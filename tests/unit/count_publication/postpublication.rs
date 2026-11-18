@@ -12,7 +12,7 @@ use test_util::object_header::v2::HeaderFlags;
 use test_util::superblock;
 
 use super::prepublication::{Part, Prefix};
-use super::{CountFile, assert_values, stage, type_header};
+use super::{CountContents, CountFile, type_header};
 use crate::{Error, File, FileAccessProperties, FileLocking, MemoryStrategy};
 
 #[rstest]
@@ -30,10 +30,11 @@ use crate::{Error, File, FileAccessProperties, FileLocking, MemoryStrategy};
 #[case::restore_barrier_after(Fault::RestoreBarrier(FailurePoint::After))]
 fn count_decrease_failures_preserve_the_published_tree_and_quarantine_writes(
     #[case] fault: Fault,
+    #[values(CountContents::Numeric, CountContents::HeapBearing)] contents: CountContents,
     #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
 ) {
     let path = test_util::temp::temp_path("published-count-failure.h5");
-    let fixture = CountFile::write(&path, 3, true);
+    let fixture = CountFile::with_contents(&path, 3, true, contents);
     let control_path = test_util::temp::temp_path("published-count-control.h5");
     std::fs::copy(&path, &control_path).unwrap();
     let properties = FileAccessProperties::new()
@@ -42,7 +43,7 @@ fn count_decrease_failures_preserve_the_published_tree_and_quarantine_writes(
         .with_page_buffer_size(0);
     let reference = File::open_rw_with_options(&control_path, properties).unwrap();
     let before_control = std::fs::read(&control_path).unwrap();
-    stage(&reference, 1, true, false);
+    fixture.stage(&reference, 1, true, false);
     disk_log::start();
     reference.commit().unwrap();
     let recording = disk_log::finish();
@@ -53,7 +54,7 @@ fn count_decrease_failures_preserve_the_published_tree_and_quarantine_writes(
 
     let file = File::open_rw_with_options(&path, properties).unwrap();
     let before = std::fs::read(&path).unwrap();
-    stage(&file, 1, true, false);
+    fixture.stage(&file, 1, true, false);
     disk_log::start();
     let event = control.inject(fault);
     let error = file.commit().unwrap_err();
@@ -118,12 +119,12 @@ fn count_decrease_failures_preserve_the_published_tree_and_quarantine_writes(
                 || section.address().get() >= range.end as u64
         }));
     }
-    assert_values(&file, 1, false);
+    fixture.assert_values(&file, 1, false);
     assert_quarantined(&file, &path, &after);
     drop(file);
     File::clear_status_flags(&path).unwrap();
     let reopened = File::open(&path).unwrap();
-    assert_values(&reopened, 1, false);
+    fixture.assert_values(&reopened, 1, false);
     reopened.close().unwrap();
 }
 

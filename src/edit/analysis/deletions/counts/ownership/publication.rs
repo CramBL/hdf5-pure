@@ -196,17 +196,47 @@ impl<'a> CountPublicationBounds<'a> {
         relocations: BTreeMap<ObjectId, ObjectId>,
         complete: impl FnOnce(PublishedTree<'_>) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        let mut storage = OriginalStorage::from_counts(&self.phase.counts);
+        self.with_ordered_counts_excluding(relocations, &mut storage, |published, _| {
+            complete(published)
+        })
+        .map_err(|error| match error {
+            PublicationError::Write(error) => error,
+            PublicationError::Storage(_) => {
+                Error::EditUnsupported("publication conflicts with an original count allocation")
+            }
+        })
+    }
+
+    /// Publishes between count increases and decreases with combined storage exclusions and rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns source-association, count-preparation, exclusion, publication or completion errors.
+    pub(in crate::edit) fn with_ordered_counts_excluding<T>(
+        self,
+        relocations: BTreeMap<ObjectId, ObjectId>,
+        storage: &mut OriginalStorage,
+        complete: impl FnOnce(PublishedTree<'_>, &OriginalStorage) -> Result<T, Error>,
+    ) -> Result<T, PublicationError> {
         let Self { phase, end } = self;
         let CountPublicationPhase {
             engine,
             counts,
             retirement,
         } = phase;
+        storage.include_counts(engine, &counts)?;
         if counts.updates().is_empty() {
-            return engine.publish_pending_tree_with_completion(retirement, relocations, complete);
+            return engine.publish_pending_tree_excluding(
+                retirement,
+                relocations,
+                Some(storage),
+                |published| complete(published, storage).map_err(Into::into),
+            );
         }
-        let storage = OriginalStorage::from_counts(&counts);
-        let increases = counts.current_updates(engine, Some(Ordering::Greater))?;
+        let increases = counts
+            .current_updates(engine, Some(Ordering::Greater))
+            .map_err(Error::from)?;
         for update in &increases {
             for (range, bytes) in update.writes() {
                 engine.write_inplace_journaled(range.start(), bytes)?;
@@ -217,42 +247,35 @@ impl<'a> CountPublicationBounds<'a> {
             root: retirement.root,
             proposed_end: end,
         };
-        engine
-            .publish_pending_tree_excluding(retirement, relocations, Some(&storage), |published| {
-                let requested = published.requested_root();
-                let scope = request
-                    .into_write_scope(published)
-                    .map_err(|error| match error {
-                        CountCompletionError::Protection(error) => Error::from(error),
-                        CountCompletionError::Root { .. } => FormatError::Internal(
-                            "count updates belong to another published tree".into(),
-                        )
-                        .into(),
-                    })?;
-                let decreases = scope
-                    .counts
-                    .current_updates(scope.engine, Some(Ordering::Less))
-                    .map_err(Error::from)?;
-                let result = JournalScope::run(scope.engine, |journal| {
-                    for update in &decreases {
-                        for (range, bytes) in update.writes() {
-                            journal.write(range.start(), bytes)?;
-                        }
+        engine.publish_pending_tree_excluding(retirement, relocations, Some(storage), |published| {
+            let requested = published.requested_root();
+            let scope = request
+                .into_write_scope(published)
+                .map_err(|error| match error {
+                    CountCompletionError::Protection(error) => Error::from(error),
+                    CountCompletionError::Root { .. } => FormatError::Internal(
+                        "count updates belong to another published tree".into(),
+                    )
+                    .into(),
+                })?;
+            let decreases = scope
+                .counts
+                .current_updates(scope.engine, Some(Ordering::Less))
+                .map_err(Error::from)?;
+            let result = JournalScope::run(scope.engine, |journal| {
+                for update in &decreases {
+                    for (range, bytes) in update.writes() {
+                        journal.write(range.start(), bytes)?;
                     }
-                    Ok(())
-                });
-                if matches!(&result, Err(Error::CommitPartiallyApplied { .. })) {
-                    scope.engine.make_allocation_uncertain();
                 }
-                result?;
-                complete(PublishedTree::new(scope.engine, requested)?).map_err(Into::into)
-            })
-            .map_err(|error| match error {
-                PublicationError::Write(error) => error,
-                PublicationError::Storage(_) => Error::EditUnsupported(
-                    "publication conflicts with an original count allocation",
-                ),
-            })
+                Ok(())
+            });
+            if matches!(&result, Err(Error::CommitPartiallyApplied { .. })) {
+                scope.engine.make_allocation_uncertain();
+            }
+            result?;
+            complete(PublishedTree::new(scope.engine, requested)?, storage).map_err(Into::into)
+        })
     }
 
     /// Recovers the checked phase for another EOA proposal.

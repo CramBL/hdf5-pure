@@ -20,11 +20,11 @@ use super::AnalysisPhase;
 use super::CompleteTopology;
 use super::counts::CountQueries;
 
+#[cfg(test)]
+pub(in crate::edit) use counts::CountInventory;
 pub(in crate::edit) use counts::CountPreflight;
 pub(in crate::edit) use counts::CountProjectionIdentity;
-pub(in crate::edit) use counts::{
-    CountInventory, CountPreflightError, CountProtectionError, ProtectedCounts,
-};
+pub(in crate::edit) use counts::{CountPreflightError, CountProtectionError, ProtectedCounts};
 
 pub(in crate::edit) use counts::DeclaredCountChange;
 pub(in crate::edit) use counts::SourceRemovalPlan;
@@ -135,6 +135,19 @@ impl<'topology, 'source> RemovedLinks<'topology, 'source> {
 }
 
 impl RemovedLinks<'_, '_> {
+    /// Returns distinct physical deletion targets independently of retirement eligibility.
+    pub(in crate::edit) fn targets(self) -> Vec<ObjectId> {
+        let mut targets = self
+            .edges
+            .into_iter()
+            .map(|(_, object)| object)
+            .chain(self.unresolved)
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        targets.dedup();
+        targets
+    }
+
     /// Appends allocations selected by reclamation policy and returns distinct physical targets.
     ///
     /// With complete topology, calls [`CompleteTopology::collect_free_spans`] once per target
@@ -219,6 +232,7 @@ impl<'source> AnalysisPhase<'source> {
             value_references: _,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;

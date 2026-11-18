@@ -28,6 +28,7 @@ use crate::object_path::ObjectPathBuf;
 pub(in crate::edit::commit) mod dispositions;
 pub(in crate::edit::commit) mod members;
 pub(in crate::edit::commit) mod prospective;
+mod session;
 pub(in crate::edit::commit) mod storage;
 
 /// Owns tree edits and their original count, ownership, and collection observations.
@@ -52,11 +53,31 @@ impl PreparedEditInventory {
     /// Returns the original staged set on planning failure. In-place-only plans are returned
     /// without an inventory. Count or ownership qualification failures are retained in
     /// [`OriginalEdits`] independently of successful tree preparation.
+    #[cfg(test)]
     pub(in crate::edit::commit) fn prepare(
         engine: &mut WriteEngine,
         staged: StagedEdits,
     ) -> InventoryPreparation {
-        match engine.plan_commit_with_inventory(&staged, true) {
+        let plan = engine.plan_commit_with_inventory(&staged, true);
+        Self::from_plan(engine, staged, plan)
+    }
+
+    /// Prepares counts and captures original storage only when heap candidates require it.
+    pub(in crate::edit::commit) fn prepare_public(
+        engine: &mut WriteEngine,
+        staged: StagedEdits,
+    ) -> InventoryPreparation {
+        let counted = !staged.deletes().is_empty() || !staged.copies().is_empty();
+        let plan = engine.plan_commit_inner(&staged, false, counted, true);
+        Self::from_plan(engine, staged, plan)
+    }
+
+    fn from_plan(
+        engine: &WriteEngine,
+        staged: StagedEdits,
+        plan: Result<(CommitPlan, Option<OriginalPreparation>), Error>,
+    ) -> InventoryPreparation {
+        match plan {
             Ok((mut plan, original)) => {
                 let (staged, writes) = staged.into_apply();
                 let mut overwrites = OverwritePayloads { writes };
@@ -134,7 +155,11 @@ impl PreparedEditInventory {
             tree,
             staged,
             Some(&mut dispositions),
-            Some(reclamation?),
+            Some(match reclamation {
+                Ok(spans) => spans,
+                Err(Error::EditUnsupported(_)) => Vec::new(),
+                Err(error) => return Err(error),
+            }),
         )?;
         let dispositions = dispositions.finish(&tree);
         Ok(AppliedEditInventory {
@@ -236,10 +261,42 @@ impl OriginalPreparation {
         phase: &mut AnalysisPhase<'_>,
         tree: &mut PreparedTree,
         staged: &StagedEdits,
-    ) -> Self {
-        let original = OriginalEdits::collect(engine, phase, tree, staged);
-        let dispositions = ReconstructionDispositions::collect(engine, phase, tree);
-        let reclamation =
+        counts: Option<Result<OriginalOwnerFacts, EditInputError>>,
+    ) -> Result<Self, Error> {
+        let original = OriginalEdits::collect_with_counts(engine, phase, tree, staged, counts);
+        let mut dispositions =
+            ReconstructionDispositions::collect(engine, phase, tree, original.facts());
+        if dispositions
+            .predecessors()
+            .get(&ObjectPathBuf::root())
+            .is_some_and(|root| root.disposition == dispositions::Disposition::Retain)
+        {
+            let root = tree.groups.get_mut(&ObjectPathBuf::root()).ok_or_else(|| {
+                FormatError::Internal("a retained predecessor has no replacement root".into())
+            })?;
+            let count = root
+                .prepared
+                .region
+                .reference_count_mut()
+                .map_err(|error| {
+                    FormatError::Internal(format!(
+                        "invalid retained-root replacement count: {error:?}"
+                    ))
+                })?;
+            if count.count() != 2 {
+                return Err(FormatError::Internal(
+                    "a retained-root replacement differs from its checked original count".into(),
+                )
+                .into());
+            }
+            count.set(1).map_err(|error| {
+                FormatError::Internal(format!(
+                    "invalid retained-root replacement count: {error:?}"
+                ))
+            })?;
+        }
+
+        let mut reclamation =
             engine.prepare_reclamation(&tree.groups, std::mem::take(&mut tree.deleted_free));
         let storage = storage::OriginalStorage::collect(
             engine,
@@ -249,17 +306,19 @@ impl OriginalPreparation {
             &dispositions,
             &reclamation,
         );
+        storage.withhold_protected_reclamation(tree, &mut reclamation);
         let collections = phase.capture_collections(
             dispositions.source().as_ref().ok(),
             std::mem::take(&mut tree.collection_candidates),
         );
-        Self {
+        dispositions.capture_session_parents(engine, phase, staged, &collections, &storage);
+        Ok(Self {
             original,
             dispositions,
             storage,
             collections,
             reclamation,
-        }
+        })
     }
 }
 
@@ -301,7 +360,18 @@ impl OriginalEdits {
         tree: &PreparedTree,
         staged: &StagedEdits,
     ) -> Self {
-        let counts = Self::count_inputs(engine, phase, &tree.groups, staged);
+        Self::collect_with_counts(engine, phase, tree, staged, None)
+    }
+
+    fn collect_with_counts(
+        engine: &WriteEngine,
+        phase: &mut AnalysisPhase<'_>,
+        tree: &PreparedTree,
+        staged: &StagedEdits,
+        counts: Option<Result<OriginalOwnerFacts, EditInputError>>,
+    ) -> Self {
+        let counts =
+            counts.unwrap_or_else(|| Self::count_inputs(engine, phase, &tree.groups, staged));
         let source = ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address)
             .map_err(Error::from)
             .and_then(|root| {
@@ -372,6 +442,38 @@ impl OriginalEdits {
             .ok_or(EditInputError::IncompleteCounts)?
             .original_owners(engine)
             .map_err(EditInputError::Handoff)
+    }
+
+    /// Returns a captured source, domain, or count-input error in that order.
+    pub(super) fn into_source_error(self) -> Option<Error> {
+        match self {
+            Self::Unavailable {
+                counts,
+                source,
+                domain,
+            } => source
+                .err()
+                .or_else(|| domain.and_then(Result::err))
+                .or_else(|| {
+                    counts
+                        .err()
+                        .filter(|error| !matches!(error, EditInputError::IncompleteCounts))
+                        .map(super::PreparedTreeCounts::input_error)
+                }),
+            Self::Association(_) | Self::Complete(_) => None,
+        }
+    }
+
+    /// Borrows a resolved original source independently of count and domain outcomes.
+    ///
+    /// Returns [`None`] if source resolution failed or qualification found an incompatible
+    /// association.
+    pub(in crate::edit::commit) fn source(&self) -> Option<&ReconstructionSource> {
+        match self {
+            Self::Complete(owners) => Some(owners.source()),
+            Self::Unavailable { source, .. } => source.as_ref().ok(),
+            Self::Association(_) => None,
+        }
     }
 
     /// Borrows fully qualified facts, or returns [`None`] when qualification failed.

@@ -18,6 +18,7 @@ use super::PreparedGroup;
 use super::RelocatedDataset;
 
 pub(in crate::edit::commit) use preparation::PreparedTreeCounts;
+pub(super) use preparation::{CountedPreparation, TreeCountInputs};
 
 mod preparation;
 

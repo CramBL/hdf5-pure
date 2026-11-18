@@ -1,16 +1,17 @@
 //! Original predecessor classifications and successful placement correspondence.
 //!
 //! The editor collects rebuilt groups and relocated datasets independently of count changes.
-//! Complete translation requires supersession of every predecessor and agreement with the
-//! applied tree's placements. The caller establishes source freshness, source-domain
+//! Complete correspondence requires checked supersession or retention of every predecessor and
+//! agreement with the applied tree's placements. The caller establishes source freshness, source-domain
 //! applicability, storage protection, and publication permission separately.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{ChildLink, PreparedTree};
+use super::session::SessionParent;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::{CountEvidence, CountEvidenceError, ROOT_REFERENCE_COUNT};
-use crate::edit::analysis::{AnalysisPhase, ReconstructionSource};
+use crate::edit::analysis::{AnalysisPhase, OriginalOwnerFacts, ReconstructionSource};
 use crate::edit::commit::publish::AppliedTree;
 use crate::error::Error;
 use crate::object_graph::ObjectId;
@@ -22,6 +23,7 @@ use crate::object_path::ObjectPathBuf;
 /// observations independently of each predecessor's classification.
 pub(in crate::edit::commit) struct ReconstructionDispositions {
     source: Result<ReconstructionSource, Error>,
+    pub(super) session_parents: BTreeMap<hdf5_pure_core::PhysicalAddress, SessionParent>,
     predecessors: BTreeMap<ObjectPathBuf, Predecessor>,
     expected: BTreeMap<ObjectPathBuf, Option<ObjectId>>,
     placed: BTreeMap<ObjectPathBuf, ObjectId>,
@@ -37,6 +39,7 @@ impl ReconstructionDispositions {
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         tree: &PreparedTree,
+        facts: Option<&OriginalOwnerFacts>,
     ) -> Self {
         let source = ObjectId::resolve(engine.addresses(), engine.superblock().root_group_address)
             .map_err(Error::from)
@@ -47,6 +50,7 @@ impl ReconstructionDispositions {
             });
         let mut result = Self {
             source,
+            session_parents: BTreeMap::new(),
             predecessors: BTreeMap::new(),
             expected: BTreeMap::new(),
             placed: BTreeMap::new(),
@@ -59,14 +63,22 @@ impl ReconstructionDispositions {
                 node.prepared.replaces.as_ref().map(|old| old.object()),
             );
             if let Some(old) = &node.prepared.replaces {
-                result.insert(engine, phase, tree, &mut seen, path.clone(), old.source());
+                result.insert(
+                    engine,
+                    phase,
+                    tree,
+                    facts,
+                    &mut seen,
+                    path.clone(),
+                    old.source(),
+                );
             }
             for write in &node.prepared.writes {
                 let path = path.join(&write.link);
                 result
                     .expected
                     .insert(path.clone(), Some(write.source.object()));
-                result.insert(engine, phase, tree, &mut seen, path, &write.source);
+                result.insert(engine, phase, tree, facts, &mut seen, path, &write.source);
             }
         }
         result
@@ -84,6 +96,7 @@ impl ReconstructionDispositions {
     ) {
         let Self {
             source: _,
+            session_parents: _,
             predecessors: _,
             expected,
             placed: placements,
@@ -123,11 +136,41 @@ impl ReconstructionDispositions {
         &self.source
     }
 
+    /// Extracts the root source error or first predecessor-count error in path order.
+    ///
+    /// Consumes the observations and placement metadata. Converts a count contradiction to
+    /// [`Error::InconsistentReferenceCount`] with its original address and count fields.
+    pub(super) fn into_source_error(self) -> Option<Error> {
+        let Self {
+            source,
+            session_parents: _,
+            predecessors,
+            expected: _,
+            placed: _,
+            placement_error: _,
+        } = self;
+        source.err().or_else(|| {
+            predecessors.into_values().find_map(|predecessor| {
+                predecessor.counts.err().map(|error| match error {
+                    CountEvidenceError::Source(error) | CountEvidenceError::Topology(error) => {
+                        Error::from(error)
+                    }
+                    CountEvidenceError::Contradiction(error) => Error::InconsistentReferenceCount {
+                        address: error.object.header_address().get(),
+                        observed: error.observed,
+                        minimum: error.minimum,
+                    },
+                })
+            })
+        })
+    }
+
     fn insert(
         &mut self,
         engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         tree: &PreparedTree,
+        facts: Option<&OriginalOwnerFacts>,
         seen: &mut BTreeSet<ObjectId>,
         path: ObjectPathBuf,
         source: &ReconstructionSource,
@@ -148,7 +191,7 @@ impl ReconstructionDispositions {
         {
             Disposition::Withhold(Withheld::Phase)
         } else {
-            self.classify(phase, tree, &path, source, &counts)
+            self.classify(engine, phase, tree, facts, &path, source, &counts)
         };
         if self.predecessors.contains_key(&path) {
             self.placement_error = Some(PlacementError::Repeated(path.clone()));
@@ -165,8 +208,10 @@ impl ReconstructionDispositions {
 
     fn classify(
         &self,
+        engine: &WriteEngine,
         phase: &mut AnalysisPhase<'_>,
         tree: &PreparedTree,
+        facts: Option<&OriginalOwnerFacts>,
         path: &ObjectPathBuf,
         source: &ReconstructionSource,
         counts: &Result<Option<ObservedCounts>, CountEvidenceError>,
@@ -182,6 +227,37 @@ impl ReconstructionDispositions {
                 return Disposition::Withhold(Withheld::Source);
             }
             return match counts {
+                Ok(Some(counts))
+                    if facts.is_some_and(|facts| {
+                        facts.counts().permits_root_replacement(
+                            engine,
+                            source,
+                            counts.original,
+                            counts.incoming,
+                        )
+                    }) =>
+                {
+                    Disposition::Supersede
+                }
+                Ok(Some(counts))
+                    if counts.incoming == 1
+                        && counts.original == 2
+                        && tree.groups.len() == 1
+                        && tree.groups.get(path).is_some_and(|node| {
+                            node.prepared.deletes.is_empty()
+                                && node.prepared.copies.is_empty()
+                                && node.prepared.writes.is_empty()
+                                && node.existing_links.iter().any(|name| {
+                                    crate::object_path::LinkNameBuf::new(name).is_some_and(|name| {
+                                        topology
+                                            .find_link(&path.join(&name))
+                                            .is_some_and(|(_, target)| target == source.object())
+                                    })
+                                })
+                        }) =>
+                {
+                    Disposition::Retain
+                }
                 Ok(Some(counts)) if counts.incoming != 0 => {
                     Disposition::Withhold(Withheld::RootLinks(counts.incoming))
                 }
@@ -227,6 +303,7 @@ impl ReconstructionDispositions {
                 Disposition::Withhold(Withheld::ExcessCount(counts.original))
             }
             Ok(Some(_)) if owner.disposition == Disposition::Supersede => Disposition::Supersede,
+            Ok(Some(_)) if owner.disposition == Disposition::Retain => Disposition::Retain,
             Ok(Some(_)) => Disposition::Withhold(Withheld::Parent(parent)),
             Ok(None) => Disposition::Withhold(Withheld::CountUnavailable),
             Err(_) => Disposition::Withhold(Withheld::CountError),
@@ -246,6 +323,7 @@ impl ReconstructionDispositions {
     ) -> Result<BTreeMap<ObjectId, ObjectId>, TransitionWithheld> {
         let Self {
             source,
+            session_parents: _,
             predecessors,
             expected,
             placed,
@@ -284,7 +362,7 @@ impl ReconstructionDispositions {
         }
         if predecessors
             .values()
-            .any(|old| old.disposition != Disposition::Supersede)
+            .any(|old| matches!(old.disposition, Disposition::Withhold(_)))
         {
             return Err(TransitionWithheld::Predecessors);
         }
@@ -318,7 +396,7 @@ impl AppliedDispositions {
         self.result.as_ref()
     }
 
-    /// Translates a replaced original identity, preserving identities absent from the map.
+    /// Translates superseded identities and preserves retained originals and absent identities.
     ///
     /// # Errors
     ///
@@ -327,8 +405,15 @@ impl AppliedDispositions {
         &self,
         original: ObjectId,
     ) -> Result<ObjectId, &TransitionWithheld> {
-        self.replacements()
-            .map(|replacements| replacements.get(&original).copied().unwrap_or(original))
+        self.replacements().map(|replacements| {
+            if self.original.predecessors.values().any(|old| {
+                old.source.object() == original && old.disposition == Disposition::Retain
+            }) {
+                original
+            } else {
+                replacements.get(&original).copied().unwrap_or(original)
+            }
+        })
     }
 }
 
@@ -356,6 +441,8 @@ pub(in crate::edit::commit) struct ObservedCounts {
 pub(in crate::edit::commit) enum Disposition {
     /// A predecessor with compatible counts and a superseded path from the original root.
     Supersede,
+    /// An original root or descendant preserved alongside its placed replacement.
+    Retain,
     /// A predecessor excluded from complete translation, with its reason.
     Withhold(Withheld),
 }

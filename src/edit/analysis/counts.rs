@@ -77,6 +77,7 @@ impl<'source> AnalysisPhase<'source> {
             value_references: _,
             liveness: _,
             allocations: _,
+            collection_envelopes: _,
             #[cfg(test)]
                 candidate_lookups: _,
         } = self;

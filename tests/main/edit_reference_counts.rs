@@ -1,11 +1,12 @@
 use std::path::Path;
 
 use hdf5_pure::{
-    Datatype, Error, File, FileAccessProperties, FileLocking, FixedPointType, MemoryStrategy,
+    AttrValue, Datatype, Error, File, FileAccessProperties, FileLocking, FixedPointType,
+    MemoryStrategy,
 };
 use rstest::rstest;
 use test_util::datatype;
-use test_util::global_heap::Object;
+use test_util::global_heap::{self, Object};
 use test_util::object_header::Message;
 use test_util::object_header::MessageFlags;
 use test_util::object_header::MessageType;
@@ -119,6 +120,7 @@ fn public_count_contradictions_preserve_bytes_and_staged_retry(#[case] original:
 #[case::original_contradiction(CopyCountBoundary::Contradiction)]
 fn committed_type_copies_check_original_links_before_final_net_counts(
     #[case] boundary: CopyCountBoundary,
+    #[values(CopyCountRoute::CandidateFree, CopyCountRoute::Captured)] route: CopyCountRoute,
     #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
 ) {
     let path = test_util::temp::temp_path("public-copy-count-boundaries.h5");
@@ -126,7 +128,26 @@ fn committed_type_copies_check_original_links_before_final_net_counts(
         CopyCountBoundary::Contradiction => 1,
         CopyCountBoundary::Cancelled | CopyCountBoundary::Overflow => u32::MAX,
     };
-    let (fixture, target, header) = committed_type_user(original);
+    let (mut fixture, target, header) = committed_type_user(original);
+    let parent = match route {
+        CopyCountRoute::CandidateFree => None,
+        CopyCountRoute::Captured => {
+            let parent =
+                fixture.collection(&[Object::new(1, b"obsolete"), Object::new(2, b"survivor")]);
+            let mut messages = Form::CompactDataset.messages(
+                &mut fixture,
+                &global_heap_fixture::vlen_string(),
+                &global_heap_fixture::reference(8, parent, 2),
+            );
+            messages.extend(Form::CompactAttribute.messages(
+                &mut fixture,
+                &global_heap_fixture::vlen_string(),
+                &global_heap_fixture::reference(8, parent, 1),
+            ));
+            fixture.object("heap", messages);
+            Some(parent)
+        }
+    };
     fixture.write(&path);
     let file = File::open_rw_with_options(
         &path,
@@ -136,6 +157,7 @@ fn committed_type_copies_check_original_links_before_final_net_counts(
     )
     .unwrap();
     let before = std::fs::read(&path).unwrap();
+    assert_eq!(global_heap::collection_starts(&before), parent.as_slice());
     let free = file.reusable_free_sections().unwrap();
     let start = usize::try_from(target).unwrap();
     let extent = start..start + header.len();
@@ -152,6 +174,12 @@ fn committed_type_copies_check_original_links_before_final_net_counts(
     file.copy("source", "copy").unwrap();
     if !matches!(boundary, CopyCountBoundary::Overflow) {
         file.root().delete("alias").unwrap();
+    }
+    if parent.is_some() {
+        file.dataset("heap")
+            .unwrap()
+            .set_attr("a", AttrValue::I64(9))
+            .unwrap();
     }
     let committed = matches!(boundary, CopyCountBoundary::Cancelled);
     if committed {
@@ -210,17 +238,26 @@ fn committed_type_copies_check_original_links_before_final_net_counts(
     );
     let mut names = file.root().datasets().unwrap();
     names.sort();
-    assert_eq!(
-        names,
-        if committed {
-            vec!["copy", "source"]
-        } else {
-            vec!["source"]
-        }
-    );
+    let expected = match (committed, route) {
+        (true, CopyCountRoute::CandidateFree) => &["copy", "source"][..],
+        (true, CopyCountRoute::Captured) => &["copy", "heap", "source"],
+        (false, CopyCountRoute::CandidateFree) => &["source"],
+        (false, CopyCountRoute::Captured) => &["heap", "source"],
+    };
+    assert_eq!(names, expected);
     assert_eq!(file.dataset("source").unwrap().read_f64().unwrap(), [17.0]);
     if committed {
         assert_eq!(file.dataset("copy").unwrap().read_f64().unwrap(), [17.0]);
+    }
+    if parent.is_some() {
+        let heap = file.dataset("heap").unwrap();
+        assert_eq!(heap.read_string().unwrap(), ["survivor"]);
+        let value = if committed {
+            AttrValue::I64(9)
+        } else {
+            AttrValue::VarLenAsciiStringArray(vec!["obsolete".into()])
+        };
+        assert_eq!(heap.attrs().unwrap()["a"], value);
     }
     file.close().unwrap();
 }
@@ -298,6 +335,12 @@ enum CopyCountBoundary {
     Cancelled,
     Contradiction,
     Overflow,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CopyCountRoute {
+    CandidateFree,
+    Captured,
 }
 
 #[rstest]

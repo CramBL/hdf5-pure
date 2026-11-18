@@ -19,13 +19,13 @@ use crate::UserblockSize;
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::aggregation::AggregateSpace;
 use crate::edit::analysis::ownership::AllocationKind;
-use crate::edit::commit::plan::inventory::storage::{
-    SpaceClaim, StorageApplyError, StorageApplyFailure, StorageConflict, StorageOrigin,
-};
+use crate::edit::commit::plan::inventory::storage::StorageOrigin;
 use crate::edit::test_util as edit_test_util;
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
-use crate::{FileBuilder, FileSpacePageSize, FileSpaceStrategy, PhysicalAddress};
+use crate::{
+    EditStorageConflict, Error, FileBuilder, FileSpacePageSize, FileSpaceStrategy, PhysicalAddress,
+};
 
 #[test]
 fn retained_group_descendants_preserve_complete_continuation_and_payload_allocations() {
@@ -238,22 +238,16 @@ fn allocator_claims_use_physical_coordinates_before_placement(
             .get(),
         expected_extent.len().get(),
     );
-    let expected = match claim {
-        Claim::Typed(_) => SpaceClaim::Reusable,
-        Claim::Retained(kind) => SpaceClaim::Retained(kind),
-        Claim::Aggregate(_) => SpaceClaim::Aggregate,
-    };
     let bytes = engine.disk_bytes().unwrap();
     if conflict {
-        let StorageApplyFailure::BeforePlacement { error, .. } =
-            prepared.apply_excluding(&mut engine).err().unwrap()
+        let Err(Error::EditStorageConflict(EditStorageConflict::Overlap { first, second })) =
+            prepared.apply_excluding(&mut engine)
         else {
             panic!("expected a preplacement conflict");
         };
-        assert!(
-            matches!(error, StorageApplyError::Conflict(StorageConflict::Overlap {
-            allocation: actual, range, claim: actual_claim,
-        }) if actual == allocation && actual_claim == expected && range == expected_range)
+        assert_eq!(
+            (first, second),
+            (allocation.range.range(), expected_range.range())
         );
         assert_eq!(engine.disk_bytes().unwrap(), bytes);
     } else {
@@ -331,7 +325,7 @@ fn storage_capture_reuses_original_observations() {
         .prepared
         .replaces = Some(ReplacedHeader::Header(source));
     let original = OriginalEdits::collect(&engine, &mut phase, &tree, &staged);
-    let dispositions = ReconstructionDispositions::collect(&engine, &mut phase, &tree);
+    let dispositions = ReconstructionDispositions::collect(&engine, &mut phase, &tree, None);
     let reclamation =
         engine.prepare_reclamation(&tree.groups, std::mem::take(&mut tree.deleted_free));
     let before = (
@@ -367,7 +361,10 @@ fn storage_capture_reuses_original_observations() {
         "{:?}",
         storage.unavailable()
     );
-    assert_eq!(storage.allocations().len(), 2);
+    assert_eq!(storage.allocations().len(), 3);
+    assert!(storage.allocations().iter().any(|allocation| {
+        matches!(allocation.origin, StorageOrigin::Parent { address, .. } if address.get() == parent)
+    }));
     assert!(
         storage
             .allocations()

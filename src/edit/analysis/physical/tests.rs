@@ -23,7 +23,7 @@ use test_util::superblock::v0;
 use test_util::superblock::v2;
 use test_util::widths::Widths;
 
-use super::{CapacityKind, CapacityRange, FileStorageKind, FileStorageRange, StorageProblem};
+use super::{CapacityKind, CapacityRange, FileStorageKind, FileStorageRange};
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::aggregation::AggregateSpace;
 use crate::edit::analysis::{AnalysisPhase, DISCOVERY_WORK};
@@ -57,7 +57,7 @@ fn file_framing_preserves_versions_widths_and_source_bounds(
         (facts.physical_size(), facts.logical_eoa()),
         (fixture.physical, fixture.logical)
     );
-    assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+    assert!(facts.is_complete());
     let ranges = facts
         .file()
         .iter()
@@ -145,30 +145,12 @@ fn extension_framing_keeps_message_support_independent(#[case] support: Extensio
             .collect::<Vec<_>>(),
         [(512 + EXTENSION, u64::try_from(extension.len()).unwrap())]
     );
-    match support {
-        ExtensionSupport::Known => assert!(facts.problems().is_empty(), "{:?}", facts.problems()),
-        ExtensionSupport::Opaque => assert!(
-            matches!(facts.problems(), [StorageProblem::ExtensionMessage(kind)] if *kind == crate::MessageType::from_u16(0x7f)),
-            "{:?}",
-            facts.problems()
-        ),
-        ExtensionSupport::RequiredUnknown => assert!(
-            matches!(
-                facts.problems(),
-                [StorageProblem::Framing {
-                    kind: FileStorageKind::Extension,
-                    error: FormatError::UnsupportedMessage(0x7f)
-                }]
-            ),
-            "{:?}",
-            facts.problems()
-        ),
-    }
+    let complete = support == ExtensionSupport::Known;
+    assert_eq!(facts.is_complete(), complete);
     let before = calls.load(Ordering::Relaxed);
-    let expected = usize::from(support != ExtensionSupport::Known);
     assert_eq!(
-        phase.physical_storage(&source).unwrap().problems().len(),
-        expected
+        phase.physical_storage(&source).unwrap().is_complete(),
+        complete
     );
     assert_eq!(calls.load(Ordering::Relaxed), before);
 }
@@ -219,14 +201,18 @@ fn manager_framing_retains_allocated_capacity_and_failed_outcomes(#[case] outsid
         .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(ROOT)))
         .unwrap();
     let facts = phase.physical_storage(&source).unwrap();
+    assert_eq!(facts.is_complete(), !outside);
     if outside {
         assert!(
-            matches!(facts.problems(), [StorageProblem::Framing { kind: FileStorageKind::Manager, error: FormatError::InvalidFreeSpaceManager(reason) }] if reason == &format!("the section list allocation at {list_at}, {allocated} bytes long, runs past the end of the file, 8192 bytes long")),
-            "{:?}",
-            facts.problems()
+            facts
+                .file()
+                .iter()
+                .all(|entry| entry.kind != FileStorageKind::Manager)
         );
+        assert!(facts.file().iter().any(|entry| {
+            entry.kind == FileStorageKind::Extension && entry.range.start().get() == EXTENSION
+        }));
     } else {
-        assert!(facts.problems().is_empty(), "{:?}", facts.problems());
         assert_eq!(
             facts
                 .file()
@@ -252,8 +238,8 @@ fn manager_framing_retains_allocated_capacity_and_failed_outcomes(#[case] outsid
     }
     let before = calls.load(Ordering::Relaxed);
     assert_eq!(
-        phase.physical_storage(&source).unwrap().problems().len(),
-        usize::from(outside)
+        phase.physical_storage(&source).unwrap().is_complete(),
+        !outside
     );
     assert_eq!(calls.load(Ordering::Relaxed), before);
 }
@@ -292,7 +278,7 @@ fn page_capacity_preserves_recorded_classes_and_boundaries() {
         .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(512 + ROOT)))
         .unwrap();
     let facts = phase.physical_storage(&source).unwrap();
-    assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+    assert!(facts.is_complete());
     assert_eq!(
         capacity_tuples(facts.non_live()),
         [
@@ -380,7 +366,7 @@ fn aggregate_capacity_preserves_classes_and_exact_spare_ranges(
         .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(512 + ROOT)))
         .unwrap();
     let facts = phase.physical_storage(&source).unwrap();
-    assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+    assert!(facts.is_complete());
     assert_eq!(
         capacity_tuples(facts.non_live()),
         expected
@@ -414,11 +400,7 @@ fn capacity_address_failures_preserve_other_recorded_ranges() {
         capacity_tuples(facts.non_live()),
         [(2_560, 64, CapacityKind::Reusable(FreeClass::Dead))]
     );
-    assert!(
-        matches!(facts.problems(), [StorageProblem::Address(FormatError::OffsetOverflow { offset, length: 512 })] if *offset == u64::MAX - 511),
-        "{:?}",
-        facts.problems()
-    );
+    assert!(!facts.is_complete());
 }
 
 #[rstest]
@@ -427,7 +409,7 @@ fn capacity_address_failures_preserve_other_recorded_ranges() {
 #[case::legacy(LocalProblem::Legacy)]
 #[case::publication(LocalProblem::Publication)]
 #[case::superblock(LocalProblem::Superblock)]
-fn local_storage_keeps_failed_and_inapplicable_facts_explicit(#[case] problem: LocalProblem) {
+fn incomplete_storage_preserves_observed_framing(#[case] problem: LocalProblem) {
     let path = test_util::temp::temp_path("physical-source-problem.h5");
     let version = if matches!(problem, LocalProblem::Legacy) {
         SuperblockVersion::Zero
@@ -435,7 +417,7 @@ fn local_storage_keeps_failed_and_inapplicable_facts_explicit(#[case] problem: L
         SuperblockVersion::Three
     };
     let fixture = FileFixture::new(version, Widths::EIGHT, 512);
-    fixture.write(&path, None);
+    let encoded = fixture.write(&path, None);
     if matches!(problem, LocalProblem::Legacy) {
         let mut bytes = fs::read(&path).unwrap();
         let fields = v0::Fields::read(&bytes, 512);
@@ -475,46 +457,28 @@ fn local_storage_keeps_failed_and_inapplicable_facts_explicit(#[case] problem: L
         .reconstruction_source(&engine, ObjectId::new(PhysicalAddress::new(512 + ROOT)))
         .unwrap();
     let facts = phase.physical_storage(&source).unwrap();
-    match problem {
-        LocalProblem::Address => assert!(
-            matches!(facts.problems(), [StorageProblem::Address(FormatError::OffsetOverflow { offset, length: 512 })] if *offset == u64::MAX - 1),
-            "{:?}",
-            facts.problems()
-        ),
-        LocalProblem::Context => assert!(
-            matches!(facts.problems(), [StorageProblem::Context]),
-            "{:?}",
-            facts.problems()
-        ),
-        LocalProblem::Legacy => assert!(
-            matches!(facts.problems(), [StorageProblem::LegacyAllocation(address)] if address.get() == 2_048),
-            "{:?}",
-            facts.problems()
-        ),
-        LocalProblem::Publication => assert!(
-            matches!(
-                facts.problems(),
-                [StorageProblem::Publication(
-                    crate::Error::AllocationPublicationUncertain
-                )]
-            ),
-            "{:?}",
-            facts.problems()
-        ),
-        LocalProblem::Superblock => assert!(
-            matches!(
-                facts.problems(),
-                [StorageProblem::Framing {
-                    kind: FileStorageKind::Superblock,
-                    error: FormatError::SignatureNotFound
-                }]
-            ),
-            "{:?}",
-            facts.problems()
-        ),
+    assert!(!facts.is_complete());
+    if matches!(problem, LocalProblem::Superblock) {
+        assert!(facts.file().is_empty());
+    } else {
+        assert_eq!(
+            facts
+                .file()
+                .iter()
+                .map(|entry| (entry.kind, entry.range.start().get(), entry.range.length()))
+                .collect::<Vec<_>>(),
+            [
+                (FileStorageKind::Userblock, 0, 512),
+                (
+                    FileStorageKind::Superblock,
+                    512,
+                    u64::try_from(encoded.len()).unwrap()
+                ),
+            ]
+        );
     }
     let before = calls.load(Ordering::Relaxed);
-    assert_eq!(phase.physical_storage(&source).unwrap().problems().len(), 1);
+    assert!(!phase.physical_storage(&source).unwrap().is_complete());
     assert_eq!(calls.load(Ordering::Relaxed), before);
 }
 
@@ -554,7 +518,7 @@ fn file_storage_queries_read_no_payload_or_residual_bytes() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     let ((), measured) = allocation::measure("physical_file_query", || {
         let facts = phase.physical_storage(&source).unwrap();
-        assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+        assert!(facts.is_complete());
         assert_eq!(facts.physical_size(), fixture.physical);
         assert_eq!(facts.logical_eoa(), fixture.logical);
         assert_eq!(facts.file().len(), 1);
@@ -636,7 +600,7 @@ fn compact_capacity_queries_bound_source_reads_and_allocations(#[case] pages: u6
         .unwrap();
     let ((), measured) = allocation::measure("physical_capacity_query", || {
         let facts = phase.physical_storage(&source).unwrap();
-        assert!(facts.problems().is_empty(), "{:?}", facts.problems());
+        assert!(facts.is_complete());
         assert_eq!(facts.non_live().len(), 1);
         assert_eq!(facts.non_live()[0].range().length(), length);
     });

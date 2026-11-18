@@ -17,6 +17,7 @@ use rstest::rstest;
 use test_util::fractal_heap;
 use test_util::temp;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
+use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 /// Write a starter file with one dataset, returning its path.
 fn write_starter(path: &std::path::Path) {
@@ -5002,6 +5003,86 @@ fn write_dataset_accepts_resolved_reference_addresses() {
     drop(file);
 }
 
+#[rstest]
+#[case::reference_to_root(false)]
+#[case::variable_length_with_root_alias(true)]
+fn same_size_raw_overwrites_keep_the_root_and_contiguous_storage(#[case] vlen: bool) {
+    let path = temp::temp_path("raw-overwrite-keeps-root.h5");
+    let mut fixture = Fixture::new();
+    let (datatype, original, replacement) = if vlen {
+        fixture = fixture.with_root_reference_count(NonZeroU32::new(2).unwrap());
+        fixture.link("root_alias", Fixture::ROOT);
+        let heap = fixture.collection(&[
+            test_util::global_heap::Object::new(1, b"first"),
+            test_util::global_heap::Object::new(2, b"second"),
+        ]);
+        (
+            global_heap_fixture::vlen_string(),
+            global_heap_fixture::reference(5, heap, 1),
+            global_heap_fixture::reference(6, heap, 2),
+        )
+    } else {
+        let numeric = Form::ContiguousDataset.messages(
+            &mut fixture,
+            &hdf5_pure::make_i32_type(),
+            &42i32.to_le_bytes(),
+        );
+        let target = fixture.append_header(numeric);
+        fixture.link("keep", target);
+        (
+            global_heap_fixture::object_reference(),
+            target.to_le_bytes().to_vec(),
+            Fixture::ROOT.to_le_bytes().to_vec(),
+        )
+    };
+    let messages = Form::ContiguousDataset.messages(&mut fixture, &datatype, &original);
+    fixture.object("data", messages);
+    fixture.write(&path);
+
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("data").unwrap();
+    let layout = dataset.layout().unwrap();
+    assert!(matches!(
+        layout,
+        hdf5_pure::Layout::Contiguous { address: Some(_), size }
+            if size == u64::try_from(replacement.len()).unwrap()
+    ));
+    assert_eq!(dataset.shape().unwrap(), [1]);
+    assert_eq!(dataset.read_raw().unwrap(), original);
+    dataset
+        .write_staged(|builder| {
+            builder.with_raw_data(datatype.clone(), replacement.clone(), 1);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    drop(dataset);
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.superblock().root_group_address.get(), Fixture::ROOT);
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.layout().unwrap(), layout);
+    assert_eq!(dataset.datatype().unwrap(), datatype);
+    assert_eq!(dataset.read_raw().unwrap(), replacement);
+    if vlen {
+        assert_eq!(dataset.read_string().unwrap(), ["second"]);
+        assert_eq!(
+            file.dataset("root_alias/data")
+                .unwrap()
+                .read_string()
+                .unwrap(),
+            ["second"]
+        );
+    } else {
+        let targets = dataset.dereference().unwrap();
+        let [Object::Group(root)] = targets.as_slice() else {
+            panic!("expected a reference to the root, got {targets:?}");
+        };
+        assert_eq!(root.dataset("keep").unwrap().read_i32().unwrap(), [42]);
+    }
+}
+
 /// A staged dataset whose datatype occupies zero bytes per element is refused at
 /// `commit`, alongside the other dataset guards, rather than reaching the write.
 /// The whole-file writer refuses the same type; this is the second door into a
@@ -6376,10 +6457,11 @@ fn rotating_a_vlen_dataset_in_a_session_stops_growing_the_file() {
         }
     }
 
-    let ceiling = sizes[1];
+    // Retirement can trim the tail on alternate rounds.
+    let ceiling = sizes[0].max(sizes[1]);
     assert!(
         sizes[2..].iter().all(|&s| s <= ceiling),
-        "the file grew past its second-round size under rotation: {sizes:?}"
+        "the file grew past its initial two-round maximum under rotation: {sizes:?}"
     );
 
     let file = File::open(&path).unwrap();
