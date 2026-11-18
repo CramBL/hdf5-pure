@@ -4,6 +4,7 @@ use test_util::allocation;
 
 use super::super::AttrOp;
 use super::super::EditedAttrs;
+use super::super::test_util::encode_attr_body;
 use crate::attribute::AttributeMessage;
 use crate::edit::object_header::OhRegion;
 use crate::edit::test_util as edit_test_util;
@@ -28,7 +29,7 @@ fn compact_batches_copy_unrelated_records_a_bounded_number_of_times(
     let unrelated = region.len();
     region.push(
         MessageType::ATTRIBUTE,
-        &super::super::encode_attr_body("changed", &AttrValue::I64(-1)).unwrap(),
+        &encode_attr_body("changed", &AttrValue::I64(-1)).unwrap(),
     );
     let ops: Vec<_> = (0..operations)
         .map(|index| AttrOp::Set {
