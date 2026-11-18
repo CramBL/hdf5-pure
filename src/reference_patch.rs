@@ -199,31 +199,6 @@ impl HeaderOffset {
     }
 }
 
-std::thread_local! {
-    /// How many times a commit on this thread has walked the file to repoint its
-    /// stored references.
-    ///
-    /// The walk's *absence* is the whole of the `proved_free_of_references`
-    /// optimization, and absence is invisible from outside: a session that never
-    /// caches the proof produces byte-identical files and passes every
-    /// correctness test, having quietly gone back to walking the file on every
-    /// commit. The count is the only thing a test can hold that to. Per-thread
-    /// because the harness runs tests concurrently, each on its own thread.
-    static WALKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
-
-/// Start counting reference walks on this thread from zero.
-#[cfg(test)]
-pub(crate) fn reset_walks() {
-    WALKS.with(|count| count.set(0));
-}
-
-/// How many reference walks this thread has run since the last reset.
-#[cfg(test)]
-pub(crate) fn walks() -> usize {
-    WALKS.with(|count| count.get())
-}
-
 /// Plans stored-reference updates for relocated objects.
 ///
 /// `relocations` maps superseded object identities to their replacements. The writer walks the
@@ -312,7 +287,6 @@ fn walk(
     budget: u32,
 ) -> Result<Plan, Error> {
     let mut plan = Plan::default();
-    WALKS.with(|count| count.set(count.get() + 1));
     let addresses = src.addresses();
     let base = addresses;
 
