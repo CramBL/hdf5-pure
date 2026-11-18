@@ -12,7 +12,10 @@ use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
 use super::{File, FileAccessProperties};
 use crate::edit::open_observed_engine;
-use crate::{AttrValue, Layout, MetadataCacheConfig, PhysicalAddress, SyncPolicy};
+use crate::{
+    AttrValue, FileBuilder, FileSpaceSettings, FileSpaceStrategy, Layout, MetadataCacheConfig,
+    PhysicalAddress, SyncPolicy,
+};
 
 #[rstest]
 #[case::group(Edit::Group)]
@@ -113,6 +116,87 @@ fn candidate_free_public_commits_skip_unrelated_payload_reads(#[case] edit: Edit
         file.dataset("large").unwrap().read_u8().unwrap(),
         vec![0x2a; LARGE]
     );
+}
+
+#[rstest]
+#[case::reference_free(false)]
+#[case::stored_root_reference(true)]
+fn repeated_public_commits_read_untouched_headers_only_when_needed(#[case] references: bool) {
+    let path = test_util::temp::temp_path("reference-walk-commit-reads.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::None));
+    let probe = builder.create_dataset("probe");
+    if references {
+        probe.with_path_references(&[""]);
+    } else {
+        probe.with_u64_data(&[37]);
+    }
+    builder.create_dataset("original").with_i32_data(&[23, 29]);
+    builder.write(&path).unwrap();
+
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let file = open_observed_file(&path, &reads);
+    let addresses = ["probe", "original"]
+        .map(|name| PhysicalAddress::new(file.dataset(name).unwrap().header_address().unwrap()));
+    // Reading either untouched header starts at its signature.
+    let headers = addresses.map(|address| FileRange::new(address, 4).unwrap());
+    let payload = extent(&file, "probe");
+    assert_eq!(payload.length(), 8);
+    let mut root = file.root().header_address().unwrap();
+    for index in 0..3 {
+        file.root()
+            .create_dataset(&format!("added{index}"), |builder| {
+                builder.with_i32_data(&[index]);
+            })
+            .unwrap();
+        reads.lock().unwrap().clear();
+        file.commit().unwrap();
+        let requested = mem::take(&mut *reads.lock().unwrap());
+        for header in headers {
+            assert_eq!(
+                requested.iter().any(|read| read.overlaps(header)),
+                references || index == 0,
+                "commit {index} and header {header:?}: {requested:?}"
+            );
+        }
+        assert_eq!(
+            requested.iter().any(|read| read.overlaps(payload)),
+            references,
+            "commit {index} and payload {payload:?}: {requested:?}"
+        );
+        assert!(!file.has_staged_edits());
+        let published = file.root().header_address().unwrap();
+        assert_ne!(published, root);
+        root = published;
+    }
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    for (name, address) in ["probe", "original"].into_iter().zip(addresses) {
+        assert_eq!(
+            file.dataset(name).unwrap().header_address().unwrap(),
+            address.get()
+        );
+    }
+    assert_eq!(file.root().header_address().unwrap(), root);
+    assert_eq!(
+        file.dataset("original").unwrap().read_i32().unwrap(),
+        [23, 29]
+    );
+    for index in 0..3 {
+        let dataset = file.dataset(&format!("added{index}")).unwrap();
+        assert_eq!(dataset.read_i32().unwrap(), [index]);
+    }
+    let probe = file.dataset("probe").unwrap();
+    if references {
+        let resolved = probe.dereference().unwrap();
+        let [crate::Object::Group(target)] = resolved.as_slice() else {
+            panic!("expected a reference to the current root: {resolved:?}");
+        };
+        assert_eq!(target.header_address().unwrap(), root);
+    } else {
+        assert_eq!(probe.read_u64().unwrap(), [37]);
+    }
 }
 
 #[test]
