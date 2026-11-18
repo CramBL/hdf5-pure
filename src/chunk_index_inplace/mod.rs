@@ -3097,6 +3097,7 @@ mod tests {
     use crate::writer::FileBuilder;
 
     mod append_records;
+    mod finite_interruptions;
     mod fixed;
     mod metadata;
     mod single;
