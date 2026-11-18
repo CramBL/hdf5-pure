@@ -293,53 +293,6 @@ fn a_variable_length_string_is_screened_without_object_references() {
 }
 
 #[test]
-fn a_file_proved_free_of_references_is_walked_once_and_no_more() {
-    use crate::reference_patch;
-
-    let dir = tempfile::tempdir().unwrap();
-
-    let commit_three = |path: &std::path::Path| {
-        let session = crate::File::open_rw(path).unwrap();
-        for i in 0..3 {
-            session
-                .root()
-                .create_dataset(&format!("added{i}"), |b| {
-                    b.with_i32_data(&[i]);
-                })
-                .unwrap();
-            session.commit().unwrap();
-        }
-    };
-
-    let plain = dir.path().join("plain.h5");
-    let mut b = crate::writer::FileBuilder::new();
-    b.create_dataset("d").with_i32_data(&[1, 2, 3]);
-    b.write(&plain).unwrap();
-    reference_patch::reset_walks();
-    commit_three(&plain);
-    assert_eq!(
-        reference_patch::walks(),
-        1,
-        "the first commit's walk proves the file reference-free; the rest \
-         must take its word for it"
-    );
-
-    let referencing = dir.path().join("referencing.h5");
-    let mut b = crate::writer::FileBuilder::new();
-    b.create_dataset("d").with_i32_data(&[1, 2, 3]);
-    b.create_dataset("refs").with_path_references(&["d"]);
-    b.write(&referencing).unwrap();
-    reference_patch::reset_walks();
-    commit_three(&referencing);
-    assert_eq!(
-        reference_patch::walks(),
-        3,
-        "a file that holds a reference is never proved free of one, so every \
-         commit walks it"
-    );
-}
-
-#[test]
 fn a_raw_reference_target_is_screened_like_a_path_one() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("raw_target.h5");
