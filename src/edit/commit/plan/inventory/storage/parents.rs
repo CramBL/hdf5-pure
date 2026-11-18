@@ -47,7 +47,6 @@ impl PendingEditInventory<'_> {
             engine,
             session: _,
             counts: _,
-            original: _,
             dispositions,
             storage,
             collections,
@@ -79,7 +78,6 @@ impl PendingEditInventory<'_> {
             engine,
             session,
             counts: _,
-            original: _,
             dispositions,
             storage,
             collections,
@@ -97,7 +95,7 @@ impl PendingEditInventory<'_> {
             return Err(ParentPreparationError::Session);
         }
         let expected = storage.source.as_ref();
-        let applied = dispositions.original().source().as_ref().ok();
+        let applied = dispositions.source();
         let Some(source) = expected else {
             return Err(ParentPreparationError::Source {
                 expected: None,

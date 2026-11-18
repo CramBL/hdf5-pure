@@ -158,13 +158,12 @@ impl SessionParent {
             range,
             class,
         } = self;
-        if dispositions.original().source().as_ref().ok() != Some(source)
+        if dispositions.source() != Some(source)
             || prospective.source() != Some(source)
             || !prospective.session()?.same(session)
             || prospective.parent_presence(range.start()) == ReferencePresence::ObservedLive
             || dispositions
-                .replacements()
-                .ok()?
+                .replacements()?
                 .get(owner)
                 .is_none_or(|&placed| placed == *owner)
         {

@@ -5,8 +5,7 @@ use std::collections::BTreeSet;
 use hdf5_pure_core::PhysicalAddress;
 
 use super::OriginalEdits;
-use super::dispositions::TransitionWithheld;
-use super::dispositions::{AppliedDispositions, Disposition};
+use super::dispositions::AppliedDispositions;
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::AnalysisPhase;
@@ -27,8 +26,7 @@ pub(in crate::edit::commit) struct ProspectiveCollections {
     root: Option<PhysicalAddress>,
     session: Option<AllocationSession>,
     source: Option<ReconstructionSource>,
-    roots: BTreeSet<ObjectId>,
-    unavailable: Option<ProspectiveUnavailable>,
+    applicable: bool,
     references: Option<ReachableHeapReferences>,
 }
 
@@ -47,11 +45,11 @@ impl ProspectiveCollections {
             return Self::default();
         }
         let mut roots = BTreeSet::from([ObjectId::new(root)]);
-        let unavailable = Self::retained_roots(engine, original, dispositions, &mut roots)
+        let applicable = Self::retained_roots(engine, original, dispositions, &mut roots)
             .and_then(|()| {
                 Self::residual_roots(engine, original, dispositions, collections, &mut roots)
             })
-            .err();
+            .is_some();
         let references = Some(
             AnalysisPhase::prospective(engine, root)
                 .heap_references_reachable_from(roots.iter().copied()),
@@ -60,8 +58,7 @@ impl ProspectiveCollections {
             root: Some(root),
             session: Some(engine.context.allocations.session()),
             source: original.source().cloned(),
-            roots,
-            unavailable,
+            applicable,
             references,
         }
     }
@@ -69,25 +66,6 @@ impl ProspectiveCollections {
     /// Returns the applied root used for traversal, or [`None`] for empty original input.
     pub(in crate::edit::commit) fn root(&self) -> Option<PhysicalAddress> {
         self.root
-    }
-
-    /// Borrows the distinct physical roots supplied to the reference traversal.
-    ///
-    /// The set can be partial when retained-root applicability failed.
-    pub(in crate::edit::commit) fn roots(&self) -> &BTreeSet<ObjectId> {
-        &self.roots
-    }
-
-    /// Borrows the failure that prevented complete retained-root association.
-    pub(in crate::edit::commit) fn unavailable(&self) -> Option<&ProspectiveUnavailable> {
-        self.unavailable.as_ref()
-    }
-
-    /// Borrows decoded heap references and their traversal outcome.
-    ///
-    /// Returns [`None`] for empty original candidate input.
-    pub(in crate::edit::commit) fn references(&self) -> Option<&ReachableHeapReferences> {
-        self.references.as_ref()
     }
 
     /// Borrows the original source association retained with prospective observations.
@@ -106,7 +84,7 @@ impl ProspectiveCollections {
 
     /// Returns whether root applicability, reference traversal, and interpretation completed.
     pub(in crate::edit::commit) fn is_complete(&self) -> bool {
-        self.unavailable.is_none()
+        self.applicable
             && self
                 .references
                 .as_ref()
@@ -170,26 +148,22 @@ impl ProspectiveCollections {
         dispositions: &AppliedDispositions,
         collections: &OriginalCollections,
         roots: &mut BTreeSet<ObjectId>,
-    ) -> Result<(), ProspectiveUnavailable> {
+    ) -> Option<()> {
         let Some(groups) = collections.residual_groups() else {
-            return Ok(());
+            return Some(());
         };
         if Some(groups.source()) != original.source()
-            || dispositions.original().source().as_ref().ok() != Some(groups.source())
+            || dispositions.source() != Some(groups.source())
         {
-            return Err(ProspectiveUnavailable::Source);
+            return None;
         }
         if !groups.session().same(&engine.context.allocations.session()) {
-            return Err(ProspectiveUnavailable::Session);
+            return None;
         }
         for &object in groups.roots() {
-            roots.insert(
-                dispositions
-                    .translate(object)
-                    .map_err(|error| ProspectiveUnavailable::Dispositions(error.clone()))?,
-            );
+            roots.insert(dispositions.translate(object)?);
         }
-        Ok(())
+        Some(())
     }
 
     fn retained_roots(
@@ -197,35 +171,22 @@ impl ProspectiveCollections {
         original: &OriginalEdits,
         dispositions: &AppliedDispositions,
         roots: &mut BTreeSet<ObjectId>,
-    ) -> Result<(), ProspectiveUnavailable> {
-        let facts = original.facts().ok_or(ProspectiveUnavailable::Original)?;
-        let source = original.source().ok_or(ProspectiveUnavailable::Source)?;
-        if dispositions.original().source().as_ref().ok() != Some(source) {
-            return Err(ProspectiveUnavailable::Source);
+    ) -> Option<()> {
+        let facts = original.facts()?;
+        let source = original.source()?;
+        if dispositions.source() != Some(source) {
+            return None;
         }
         let storage = facts.storage();
         if !storage.same_session(engine) {
-            return Err(ProspectiveUnavailable::Session);
+            return None;
         }
-        dispositions
-            .replacements()
-            .map_err(|error| ProspectiveUnavailable::Dispositions(error.clone()))?;
-        roots.extend(
-            dispositions
-                .original()
-                .predecessors()
-                .values()
-                .filter(|old| old.disposition == Disposition::Retain)
-                .map(|old| old.source.object()),
-        );
+        dispositions.replacements()?;
+        roots.extend(dispositions.retained().iter().copied());
         for &object in storage.reference_roots() {
-            roots.insert(
-                dispositions
-                    .translate(object)
-                    .map_err(|error| ProspectiveUnavailable::Dispositions(error.clone()))?,
-            );
+            roots.insert(dispositions.translate(object)?);
         }
-        Ok(())
+        Some(())
     }
 }
 
@@ -274,17 +235,4 @@ pub(in crate::edit::commit) enum ReferencePresence {
     Unavailable,
     /// No reference was observed in complete, applicable prospective observations.
     Unreferenced,
-}
-
-/// The reason complete retained-root applicability is unavailable.
-#[derive(Debug, Eq, PartialEq)]
-pub(in crate::edit::commit) enum ProspectiveUnavailable {
-    /// Original predecessors or actual placements prevent complete identity translation.
-    Dispositions(TransitionWithheld),
-    /// Original count and owner qualification is unavailable.
-    Original,
-    /// Original storage belongs to another allocation session.
-    Session,
-    /// Original owner facts and dispositions have different source associations.
-    Source,
 }

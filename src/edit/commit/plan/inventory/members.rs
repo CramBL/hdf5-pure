@@ -12,26 +12,15 @@ use super::prospective::{ParentAbsence, ProspectiveCollections, ReferencePresenc
 use super::session::SessionParentRetirement;
 use super::storage::{OriginalStorage, StorageOrigin};
 use crate::edit::allocation::AllocationSession;
-#[cfg(test)]
-use crate::edit::analysis::CollectionProvenance;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::heap::qualification::QualifiedParentAllocation;
 use crate::edit::analysis::heap::qualification::{OriginalCollections, OriginalQualification};
-use crate::error::FormatError;
-#[cfg(test)]
-use crate::global_heap::GlobalHeapId;
 
-/// Member and parent removal decisions with independent compaction planning outcomes.
+/// One exclusive action for each qualified heap parent.
 ///
 /// Parent allocation release requires separate permission.
 #[derive(Default)]
 pub(in crate::edit::commit) struct MemberDecisions {
-    #[cfg(test)]
-    members: BTreeMap<(CollectionProvenance, GlobalHeapId), Option<MemberDecision>>,
-    #[cfg(test)]
-    parents: BTreeMap<PhysicalAddress, Option<MemberDecision>>,
-    #[cfg(test)]
-    planning: BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>>,
     actions: BTreeMap<PhysicalAddress, ParentDisposition>,
 }
 
@@ -54,11 +43,6 @@ impl MemberDecisions {
         let OriginalQualification::Qualified(qualification) = original.qualification() else {
             return result;
         };
-        let decision = |presence| match presence {
-            ReferencePresence::ObservedLive => MemberDecision::Live,
-            ReferencePresence::Unreferenced => MemberDecision::Remove,
-            ReferencePresence::Unavailable => MemberDecision::Prospective,
-        };
         let protected: BTreeMap<_, _> = storage
             .allocations()
             .iter()
@@ -73,23 +57,15 @@ impl MemberDecisions {
         let mut removed: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
         for (origin, observations) in qualification.predecessors().into_iter().flatten() {
             for &id in observations.objects() {
-                let outcome = qualification
-                    .member(origin, id)
-                    .then(|| decision(prospective.member_presence(id)));
-                if outcome == Some(MemberDecision::Remove) {
+                if qualification.member(origin, id)
+                    && prospective.member_presence(id) == ReferencePresence::Unreferenced
+                {
                     removed.entry(id.collection).or_default().insert(id.index);
                 }
-                #[cfg(test)]
-                result.members.insert((origin.clone(), id), outcome);
             }
         }
         for &address in qualification.parents().keys() {
-            let parent = qualification
-                .whole_parent(address)
-                .then(|| decision(prospective.parent_presence(address)));
-            #[cfg(test)]
-            result.parents.insert(address, parent);
-            let retired = (parent == Some(MemberDecision::Remove))
+            let retired = (prospective.parent_presence(address) == ReferencePresence::Unreferenced)
                 .then(|| qualification.whole_parent_allocation(address))
                 .flatten()
                 .filter(|allocation| protected.get(&address) == Some(&allocation.range()))
@@ -108,58 +84,22 @@ impl MemberDecisions {
                 result.actions.insert(address, ParentDisposition::Retain);
                 continue;
             };
-            let planned = original
+            let compaction = original
                 .contents()
                 .get(&address)
-                .ok_or(CompactionUnavailable::Framing)
+                .filter(|contents| protected.get(&address) == Some(&contents.range()))
                 .and_then(|contents| {
-                    if protected.get(&address) != Some(&contents.range()) {
-                        return Err(CompactionUnavailable::Protection);
-                    }
                     contents
                         .framing()
                         .compact(|member| indices.contains(&member.index()))
-                        .map_err(CompactionUnavailable::Planning)
+                        .ok()
                 });
-            let outcome = planned.map(|plan| {
-                result
-                    .actions
-                    .insert(address, ParentDisposition::Compact(plan));
-            });
-            #[cfg(test)]
-            result.planning.insert(address, outcome);
-            #[cfg(not(test))]
-            drop(outcome);
-            result
-                .actions
-                .entry(address)
-                .or_insert(ParentDisposition::Retain);
+            result.actions.insert(
+                address,
+                compaction.map_or(ParentDisposition::Retain, ParentDisposition::Compact),
+            );
         }
         result
-    }
-
-    /// Borrows per-origin member qualification and prospective reference outcomes.
-    #[cfg(test)]
-    pub(in crate::edit::commit) fn members(
-        &self,
-    ) -> &BTreeMap<(CollectionProvenance, GlobalHeapId), Option<MemberDecision>> {
-        &self.members
-    }
-
-    /// Borrows stronger whole-parent qualification and prospective reference outcomes.
-    #[cfg(test)]
-    pub(in crate::edit::commit) fn parents(
-        &self,
-    ) -> &BTreeMap<PhysicalAddress, Option<MemberDecision>> {
-        &self.parents
-    }
-
-    /// Borrows planning outcomes for parents with eligible member removals.
-    #[cfg(test)]
-    pub(in crate::edit::commit) fn planning(
-        &self,
-    ) -> &BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>> {
-        &self.planning
     }
 
     /// Borrows at most one compaction plan per protected parent.
@@ -185,7 +125,7 @@ impl MemberDecisions {
         dispositions: &AppliedDispositions,
         prospective: &ProspectiveCollections,
     ) {
-        for (&address, parent) in &dispositions.original().session_parents {
+        for (&address, parent) in &dispositions.session_parents {
             if let Some(retirement) = parent.retirement(dispositions, prospective) {
                 self.actions.insert(
                     address,
@@ -194,28 +134,6 @@ impl MemberDecisions {
             }
         }
     }
-}
-
-/// The removal eligibility of an originally qualified member or parent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::edit::commit) enum MemberDecision {
-    /// A prospective reference to the member or parent was observed.
-    Live,
-    /// Complete prospective interpretation or root applicability is unavailable.
-    Prospective,
-    /// The member or parent is absent from complete prospective references.
-    Remove,
-}
-
-/// An unmet prerequisite for planning a protected parent compaction.
-#[derive(Debug)]
-pub(in crate::edit::commit) enum CompactionUnavailable {
-    /// Complete original collection framing is unavailable.
-    Framing,
-    /// Compaction planning failed.
-    Planning(FormatError),
-    /// A protected range matching the captured collection range is unavailable.
-    Protection,
 }
 
 /// An exclusive prepared action for one global heap parent.
