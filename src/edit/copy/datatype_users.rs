@@ -1,5 +1,6 @@
 //! Uses of committed datatypes in prepared object copies.
 
+use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -86,7 +87,10 @@ impl CopyTree {
                 pos = record.body_range.end;
             }
         }
-        Ok(Some(CopiedDatatypeUsers { tree: self, users }))
+        Ok(Some(CopiedDatatypeUsers {
+            users,
+            copy: PhantomData,
+        }))
     }
 }
 
@@ -95,16 +99,11 @@ impl CopyTree {
 /// The original copy remains immutably borrowed for the summary's lifetime. Source freshness,
 /// allocation ownership, and count-write permission require separate proofs.
 pub(in crate::edit) struct CopiedDatatypeUsers<'copy> {
-    tree: &'copy CopyTree,
     users: BTreeMap<StoredAddress, NonZeroU64>,
+    copy: PhantomData<&'copy CopyTree>,
 }
 
 impl CopiedDatatypeUsers<'_> {
-    /// Returns whether these counts were collected from `tree`.
-    pub(in crate::edit) fn matches(&self, tree: &CopyTree) -> bool {
-        core::ptr::eq(self.tree, tree)
-    }
-
     /// Returns distinct stored targets and their positive multiplicities in address order.
     pub(in crate::edit) fn users(&self) -> impl Iterator<Item = (StoredAddress, NonZeroU64)> + '_ {
         self.users.iter().map(|(&address, &count)| (address, count))
