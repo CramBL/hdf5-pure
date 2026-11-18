@@ -108,13 +108,21 @@ impl From<CountProtectionError> for Error {
             CountProtectionError::Allocation => {
                 Error::EditUnsupported("the original count allocation is unavailable")
             }
-            error @ (CountProtectionError::Phase { .. }
-            | CountProtectionError::Repeated { .. }
-            | CountProtectionError::Root { .. }
-            | CountProtectionError::Session) => FormatError::Internal(format!(
-                "incompatible original count association: {error:?}"
+            CountProtectionError::Phase { object } => FormatError::Internal(format!(
+                "incompatible original count association: Phase {{ object: {object:?} }}"
             ))
             .into(),
+            CountProtectionError::Repeated { object } => FormatError::Internal(format!(
+                "incompatible original count association: Repeated {{ object: {object:?} }}"
+            ))
+            .into(),
+            CountProtectionError::Root { expected, actual } => FormatError::Internal(format!(
+                "incompatible original count association: Root {{ expected: {expected:?}, actual: {actual:?} }}"
+            ))
+            .into(),
+            CountProtectionError::Session => {
+                FormatError::Internal("incompatible original count association: Session".into()).into()
+            }
         }
     }
 }

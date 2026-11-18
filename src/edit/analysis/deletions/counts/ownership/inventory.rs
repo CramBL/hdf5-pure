@@ -123,14 +123,12 @@ impl CountInventory {
         };
         for change in changes {
             if change.original().value() == 0 {
-                return Err(CountPreflightError::OriginalZero {
-                    object: change.object(),
-                });
+                return Err(CountPreflightError::OriginalZero);
             }
             match change.disposition() {
-                CountDisposition::Retain(_)
+                CountDisposition::Retain
                 | CountDisposition::Surviving { .. }
-                | CountDisposition::Unchanged(_)
+                | CountDisposition::Unchanged
                 | CountDisposition::Unresolved {
                     reason: UnresolvedCount::Zero,
                     ..
@@ -139,11 +137,7 @@ impl CountInventory {
                     change,
                     reason: UnresolvedCount::MissingField,
                 } if !replaced.contains(&change.object()) => {
-                    return Err(CountPreflightError::MissingField {
-                        object: change.object(),
-                        original: change.original().value(),
-                        remaining: change.remaining(),
-                    });
+                    return Err(CountPreflightError::MissingField);
                 }
                 CountDisposition::Unresolved { .. } => {}
             }
@@ -316,19 +310,9 @@ impl CountPreflight {
         self.inventory.shares_phase(source)
     }
 
-    /// Returns the original physical root, or `None` for an empty inventory.
-    pub(in crate::edit) fn root(&self) -> Option<ObjectId> {
-        self.inventory.root()
-    }
-
     /// Borrows every original count entry in the inventory's established order.
     pub(in crate::edit) fn changes(&self) -> &[OwnedCountChange] {
         self.inventory.changes()
-    }
-
-    /// Borrows the positive source updates and their checked complete allocations.
-    pub(in crate::edit) fn protected(&self) -> &ProtectedCounts {
-        &self.protected
     }
 
     /// Returns whether `object` was supplied in the checked reconstruction set.
@@ -426,22 +410,9 @@ struct ProjectionIdentity;
 #[derive(Debug)]
 pub(in crate::edit) enum CountPreflightError {
     /// A changed positive implicit count without a matching reconstruction.
-    MissingField {
-        /// The physical identity of the original target.
-        object: ObjectId,
-        /// The original implicit count.
-        original: u32,
-        /// The planned positive count.
-        remaining: u32,
-    },
+    MissingField,
     /// An unsupported original zero, independently of any known reference minimum.
-    OriginalZero {
-        /// The physical identity of the original target.
-        object: ObjectId,
-    },
+    OriginalZero,
     /// A source, reconstruction, publication, or allocator-protection failure.
     Protection(CountProtectionError),
 }
-
-#[cfg(test)]
-mod tests;

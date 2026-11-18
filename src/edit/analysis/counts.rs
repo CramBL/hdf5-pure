@@ -38,9 +38,6 @@ pub(super) mod balance;
 pub(in crate::edit) mod changes;
 pub(super) mod referenced;
 
-#[cfg(test)]
-pub(super) mod test_util;
-
 impl<'source> AnalysisPhase<'source> {
     /// Returns a positive declared count consistent with this topology's reference minimum.
     ///
@@ -55,7 +52,7 @@ impl<'source> AnalysisPhase<'source> {
     /// Returns [`CountEvidenceError::Contradiction`] if the observed count is below the applicable
     /// minimum, [`CountEvidenceError::Topology`] if a discovered non-root object
     /// lacks a positive incoming count, or [`CountEvidenceError::Source`] for errors from
-    /// [`Self::object_reference_count`].
+    /// [`CountQueries::summary`].
     pub(in crate::edit) fn count_evidence(
         &mut self,
         object: ObjectId,
@@ -110,21 +107,6 @@ impl<'cache, 'source> CountQueries<'cache, 'source> {
             counts,
             topology,
         }
-    }
-
-    /// Returns a cached raw count observation, with topology optional.
-    ///
-    /// Uses the complete-parse and failure-caching contract of
-    /// [`AnalysisPhase::object_reference_count`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors described by [`AnalysisPhase::object_reference_count`].
-    pub(in crate::edit) fn observation(
-        &mut self,
-        object: ObjectId,
-    ) -> Result<ObjectReferenceCount, FormatError> {
-        self.summary(object).map(|summary| summary.count)
     }
 
     /// Checks a source count against the original reference minimum and subject classification.

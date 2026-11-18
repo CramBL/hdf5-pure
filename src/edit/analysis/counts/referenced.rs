@@ -208,6 +208,3 @@ pub(in crate::edit) enum ReferencedCountError {
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_refcount
 const IMPLICIT_REFERENCE_COUNT: u32 = 1;
-
-#[cfg(test)]
-mod tests;

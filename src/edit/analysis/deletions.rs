@@ -20,26 +20,15 @@ use super::AnalysisPhase;
 use super::CompleteTopology;
 use super::counts::CountQueries;
 
-#[cfg(test)]
-pub(in crate::edit) use counts::CountInventory;
 pub(in crate::edit) use counts::CountPreflight;
 pub(in crate::edit) use counts::CountProjectionIdentity;
 pub(in crate::edit) use counts::{CountPreflightError, CountProtectionError, ProtectedCounts};
 
-pub(in crate::edit) use counts::DeclaredCountChange;
-pub(in crate::edit) use counts::SourceRemovalPlan;
 pub(in crate::edit) use counts::{
     CountHandoffError, NetCountError, NetCountPlan, OriginalOwnerError, OriginalOwnerFacts,
     OriginalOwnerInventory,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "graph-relative count transitions do not authorize allocation retirement"
-    )
-)]
 mod counts;
 
 /// A leaf name paired with its physical target and any complete-topology edge identity.

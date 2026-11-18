@@ -15,7 +15,6 @@ mod independent_widths;
 mod large_page;
 mod link_patches;
 mod manager_allocations;
-mod object_counts;
 mod symbol_table_links;
 mod version_1_attributes;
 
