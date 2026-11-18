@@ -160,6 +160,17 @@ pub fn finish() -> Recording {
     LOG.with(|log| log.borrow_mut().take()).unwrap_or_default()
 }
 
+/// Returns whether the current recording includes bytes written at `offset`.
+pub fn has_written_at(offset: u64) -> bool {
+    LOG.with(|log| {
+        log.borrow().as_ref().is_some_and(|recording| {
+            recording.operations.iter().any(
+                |operation| matches!(operation, DiskOp::Write { offset: at, .. } if *at == offset),
+            )
+        })
+    })
+}
+
 /// Records a completed write if this thread is recording.
 ///
 /// Copies the bytes only when recording is enabled.

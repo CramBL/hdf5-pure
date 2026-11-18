@@ -3089,11 +3089,19 @@ impl File {
     /// locking, format, and configuration errors of [`Self::open_rw`].
     #[cfg(test)]
     pub(crate) fn open_rw_source_only(path: &std::path::Path) -> Result<Self, Error> {
+        Self::from_test_edit_session(
+            WriteEngine::open_source_only(path)?,
+            FileAccessProperties::new(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_edit_session(
+        engine: WriteEngine,
+        properties: FileAccessProperties,
+    ) -> Result<Self, Error> {
         Ok(File {
-            inner: Arc::new(FileInner::from_rw_session(
-                WriteEngine::open_source_only(path)?,
-                FileAccessProperties::new(),
-            )?),
+            inner: Arc::new(FileInner::from_rw_session(engine, properties)?),
         })
     }
 
