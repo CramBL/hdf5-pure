@@ -18,6 +18,8 @@ use crate::{
 };
 use crate::{MemoryStrategy, SyncPolicy};
 
+#[path = "heap_compaction/progress.rs"]
+mod progress;
 #[path = "heap_compaction/restoration.rs"]
 mod restoration;
 
