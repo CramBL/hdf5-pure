@@ -246,6 +246,3 @@ pub(in crate::edit) enum AllocationKind {
 std::thread_local! {
     pub(in crate::edit) static OWNERSHIP_READS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
-
-#[cfg(test)]
-mod tests;

@@ -4,10 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use hdf5_pure_core::__private::FileRange;
 use rstest::rstest;
-use test_util::global_heap::{MIN_COLLECTION_SIZE, Object};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use test_util::allocation;
+use test_util::global_heap::{self, MIN_COLLECTION_SIZE, Object};
+use test_util::widths::Widths;
 use test_util_hdf5::global_heap_fixture::{self, Fixture, Form};
 
-use super::{File, FileAccessProperties, FileInner};
+use super::{File, FileAccessProperties};
 use crate::edit::open_observed_engine;
 use crate::{AttrValue, Layout, MetadataCacheConfig, PhysicalAddress, SyncPolicy};
 
@@ -19,18 +22,7 @@ fn candidate_free_public_commits_skip_unrelated_payload_reads(#[case] edit: Edit
     let path = test_util::temp::temp_path("candidate-free-commit-reads.h5");
     let parent = fixture(&path);
     let reads = Arc::new(Mutex::new(Vec::new()));
-    let engine = open_observed_engine(&path, Arc::clone(&reads));
-    let file = File {
-        inner: Arc::new(
-            FileInner::from_rw_session(
-                engine,
-                FileAccessProperties::new()
-                    .with_metadata_cache(MetadataCacheConfig::disabled())
-                    .with_sync_policy(SyncPolicy::OnClose),
-            )
-            .unwrap(),
-        ),
-    };
+    let file = open_observed_file(&path, &reads);
     let large = extent(&file, "large");
     assert_eq!(large.length(), u64::try_from(LARGE).unwrap());
     let labels = extent(&file, "labels");
@@ -121,6 +113,205 @@ fn candidate_free_public_commits_skip_unrelated_payload_reads(#[case] edit: Edit
         file.dataset("large").unwrap().read_u8().unwrap(),
         vec![0x2a; LARGE]
     );
+}
+
+#[test]
+fn heap_bearing_commit_bounds_descriptor_reads_and_skips_numeric_payload() {
+    let path = test_util::temp::temp_path("heap-bearing-commit-reads.h5");
+    let mut fixture = Fixture::new();
+    let retained = Object::new(91, b"retained");
+    let parent = fixture.collection(&[Object::new(7, b"gone"), retained]);
+    let datatype = global_heap_fixture::vlen_string();
+    let labels = global_heap_fixture::reference(8, parent, 91).repeat(8_192);
+    let messages = Form::ContiguousDataset.messages(&mut fixture, &datatype, &labels);
+    fixture.object("labels", messages);
+    let mut messages =
+        Form::ContiguousDataset.messages(&mut fixture, &crate::make_u8_type(), &vec![0x2a; LARGE]);
+    messages.extend(Form::CompactAttribute.messages(
+        &mut fixture,
+        &datatype,
+        &global_heap_fixture::reference(4, parent, 7),
+    ));
+    fixture.object("large", messages);
+    fixture.write(&path);
+
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let file = open_observed_file(&path, &reads);
+    let descriptors = extent(&file, "labels");
+    let numeric = extent(&file, "large");
+    assert_eq!(descriptors.length(), u64::try_from(labels.len()).unwrap());
+    assert_eq!(numeric.length(), u64::try_from(LARGE).unwrap());
+    let mut large = file.dataset("large").unwrap();
+    reads.lock().unwrap().clear();
+    assert_eq!(large.read_u8_region(&[0], &[1]).unwrap(), [0x2a]);
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|read| read.overlaps(numeric))
+    );
+
+    large.remove_attr("a").unwrap();
+    reads.lock().unwrap().clear();
+    file.commit().unwrap();
+    let requested = mem::take(&mut *reads.lock().unwrap());
+    assert!(requested.iter().all(|read| !read.overlaps(numeric)));
+    let mut scans = requested
+        .into_iter()
+        .filter(|read| read.overlaps(descriptors))
+        .collect::<Vec<_>>();
+    scans.sort_unstable_by_key(|read| read.start());
+    let mut covered = descriptors.start();
+    for read in &scans {
+        assert!(read.length() <= 64 * 1024, "{read:?}");
+        assert!(read.start() <= covered, "gap before {read:?}");
+        covered = covered.max(read.end());
+    }
+    assert!(covered >= descriptors.end(), "{scans:?}");
+    let total = scans.iter().map(|read| read.length()).sum::<u64>();
+    assert!(total <= 4 * descriptors.length(), "{total}");
+    assert!(large.attrs().unwrap().is_empty());
+    drop(large);
+    file.close().unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    let parent = usize::try_from(parent).unwrap();
+    let compacted = global_heap::collection(&[retained], Widths::EIGHT);
+    // Compare the collection header, retained member, and free header.
+    let prefix = 16 + 24 + 16;
+    assert_eq!(bytes[parent..parent + prefix], compacted[..prefix]);
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("labels").unwrap().read_string().unwrap(),
+        vec!["retained"; 8_192]
+    );
+    let large = file.dataset("large").unwrap();
+    assert!(large.attrs().unwrap().is_empty());
+    assert_eq!(large.read_u8().unwrap(), vec![0x2a; LARGE]);
+}
+
+#[test]
+fn heap_compaction_leaves_large_stationary_payloads_unread() {
+    let path = test_util::temp::temp_path("stationary-heap-commit-reads.h5");
+    let payload = vec![b's'; LARGE];
+    let numeric = vec![0x2a; LARGE];
+    let retained = Object {
+        index: 91,
+        reference_count: 3,
+        data: &payload,
+    };
+    let obsolete = Object::new(7, b"gone");
+    let original = global_heap::collection(&[retained, obsolete], Widths::EIGHT);
+    let compacted = global_heap::collection_of_size(&[retained], Widths::EIGHT, original.len());
+    let mut fixture = Fixture::new();
+    let parent = fixture.image.append(&original);
+    let address = u64::try_from(parent).unwrap();
+    let datatype = global_heap_fixture::vlen_string();
+    let messages = Form::CompactDataset.messages(
+        &mut fixture,
+        &datatype,
+        &global_heap_fixture::reference(u32::try_from(LARGE).unwrap(), address, 91),
+    );
+    fixture.object("label", messages);
+    let mut messages =
+        Form::ContiguousDataset.messages(&mut fixture, &crate::make_u8_type(), &numeric);
+    messages.extend(Form::CompactAttribute.messages(
+        &mut fixture,
+        &datatype,
+        &global_heap_fixture::reference(4, address, 7),
+    ));
+    fixture.object("large", messages);
+    fixture.write(&path);
+
+    // Eight-byte lengths give this collection and its records 16-byte headers.
+    let payload_start = parent + 32;
+    let free_header = payload_start + LARGE..payload_start + LARGE + 16;
+    let member_payload = FileRange::new(
+        PhysicalAddress::new(u64::try_from(payload_start).unwrap()),
+        u64::try_from(LARGE).unwrap(),
+    )
+    .unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let file = open_observed_file(&path, &reads);
+    let numbers = extent(&file, "large");
+    assert_eq!(numbers.length(), u64::try_from(LARGE).unwrap());
+    let forbidden = [member_payload, numbers];
+
+    file.dataset("large").unwrap().remove_attr("a").unwrap();
+    drop(mem::take(&mut *reads.lock().unwrap()));
+    let commit = || file.commit().unwrap();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let ((), measured) = allocation::measure("stationary_heap_member_commit", commit);
+        assert!(measured.peak_bytes < 64 * 1024, "{measured}");
+        assert!(measured.live_bytes < 16 * 1024, "{measured}");
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    commit();
+    let requested = mem::take(&mut *reads.lock().unwrap());
+    for range in forbidden {
+        assert!(
+            requested.iter().all(|read| !read.overlaps(range)),
+            "commit read payload {range:?}: {requested:?}"
+        );
+    }
+    let bytes = requested.iter().map(|read| read.length()).sum::<u64>();
+    assert!(
+        (1..=16 * 1024).contains(&bytes),
+        "commit requested {bytes} bytes"
+    );
+    assert!(!file.has_staged_edits());
+    file.close().unwrap();
+
+    let stored = std::fs::read(&path).unwrap();
+    let prefix = free_header.start - parent;
+    assert_eq!(&stored[parent..free_header.start], &original[..prefix]);
+    assert_eq!(
+        &stored[free_header.clone()],
+        &compacted[prefix..prefix + 16]
+    );
+    assert_ne!(&stored[free_header], &original[prefix..prefix + 16]);
+
+    let file = open_observed_file(&path, &reads);
+    reads.lock().unwrap().clear();
+    let read_values = || {
+        (
+            file.dataset("label").unwrap().read_string().unwrap(),
+            file.dataset("large").unwrap().read_u8().unwrap(),
+        )
+    };
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let ((label, values), positive) =
+        allocation::measure("stationary_heap_member_read_control", read_values);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let payload_bytes = u64::try_from(payload.len() + numeric.len()).unwrap();
+        assert!(positive.peak_bytes >= payload_bytes, "{positive}");
+        assert!(positive.live_bytes >= payload_bytes, "{positive}");
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let (label, values) = read_values();
+
+    let control = mem::take(&mut *reads.lock().unwrap());
+    for range in forbidden {
+        assert!(control.iter().any(|read| read.overlaps(range)), "{range:?}");
+    }
+    let [label]: [String; 1] = label.try_into().unwrap();
+    assert_eq!(label.as_bytes(), payload);
+    assert_eq!(values, numeric);
+    assert!(file.dataset("large").unwrap().attrs().unwrap().is_empty());
+    file.close().unwrap();
+}
+
+fn open_observed_file(path: &Path, reads: &Arc<Mutex<Vec<FileRange>>>) -> File {
+    File::from_test_edit_session(
+        open_observed_engine(path, Arc::clone(reads)),
+        FileAccessProperties::new()
+            .with_metadata_cache(MetadataCacheConfig::disabled())
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap()
 }
 
 #[derive(Clone, Copy, Debug)]
