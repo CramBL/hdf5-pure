@@ -18,6 +18,9 @@ use crate::{
 };
 use crate::{MemoryStrategy, SyncPolicy};
 
+#[path = "heap_compaction/restoration.rs"]
+mod restoration;
+
 const HEADER: usize = 16;
 const RECORD: usize = 24;
 const PARTIAL: usize = 2;
@@ -267,31 +270,14 @@ fn assert_failed_write(
     else {
         panic!("expected the control write");
     };
-    let IoEvent::Write {
-        offset: failed_at,
-        requested,
-        written: completed,
-        outcome,
-        operation,
-    } = failed.events[event]
-    else {
-        panic!("expected the failed write, got {:?}", failed.events[event]);
-    };
-    assert_eq!(failed_at, *offset);
-    assert_eq!(requested, bytes.len());
-    assert_eq!(completed, written);
-    assert_eq!(outcome, IoOutcome::Failed(ErrorKind::Other));
-    if written == 0 {
-        assert_eq!(operation, None);
-    } else {
-        assert_eq!(
-            failed.operations[operation.unwrap()],
-            DiskOp::Write {
-                offset: *offset,
-                bytes: bytes[..written].to_vec(),
-            }
-        );
-    }
+    assert_issued_write(
+        failed,
+        event,
+        *offset,
+        bytes,
+        written,
+        IoOutcome::Failed(ErrorKind::Other),
+    );
 
     let mut expected = replay_prefix(control, original, event);
     let start = usize::try_from(*offset).unwrap();
@@ -304,6 +290,41 @@ fn assert_failed_write(
         replay_prefix(failed, original, event + 1)[parent.clone()],
         expected[parent]
     );
+}
+
+fn assert_issued_write(
+    recording: &Recording,
+    event: usize,
+    at: u64,
+    bytes: &[u8],
+    count: usize,
+    expected: IoOutcome,
+) {
+    let IoEvent::Write {
+        offset,
+        requested,
+        written: completed,
+        outcome,
+        operation,
+    } = recording.events[event]
+    else {
+        panic!("expected a write, got {:?}", recording.events[event]);
+    };
+    assert_eq!(offset, at);
+    assert_eq!(requested, bytes.len());
+    assert_eq!(completed, count);
+    assert_eq!(outcome, expected);
+    if count == 0 {
+        assert_eq!(operation, None);
+    } else {
+        assert_eq!(
+            recording.operations[operation.unwrap()],
+            DiskOp::Write {
+                offset: at,
+                bytes: bytes[..count].to_vec(),
+            }
+        );
+    }
 }
 
 fn replay_prefix(recording: &Recording, original: &[u8], end: usize) -> Vec<u8> {
@@ -575,11 +596,15 @@ fn stage(file: &File) {
 }
 
 fn assert_published_values(file: &File) {
-    assert_eq!(file.dataset("numbers").unwrap().read_i32().unwrap(), [23]);
+    assert_published_scalars(file);
     assert_eq!(
         file.dataset("keep").unwrap().read_string().unwrap(),
         ["retained"; 3]
     );
+}
+
+fn assert_published_scalars(file: &File) {
+    assert_eq!(file.dataset("numbers").unwrap().read_i32().unwrap(), [23]);
     let value = file.dataset("value").unwrap();
     assert_eq!(value.read_i32().unwrap(), [17]);
     assert_eq!(value.attrs().unwrap().get("a"), Some(&AttrValue::I64(9)));
