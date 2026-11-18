@@ -79,39 +79,6 @@ fn published_batch<'plan>(
     Ok(())
 }
 
-/// Applies all collection plans while retaining undo for the enclosing unpublished commit.
-///
-/// With a nonempty journal, issues pending writes in every buffering mode and applies the
-/// engine's synchronization policy on success. The enclosing commit retains all prior descriptor
-/// and collection undo entries until its own completion. If applying the plans or completing
-/// their writes fails, attempts to restore the whole journal in reverse write order, including
-/// entries recorded before this call.
-///
-/// Copies records through a 4096-byte scratch buffer. Retained undo includes every overwritten
-/// destination byte and free space header, in addition to the earlier journal. Repeated writes
-/// retain separate prior-byte copies. Journal capacity, plans, image buffering, and any mirror
-/// require additional memory.
-///
-/// # Errors
-///
-/// Returns [`Error::AllocationPublicationUncertain`] if allocation permission is uncertain,
-/// or [`FormatError::Internal`] if allocations are provisional or publication was attempted.
-/// Returns bounds, read, write, or completion errors. Returns [`Error::CommitPartiallyApplied`]
-/// with both errors if restoration fails, and marks allocation state uncertain.
-#[cfg(test)]
-pub(in crate::edit) fn rootless(
-    engine: &mut WriteEngine,
-    plans: &[GlobalHeapCompaction],
-) -> Result<(), Error> {
-    engine.context.allocations.before_reference()?;
-    JournalScope::run_rootless(engine, |journal| {
-        for plan in plans {
-            apply(journal, plan)?;
-        }
-        Ok(())
-    })
-}
-
 /// Records the completed prefix and the failure of the next collection operation.
 #[derive(Debug)]
 pub(in crate::edit) struct HeapMutationFailure {
