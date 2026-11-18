@@ -16,8 +16,6 @@ use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::CollectionProvenance;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::heap::qualification::QualifiedParentAllocation;
-#[cfg(test)]
-use crate::edit::analysis::heap::qualification::{MemberUnavailable, ParentUnavailable};
 use crate::edit::analysis::heap::qualification::{OriginalCollections, OriginalQualification};
 use crate::error::FormatError;
 #[cfg(test)]
@@ -29,10 +27,9 @@ use crate::global_heap::GlobalHeapId;
 #[derive(Default)]
 pub(in crate::edit::commit) struct MemberDecisions {
     #[cfg(test)]
-    members:
-        BTreeMap<(CollectionProvenance, GlobalHeapId), Result<MemberDecision, MemberUnavailable>>,
+    members: BTreeMap<(CollectionProvenance, GlobalHeapId), Option<MemberDecision>>,
     #[cfg(test)]
-    parents: BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>>,
+    parents: BTreeMap<PhysicalAddress, Option<MemberDecision>>,
     #[cfg(test)]
     planning: BTreeMap<PhysicalAddress, Result<(), CompactionUnavailable>>,
     actions: BTreeMap<PhysicalAddress, ParentDisposition>,
@@ -78,8 +75,8 @@ impl MemberDecisions {
             for &id in observations.objects() {
                 let outcome = qualification
                     .member(origin, id)
-                    .map(|()| decision(prospective.member_presence(id)));
-                if outcome == Ok(MemberDecision::Remove) {
+                    .then(|| decision(prospective.member_presence(id)));
+                if outcome == Some(MemberDecision::Remove) {
                     removed.entry(id.collection).or_default().insert(id.index);
                 }
                 #[cfg(test)]
@@ -89,11 +86,11 @@ impl MemberDecisions {
         for &address in qualification.parents().keys() {
             let parent = qualification
                 .whole_parent(address)
-                .map(|()| decision(prospective.parent_presence(address)));
+                .then(|| decision(prospective.parent_presence(address)));
             #[cfg(test)]
             result.parents.insert(address, parent);
-            let retired = (parent == Ok(MemberDecision::Remove))
-                .then(|| qualification.whole_parent_allocation(address).ok())
+            let retired = (parent == Some(MemberDecision::Remove))
+                .then(|| qualification.whole_parent_allocation(address))
                 .flatten()
                 .filter(|allocation| protected.get(&address) == Some(&allocation.range()))
                 .and_then(|allocation| {
@@ -114,7 +111,6 @@ impl MemberDecisions {
             let planned = original
                 .contents()
                 .get(&address)
-                .and_then(|contents| contents.as_ref().ok())
                 .ok_or(CompactionUnavailable::Framing)
                 .and_then(|contents| {
                     if protected.get(&address) != Some(&contents.range()) {
@@ -146,8 +142,7 @@ impl MemberDecisions {
     #[cfg(test)]
     pub(in crate::edit::commit) fn members(
         &self,
-    ) -> &BTreeMap<(CollectionProvenance, GlobalHeapId), Result<MemberDecision, MemberUnavailable>>
-    {
+    ) -> &BTreeMap<(CollectionProvenance, GlobalHeapId), Option<MemberDecision>> {
         &self.members
     }
 
@@ -155,7 +150,7 @@ impl MemberDecisions {
     #[cfg(test)]
     pub(in crate::edit::commit) fn parents(
         &self,
-    ) -> &BTreeMap<PhysicalAddress, Result<MemberDecision, ParentUnavailable>> {
+    ) -> &BTreeMap<PhysicalAddress, Option<MemberDecision>> {
         &self.parents
     }
 

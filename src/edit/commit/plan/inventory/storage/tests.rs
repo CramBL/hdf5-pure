@@ -254,10 +254,10 @@ fn candidate_parent_capacity_is_checked_against_actual_retirement(
     let parent = PhysicalAddress::new(parent);
     let storage = &prepared.storage().parents().unwrap()[&parent];
     assert_eq!(
-        storage.framing.as_ref().copied().unwrap(),
+        storage.framing.unwrap(),
         range(parent.get(), parent_end - parent.get())
     );
-    assert_eq!(storage.allocation, Ok(()));
+    assert!(storage.allocation_matches);
     let parent_range = range(parent.get(), parent_end - parent.get());
     assert_eq!(
         storage.original,

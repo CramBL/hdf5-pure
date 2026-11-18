@@ -82,11 +82,7 @@ impl ReconstructionDispositions {
             }
             for &range in ranges {
                 let address = range.start();
-                let Some(contents) = collections
-                    .contents()
-                    .get(&address)
-                    .and_then(|contents| contents.as_ref().ok())
-                else {
+                let Some(contents) = collections.contents().get(&address) else {
                     continue;
                 };
                 if contents.range() != range

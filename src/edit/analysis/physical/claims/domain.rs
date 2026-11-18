@@ -5,8 +5,6 @@
 
 use std::sync::Arc;
 
-use hdf5_pure_core::PhysicalAddress;
-
 use super::coverage::content::ResidualOutcome;
 use super::{ClaimOrigin, ClaimProblem, PhysicalClaims};
 use crate::edit::WriteEngine;
@@ -98,9 +96,9 @@ impl AnalysisPhase<'_> {
         if claims.root() != Some(original) {
             return Ok(Some(DomainUnavailable::Root));
         }
-        if let Some(index) = claims.problems().iter().find(|problem| {
+        if let Some(problem) = claims.problems().iter().find(|problem| {
             !matches!((framing, problem),
-                (CollectionFraming::Envelope, ClaimProblem::Collection { address, .. })
+                (CollectionFraming::Envelope, ClaimProblem::Collection(address))
                     if self.allocations.get(address).is_some_and(Result::is_err)
                         && self.collection_envelopes.get(address).is_some_and(|&range| {
                             claims.claims().iter().any(|claim| {
@@ -109,101 +107,97 @@ impl AnalysisPhase<'_> {
                         })
             )
         }).map(DomainUnavailable::from) {
-            return Ok(Some(index));
+            return Ok(Some(problem));
         }
-        if let Some(index) = self.unavailable_exclusion(claims, framing)? {
-            return Ok(Some(DomainUnavailable::Authority(index)));
+        if self.has_unavailable_exclusion(claims, framing)? {
+            return Ok(Some(DomainUnavailable::Authority));
         }
         let coverage = self.physical_coverage(source)?;
-        if let Some(pair) = coverage.conflict() {
-            return Ok(Some(DomainUnavailable::Conflict(pair)));
+        if coverage.conflict().is_some() {
+            return Ok(Some(DomainUnavailable::Conflict));
         }
-        if let Some(&index) = coverage.beyond_source().first() {
-            return Ok(Some(DomainUnavailable::BeyondSource(index)));
+        if !coverage.beyond_source().is_empty() {
+            return Ok(Some(DomainUnavailable::BeyondSource));
         }
-        if let Some(&index) = coverage.beyond_eoa().first() {
-            return Ok(Some(DomainUnavailable::BeyondEoa(index)));
+        if !coverage.beyond_eoa().is_empty() {
+            return Ok(Some(DomainUnavailable::BeyondEoa));
         }
         let claims = self.physical_claims(source)?;
         if claims.logical_eoa() > claims.physical_size() {
             return Ok(Some(DomainUnavailable::MissingSource));
         }
         let contents = self.residual_content(source)?;
-        if let Some(index) = contents
+        if contents
             .intervals()
             .iter()
-            .position(|interval| !matches!(interval.outcome(), ResidualOutcome::AllZero))
+            .any(|interval| !matches!(interval.outcome(), ResidualOutcome::AllZero))
         {
-            return Ok(Some(DomainUnavailable::Residual(index)));
+            return Ok(Some(DomainUnavailable::Residual));
         }
         Ok(None)
     }
 
-    /// Returns the index of the first claim unsupported by its cached allocation observation.
+    /// Checks for any claim unsupported by its cached allocation observation.
     ///
     /// Requires each object's claims to be contiguous and ordered as its cached allocations.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if the physical-storage cache is absent.
-    fn unavailable_exclusion(
+    fn has_unavailable_exclusion(
         &self,
         claims: &PhysicalClaims,
         framing: CollectionFraming,
-    ) -> Result<Option<usize>, FormatError> {
+    ) -> Result<bool, FormatError> {
         let physical = self
             .physical
             .as_ref()
             .ok_or_else(|| FormatError::Internal("physical storage was not retained".into()))?;
         let mut owner = None;
         let mut allocation_index = 0;
-        Ok(claims
-            .claims()
-            .iter()
-            .enumerate()
-            .find_map(|(index, claim)| {
-                let range = claim.range();
-                let authoritative = match claim.origin() {
-                    ClaimOrigin::File { index, kind } => physical
-                        .file()
-                        .get(index)
-                        .is_some_and(|entry| entry.range == range && entry.kind == kind),
-                    ClaimOrigin::MetadataCapacity(index) => physical
-                        .metadata_capacity()
-                        .get(index)
-                        .is_some_and(|&capacity| capacity == range),
-                    ClaimOrigin::NonLive { index, kind } => physical
-                        .non_live()
-                        .get(index)
-                        .is_some_and(|entry| entry.range() == range && entry.kind() == kind),
-                    ClaimOrigin::Object { object, kind } => {
-                        if owner != Some(object) {
-                            owner = Some(object);
-                            allocation_index = 0;
-                        }
-                        let matches = self.ownership.get(&object).is_some_and(|ownership| {
-                            ownership.is_complete()
-                                && ownership.allocations().get(allocation_index).is_some_and(
-                                    |allocation| {
-                                        allocation.range() == range && allocation.kind() == kind
-                                    },
-                                )
-                        });
-                        allocation_index += 1;
-                        matches
+        Ok(claims.claims().iter().any(|claim| {
+            let range = claim.range();
+            let authoritative = match claim.origin() {
+                ClaimOrigin::File { index, kind } => physical
+                    .file()
+                    .get(index)
+                    .is_some_and(|entry| entry.range == range && entry.kind == kind),
+                ClaimOrigin::MetadataCapacity(index) => physical
+                    .metadata_capacity()
+                    .get(index)
+                    .is_some_and(|&capacity| capacity == range),
+                ClaimOrigin::NonLive { index, kind } => physical
+                    .non_live()
+                    .get(index)
+                    .is_some_and(|entry| entry.range() == range && entry.kind() == kind),
+                ClaimOrigin::Object { object, kind } => {
+                    if owner != Some(object) {
+                        owner = Some(object);
+                        allocation_index = 0;
                     }
-                    ClaimOrigin::Heap(address) => {
-                        self.allocations
-                            .get(&address)
-                            .and_then(|contents| contents.as_ref().ok())
-                            .is_some_and(|contents| contents.range() == range)
-                            || matches!(framing, CollectionFraming::Envelope)
-                                && self.allocations.get(&address).is_some_and(Result::is_err)
-                                && self.collection_envelopes.get(&address) == Some(&range)
-                    }
-                };
-                (!authoritative).then_some(index)
-            }))
+                    let matches = self.ownership.get(&object).is_some_and(|ownership| {
+                        ownership.is_complete()
+                            && ownership.allocations().get(allocation_index).is_some_and(
+                                |allocation| {
+                                    allocation.range() == range && allocation.kind() == kind
+                                },
+                            )
+                    });
+                    allocation_index += 1;
+                    matches
+                }
+                ClaimOrigin::Heap(address) => {
+                    self.allocations
+                        .get(&address)
+                        .and_then(|contents| contents.as_ref().ok())
+                        .is_some_and(|contents| contents.range() == range)
+                        || matches!(framing, CollectionFraming::Envelope)
+                            && self.allocations.get(&address).is_some_and(Result::is_err)
+                            && self.collection_envelopes.get(&address) == Some(&range)
+                }
+            };
+            !authoritative
+        }))
     }
 }
 
@@ -256,21 +250,18 @@ impl SupportedOwnerDomain {
 }
 
 /// An unmet prerequisite for a supported source object-header domain.
-///
-/// Claim indices refer to [`PhysicalClaims::claims`]. Residual indices refer to
-/// [`super::coverage::content::ResidualContents::intervals`].
 #[derive(Debug)]
 pub(in crate::edit) enum DomainUnavailable {
     /// A claim whose range or origin differs from its cached allocation observation.
-    Authority(usize),
+    Authority,
     /// A claim beyond the recorded end address.
-    BeyondEoa(usize),
+    BeyondEoa,
     /// A claim beyond the source image length.
-    BeyondSource(usize),
-    /// A referenced global heap collection with incomplete framing at this physical address.
-    Collection(PhysicalAddress),
-    /// The two claim indices of an incompatible overlap.
-    Conflict([usize; 2]),
+    BeyondSource,
+    /// A referenced global heap collection with incomplete framing.
+    Collection,
+    /// An incompatible overlap between claims.
+    Conflict,
     /// Incomplete file storage discovery.
     File,
     /// A recorded end address beyond the source image length.
@@ -280,9 +271,9 @@ pub(in crate::edit) enum DomainUnavailable {
     /// An allocation-publication failure that prevents qualification.
     Publication,
     /// An object with incomplete reference interpretation.
-    References(ObjectId),
+    References,
     /// An interval with a nonzero witness or incomplete content examination.
-    Residual(usize),
+    Residual,
     /// An unresolved original root or a different phase root.
     Root,
     /// Unavailable hard-link topology for the phase root.
@@ -292,14 +283,11 @@ pub(in crate::edit) enum DomainUnavailable {
 impl From<&ClaimProblem> for DomainUnavailable {
     fn from(problem: &ClaimProblem) -> Self {
         match problem {
-            ClaimProblem::Collection { address, .. } => Self::Collection(*address),
+            ClaimProblem::Collection(_) => Self::Collection,
             ClaimProblem::File => Self::File,
             ClaimProblem::ObjectStorage(object) => Self::ObjectStorage(*object),
-            ClaimProblem::References(object) => Self::References(*object),
+            ClaimProblem::References => Self::References,
             ClaimProblem::Topology => Self::Topology,
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

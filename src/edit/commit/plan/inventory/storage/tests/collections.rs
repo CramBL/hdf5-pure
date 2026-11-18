@@ -112,8 +112,6 @@ fn checked_tree_handoffs_retain_original_members_and_framing(#[case] outcome: Ou
             id.collection.get(),
             usize::try_from(
                 pending.collections().contents()[&id.collection]
-                    .as_ref()
-                    .unwrap()
                     .range()
                     .length(),
             )
@@ -198,16 +196,14 @@ fn check(collections: &OriginalCollections, owner: ObjectId, id: GlobalHeapId) -
     let OriginalQualification::Qualified(qualification) = collections.qualification() else {
         panic!("expected original collection qualification");
     };
-    qualification
-        .member(
-            &CollectionProvenance {
-                object: owner,
-                content: CollectionContent::Attribute("a".into()),
-            },
-            id,
-        )
-        .unwrap();
-    let contents = collections.contents()[&id.collection].as_ref().unwrap();
+    assert!(qualification.member(
+        &CollectionProvenance {
+            object: owner,
+            content: CollectionContent::Attribute("a".into()),
+        },
+        id,
+    ));
+    let contents = &collections.contents()[&id.collection];
     assert_eq!(contents.range().start(), id.collection);
     assert_eq!(
         qualification.original_allocation(id.collection).unwrap().0,
