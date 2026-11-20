@@ -243,7 +243,7 @@ fn reference_to_object_id_zero_decodes() {
     // workspace of an anonymous function, `f = @(v) v + 1`. Id 0 has no object
     // record.
     let blob = FileWrapper::new(&["function_handle_workspace", "value"])
-        .class(0, 1) // class 1 = "function_handle_workspace"
+        .class(0, 1) // class 1 = `function_handle_workspace`
         .object(1, 0, 1)
         .normal_block(&[(2, mcos::HEAP, 0)]) // value -> cell 2
         .build();
