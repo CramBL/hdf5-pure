@@ -206,6 +206,46 @@ fn unknown_opaque_class_is_lossless() {
 }
 
 #[test]
+fn string_after_a_duration_decodes() {
+    // The layout MATLAB R2026b writes for `d = seconds(1); s = "x"`. The
+    // duration is object 1 and its two properties take heap cells 0 and 1, so
+    // the payload of the string, object 2, is in heap cell 2.
+    let blob = FileWrapper::new(&["fmt", "millis", "duration", "any", "string"])
+        .class(0, 3) // class 1 = "duration"
+        .class(0, 5) // class 2 = "string"
+        .object(1, 0, 1) // object 1: the duration, normal-segment block 1
+        .object(2, 1, 0) // object 2: the string, saveobj-segment block 1
+        .saveobj_block(&[(4, mcos::HEAP, 2)]) // `any` -> heap cell 2
+        .normal_block(&[(1, mcos::HEAP, 0), (2, mcos::HEAP, 1)]) // `fmt`, `millis`
+        .build();
+    let bytes = mat_file::objects_file(
+        &[
+            ("d", "duration", &mcos::object_metadata(1, 1)),
+            ("s", "string", &mcos::object_metadata(2, 2)),
+        ],
+        &[
+            ("blob", Cell::Blob(blob)),
+            ("canon", Cell::Empty),
+            ("fmt", Cell::Char("s".into())),
+            ("millis", Cell::F64(vec![1000.0])),
+            // Version 1, a 1x1 array, one code unit, "x".
+            ("payload", Cell::U64(vec![1, 2, 1, 1, 1, 0x78])),
+        ],
+        &[],
+    );
+
+    #[derive(Deserialize)]
+    struct Doc {
+        d: MatDuration,
+        s: String,
+    }
+    let doc: Doc = mat::from_bytes(&bytes).expect("decode a string after a duration");
+    assert_eq!(doc.d.millis, [1_000.0]);
+    assert_eq!(doc.d.fmt.as_deref(), Some("s"));
+    assert_eq!(doc.s, "x");
+}
+
+#[test]
 fn dangling_heap_reference_is_an_error_not_a_panic() {
     // A property points at heap value 5 (MCOS cell 7), which does not exist.
     let blob = FileWrapper::new(&["datetime", "data"])
