@@ -151,6 +151,8 @@ pub enum Cell {
     F64(Vec<f64>),
     /// A cell array of the objects at these `#refs#` paths.
     Refs(Vec<String>),
+    /// A `uint32` array, such as a reference to an object.
+    U32(Vec<u32>),
     U8(Vec<u8>),
 }
 
@@ -193,6 +195,12 @@ impl Cell {
                     .with_path_references(&paths)
                     .with_shape(&[1, paths.len() as u64]);
                 "cell"
+            }
+            Self::U32(values) => {
+                dataset
+                    .with_u32_data(values)
+                    .with_shape(&[1, values.len() as u64]);
+                "uint32"
             }
             Self::U8(values) => {
                 dataset

@@ -13,6 +13,8 @@
 
 #![cfg(feature = "serde")]
 
+use std::collections::HashMap;
+
 use hdf5_pure::mat::{self, MatCategorical, MatDatetime, MatDuration, MatError};
 use serde::Deserialize;
 use test_util::mcos::{self, FileWrapper};
@@ -232,5 +234,34 @@ fn dangling_heap_reference_is_an_error_not_a_panic() {
     assert!(
         matches!(&error, MatError::Custom(reason) if reason == "MCOS heap value 5 maps to cell 7, but the store has 2 cells"),
         "{error:?}"
+    );
+}
+
+#[test]
+fn reference_to_object_id_zero_decodes() {
+    // MATLAB R2022b and R2026b write a reference to object id 0 in the
+    // workspace of an anonymous function, `f = @(v) v + 1`. Id 0 has no object
+    // record.
+    let blob = FileWrapper::new(&["function_handle_workspace", "value"])
+        .class(0, 1) // class 1 = `function_handle_workspace`
+        .object(1, 0, 1)
+        .normal_block(&[(2, mcos::HEAP, 0)]) // value -> cell 2
+        .build();
+    let bytes = mat_file::object_file(
+        "w",
+        "function_handle_workspace",
+        &mcos::object_metadata(1, 1),
+        &[
+            ("blob", Cell::Blob(blob)),
+            ("canon", Cell::Empty),
+            ("value", Cell::U32(mcos::object_metadata(0, 1))),
+        ],
+        &[],
+    );
+
+    let value = mat::from_bytes::<HashMap<String, serde_json::Value>>(&bytes).unwrap();
+    assert_eq!(
+        value,
+        HashMap::from([("w".into(), serde_json::json!({ "value": {} }))])
     );
 }
