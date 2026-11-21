@@ -58,7 +58,7 @@ fn large_page_reservations_bound_zero_scratch_and_copy_work(
     ];
     let mut plan = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("planning failed: {:?}", failure.error));
+        .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
     let end = plan.end().get();
     let placements = plan
         .reservations()

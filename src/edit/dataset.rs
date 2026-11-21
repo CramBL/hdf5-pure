@@ -73,7 +73,6 @@ use super::attributes::{DenseAttrSet, EditedAttrs};
 use super::block::{BlockRequest, EncodingDependency};
 use super::commit::plan::{OverwriteId, OverwritePayloads};
 use super::reservation::ReservationChoice;
-use super::reservation::ReservationFailure;
 use super::reservation::ReservationPlan;
 use super::retirement::ChunkAllocation;
 use super::staging::{StagedKind, StagedOp};
@@ -968,9 +967,7 @@ impl WriteEngine {
                     EncodingDependency::Reservations,
                 ));
             }
-            let mut plan = self
-                .plan_blocks(&requests)
-                .map_err(ReservationFailure::into_error)?;
+            let mut plan = self.plan_blocks(&requests)?;
             let mut combined = kept_chunks.to_vec();
             for (chunk, reservation) in new_chunks.iter().zip(plan.reservations()) {
                 combined.push(ChunkRecord {
@@ -1096,8 +1093,7 @@ impl WriteEngine {
         } else {
             self.plan_blocks(&metadata)
                 .map(|plan| (ReservationChoice::Fallback, plan))
-        }
-        .map_err(ReservationFailure::into_error)?;
+        }?;
         let mut combined = kept_chunks.to_vec();
         match choice {
             ReservationChoice::Preferred => {
@@ -1252,9 +1248,7 @@ impl WriteEngine {
             ReservationRequest::new(size, AllocationClass::Raw),
             EncodingDependency::Allocation,
         );
-        let mut reservations = self
-            .plan_blocks(core::slice::from_ref(&request))
-            .map_err(ReservationFailure::into_error)?;
+        let mut reservations = self.plan_blocks(core::slice::from_ref(&request))?;
         let address = reservations
             .addresses()
             .relative(reservations.reservations()[0].range().start())?;
@@ -1485,7 +1479,6 @@ impl WriteEngine {
             self.plan_blocks(&requests)
                 .map(|plan| (ReservationChoice::Preferred, plan))
         }
-        .map_err(ReservationFailure::into_error)
     }
 
     /// Places attributes selected for dense storage during dataset preparation.
@@ -1638,9 +1631,7 @@ impl WriteEngine {
             EncodingDependency::Independent,
         )];
         requests.extend(index.requests()?);
-        let mut reservations = self
-            .plan_blocks(&requests)
-            .map_err(ReservationFailure::into_error)?;
+        let mut reservations = self.plan_blocks(&requests)?;
         let address = reservations
             .addresses()
             .relative(reservations.reservations()[0].range().start())?;

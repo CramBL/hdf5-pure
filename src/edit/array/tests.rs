@@ -107,7 +107,7 @@ fn array_blocks_follow_complete_metadata_reservations(
     let addresses = engine.context.addresses();
     let mut reservations = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     let expected: Vec<_> = reservations
         .reservations()
         .iter()
@@ -219,7 +219,7 @@ fn array_emission_rejects_incompatible_reservations(#[case] mismatch: Mismatch) 
     let prior = engine.image.len();
     let mut reservations = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     let owned: Vec<_> = reservations
         .reservations()
         .iter()
@@ -278,7 +278,7 @@ fn array_emission_follows_preceding_payload_reservations(#[case] kind: ChunkArra
     let addresses = engine.context.addresses();
     let mut reservations = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     let expected = addresses
         .relative(reservations.reservations()[1].range().start())
         .unwrap();
@@ -329,7 +329,7 @@ fn partial_array_emission_keeps_every_reserved_allocation_unavailable() {
     let rollback = engine.snapshot_free();
     let mut reservations = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     disk_log::fail_write_after(1, 0);
     let error = index.write(&slots, &mut reservations).unwrap_err();
     let Error::Io(error) = error else {
@@ -426,7 +426,7 @@ fn extensible_array_emission_keeps_one_block_buffer(#[case] count: usize) {
     let addresses = engine.context.addresses();
     let mut reservations = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     let (header, measured) = allocation::measure(&format!("array_block_encoding_{count}"), || {
         index.write(&slots, &mut reservations).unwrap()
     });
@@ -487,7 +487,7 @@ fn array_emission_rejects_incompatible_slot_tables(#[case] kind: ChunkArrayKind)
     let requests = index.requests().unwrap();
     let mut reservations = engine
         .plan_blocks(&requests)
-        .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        .unwrap_or_else(|error| panic!("{error:?}"));
     let error = index.write(&slots, &mut reservations).unwrap_err();
     match (kind, error) {
         (
