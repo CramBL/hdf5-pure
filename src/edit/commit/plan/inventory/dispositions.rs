@@ -7,12 +7,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use hdf5_pure_core::PhysicalAddress;
+
 use super::super::{ChildLink, PreparedTree};
 use super::session::SessionParent;
 use crate::edit::WriteEngine;
 use crate::edit::analysis::counts::{CountEvidence, CountEvidenceError, ROOT_REFERENCE_COUNT};
 use crate::edit::analysis::{AnalysisPhase, OriginalOwnerFacts, ReconstructionSource};
-use crate::edit::commit::publish::AppliedTree;
 use crate::error::Error;
 use crate::object_graph::ObjectId;
 use crate::object_path::ObjectPathBuf;
@@ -110,8 +111,14 @@ impl ReconstructionDispositions {
     }
 
     /// Pairs the original observations with their placement reconciliation outcome.
-    pub(super) fn finish(self, tree: &AppliedTree) -> AppliedDispositions {
-        let replacements = self.reconcile(tree);
+    pub(super) fn finish(
+        self,
+        root: PhysicalAddress,
+        relocations: BTreeMap<ObjectId, ObjectId>,
+    ) -> AppliedDispositions {
+        let replacements = self
+            .matches_placements(root, &relocations)
+            .then_some(relocations);
         let retained = self
             .predecessors
             .into_values()
@@ -299,11 +306,16 @@ impl ReconstructionDispositions {
         }
     }
 
-    /// Reconciles recorded placements before constructing the complete replacement map.
+    /// Checks that the application map matches every recorded predecessor placement.
     ///
-    /// Returns `None` for missing or mismatched placements, an unavailable original root,
-    /// or a withheld predecessor.
-    fn reconcile(&self, tree: &AppliedTree) -> Option<BTreeMap<ObjectId, ObjectId>> {
+    /// Repeated predecessor identities are withheld during collection. Matching every
+    /// predecessor and the map length excludes additional relocations. Missing placements,
+    /// an unavailable original root, and withheld predecessors prevent reconciliation.
+    fn matches_placements(
+        &self,
+        root: PhysicalAddress,
+        relocations: &BTreeMap<ObjectId, ObjectId>,
+    ) -> bool {
         let Self {
             source,
             session_parents: _,
@@ -312,37 +324,20 @@ impl ReconstructionDispositions {
             placed,
             placement_mismatch,
         } = self;
-        if *placement_mismatch || expected.keys().any(|path| !placed.contains_key(path)) {
-            return None;
-        }
-        let replacements: BTreeMap<_, _> = predecessors
-            .iter()
-            .filter_map(|(path, old)| {
-                placed
-                    .get(path)
-                    .map(|&placed| (old.source.object(), placed))
+        !*placement_mismatch
+            && expected.keys().all(|path| placed.contains_key(path))
+            && placed
+                .get(&ObjectPathBuf::root())
+                .map(|root| root.header_address())
+                == Some(root)
+            && source.is_ok()
+            && predecessors.len() == relocations.len()
+            && predecessors.iter().all(|(path, old)| {
+                old.disposition != Disposition::Withhold
+                    && placed
+                        .get(path)
+                        .is_some_and(|new| relocations.get(&old.source.object()) == Some(new))
             })
-            .collect();
-        if replacements != tree.relocations {
-            return None;
-        }
-        if placed
-            .get(&ObjectPathBuf::root())
-            .map(|root| root.header_address())
-            != Some(tree.retirement.root())
-        {
-            return None;
-        }
-        if source.is_err() {
-            return None;
-        }
-        if predecessors
-            .values()
-            .any(|old| old.disposition == Disposition::Withhold)
-        {
-            return None;
-        }
-        Some(replacements)
     }
 }
 
@@ -366,6 +361,11 @@ impl AppliedDispositions {
     /// Borrows the complete original-to-placed map after successful reconciliation.
     pub(super) fn replacements(&self) -> Option<&BTreeMap<ObjectId, ObjectId>> {
         self.replacements.as_ref()
+    }
+
+    /// Moves the checked application map into publication.
+    pub(super) fn into_replacements(self) -> Option<BTreeMap<ObjectId, ObjectId>> {
+        self.replacements
     }
 
     /// Translates superseded identities and preserves retained originals and absent identities.
