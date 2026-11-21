@@ -10,6 +10,7 @@ use test_util::snapshot::text::{Report, Value};
 
 use crate::AddressRange;
 use crate::address::{StoredAddress, StoredAddressExt};
+use crate::edit::test_util::decode_manager_sections;
 use crate::file_space_info::{FileSpacePageSize, FileSpaceStrategy};
 use crate::free_space_manager;
 use crate::message_type::MessageType;
@@ -441,23 +442,36 @@ fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] p
     .unwrap();
     let before: Vec<_> = space.admitted_snapshot().sections().collect();
     let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let eoa = StoredAddress::new((pages + 5) * page);
     let admitted = ManagerProjection::new(space.admitted_snapshot(), widths)
         .unwrap()
-        .work();
+        .into_plan(eoa)
+        .unwrap();
+    let admitted_end = admitted.end();
+    let admitted = admitted
+        .encode(admitted_end)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let (admitted_sections, admitted_bytes) = decode_manager_sections(&admitted, widths);
     let semantic = space.paged_tail_section_limit([]).unwrap();
     assert_eq!(semantic, 2);
-    assert_eq!((admitted.managers, admitted.sections), (2, 2));
-    let plan = plan_persistence(
-        &space,
-        StoredAddress::new((pages + 5) * page),
-        &[],
-        &[],
-        160,
-        widths,
-        true,
-    )
-    .unwrap()
-    .unwrap();
+    assert_eq!(admitted.len(), 2);
+    assert_eq!(admitted_sections, [durable, run]);
+    let records = extension_records(160);
+    let header =
+        ObjectHeaderAllocationGeometry::new(format::ObjectHeaderPrefix::PLAIN, widths, &records)
+            .unwrap();
+    let plan = measure_manager_plan(
+        &format!("compact_manager_plan_{pages}"),
+        8 * 1024,
+        4 * 1024,
+        || {
+            PagedPersistencePlan::new(&space, eoa, &[], &[], &header, true)
+                .unwrap()
+                .unwrap()
+        },
+    );
     assert!(!plan.tail.appended);
     assert_eq!(plan.tail.post.sections().raw(), [run]);
     assert_eq!(
@@ -476,34 +490,24 @@ fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] p
     );
     assert!(plan.tail.allocation.len() < ByteLength::new(page));
     assert_complete_capacity(&plan, widths, 160);
-    let reserved = ManagerProjection::new(plan.tail.post.admitted_snapshot(), widths)
-        .unwrap()
-        .work();
-    assert_eq!((reserved.managers, reserved.sections), (2, 2));
+    let (reserved_sections, reserved_bytes) = assert_emitted_manager_sections(&plan, widths);
+    assert_eq!((plan.blocks.len(), reserved_sections), (2, 2));
     let mut report = Report::new();
     report.table(
-        "projection",
-        [
-            "phase",
-            "managers",
-            "records",
-            "vector capacity",
-            "encoded bytes",
-        ],
+        "manager encoding",
+        ["phase", "managers", "records", "encoded bytes"],
         [
             [
                 Value::text("admitted"),
-                Value::Number(admitted.managers),
-                Value::Number(admitted.sections),
-                Value::Number(admitted.section_capacity),
-                Value::Number(admitted.encoded_bytes),
+                Value::Number(admitted.len() as u64),
+                Value::Number(admitted_sections.len() as u64),
+                Value::Number(admitted_bytes),
             ],
             [
                 Value::text("reserved"),
-                Value::Number(reserved.managers),
-                Value::Number(reserved.sections),
-                Value::Number(reserved.section_capacity),
-                Value::Number(reserved.encoded_bytes),
+                Value::Number(plan.blocks.len() as u64),
+                Value::Number(reserved_sections as u64),
+                Value::Number(reserved_bytes),
             ],
         ],
     );
@@ -528,7 +532,7 @@ fn compact_runs_keep_projection_and_capacity_independent_of_page_count(#[case] p
                     .map(|allocation| allocation.len().get())
                     .sum::<u64>(),
             ),
-            ("manager encoding", reserved.encoded_bytes),
+            ("manager encoding", reserved_bytes),
             (
                 "manager allocations",
                 plan.tail.allocation.len().get()
@@ -588,25 +592,33 @@ fn compact_capacity_contains_size_groups_and_reservation_effects(
         .paged_tail_section_limit(freed.iter().map(|&(extent, _)| extent).chain(old_blocks))
         .unwrap();
     let widths = FormatWidths::from_sizes(width, width).unwrap();
-    let plan = plan_persistence(
-        &space,
-        StoredAddress::new((2 * count + 24) * page),
-        &freed,
-        &old_blocks,
-        160,
-        widths,
-        false,
-    )
-    .unwrap()
-    .unwrap();
+    let records = extension_records(160);
+    let header =
+        ObjectHeaderAllocationGeometry::new(format::ObjectHeaderPrefix::PLAIN, widths, &records)
+            .unwrap();
+    let plan = measure_manager_plan(
+        &format!("fragmented_manager_plan_{count}_{width}"),
+        16 * 1024 + 3_584 * count,
+        8 * 1024 + 240 * count,
+        || {
+            PagedPersistencePlan::new(
+                &space,
+                StoredAddress::new((2 * count + 24) * page),
+                &freed,
+                &old_blocks,
+                &header,
+                false,
+            )
+            .unwrap()
+            .unwrap()
+        },
+    );
     assert!(plan.tail.appended);
     assert_complete_capacity(&plan, widths, 160);
-    let projected = ManagerProjection::new(plan.tail.post.admitted_snapshot(), widths)
-        .unwrap()
-        .work();
-    assert!(projected.sections <= (limit + RESERVATION_SECTION_LIMIT) as u64);
+    let (sections, _) = assert_emitted_manager_sections(&plan, widths);
+    assert!(sections <= limit + RESERVATION_SECTION_LIMIT);
     assert_eq!(
-        projected.managers,
+        plan.blocks.len(),
         match managers {
             Managers::Metadata => 1,
             Managers::All => 3,
@@ -767,12 +779,62 @@ fn plan_persistence(
     reuse_only: bool,
 ) -> Result<Option<PagedPersistencePlan>, FormatError> {
     let prefix = format::ObjectHeaderPrefix::PLAIN;
-    let records = prefix.layout.record(
-        MessageType::DATATYPE,
-        &vec![0; usize::try_from(extension - 15).unwrap()],
-    );
+    let records = extension_records(extension);
     let geometry = ObjectHeaderAllocationGeometry::new(prefix, widths, &records)?;
     PagedPersistencePlan::new(space, eoa, freed, old_blocks, &geometry, reuse_only)
+}
+
+fn extension_records(extension: u64) -> Vec<u8> {
+    format::ObjectHeaderPrefix::PLAIN.layout.record(
+        MessageType::DATATYPE,
+        &vec![0; usize::try_from(extension - 15).unwrap()],
+    )
+}
+
+fn assert_emitted_manager_sections(
+    plan: &PagedPersistencePlan,
+    widths: FormatWidths,
+) -> (usize, u64) {
+    let (sections, used) = decode_manager_sections(&plan.blocks, widths);
+    let actual = FreeList::from_sorted(sections.iter().copied()).unwrap();
+    let expected = FreeList::from_sorted(
+        plan.tail
+            .post
+            .admitted_snapshot()
+            .sections()
+            .map(|(extent, _)| extent),
+    )
+    .unwrap();
+    assert_eq!(actual.extents(), expected.extents());
+    assert_eq!(actual.total_bytes(), expected.total_bytes());
+    (sections.len(), used)
+}
+
+fn measure_manager_plan(
+    region: &str,
+    cumulative_limit: u64,
+    peak_limit: u64,
+    plan: impl FnOnce() -> PagedPersistencePlan,
+) -> PagedPersistencePlan {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let (plan, work) = test_util::allocation::measure(region, plan);
+        let emitted = plan
+            .blocks
+            .iter()
+            .map(|block| (block.header.len() + block.section_list.len()) as u64)
+            .sum::<u64>();
+        assert_ne!(emitted, 0);
+        // The retained encodings give a positive allocation floor for the call.
+        assert!((emitted..=peak_limit).contains(&work.peak_bytes), "{work}");
+        assert!(work.bytes <= cumulative_limit, "{work}");
+        plan
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (region, cumulative_limit, peak_limit);
+        plan()
+    }
 }
 
 fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, extension: u64) {
