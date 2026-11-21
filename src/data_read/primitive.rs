@@ -262,25 +262,8 @@ impl_from_endian_bytes!(i64, 8);
 impl_from_endian_bytes!(f32, 4);
 impl_from_endian_bytes!(f64, 8);
 
-/// HDF5's classification of a datatype conversion path.
-#[allow(dead_code, reason = "for when we support soft conversions")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConversionKind {
-    /// Source and destination require no value conversion.
-    NoOp,
-
-    /// A native/compiler conversion.
-    Hard,
-
-    /// A conversion implemented by library logic.
-    Soft,
-}
-
 /// Converts numeric values from `S` to `T`.
 pub(crate) trait H5Conversion<S, T> {
-    #[allow(dead_code, reason = "for when we support soft conversions")]
-    const KIND: ConversionKind;
-
     fn convert(&self, value: S) -> T;
 
     /// Appends native-endian values when this conversion supports a byte copy.
@@ -308,8 +291,6 @@ pub(crate) trait H5Conversion<S, T> {
 pub(crate) struct NoOpConversion;
 
 impl<T: PrimitiveBytes> H5Conversion<T, T> for NoOpConversion {
-    const KIND: ConversionKind = ConversionKind::NoOp;
-
     #[inline]
     fn convert(&self, value: T) -> T {
         value
@@ -328,8 +309,6 @@ macro_rules! impl_soft_from_signed {
     ($src:ty => $($dst:ty),+ $(,)?) => {
         $(
             impl H5Conversion<$src, $dst> for SoftIntegerConversion {
-                const KIND: ConversionKind = ConversionKind::Soft;
-
                 #[inline]
                 fn convert(&self, value: $src) -> $dst {
                     match <$dst>::try_from(value) {
@@ -347,8 +326,6 @@ macro_rules! impl_soft_from_unsigned {
     ($src:ty => $($dst:ty),+ $(,)?) => {
         $(
             impl H5Conversion<$src, $dst> for SoftIntegerConversion {
-                const KIND: ConversionKind = ConversionKind::Soft;
-
                 #[inline]
                 fn convert(&self, value: $src) -> $dst {
                     <$dst>::try_from(value).unwrap_or(<$dst>::MAX)
@@ -378,8 +355,6 @@ macro_rules! impl_hard_from {
     ($src:ty => $($dst:ty),+ $(,)?) => {
         $(
             impl H5Conversion<$src, $dst> for HardConversion {
-                const KIND: ConversionKind = ConversionKind::Hard;
-
                 #[inline]
                 fn convert(&self, value: $src) -> $dst {
                     value.into()
@@ -421,8 +396,6 @@ macro_rules! impl_hard_cast {
     ($src:ty => $($dst:ty),+ $(,)?) => {
         $(
             impl H5Conversion<$src, $dst> for HardConversion {
-                const KIND: ConversionKind = ConversionKind::Hard;
-
                 #[inline]
                 #[allow(
                     clippy::cast_possible_truncation,
@@ -479,7 +452,7 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::{ConversionKind, FromEndianBytes, H5Conversion, NoOpConversion};
+    use super::{FromEndianBytes, H5Conversion, NoOpConversion};
     use crate::FormatError;
     use crate::datatype::byte_order::FixedWidthByteOrder;
     use crate::primitive_bytes::PrimitiveBytes;
@@ -614,12 +587,10 @@ mod tests {
     }
 
     #[test]
-    fn converts_distinct_types_with_noop_discriminant() {
+    fn converts_distinct_types_with_scalar_fallback() {
         struct DifferentTypes;
 
         impl H5Conversion<i32, u32> for DifferentTypes {
-            const KIND: ConversionKind = ConversionKind::NoOp;
-
             fn convert(&self, _value: i32) -> u32 {
                 7
             }
