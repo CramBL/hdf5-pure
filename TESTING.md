@@ -1,39 +1,84 @@
 # Testing
 
-## Choosing the test boundary
+## Prefer integration tests
 
-Test observable behavior through the production entry point that owns the contract. Exercise
-user-visible reader, writer, and editor behavior through the public file API. Test parser and
-allocator contracts through their component interfaces. Use private unit tests for local invariants,
-checked state transitions, and cases that need closer isolation.
+Put new behavior and regression tests in the owning crate's `tests/` suite.
+Use the interface its callers use.
 
-For a file operation, check the values, stored structure, errors, recovery, and resource bounds
-relevant to the change. Close and reopen the file to check persistence. Use an independent reader
-to check interoperability. Cover the complete commit, append, or copy when the guarantee depends
-on the complete operation. Use unit tests to isolate the parts that need their own assertions.
-Reuse existing coverage when it establishes the same behavior.
+- Exercise file operations through `File`, dataset, and group APIs. Use the
+  owning crate's interface for format and allocation behavior.
+- Use the smallest input and operation sequence that demonstrates the behavior.
+- Check complete values, the stored bytes that establish the format claim, and
+  the specific error expected. Close and reopen the file to check persistence.
 
-## Production execution and test support
+## Organize integration tests by area
 
-Test builds exercise the same parsing, planning, mutation, publication, and recovery code as
-ordinary builds. Keep fields and counters used solely for test reports out of these algorithms.
-Keep the state that enforces resource limits and the checked evidence that establishes ownership,
-source identity, or permission to modify storage. Exercise the complete production operation
-without test-only phase selectors or simulated success paths.
+Keep ordinary integration tests in one target per crate. Use
+`tests/main/main.rs` for module declarations, shared gates, and suite setup.
+Group cases by behavior or format area. Give distinct behaviors their own
+submodules in large areas.
 
-Observe effects at existing boundaries. Inject read, write, resize, or synchronization failures
-at the I/O boundary so the operation runs its own error handling. Reuse an adapter that can record
-or fail the chosen operation, or add one scoped to that boundary. Let the production code
-construct its own plans and decide how to recover.
+| Facade test file | Responsibility |
+| --- | --- |
+| `tests/main/main.rs` | Declare area modules, such as `mod append;` |
+| `tests/main/append.rs` | Append behavior |
+| `tests/main/edit_free_space.rs` | Free-space editing |
+| `tests/main/edit_reference_counts.rs` | Reference-count editing |
 
-Private unit tests can inspect invariants using existing state. Keep assertion helpers with their
-tests. Ordinary functions, test-owned fixture types, and test-gated methods can express those
-assertions without adding production fields or widening visibility in ordinary builds.
+Area modules share the `main` target. A top-level `tests/<area>.rs` creates a
+separate binary. Share the target to reduce repeated linking.
 
-Keep small helpers with their callers. Share helpers with the same contract, and extract a
-module when it gives related helpers a clear home. When a test exercises a production operation,
-call that operation directly so the test covers its actual sequence. Moving a gated helper
-changes where readers find it. Evaluate the test's independence by how it obtains its evidence.
+## Unit tests
+
+Use unit tests for focused algorithms or invariants that are awkward to cover
+through the crate's interface. Choose the boundary that makes the case clear
+and keeps it useful when private implementation details change.
+
+## Keep fixtures independent
+
+Use `test-util` to construct raw file structures, including malformed inputs and
+layouts the writer cannot produce. Use `test-util-hdf5` for facade fixtures and
+native-library comparisons. Check format conformance against independent bytes
+or a reference implementation. A roundtrip can share a reader and writer defect.
+
+Describe valid fixtures with checked types. Follow parse, don't validate.
+Represent deliberate corruption as raw bytes or explicit mutations.
+
+## Keep test support out of production algorithms
+
+Exercise the real operation. Inject failures at the I/O boundary so production
+code handles read, write, resize, and synchronization errors. Keep test-only
+fields, reports, counters, and partial-execution modes out of the algorithms.
+Keep checked ownership evidence and counters that enforce resource limits.
+
+Keep small helpers beside their callers. Share setup with the same purpose.
+Call existing production operations directly. Use an ordinary function or
+a test-owned type when it keeps setup or assertions clear.
+
+## Extended tests
+
+Use the extended suite for long operation sequences, large inputs, and broad
+combinations, including free-space churn and endurance.
+
+- Prefix each function with `extended_` and keep it in its existing area module.
+- Keep short regression cases in the ordinary suite.
+- Retain functional assertions, resource bounds, and per-test timeouts.
+
+Run both suites in CI through separate nextest profiles. Use
+`just test-extended` or `just test-extended-full` for the workspace and
+`just interop::test-extended-hdf5 <version>` or
+`just interop::test-extended-bundled` for native cases. Plain `cargo test`
+also runs extended cases because it does not read nextest profiles.
+
+## Changes to coverage and resource budgets
+
+Preserve the behavior a test establishes when replacing it. Retire assertions
+about private structures outside the contract. Explain any loss of coverage.
+
+Compare the same workload, backing, cache state, and measurement interval when
+changing a budget. Distinguish source requests from system I/O and allocation count
+from cumulative, peak, and retained bytes. Explain any increase and bound the new
+cost. A snapshot records the result of that decision.
 
 ## Where tests and helpers belong
 
@@ -41,12 +86,12 @@ Keep tests with the code or API they exercise.
 
 | Test or helper | Home |
 |---|---|
+| Public API tests | Area modules in the owning crate's `tests/main/` suite |
 | Private unit tests | Owner's `#[cfg(test)] mod tests`, inline when small, otherwise `tests.rs` or `tests/mod.rs` with domain children |
-| Public API tests | Owning package's `tests/`, bundling related suites with facade/crosscheck entry points at `tests/main/main.rs` |
 | Private native crosschecks | Owner-local `native_crosschecks`, gated through the helper capability macro |
 | Independent bytes, malformed inputs, paths, allocation measurement | `crates/test-util` |
 | Facade fixtures and reference-library helpers | `crates/test-util-hdf5`, with optional native dependencies |
-| Private-access support | Owner-local test-only support, following [Production execution and test support][test-support] |
+| Private-access support | Owner-local test-only support, following the [unit test guidance](#unit-tests) |
 
 Keep `test-util` independent of implementation crates. [ARCHITECTURE.md][architecture] explains the
 dependency boundary.
@@ -64,9 +109,8 @@ include them. Verify that the intended tests execute.
 
 Name the behavior the test proves.
 
-Cover each public API addition and each change to a public operation's behavior through that API in
-the owning package's `tests/`. An existing test satisfies this requirement if it establishes the
-behavior.
+Cover public API additions and changes in public behavior through that API in the owning crate's
+`tests/`. Reuse an existing test if it establishes the behavior.
 
 Use `snake_case` names and named `rstest` cases that identify the distinguishing input. Cover meaningful
 boundaries and failure cases. A registered test must be independently executable: never call it as a
@@ -75,21 +119,8 @@ helper or use it for child dispatch. Reuse ordinary functions and explicit fixtu
 Unwrap successes and check complete promised values and state. Assert discriminating error variants
 and fields using [the exact-error rules][errors]. An unrelated failure must not satisfy a test.
 
-Choose independent evidence for the behavior under test. Use independently constructed bytes or
-observations from a reference library to establish format conformance. A reader and writer can
-share a defect that a roundtrip misses. Use production builders for unrelated setup, and derive
-the expected result independently of the operation under test. When a case depends on a particular
-file layout, assert the structure that distinguishes it as well as the decoded values.
-
-Use the low-level byte builders and mutation helpers in `test-util` for malformed inputs and
-layouts the public writer cannot create. Keep fixtures built through the facade and reference
-library helpers in `test-util-hdf5`. Follow the dependency directions in
-[ARCHITECTURE.md][architecture].
-
-Use parse, don't validate in Rust helpers: convert inputs once into existing domain types or small
-enums/newtypes that cannot express unsupported combinations. Describe valid fixtures with checked
-types and create malformed inputs from raw bytes or explicit corruption of valid bytes. Reuse
-`ReadBackend` and typed dataset/filter cases where their contracts fit.
+For a case that depends on a file layout, check the structure that distinguishes it.
+Reuse `ReadBackend` and typed dataset or filter cases where their contracts fit.
 
 ## Fixtures and temporary files
 
@@ -160,7 +191,6 @@ provide lint and execution checks. Formatting, docs, and prose have separate gat
 test boundary, helper ownership, independent evidence, and retained coverage.
 
 [architecture]: ARCHITECTURE.md#test-helpers
-[test-support]: #production-execution-and-test-support
 [profiles]: scripts/api-profiles.toml
 [errors]: CODE_STYLE.md#assert-the-exact-error
 [fixtures]: tests/data/NOTICE.md

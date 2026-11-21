@@ -85,6 +85,6 @@ can enable native helpers for facade unit tests in an interoperability run. The 
 is therefore one entry point for native tests, alongside owner-local `native_crosschecks` modules.
 The helper capability macro gates those modules without adding native features to the facade's
 public API. Helpers that need private production access stay in
-[owner-local test-only support](TESTING.md#production-execution-and-test-support).
+[owner-local test-only support](TESTING.md#unit-tests).
 
 [TESTING.md](TESTING.md) defines test ownership, independent evidence, and suite selection.

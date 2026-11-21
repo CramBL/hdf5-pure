@@ -77,7 +77,9 @@ The body, when there is one, follows a blank line and explains why. Issue refere
 
 ## Testing
 
-Changes must meet the expectations in [TESTING.md](TESTING.md). Exercise observable behavior through production entry points, use independent evidence for file conformance, and use focused unit tests for local invariants. Keep state and execution modes used solely for testing out of production algorithms. [ARCHITECTURE.md](ARCHITECTURE.md#test-helpers) defines the helper dependencies.
+Prefer integration tests that check behavior visible to callers of the owning crate.
+Use unit tests for focused coverage. Follow [TESTING.md](TESTING.md) for test
+organization, fixtures, and the extended suite.
 
 `just test` runs the ordinary suite with the default features, and `just test-full` with the full public feature profile. Run doctests separately with `just doctest` or `just doctest-full`. `just interop::test-bundled` runs the native interoperability suite with bundled libhdf5.
 

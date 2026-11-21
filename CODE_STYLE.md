@@ -72,7 +72,8 @@ Before making a function longer, consider splitting part of it out into a functi
 
 If a function's semantics or implementation are strongly dependent on one of its arguments, and the argument is defined in a type within the current crate, prefer using a method on the type. Similarly, if a function is taking multiple arguments that originate from the same common type in all call sites it is a strong candidate for becoming a method on the type.
 
-Use ordinary functions or test-owned fixture types for test setup and assertions when they fit. See the [test-support rules](TESTING.md#production-execution-and-test-support) when a helper needs access to a production type.
+Test helpers can be ordinary functions in the owning test module. Extend a production
+type when the operation belongs to that type in production.
 
 ### Order arguments from most generic to most specific
 
@@ -188,7 +189,7 @@ We prefer not to elide lifetimes when naming types that are generic over lifetim
 
 A module is a file. An inline module (`mod foo { .. }`) has two uses: `#[cfg(test)] mod tests` at the bottom of the file it tests, and a private module that seals a trait, so that the trait's bound cannot be implemented outside the crate. Everything else that would be an inline module is a file.
 
-Choose whether the helpers form a separate module before applying the file rule. Keep small helpers in the owning test module. Extract a module when it clarifies responsibility or gives shared helpers a common home.
+Apply the file rule once a separate module helps organize the tests.
 
 [TESTING.md](TESTING.md#where-tests-and-helpers-belong) defines test module ownership and integration-test bundling.
 
