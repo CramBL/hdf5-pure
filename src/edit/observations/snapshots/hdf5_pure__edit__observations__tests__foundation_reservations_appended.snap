@@ -22,15 +22,12 @@ Free sections
   --------------  -----  -----
   (none)
 
-Manager projection
-  Metric                             Value
-  ---------------------------------  -----
-  Managers (count)                       0
-  Sections (count)                       0
-  Section capacity (elements)            0
-  Measured encoding (bytes)              0
-  Encoded metadata (bytes)               0
-  Encoded metadata capacity (bytes)      0
+Manager encoding
+  Metric                    Value
+  ------------------------  -----
+  Managers (count)              0
+  Sections (count)              0
+  Encoded metadata (bytes)      0
 
 Issued writes
   Physical address  Bytes

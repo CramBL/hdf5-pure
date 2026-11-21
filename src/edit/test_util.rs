@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicU64;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_format::__private as format;
 use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
@@ -46,6 +47,7 @@ use crate::error::FormatError;
 use crate::file_writer::OFFSET_WIDTH;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::free_space_manager;
+use crate::free_space_manager::EncodedManager;
 use crate::image::CountingImage;
 use crate::image::HandleImage;
 use crate::image::WriteBuffering;
@@ -64,6 +66,38 @@ use crate::source::SourceMetadata;
 use crate::superblock;
 use crate::type_builders::DatasetBuilder;
 use crate::width::FormatWidths;
+
+/// Decodes emitted manager sections in stored-address order and sums the used bytes.
+///
+/// # Panics
+/// Panics if a header or section list does not parse or disagrees with its allocation.
+pub(super) fn decode_manager_sections(
+    blocks: &[EncodedManager],
+    widths: FormatWidths,
+) -> (Vec<FreeExtent>, u64) {
+    let mut sections = Vec::new();
+    let mut used = 0;
+    for block in blocks {
+        let header = format::FreeSpaceManagerHeader::parse(widths, &block.header).unwrap();
+        assert_eq!(header.section_list_addr(), block.section_list_address);
+        assert_eq!(
+            header.section_list_allocated(),
+            block.section_list.len() as u64
+        );
+        let decoded =
+            format::parse_section_info(widths, &block.section_list, block.header_address, &header)
+                .unwrap();
+        assert_eq!(decoded.len() as u64, header.total_sections());
+        sections.extend(
+            decoded.into_iter().map(|section| {
+                FreeExtent::new(section.addr, ByteLength::new(section.size)).unwrap()
+            }),
+        );
+        used += block.header.len() as u64 + header.section_list_used();
+    }
+    sections.sort_unstable_by_key(|section| section.start());
+    (sections, used)
+}
 
 /// Creates, appends, and reopens finite datasets beside variable-length datasets and attributes.
 ///
