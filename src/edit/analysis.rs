@@ -120,6 +120,15 @@ impl<'a> AnalysisPhase<'a> {
         }
     }
 
+    /// Seeds a prospective phase with the complete summaries of preserved objects.
+    ///
+    /// The caller has checked placement and excluded rebuilt identities. Group adjacency
+    /// and source failures are still checked during the prospective traversal.
+    pub(super) fn with_preserved_references(mut self, references: PreservedReferences) -> Self {
+        self.references = references.0;
+        self
+    }
+
     /// Associates the supplied physical object identity with this analysis phase.
     ///
     /// The caller supplies the source object for the rebuilt records. Shares the lazily
@@ -884,6 +893,19 @@ pub(in crate::edit) struct ObjectReferences {
     complete: bool,
     /// A header, descriptor, or source failure, with partial identities retained separately.
     error: Option<HeapReferenceError>,
+}
+
+/// Complete reference facts selected from a source phase using original allocation evidence.
+#[derive(Default)]
+pub(in crate::edit) struct PreservedReferences(BTreeMap<ObjectId, ObjectReferences>);
+
+impl PreservedReferences {
+    /// Discards facts for identities whose contents are not known to be preserved.
+    pub(in crate::edit) fn exclude(&mut self, objects: impl IntoIterator<Item = ObjectId>) {
+        for object in objects {
+            self.0.remove(&object);
+        }
+    }
 }
 
 /// Global heap allocation candidates and predecessor observations from one editing session.
