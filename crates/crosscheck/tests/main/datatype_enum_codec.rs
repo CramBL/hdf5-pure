@@ -1,10 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::ffi::CString;
 
-use hdf5::Datatype as NativeDatatype;
-use hdf5::file::LibraryVersion;
-use hdf5::globals;
 use hdf5_pure::File;
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
@@ -14,8 +11,11 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader,
 };
-use hdf5_sys::h5i::hid_t;
-use hdf5_sys::h5t;
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::file::LibraryVersion;
+use libhdf5::globals;
+use libhdf5_sys::h5i::hid_t;
+use libhdf5_sys::h5t;
 use rstest::rstest;
 use test_util_hdf5::{lock, storage};
 
@@ -34,7 +34,7 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         LibraryVersion::V110
     };
     let datatype = shape.native(big_endian);
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_bounds(version, version))
         .create(&path)
         .unwrap();
@@ -88,7 +88,7 @@ fn datatype_enum_codecs_preserve_native_descriptions(
     if !latest {
         assert_eq!(message.version(), DatatypeVersion::Three);
     }
-    #[cfg(feature = "__hdf5-2")]
+    #[cfg(feature = "__libhdf5-2")]
     if latest {
         assert_eq!(message.version(), DatatypeVersion::Five);
     }
@@ -104,7 +104,7 @@ enum Shape {
 
 impl Shape {
     fn native(self, big_endian: bool) -> NativeDatatype {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             let base = if big_endian {
                 *globals::H5T_STD_I16BE
             } else {
@@ -198,5 +198,5 @@ fn value(value: i16, big_endian: bool) -> [u8; 2] {
 fn owned(id: hid_t) -> NativeDatatype {
     assert!(id >= 0);
     // SAFETY: Every caller transfers a newly created datatype ID exactly once.
-    unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
+    unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap()
 }

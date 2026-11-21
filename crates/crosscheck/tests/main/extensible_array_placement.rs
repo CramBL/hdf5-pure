@@ -1,14 +1,10 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
 use std::slice;
 
-use hdf5::Extent;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
 use hdf5_pure::PhysicalAddress;
@@ -37,6 +33,10 @@ use hdf5_pure_format::__private::LengthWidth;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OffsetWidth;
 use hdf5_pure_format::__private::SlotOccupancy;
+use libhdf5::Extent;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
 use rstest::rstest;
 use test_util::bytes;
 use test_util::extensible_array;
@@ -74,7 +74,7 @@ fn native_reads_and_mutates_independently_placed_extensible_array_allocations(
     let len = writes.len;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("placed-extensible-array.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
         })
@@ -112,7 +112,7 @@ fn native_reads_and_mutates_independently_placed_extensible_array_allocations(
     layout.set_creation(&mut image, creation);
     fs::write(&path, &image).unwrap();
     if len > 0 {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let dataset = file.dataset("d").unwrap();
         writes.write(&dataset);
         assert_eq!(dataset.read_raw::<i32>().unwrap(), writes.expected());
@@ -125,7 +125,7 @@ fn native_reads_and_mutates_independently_placed_extensible_array_allocations(
     expected.resize(final_len, 0);
     expected[len..len + 2].copy_from_slice(&[83, 89]);
     expected[mutation] = 97;
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let dataset = native.dataset("d").unwrap();
     assert_eq!(dataset.read_raw::<i32>().unwrap(), writes.expected());
     dataset.resize([final_len]).unwrap();
@@ -159,7 +159,7 @@ fn native_reads_and_mutates_independently_placed_extensible_array_allocations(
         }
         pure.close().unwrap();
     }
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let dataset = native.dataset("d").unwrap();
     assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
     drop(dataset);
@@ -180,7 +180,7 @@ fn independent_placement_preserves_native_skipped_filter_masks_and_stored_length
         [(2, 16), (2, 16)]
     );
     replace_index(&path, 0, 4, [32, 4, 4, 16, 10], true, false);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.read_raw::<i32>().unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
     drop(dataset);
@@ -375,7 +375,7 @@ fn replace_index(
     expected.sort_by_key(|range| range.start());
     assert_eq!(actual, expected);
     fs::write(path, &image).unwrap();
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     assert_eq!(
         native.dataset("d").unwrap().num_chunks().unwrap(),
         original.len()

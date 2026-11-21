@@ -9,7 +9,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::FreeSections;
 use hdf5_pure::FreeSpaceManagerRole;
@@ -20,8 +19,9 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
-use hdf5_sys::h5f::H5F_info2_t;
-use hdf5_sys::{h5f, h5p};
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5_sys::h5f::H5F_info2_t;
+use libhdf5_sys::{h5f, h5p};
 
 use crate::file_space;
 
@@ -76,7 +76,7 @@ pub fn assert_manager_metadata_bytes(path: &Path) -> u64 {
         expected
     });
     reader.close().unwrap();
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     // `H5MF_get_freespace` opens and closes managers started for its query (`H5MF.c`, HDF5 1.14.6).
     // `H5FS_size` uses allocated bytes with the section list unloaded (`H5FS.c`, HDF5 1.14.6).
     assert_eq!(
@@ -93,12 +93,12 @@ pub fn assert_manager_metadata_bytes(path: &Path) -> u64 {
     expected
 }
 
-fn c_manager_metadata_bytes(file: &hdf5::File) -> hdf5::Result<u64> {
-    hdf5::sync::sync(|| {
+fn c_manager_metadata_bytes(file: &libhdf5::File) -> libhdf5::Result<u64> {
+    libhdf5::sync::sync(|| {
         let mut info = H5F_info2_t::default();
         // SAFETY: The library lock serializes access. The file owns a valid identifier, and info
         // is writable storage of the type `H5Fget_info2` requires for the duration of the call.
-        hdf5::h5check(unsafe { h5f::H5Fget_info2(file.id(), &mut info) })?;
+        libhdf5::h5check(unsafe { h5f::H5Fget_info2(file.id(), &mut info) })?;
         Ok(info.free.meta_size)
     })
 }
@@ -156,7 +156,7 @@ pub fn assert_persisted_sections(path: &Path) {
         assert_manager_sections(&reader, report, &bytes);
     }
     reader.close().unwrap();
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let c = SectionMap::new(
         "libhdf5",
         file_space::libhdf5_free_sections(&file).unwrap(),
@@ -355,7 +355,7 @@ impl FreeSpaceOracleCheckpoint {
         )?;
         let info = reader.file_space_info().map_err(OracleError::Rust)?;
         reader.close().map_err(OracleError::Rust)?;
-        let file = hdf5::File::open(path).map_err(|source| OracleError::C {
+        let file = libhdf5::File::open(path).map_err(|source| OracleError::C {
             operation: "H5Fopen",
             source,
         })?;
@@ -387,7 +387,7 @@ impl FreeSpaceOracleCheckpoint {
                 operation: "H5Pget_userblock",
                 source,
             })?;
-        let (c_persist, c_threshold) = hdf5::sync::sync(|| {
+        let (c_persist, c_threshold) = libhdf5::sync::sync(|| {
             let mut strategy = h5f::H5F_FSPACE_STRATEGY_FSM_AGGR;
             let mut persist = 0;
             let mut threshold = 0;
@@ -624,7 +624,7 @@ pub enum OracleError {
     /// A C API call failed.
     C {
         operation: &'static str,
-        source: hdf5::Error,
+        source: libhdf5::Error,
     },
     /// The file bytes differed after observation.
     ChangedBytes,
@@ -733,8 +733,8 @@ fn strategy_name(strategy: &CStrategy) -> &'static str {
 /// # Errors
 ///
 /// Returns [`OracleError::C`] if either C call fails.
-fn c_sizes(file: &hdf5::File) -> Result<(u64, u64), OracleError> {
-    hdf5::sync::sync(|| {
+fn c_sizes(file: &libhdf5::File) -> Result<(u64, u64), OracleError> {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access and `file` retains a live file identifier.
         let free = unsafe { h5f::H5Fget_freespace(file.id()) };
         let free = u64::try_from(free).map_err(|_error| c_error("H5Fget_freespace"))?;
@@ -750,7 +750,7 @@ fn c_sizes(file: &hdf5::File) -> Result<(u64, u64), OracleError> {
 fn c_error(operation: &'static str) -> OracleError {
     OracleError::C {
         operation,
-        source: hdf5::Error::query().unwrap_or_else(|source| source),
+        source: libhdf5::Error::query().unwrap_or_else(|source| source),
     }
 }
 

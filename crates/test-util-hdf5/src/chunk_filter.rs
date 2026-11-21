@@ -3,11 +3,11 @@
 use std::mem;
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::filters::Filter as CFilter;
-use hdf5::sync;
-use hdf5_sys::h5d;
-use hdf5_sys::h5p::H5P_DEFAULT;
+use libhdf5::Extent;
+use libhdf5::filters::Filter as CFilter;
+use libhdf5::sync;
+use libhdf5_sys::h5d;
+use libhdf5_sys::h5p::H5P_DEFAULT;
 
 use crate::file;
 use crate::numeric::ByteOrder;

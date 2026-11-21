@@ -1,6 +1,6 @@
 //! Native reads of independently constructed huge-link storage.
 
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use test_util::temp;
 use test_util_hdf5::native_fixtures::Fixture;

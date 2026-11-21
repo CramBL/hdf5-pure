@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for chunked, filtered, and resizable
 //! variable-length string datasets (issue #109).
 //!
@@ -17,13 +17,13 @@
 
 use core::str::FromStr;
 
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, MaxExtent};
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 
 use test_util_hdf5::{dataset, file, lock};
@@ -65,7 +65,7 @@ fn c_library_reads_chunked_vlen_strings() {
 
     // The layout really is chunked — otherwise this test would pass trivially by
     // falling back to the long-supported contiguous path.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert!(
         f.dataset("labels").unwrap().is_chunked(),
         "expected a chunked layout"
@@ -91,7 +91,7 @@ fn c_library_reads_filtered_chunked_vlen_strings() {
 
     assert_both_read(&path, "labels", &data);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert!(
         !f.dataset("labels").unwrap().filters().is_empty(),
         "expected a filter pipeline on the dataset"
@@ -117,7 +117,7 @@ fn c_library_reads_resizable_vlen_strings() {
 
     assert_both_read(&path, "labels", &data);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let ds = f.dataset("labels").unwrap();
     assert!(ds.is_resizable(), "expected an unlimited dimension");
 }
@@ -368,7 +368,7 @@ fn c_library_reads_an_overwritten_filtered_chunked_vlen_string_dataset() {
 
     // The overwrite must not have quietly dropped the storage properties it was
     // supposed to preserve: this is a value overwrite, not a re-layout.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let ds = f.dataset("labels").unwrap();
     assert!(
         ds.is_chunked(),
@@ -448,7 +448,7 @@ fn c_library_reads_an_overwritten_compact_vlen_string_dataset() {
             .map(|s| s.parse::<VarLenUnicode>().unwrap())
             .collect();
         f.new_dataset::<VarLenUnicode>()
-            .layout(hdf5::dataset::Layout::Compact)
+            .layout(libhdf5::dataset::Layout::Compact)
             .shape([3])
             .create("labels")
             .unwrap()
@@ -457,11 +457,11 @@ fn c_library_reads_an_overwritten_compact_vlen_string_dataset() {
     }
     // The source really is compact, or this test proves nothing about that arm.
     {
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         assert!(
             matches!(
                 f.dataset("labels").unwrap().layout(),
-                hdf5::dataset::Layout::Compact
+                libhdf5::dataset::Layout::Compact
             ),
             "expected a compact source layout"
         );
@@ -533,7 +533,7 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
         ["compressed-first", "compressed-second"]
     );
     {
-        let reference = hdf5::File::open(&path).unwrap();
+        let reference = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             reference
                 .attr("root_label")
@@ -593,7 +593,7 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
         ["compressed-first", "compressed-second"]
     );
     {
-        let reference = hdf5::File::open_rw(&path).unwrap();
+        let reference = libhdf5::File::open_rw(&path).unwrap();
         reference
             .new_dataset_builder()
             .with_data(&[12i32, 34])
@@ -622,7 +622,7 @@ fn libhdf5_reads_its_paged_vlen_dataset_after_a_raw_collection_replacement(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reference_paged_vlen.h5");
     {
-        let reference = hdf5::FileBuilder::new()
+        let reference = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.userblock(userblock)

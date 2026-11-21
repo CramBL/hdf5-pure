@@ -1,9 +1,9 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::file::LibraryVersion;
-use hdf5::plist::group_create::LinkPhaseChange;
 use hdf5_pure::{File, MessageType};
 use hdf5_pure_format::__private::{AccessMode, GroupInfo, GroupPhaseChange, ObjectHeader};
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::group_create::LinkPhaseChange;
 use rstest::rstest;
 use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::storage;
@@ -19,7 +19,7 @@ fn encoded_group_info_agrees_with_native_group_messages(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("group-info.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })
@@ -69,7 +69,7 @@ fn encoded_group_info_agrees_with_native_group_messages(
     directory.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::defaults(None)]
 #[case::thresholds(Some((12, 8)))]
@@ -84,13 +84,13 @@ fn inspected_link_policy_agrees_with_native_creation_properties(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native-policy.h5");
     test_util_hdf5::dense_links::write_edit_fixture(&path, group_path, count, thresholds);
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let group = native.group(group_path).unwrap();
     let expected = group.gcpl().unwrap().get_link_phase_change().unwrap();
     if count > 0 {
         assert_eq!(
             group.info().unwrap().storage_type,
-            hdf5::GroupStorageType::Dense
+            libhdf5::GroupStorageType::Dense
         );
     }
     drop(group);
@@ -117,7 +117,7 @@ fn legacy_group_policy_matches_native_defaults(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("legacy-policy.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18)
         })
@@ -128,7 +128,7 @@ fn legacy_group_policy_matches_native_defaults(
     let group = native.group(group_path).unwrap();
     assert_eq!(
         group.info().unwrap().storage_type,
-        hdf5::GroupStorageType::SymbolTable
+        libhdf5::GroupStorageType::SymbolTable
     );
     let expected = group.gcpl().unwrap().get_link_phase_change().unwrap();
     drop(group);
@@ -147,7 +147,7 @@ fn legacy_group_policy_matches_native_defaults(
     directory.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 fn policy_inspection_resolves_a_replaced_group_again() {
     let directory = tempfile::tempdir().unwrap();
@@ -167,7 +167,7 @@ fn policy_inspection_resolves_a_replaced_group_again() {
     );
     drop(group);
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let group = native.group("group").unwrap();
     assert_eq!(
         group.gcpl().unwrap().get_link_phase_change().unwrap(),

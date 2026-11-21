@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::datatype::ByteOrder as NativeByteOrder;
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use hdf5_pure::{File, FreeSpaceManagerRole};
+use libhdf5::Extent;
+use libhdf5::datatype::ByteOrder as NativeByteOrder;
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 
 use crate::dataset;
 use crate::file_space_oracle;
@@ -50,7 +50,7 @@ impl Fixture {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn write(path: &Path, paged: bool, filtered: bool, incompressible: bool) -> Self {
-        let native = hdf5::File::with_options()
+        let native = libhdf5::File::with_options()
             .with_fapl(|properties| properties.libver_v110())
             .with_fcpl(|properties| {
                 properties.file_space_strategy(NativeStrategy::FreeSpaceManager {
@@ -144,7 +144,7 @@ impl Fixture {
         let before = std::fs::read(path).unwrap();
         file_space_oracle::assert_persisted_sections(path);
         file_space_oracle::assert_manager_metadata_bytes(path);
-        let native = hdf5::File::open(path).unwrap();
+        let native = libhdf5::File::open(path).unwrap();
         let mut expected = initial.clone();
         for completed in 0..=cycle {
             expected.extend(payload(0x3cb6_7710 + completed));

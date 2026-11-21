@@ -1,7 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::dataset::ChunkOpts;
 use hdf5_pure::File;
+use libhdf5::dataset::ChunkOpts;
 use rstest::rstest;
 use test_util_hdf5::file;
 

@@ -1,4 +1,4 @@
-#![cfg(all(feature = "serde", feature = "hdf5"))]
+#![cfg(all(feature = "serde", feature = "libhdf5"))]
 //! The format boundary against the linked release of the C library, in both
 //! directions.
 //!
@@ -10,24 +10,24 @@
 //!
 //! This is the one crosscheck that compiles against every release, 1.8
 //! included, and a test whose expected result differs before 1.10 is gated on
-//! the `__hdf5-1.10` feature.
+//! the `__libhdf5-1.10` feature.
 
 use std::path::Path;
 
-use hdf5::file::LibraryVersion;
-use hdf5::types::{FixedAscii, VarLenArray};
-use hdf5::{H5Type, ObjectReference, ObjectReference1, ReferencedObject};
-#[cfg(not(feature = "__hdf5-1.10"))]
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::mat::{self, Options};
 use hdf5_pure::{AttrValue, FileBuilder, LibVer};
-#[cfg(not(feature = "__hdf5-1.10"))]
+use libhdf5::file::LibraryVersion;
+use libhdf5::types::{FixedAscii, VarLenArray};
+use libhdf5::{H5Type, ObjectReference, ObjectReference1, ReferencedObject};
+#[cfg(not(feature = "__libhdf5-1.10"))]
+use libhdf5::{MajorErrorCode, MinorErrorCode};
+#[cfg(not(feature = "__libhdf5-1.10"))]
 use rstest::rstest;
 use serde::Serialize;
 
 use test_util::superblock;
 
-#[cfg(not(feature = "__hdf5-1.10"))]
+#[cfg(not(feature = "__libhdf5-1.10"))]
 #[derive(Clone, Copy)]
 enum V110Fixture {
     Mat,
@@ -120,8 +120,8 @@ fn write_plain(path: &Path, libver: LibVer) {
 }
 
 /// A dataset's numbers as `f64`, read with the type the file declares.
-fn numbers(dataset: &hdf5::Dataset) -> Vec<f64> {
-    use hdf5::types::{FloatSize, IntSize, TypeDescriptor};
+fn numbers(dataset: &libhdf5::Dataset) -> Vec<f64> {
+    use libhdf5::types::{FloatSize, IntSize, TypeDescriptor};
     match dataset.dtype().unwrap().to_descriptor().unwrap() {
         TypeDescriptor::Float(FloatSize::U8) => dataset.read_raw::<f64>().unwrap(),
         TypeDescriptor::Float(FloatSize::U4) => dataset
@@ -164,14 +164,14 @@ fn numbers(dataset: &hdf5::Dataset) -> Vec<f64> {
     }
 }
 
-fn assert_numbers(file: &hdf5::File, path: &str, want: &[f64]) {
+fn assert_numbers(file: &libhdf5::File, path: &str, want: &[f64]) {
     let dataset = file
         .dataset(path)
         .unwrap_or_else(|e| panic!("the C library opens {path}: {e}"));
     assert_eq!(numbers(&dataset), want, "{path}");
 }
 
-fn fixed_string(location: &hdf5::Location, attr: &str) -> String {
+fn fixed_string(location: &libhdf5::Location, attr: &str) -> String {
     location
         .attr(attr)
         .unwrap_or_else(|e| panic!("the C library opens attribute {attr}: {e}"))
@@ -182,7 +182,7 @@ fn fixed_string(location: &hdf5::Location, attr: &str) -> String {
 }
 
 /// The paths the object references in `path` resolve to.
-fn targets(file: &hdf5::File, path: &str) -> Vec<String> {
+fn targets(file: &libhdf5::File, path: &str) -> Vec<String> {
     file.dataset(path)
         .unwrap_or_else(|e| panic!("the C library opens {path}: {e}"))
         .read_raw::<ObjectReference1>()
@@ -197,7 +197,7 @@ fn targets(file: &hdf5::File, path: &str) -> Vec<String> {
 }
 
 /// What the C library must find in a plain fixture.
-fn check_plain(c: &hdf5::File) {
+fn check_plain(c: &libhdf5::File) {
     assert_numbers(c, "values", &[1.0, 2.0, 3.0]);
     assert_eq!(fixed_string(&c.dataset("values").unwrap(), "units"), "m/s");
     assert_eq!(fixed_string(c, "root_attr"), "r");
@@ -242,7 +242,7 @@ fn r(n: u64) -> String {
 }
 
 /// What the C library must find in the `.mat` written from `demo()`.
-fn check_mat(c: &hdf5::File) {
+fn check_mat(c: &libhdf5::File) {
     assert_numbers(c, "values", &[1.0, 2.0, 3.0]);
     assert_numbers(c, "nested/count", &[7.0]);
     assert_numbers(c, "empty", &[0.0, 0.0]);
@@ -278,7 +278,7 @@ fn check_mat(c: &hdf5::File) {
 
     let signal = c.dataset("signal").unwrap();
     let descriptor = signal.dtype().unwrap().to_descriptor().unwrap();
-    let hdf5::types::TypeDescriptor::Compound(compound) = descriptor else {
+    let libhdf5::types::TypeDescriptor::Compound(compound) = descriptor else {
         panic!("signal is not a compound datatype: {descriptor:?}");
     };
     assert_eq!(compound.fields.len(), 2);
@@ -301,7 +301,7 @@ struct Complex {
 
 /// What the C library must find in the `.mat` written with the `string`
 /// class: the MCOS subsystem, and one `#refs#` object without an `H5PATH`.
-fn check_mat_string(c: &hdf5::File) {
+fn check_mat_string(c: &libhdf5::File) {
     assert_numbers(c, "label", &[3707764736.0, 2.0, 1.0, 1.0, 1.0, 1.0]);
     assert_numbers(c, &r(12), &[0.0, 0.0]);
     assert_eq!(targets(c, &r(15)), [r(13), r(14)]);
@@ -333,10 +333,10 @@ fn the_1_8_format_this_crate_writes_opens_in_every_release() {
     for path in [&plain, &mat, &string] {
         assert_eq!(superblock::version(path), 2, "{}", path.display());
     }
-    check_plain(&hdf5::File::open(&plain).expect("the C library opens the 1.8 plain file"));
-    check_mat(&hdf5::File::open(&mat).expect("the C library opens the 1.8 mat file"));
+    check_plain(&libhdf5::File::open(&plain).expect("libhdf5 opens the 1.8 plain file"));
+    check_mat(&libhdf5::File::open(&mat).expect("libhdf5 opens the 1.8 mat file"));
     check_mat_string(
-        &hdf5::File::open(&string).expect("the C library opens the 1.8 string-class file"),
+        &libhdf5::File::open(&string).expect("libhdf5 opens the 1.8 string-class file"),
     );
 }
 
@@ -355,18 +355,18 @@ fn write_v110(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     (plain, mat)
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 fn the_1_10_format_this_crate_writes_opens_from_1_10_on() {
     let dir = tempfile::tempdir().unwrap();
     let (plain, mat) = write_v110(dir.path());
-    check_plain(&hdf5::File::open(&plain).expect("the C library opens the 1.10 plain file"));
-    check_mat(&hdf5::File::open(&mat).expect("the C library opens the 1.10 mat file"));
+    check_plain(&libhdf5::File::open(&plain).expect("libhdf5 opens the 1.10 plain file"));
+    check_mat(&libhdf5::File::open(&mat).expect("libhdf5 opens the 1.10 mat file"));
 }
 
 // H5F_sblock_load in H5Fsuper_cache.c, HDF5 1.8.23, reports an unknown superblock
 // version as File/BadValue with the version diagnostic.
-#[cfg(not(feature = "__hdf5-1.10"))]
+#[cfg(not(feature = "__libhdf5-1.10"))]
 #[rstest]
 #[case::plain(V110Fixture::Plain)]
 #[case::mat(V110Fixture::Mat)]
@@ -377,7 +377,7 @@ fn the_1_10_format_this_crate_writes_is_rejected_before_1_10(#[case] fixture: V1
         V110Fixture::Mat => &mat,
         V110Fixture::Plain => &plain,
     };
-    let error = hdf5::File::open(path).unwrap_err();
+    let error = libhdf5::File::open(path).unwrap_err();
     let Some(stack) = error.stack() else {
         panic!("expected a native HDF5 error stack, got {error:?}");
     };
@@ -396,7 +396,7 @@ fn the_1_10_format_this_crate_writes_is_rejected_before_1_10(#[case] fixture: V1
             "bad superblock version number"
         ),
         "libhdf5 {:?}: {error:?}",
-        hdf5::library_version()
+        libhdf5::library_version()
     );
 }
 
@@ -404,7 +404,7 @@ fn the_1_10_format_this_crate_writes_is_rejected_before_1_10(#[case] fixture: V1
 /// a compound dataset, which this crate's whole-file writer covers through
 /// `.mat` output instead.
 fn c_write(path: &Path, low: LibraryVersion, high: LibraryVersion) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(low, high))
         .create(path)
         .unwrap_or_else(|e| panic!("the C library creates {}: {e}", path.display()));
@@ -428,7 +428,7 @@ fn c_write(path: &Path, low: LibraryVersion, high: LibraryVersion) {
         .write_scalar(&FixedAscii::<3>::from_ascii("m/s").unwrap())
         .unwrap();
 
-    let reading_t = hdf5::Datatype::from_type::<i32>().unwrap();
+    let reading_t = libhdf5::Datatype::from_type::<i32>().unwrap();
     file.commit_datatype("reading_t", &reading_t).unwrap();
     let typed = file
         .new_dataset_builder()
@@ -603,7 +603,7 @@ fn this_crate_reads_the_oldest_format_the_release_writes() {
     check_compound(&path);
 }
 
-#[cfg(not(feature = "__hdf5-1.10"))]
+#[cfg(not(feature = "__libhdf5-1.10"))]
 #[test]
 #[cfg(target_endian = "little")]
 fn this_crate_reads_the_newest_format_the_release_writes() {
@@ -615,7 +615,7 @@ fn this_crate_reads_the_newest_format_the_release_writes() {
     check_compound(&path);
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 #[cfg(target_endian = "little")]
 fn this_crate_reads_the_newest_format_the_release_writes() {

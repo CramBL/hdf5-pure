@@ -1,13 +1,8 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Repack crosschecks against libhdf5.
 
 use std::path::Path;
 
-use hdf5::GroupStorageType;
-use hdf5::ObjectReference;
-use hdf5::ObjectReference1;
-use hdf5::ReferencedObject;
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileAccessProperties;
@@ -22,6 +17,11 @@ use hdf5_pure::VariableLengthType;
 use hdf5_pure::{
     Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions,
 };
+use libhdf5::GroupStorageType;
+use libhdf5::ObjectReference;
+use libhdf5::ObjectReference1;
+use libhdf5::ReferencedObject;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use rstest::rstest;
 
 use test_util_hdf5::chunk_filter;
@@ -39,7 +39,7 @@ fn c_file_repacked_then_read_by_c_library() {
     // libhdf5 writes alpha (f64), doomed (i32, to be dropped), and a group
     // grp/beta (i32), using the 1.10+ format.
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         fixtures::populate_libhdf5_edit_repack_starter(&file, &[7, 8, 9, 10]);
         file.close().unwrap();
     }
@@ -59,7 +59,7 @@ fn c_file_repacked_then_read_by_c_library() {
     assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
 
     // libhdf5 agrees - the real interop proof.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(
         c.dataset("alpha").unwrap().read_raw::<f64>().unwrap(),
         vec![1.0, 2.0, 3.0]
@@ -85,7 +85,7 @@ fn repack_rebuilds_a_native_persistent_page_files_allocation_policy(
     let dst = directory.path().join("repacked.h5");
     let values: Vec<i32> = (0..4096).map(|index| index % 13).collect();
     {
-        let native = hdf5::FileBuilder::new()
+        let native = libhdf5::FileBuilder::new()
             .with_fapl(|properties| properties.libver_v110())
             .with_fcpl(|properties| {
                 properties
@@ -179,7 +179,7 @@ fn repack_rebuilds_a_native_persistent_page_files_allocation_policy(
     drop(dataset);
     drop(output);
     {
-        let native = hdf5::File::open(&dst).unwrap();
+        let native = libhdf5::File::open(&dst).unwrap();
         let properties = native.create_plist().unwrap();
         let native_strategy = match expected.strategy() {
             FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => CStrategy::FreeSpaceManager {
@@ -220,7 +220,7 @@ fn repack_rebuilds_a_native_persistent_page_files_allocation_policy(
         .unwrap();
     output.commit().unwrap();
     output.close().unwrap();
-    let native = hdf5::File::open(&dst).unwrap();
+    let native = libhdf5::File::open(&dst).unwrap();
     assert_eq!(
         native.dataset("values").unwrap().read_raw::<i32>().unwrap(),
         values
@@ -261,7 +261,7 @@ fn repack_policy_overrides_preserve_native_encoded_chunks_with_skipped_filters(
     assert_eq!(dataset.read_i32().unwrap(), chunks.concat());
     drop(dataset);
     drop(output);
-    let native = hdf5::File::open(&dst).unwrap();
+    let native = libhdf5::File::open(&dst).unwrap();
     assert_eq!(
         native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         chunks.concat()
@@ -313,7 +313,7 @@ fn c_reads_repacked_scale_offset() {
     let f = File::open(&dst).unwrap();
     assert_eq!(f.dataset("vals").unwrap().read_i32().unwrap(), data);
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(c.dataset("vals").unwrap().read_raw::<i32>().unwrap(), data);
 }
 
@@ -322,7 +322,7 @@ fn c_reads_repacked_scale_offset() {
 #[case::page(Some(FileSpaceStrategy::Page))]
 #[case::none(Some(FileSpaceStrategy::None))]
 fn repack_roundtrips_c_vlen_string_dataset(#[case] strategy: Option<FileSpaceStrategy>) {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
     let dir = tempfile::tempdir().unwrap();
@@ -331,7 +331,7 @@ fn repack_roundtrips_c_vlen_string_dataset(#[case] strategy: Option<FileSpaceStr
 
     let words = ["alpha", "beta", "gamma", "", "δelta"];
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<VarLenUnicode> = words
             .iter()
             .map(|s| VarLenUnicode::from_str(s).unwrap())
@@ -373,7 +373,7 @@ fn repack_roundtrips_c_vlen_string_dataset(#[case] strategy: Option<FileSpaceStr
 
     // libhdf5 agrees on both values and that the datatype is
     // variable-length — the real interop proof.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cds = c.dataset("labels").unwrap();
     let cvals = cds.read_raw::<VarLenUnicode>().unwrap();
     let cstrings: Vec<String> = cvals.iter().map(|v| v.as_str().to_string()).collect();
@@ -391,7 +391,7 @@ fn repack_roundtrips_c_vlen_string_dataset(#[case] strategy: Option<FileSpaceStr
 /// collection along with its index.
 #[test]
 fn repack_roundtrips_c_vlen_dataset_spanning_many_collections() {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
     let dir = tempfile::tempdir().unwrap();
@@ -402,7 +402,7 @@ fn repack_roundtrips_c_vlen_dataset_spanning_many_collections() {
     let count = u16::MAX as usize + 5_000;
     let words: Vec<String> = (0..count).map(|i| format!("s{i}")).collect();
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<VarLenUnicode> = words
             .iter()
             .map(|s| VarLenUnicode::from_str(s).unwrap())
@@ -427,7 +427,7 @@ fn repack_roundtrips_c_vlen_dataset_spanning_many_collections() {
     assert_eq!(got, words);
 
     // The reference library agrees, element for element.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cvals = c
         .dataset("labels")
         .unwrap()
@@ -441,7 +441,7 @@ fn repack_roundtrips_c_vlen_dataset_spanning_many_collections() {
 
 #[test]
 fn repack_roundtrips_vlen_string_2d() {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
     let dir = tempfile::tempdir().unwrap();
@@ -451,7 +451,7 @@ fn repack_roundtrips_vlen_string_2d() {
     // 2x3 grid, row-major.
     let words = ["a", "bb", "ccc", "", "ee", "ffffff"];
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<VarLenUnicode> = words
             .iter()
             .map(|s| VarLenUnicode::from_str(s).unwrap())
@@ -477,7 +477,7 @@ fn repack_roundtrips_vlen_string_2d() {
     );
 
     // C library agrees on shape and values.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cds = c.dataset("grid").unwrap();
     assert_eq!(cds.shape(), vec![2, 3]);
     let cvals = cds.read_raw::<VarLenUnicode>().unwrap();
@@ -487,7 +487,7 @@ fn repack_roundtrips_vlen_string_2d() {
 
 #[test]
 fn repack_roundtrips_c_vlen_sequence_dataset() {
-    use hdf5::types::VarLenArray;
+    use libhdf5::types::VarLenArray;
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen_seq.h5");
@@ -497,7 +497,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
     // including an empty sequence.
     let seqs: Vec<Vec<i32>> = vec![vec![1, 2, 3], vec![], vec![-7, 42, 0, 99], vec![5]];
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<VarLenArray<i32>> = seqs
             .iter()
             .map(|s| VarLenArray::from_slice(s.as_slice()))
@@ -527,7 +527,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
 
     // libhdf5 reads the exact sequences back - the interop proof
     // that the re-staged global heap and rebuilt references are valid.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cds = c.dataset("seqs").unwrap();
     let cvals = cds.read_raw::<VarLenArray<i32>>().unwrap();
     let got: Vec<Vec<i32>> = cvals.iter().map(|v| v.as_slice().to_vec()).collect();
@@ -539,7 +539,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
 #[case::page(Some(FileSpaceStrategy::Page))]
 #[case::none(Some(FileSpaceStrategy::None))]
 fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpaceStrategy>) {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_refs.h5");
@@ -610,7 +610,7 @@ fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpa
     // libhdf5 dereferences each repacked reference to the right
     // object — the proof that the addresses were rewritten to the new locations
     // rather than copied stale.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cds = c.dataset("refs").unwrap();
     let cvals = cds.read_raw::<ObjectReference1>().unwrap();
     assert_eq!(cvals.len(), 5);
@@ -655,14 +655,14 @@ fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpa
 
 #[test]
 fn repack_refuses_reference_to_dropped_object() {
-    use hdf5::{ObjectReference, ObjectReference1};
+    use libhdf5::{ObjectReference, ObjectReference1};
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_refs_drop.h5");
     let dst = dir.path().join("refs_drop_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<f64>()
             .shape((2,))
             .create("target")
@@ -695,7 +695,7 @@ fn repack_refuses_reference_to_dropped_object() {
 /// that those rebuilt addresses are real.
 #[test]
 fn repack_roundtrips_chunked_vlen_string_dataset() {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
     let dir = tempfile::tempdir().unwrap();
@@ -704,7 +704,7 @@ fn repack_roundtrips_chunked_vlen_string_dataset() {
 
     let expected: Vec<String> = (0..8).map(|i| format!("word{i}")).collect();
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<VarLenUnicode> = expected
             .iter()
             .map(|s| VarLenUnicode::from_str(s).unwrap())
@@ -730,7 +730,7 @@ fn repack_roundtrips_chunked_vlen_string_dataset() {
             .unwrap(),
         expected
     );
-    let f = hdf5::File::open(&dst).unwrap();
+    let f = libhdf5::File::open(&dst).unwrap();
     let ds = f.dataset("chunked_labels").unwrap();
     assert!(
         ds.is_chunked(),
@@ -750,7 +750,7 @@ fn repack_roundtrips_chunked_vlen_string_dataset() {
 /// C library must read the result.
 #[test]
 fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("filtered_vlen.h5");
@@ -783,7 +783,7 @@ fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
         );
     }
 
-    let f = hdf5::File::open(&dst).unwrap();
+    let f = libhdf5::File::open(&dst).unwrap();
     let compressed = f.dataset("compressed").unwrap();
     assert!(
         !compressed.filters().is_empty(),
@@ -813,17 +813,17 @@ fn c_file_with_fill_times_repacked_then_read_by_c_library() {
     let dst = dir.path().join("c_fill_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<i32>()
             .shape((3,))
-            .fill_time(hdf5::dataset::FillTime::Never)
+            .fill_time(libhdf5::dataset::FillTime::Never)
             .create("never")
             .unwrap()
             .write(&[1, 2, 3])
             .unwrap();
         file.new_dataset::<f64>()
             .shape((2,))
-            .fill_time(hdf5::dataset::FillTime::Alloc)
+            .fill_time(libhdf5::dataset::FillTime::Alloc)
             .create("alloc")
             .unwrap()
             .write(&[1.5, 2.5])
@@ -831,7 +831,7 @@ fn c_file_with_fill_times_repacked_then_read_by_c_library() {
         file.new_dataset::<i32>()
             .shape((4,))
             .fill_value(42_i32)
-            .fill_time(hdf5::dataset::FillTime::IfSet)
+            .fill_time(libhdf5::dataset::FillTime::IfSet)
             .create("if_set")
             .unwrap()
             .write(&[10, 20, 30, 40])
@@ -859,13 +859,13 @@ fn c_file_with_fill_times_repacked_then_read_by_c_library() {
         Some(42)
     );
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let never_dcpl = c.dataset("never").unwrap().dcpl().unwrap();
-    assert_eq!(never_dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    assert_eq!(never_dcpl.fill_time(), libhdf5::dataset::FillTime::Never);
     let alloc_dcpl = c.dataset("alloc").unwrap().dcpl().unwrap();
-    assert_eq!(alloc_dcpl.fill_time(), hdf5::dataset::FillTime::Alloc);
+    assert_eq!(alloc_dcpl.fill_time(), libhdf5::dataset::FillTime::Alloc);
     let if_set_dcpl = c.dataset("if_set").unwrap().dcpl().unwrap();
-    assert_eq!(if_set_dcpl.fill_time(), hdf5::dataset::FillTime::IfSet);
+    assert_eq!(if_set_dcpl.fill_time(), libhdf5::dataset::FillTime::IfSet);
     assert_eq!(if_set_dcpl.get_fill_value_as::<i32>().unwrap(), Some(42));
     c.close().unwrap();
 }
@@ -884,14 +884,14 @@ fn c_file_with_fill_times_repacked_then_read_by_c_library() {
 #[test]
 #[cfg(target_endian = "little")]
 fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
-    use hdf5::types::TypeDescriptor;
+    use libhdf5::types::TypeDescriptor;
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_boolattr.h5");
     let dst = dir.path().join("boolattr_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let ds = file
             .new_dataset::<f64>()
             .shape((2,))
@@ -908,7 +908,7 @@ fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
     }
 
     let source_type = {
-        let c = hdf5::File::open(&src).unwrap();
+        let c = libhdf5::File::open(&src).unwrap();
         c.dataset("data")
             .unwrap()
             .attr("active")
@@ -925,7 +925,7 @@ fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let attr = c.dataset("data").unwrap().attr("active").unwrap();
     assert_eq!(
         attr.dtype().unwrap().to_descriptor().unwrap(),
@@ -949,14 +949,14 @@ fn repack_carries_an_attribute_attr_value_cannot_express_faithfully() {
 /// that line for attributes.
 #[test]
 fn repack_refuses_an_attribute_whose_address_it_cannot_rewrite() {
-    use hdf5::{ObjectReference, ObjectReference1};
+    use libhdf5::{ObjectReference, ObjectReference1};
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_refattr.h5");
     let dst = dir.path().join("refattr_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let ds = file
             .new_dataset::<f64>()
             .shape((2,))
@@ -993,7 +993,7 @@ fn c_deflate_dataset_repacked_verbatim_read_by_both() {
 
     let data: Vec<i32> = (0..4096).map(|i| i % 13).collect();
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let ds = file
             .new_dataset::<i32>()
             .shape((4096,))
@@ -1011,7 +1011,7 @@ fn c_deflate_dataset_repacked_verbatim_read_by_both() {
     let f = File::open(&dst).unwrap();
     assert_eq!(f.dataset("vals").unwrap().read_i32().unwrap(), data);
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(c.dataset("vals").unwrap().read_raw::<i32>().unwrap(), data);
 }
 
@@ -1069,7 +1069,7 @@ fn c_sparse_chunked_lossless_repacked_falls_back() {
 /// longer collapsing runs of the fill value.
 #[test]
 fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
-    use hdf5::filters::ScaleOffset as CScaleOffset;
+    use libhdf5::filters::ScaleOffset as CScaleOffset;
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_sparse_so.h5");
@@ -1131,7 +1131,7 @@ fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
         want
     );
     assert_eq!(
-        hdf5::File::open(&dst)
+        libhdf5::File::open(&dst)
             .unwrap()
             .dataset("data")
             .unwrap()
@@ -1155,7 +1155,7 @@ fn c_sparse_chunked_lossy_repack_refused() {
     // would fall back to the read-raw + re-encode path — but re-encoding a lossy
     // filter is not guaranteed idempotent, so repack must refuse by name rather
     // than risk silently perturbing the data.
-    use hdf5::filters::ScaleOffset as CScaleOffset;
+    use libhdf5::filters::ScaleOffset as CScaleOffset;
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_sparse_lossy.h5");
@@ -1197,10 +1197,10 @@ fn c_sparse_chunked_lossy_repack_refused() {
 /// embedded addresses, so a self-round-trip alone would not catch a stale one.
 #[test]
 fn repack_roundtrips_c_compound_with_vlen_string_member() {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
-    #[derive(hdf5::H5Type, Clone, Debug, PartialEq)]
+    #[derive(libhdf5::H5Type, Clone, Debug, PartialEq)]
     #[repr(C)]
     struct Labelled {
         id: i32,
@@ -1219,7 +1219,7 @@ fn repack_roundtrips_c_compound_with_vlen_string_member() {
         "a longer label than the rest",
     ];
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<Labelled> = rows
             .iter()
             .enumerate()
@@ -1256,7 +1256,7 @@ fn repack_roundtrips_c_compound_with_vlen_string_member() {
 
     // libhdf5 reads every row back - the interop proof that the
     // embedded heap references name collections in the *destination*.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Labelled>().unwrap();
     assert_eq!(cvals.len(), rows.len());
     for (i, row) in rows.iter().enumerate() {
@@ -1271,10 +1271,10 @@ fn repack_roundtrips_c_compound_with_vlen_string_member() {
 /// straight per member, not per dataset.
 #[test]
 fn repack_roundtrips_c_compound_with_two_vlen_members() {
-    use hdf5::types::{VarLenArray, VarLenUnicode};
+    use libhdf5::types::{VarLenArray, VarLenUnicode};
     use std::str::FromStr;
 
-    #[derive(hdf5::H5Type, Clone, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Debug)]
     #[repr(C)]
     struct Row {
         label: VarLenUnicode,
@@ -1289,7 +1289,7 @@ fn repack_roundtrips_c_compound_with_two_vlen_members() {
     let labels = ["first", "", "third"];
     let samples: Vec<Vec<i32>> = vec![vec![1, 2, 3], vec![], vec![-9, 400_000]];
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<Row> = labels
             .iter()
             .zip(&samples)
@@ -1311,7 +1311,7 @@ fn repack_roundtrips_c_compound_with_two_vlen_members() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Row>().unwrap();
     assert_eq!(cvals.len(), labels.len());
     for i in 0..labels.len() {
@@ -1331,10 +1331,10 @@ fn repack_roundtrips_c_compound_with_two_vlen_members() {
 /// collections have to be placed before the chunks are encoded (issue #109).
 #[test]
 fn repack_roundtrips_c_chunked_compound_with_vlen_member() {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
-    #[derive(hdf5::H5Type, Clone, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Debug)]
     #[repr(C)]
     struct Row {
         id: i32,
@@ -1348,7 +1348,7 @@ fn repack_roundtrips_c_chunked_compound_with_vlen_member() {
     let n = 40usize;
     let labels: Vec<String> = (0..n).map(|i| format!("row-{i}")).collect();
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let vals: Vec<Row> = labels
             .iter()
             .enumerate()
@@ -1379,7 +1379,7 @@ fn repack_roundtrips_c_chunked_compound_with_vlen_member() {
         "repacked dataset must stay chunked"
     );
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Row>().unwrap();
     assert_eq!(cvals.len(), n);
     for i in 0..n {
@@ -1396,9 +1396,9 @@ fn repack_roundtrips_c_chunked_compound_with_vlen_member() {
 /// rather than merely reading the rows.
 #[test]
 fn repack_roundtrips_c_compound_with_object_reference_member() {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
-    #[derive(hdf5::H5Type, Clone, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Debug)]
     #[repr(C)]
     struct Row {
         id: i32,
@@ -1410,7 +1410,7 @@ fn repack_roundtrips_c_compound_with_object_reference_member() {
     let dst = dir.path().join("compound_ref_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<i32>()
             .shape((3,))
             .create("alpha")
@@ -1445,7 +1445,7 @@ fn repack_roundtrips_c_compound_with_object_reference_member() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Row>().unwrap();
     assert_eq!(cvals.len(), 2);
     assert_eq!(cvals[0].id, 7);
@@ -1472,9 +1472,9 @@ fn repack_roundtrips_c_compound_with_object_reference_member() {
 /// dangling address.
 #[test]
 fn repack_refuses_compound_reference_to_dropped_object() {
-    use hdf5::{ObjectReference, ObjectReference1};
+    use libhdf5::{ObjectReference, ObjectReference1};
 
-    #[derive(hdf5::H5Type, Clone, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Debug)]
     #[repr(C)]
     struct Row {
         id: i32,
@@ -1486,7 +1486,7 @@ fn repack_refuses_compound_reference_to_dropped_object() {
     let dst = dir.path().join("compound_ref_dropped_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<i32>()
             .shape((2,))
             .create("doomed")
@@ -1523,11 +1523,11 @@ fn repack_refuses_compound_reference_to_dropped_object() {
 /// address reads as a perfectly ordinary 8 bytes.
 #[test]
 fn repack_roundtrips_c_compound_with_both_vlen_and_reference_members() {
-    use hdf5::types::VarLenUnicode;
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::types::VarLenUnicode;
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
     use std::str::FromStr;
 
-    #[derive(hdf5::H5Type, Clone, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Debug)]
     #[repr(C)]
     struct Row {
         label: VarLenUnicode,
@@ -1541,7 +1541,7 @@ fn repack_roundtrips_c_compound_with_both_vlen_and_reference_members() {
 
     let labels = ["alpha", "", "gamma"];
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<i32>()
             .shape((3,))
             .create("pointee")
@@ -1568,7 +1568,7 @@ fn repack_roundtrips_c_compound_with_both_vlen_and_reference_members() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Row>().unwrap();
     assert_eq!(cvals.len(), labels.len());
     for (i, row) in cvals.iter().enumerate() {
@@ -1590,11 +1590,11 @@ fn repack_roundtrips_c_compound_with_both_vlen_and_reference_members() {
 /// to anything meaningful whatever else the compound carries.
 #[test]
 fn repack_refuses_dropped_target_in_a_compound_that_also_has_a_vlen_member() {
-    use hdf5::types::VarLenUnicode;
-    use hdf5::{ObjectReference, ObjectReference1};
+    use libhdf5::types::VarLenUnicode;
+    use libhdf5::{ObjectReference, ObjectReference1};
     use std::str::FromStr;
 
-    #[derive(hdf5::H5Type, Clone, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Debug)]
     #[repr(C)]
     struct Row {
         label: VarLenUnicode,
@@ -1606,7 +1606,7 @@ fn repack_refuses_dropped_target_in_a_compound_that_also_has_a_vlen_member() {
     let dst = dir.path().join("both_dropped_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<i32>()
             .shape((2,))
             .create("doomed")
@@ -1639,11 +1639,11 @@ fn repack_refuses_dropped_target_in_a_compound_that_also_has_a_vlen_member() {
 /// not make that possible.
 #[test]
 fn repack_refuses_chunked_compound_with_both_vlen_and_reference_members() {
-    use hdf5::types::VarLenUnicode;
-    use hdf5::{ObjectReference, ObjectReference1};
+    use libhdf5::types::VarLenUnicode;
+    use libhdf5::{ObjectReference, ObjectReference1};
     use std::str::FromStr;
 
-    #[derive(hdf5::H5Type, Clone, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Debug)]
     #[repr(C)]
     struct Row {
         label: VarLenUnicode,
@@ -1655,7 +1655,7 @@ fn repack_refuses_chunked_compound_with_both_vlen_and_reference_members() {
     let dst = dir.path().join("both_chunked_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<i32>()
             .shape((2,))
             .create("pointee")
@@ -1697,7 +1697,7 @@ fn repack_refuses_chunked_compound_with_both_vlen_and_reference_members() {
 /// what a consumer sees rather than what this crate's reader reports.
 #[test]
 fn c_written_attribute_encodings_survive_a_repack() {
-    use hdf5::types::{FixedAscii, FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
+    use libhdf5::types::{FixedAscii, FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
     use std::str::FromStr;
 
     let dir = tempfile::tempdir().unwrap();
@@ -1705,7 +1705,7 @@ fn c_written_attribute_encodings_survive_a_repack() {
     let dst = dir.path().join("c_attr_dst.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let ds = file
             .new_dataset::<f64>()
             .shape((4,))
@@ -1716,7 +1716,7 @@ fn c_written_attribute_encodings_survive_a_repack() {
         // One writer for both owners: an attribute on the root group takes a
         // different path through the repack walk than one on a dataset, and the
         // widening hit both.
-        let (ds_loc, root_loc): (&hdf5::Location, &hdf5::Location) = (&ds, &file);
+        let (ds_loc, root_loc): (&libhdf5::Location, &libhdf5::Location) = (&ds, &file);
         for owner in [ds_loc, root_loc] {
             owner
                 .new_attr::<i8>()
@@ -1822,9 +1822,9 @@ fn c_written_attribute_encodings_survive_a_repack() {
         ("grid", TypeDescriptor::FixedAscii(4), vec![2, 2]),
     ];
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let ds = c.dataset("data").unwrap();
-    let (ds_loc, root_loc): (&hdf5::Location, &hdf5::Location) = (&ds, &c);
+    let (ds_loc, root_loc): (&libhdf5::Location, &libhdf5::Location) = (&ds, &c);
     for (owner_name, owner) in [("dataset data", ds_loc), ("root group", root_loc)] {
         for (name, descriptor, shape) in &expected {
             let attr = owner
@@ -1922,7 +1922,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
         let src = dir.path().join("src.h5");
         let dst = dir.path().join("dst.h5");
         {
-            let file = hdf5::File::create(&src).unwrap();
+            let file = libhdf5::File::create(&src).unwrap();
             let b = file.new_dataset::<i32>().fill_value(FILL);
             // The C builder's shape call changes its type, so each layout is
             // built to completion in its own arm rather than accumulated.
@@ -1936,7 +1936,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
                     .deflate(6)
                     .create("col"),
                 _ => b
-                    .shape((hdf5::Extent::resizable(N),))
+                    .shape((libhdf5::Extent::resizable(N),))
                     .chunk((100,))
                     .create("col"),
             }
@@ -1954,7 +1954,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
         // Ground truth: the source stores nothing, and the C library reads it as
         // the fill value anyway.
         {
-            let c = hdf5::File::open(&src).unwrap();
+            let c = libhdf5::File::open(&src).unwrap();
             assert_eq!(
                 c.dataset("col").unwrap().read_raw::<i32>().unwrap(),
                 vec![FILL; N],
@@ -2048,7 +2048,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
         );
 
         // And the reference library reads back what it wrote in the first place.
-        let c = hdf5::File::open(&dst).unwrap();
+        let c = libhdf5::File::open(&dst).unwrap();
         assert_eq!(
             c.dataset("col").unwrap().read_raw::<i32>().unwrap(),
             vec![FILL; N],
@@ -2083,7 +2083,7 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let ds = file
             .new_dataset::<i32>()
             .shape((N,))
@@ -2099,7 +2099,7 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
     let mut expected = vec![FILL; N];
     expected[300..400].fill(5);
     {
-        let c = hdf5::File::open(&src).unwrap();
+        let c = libhdf5::File::open(&src).unwrap();
         assert_eq!(
             c.dataset("col").unwrap().read_raw::<i32>().unwrap(),
             expected,
@@ -2125,7 +2125,7 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
     );
     drop(f);
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(
         c.dataset("col").unwrap().read_raw::<i32>().unwrap(),
         expected,
@@ -2134,14 +2134,14 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
 }
 
 #[rstest]
-#[case::empty_unlimited(0, hdf5::dataset::FillTime::IfSet)]
-#[case::unwritten_unlimited(2000, hdf5::dataset::FillTime::Alloc)]
-#[case::unwritten_never_fill(2000, hdf5::dataset::FillTime::Never)]
+#[case::empty_unlimited(0, libhdf5::dataset::FillTime::IfSet)]
+#[case::unwritten_unlimited(2000, libhdf5::dataset::FillTime::Alloc)]
+#[case::unwritten_never_fill(2000, libhdf5::dataset::FillTime::Never)]
 fn repack_preserves_native_unallocated_lossy_float_datasets(
     #[case] size: usize,
-    #[case] fill_time: hdf5::dataset::FillTime,
+    #[case] fill_time: libhdf5::dataset::FillTime,
 ) {
-    use hdf5::filters::ScaleOffset as CScaleOffset;
+    use libhdf5::filters::ScaleOffset as CScaleOffset;
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_unwritten_lossy.h5");
@@ -2150,7 +2150,7 @@ fn repack_preserves_native_unallocated_lossy_float_datasets(
         let file = file::libhdf5_create_v110(&src);
         let ds = file
             .new_dataset::<f64>()
-            .shape([hdf5::Extent::resizable(size)])
+            .shape([libhdf5::Extent::resizable(size)])
             .chunk([512])
             .fill_value(7.25_f64)
             .fill_time(fill_time)
@@ -2190,9 +2190,9 @@ fn repack_preserves_native_unallocated_lossy_float_datasets(
         assert_eq!(destination.datatype().unwrap(), source.datatype().unwrap());
     }
 
-    let source = hdf5::File::open(&src).unwrap();
+    let source = libhdf5::File::open(&src).unwrap();
     let source_ds = source.dataset("data").unwrap();
-    let destination = hdf5::File::open(&dst).unwrap();
+    let destination = libhdf5::File::open(&dst).unwrap();
     let destination_ds = destination.dataset("data").unwrap();
     assert_eq!(destination_ds.storage_size(), 0);
     assert_eq!(destination_ds.shape(), [size]);
@@ -2203,7 +2203,7 @@ fn repack_preserves_native_unallocated_lossy_float_datasets(
     let dcpl = destination_ds.dcpl().unwrap();
     assert_eq!(dcpl.get_fill_value_as::<f64>().unwrap(), Some(7.25));
     assert_eq!(dcpl.fill_time(), fill_time);
-    if fill_time != hdf5::dataset::FillTime::Never {
+    if fill_time != libhdf5::dataset::FillTime::Never {
         assert_eq!(destination_ds.read_raw::<f64>().unwrap(), vec![7.25; size]);
     }
     drop(dcpl);
@@ -2250,7 +2250,7 @@ fn c_pipeline_order_and_optional_flags_survive_re_encoding_repack() {
     let written = 1000usize;
     let head: Vec<i32> = (1..=written as i32).collect();
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let ds = file
             .new_dataset::<i32>()
             .shape([n])
@@ -2281,7 +2281,7 @@ fn c_pipeline_order_and_optional_flags_survive_re_encoding_repack() {
     assert_eq!(&vals[..written], head.as_slice());
     assert!(vals[written..].iter().all(|&v| v == 0));
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let c_vals = c.dataset("data").unwrap().read_raw::<i32>().unwrap();
     assert_eq!(&c_vals[..written], head.as_slice());
 }
@@ -2293,7 +2293,7 @@ fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
     let dst = dir.path().join("c_unwritten_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         file.new_dataset::<i32>()
             .shape([2000])
             .chunk([512])
@@ -2337,19 +2337,19 @@ fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
 /// canonically ordered, all-mandatory pipeline.
 // Before 2.0 the C library refuses a mandatory filter, fletcher32 here, on a
 // variable-length dataset.
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 #[test]
 fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_vlen_order.h5");
     let dst = dir.path().join("c_vlen_order_repacked.h5");
 
-    let words: Vec<hdf5::types::VarLenUnicode> = (0..64)
+    let words: Vec<libhdf5::types::VarLenUnicode> = (0..64)
         .map(|i| format!("value-{i}").parse().unwrap())
         .collect();
     {
-        let file = hdf5::File::create(&src).unwrap();
-        file.new_dataset::<hdf5::types::VarLenUnicode>()
+        let file = libhdf5::File::create(&src).unwrap();
+        file.new_dataset::<libhdf5::types::VarLenUnicode>()
             .shape([words.len()])
             .chunk([8])
             .shuffle()
@@ -2391,11 +2391,11 @@ fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
     let expected: Vec<String> = words.iter().map(|w| w.to_string()).collect();
     assert_eq!(read, expected);
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let c_read = c
         .dataset("data")
         .unwrap()
-        .read_raw::<hdf5::types::VarLenUnicode>()
+        .read_raw::<libhdf5::types::VarLenUnicode>()
         .unwrap();
     assert_eq!(
         c_read.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
@@ -2420,7 +2420,7 @@ fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] sp
     let dst = dir.path().join("drop_spelling_repacked.h5");
 
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let grp = file.create_group("grp").unwrap();
         grp.new_dataset::<i32>()
             .shape((2,))
@@ -2450,7 +2450,7 @@ fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] sp
     };
     assert_eq!(missing, "grp/doomed");
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(
         c.dataset("grp/kept").unwrap().read_raw::<i32>().unwrap(),
         vec![1, 2]
@@ -2538,7 +2538,7 @@ fn a_repack_that_drops_the_repeated_link_writes_a_tree_the_c_library_reads(
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path(dropped)).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     for (group, expected) in members {
         assert_eq!(
             c.group(group).unwrap().member_names().unwrap(),
@@ -2581,7 +2581,7 @@ fn an_object_reference_through_a_dropped_alias_resolves_to_the_surviving_link() 
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("g/d1")).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let refs = c
         .dataset("refs")
         .unwrap()
@@ -2630,11 +2630,11 @@ fn the_c_library_reads_the_dense_groups_of_a_repack(
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let group = c.group(group_path).unwrap();
     assert_eq!(
         group.info().unwrap().storage_type,
-        hdf5::GroupStorageType::Dense
+        libhdf5::GroupStorageType::Dense
     );
     let mut names = group.member_names().unwrap();
     names.sort();
@@ -2666,7 +2666,7 @@ fn the_c_library_reads_every_dataset_of_a_repacked_wide_tree() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     TreeGraph::Wide.assert_read_by_c_library(&c.group("g").unwrap());
 }
 
@@ -2696,7 +2696,7 @@ fn a_repack_that_drops_a_deep_chain_writes_the_rest_for_the_c_library() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("g/g")).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(c.member_names().unwrap(), vec!["g"]);
     assert_eq!(
         c.group("g").unwrap().member_names().unwrap(),
@@ -2719,7 +2719,7 @@ fn the_c_library_reads_a_repacked_chain_at_the_depth_bound() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     let deepest = (0..MAX_REPACK_DEPTH).fold(c.as_group().unwrap(), |group, _| {
         assert_eq!(group.member_names().unwrap(), vec!["g"]);
         group.group("g").unwrap()
@@ -2751,7 +2751,7 @@ fn repack_preserves_native_metadata_trees_with_empty_and_populated_datasets(
 
 /// Writes dense groups, filtered resizable datasets, and object references through libhdf5.
 fn write_native_metadata_tree(path: &Path, strategy: Option<FileSpaceStrategy>, values: &[i32]) {
-    let mut builder = hdf5::FileBuilder::new();
+    let mut builder = libhdf5::FileBuilder::new();
     builder.with_fapl(|properties| properties.libver_v110());
     if let Some(strategy) = strategy {
         builder.with_fcpl(|properties| {
@@ -2783,7 +2783,7 @@ fn write_native_metadata_tree(path: &Path, strategy: Option<FileSpaceStrategy>, 
             let count = if index == 0 { values.len() } else { 0 };
             let dataset = parent
                 .new_dataset::<i32>()
-                .shape([hdf5::Extent::resizable(count)])
+                .shape([libhdf5::Extent::resizable(count)])
                 .chunk([4])
                 .shuffle()
                 .deflate(6)
@@ -2837,8 +2837,8 @@ fn assert_native_metadata_tree(
 ) {
     let source = File::open_streaming(source_path).unwrap();
     let output = File::open_streaming(output_path).unwrap();
-    let native = hdf5::File::open(output_path).unwrap();
-    let native_source = hdf5::File::open(source_path).unwrap();
+    let native = libhdf5::File::open(output_path).unwrap();
+    let native_source = libhdf5::File::open(source_path).unwrap();
     assert_eq!(source.file_space_settings().unwrap(), settings);
     assert_eq!(output.file_space_settings().unwrap(), settings);
     let creation = native.create_plist().unwrap();

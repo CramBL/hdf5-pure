@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Guards the discriminating power of [`test_util_hdf5::absence::assert_libhdf5_absent`], which the
 //! delete crosschecks use to prove a removed object is *absent* rather than
 //! merely unreachable.
@@ -45,7 +45,7 @@ fn genuine_absences_are_accepted() {
     }
     b.write(&compact).unwrap();
     {
-        let c = hdf5::File::open(&compact).unwrap();
+        let c = libhdf5::File::open(&compact).unwrap();
         absence::assert_libhdf5_absent(&c.dataset("nope").unwrap_err(), "missing dataset");
         absence::assert_libhdf5_absent(&c.group("nope").unwrap_err(), "missing group");
         absence::assert_libhdf5_absent(
@@ -58,7 +58,7 @@ fn genuine_absences_are_accepted() {
     let dense = dir.path().join("dense.h5");
     metadata_heavy(&dense);
     {
-        let c = hdf5::File::open(&dense).unwrap();
+        let c = libhdf5::File::open(&dense).unwrap();
         absence::assert_libhdf5_absent(&c.dataset("nope").unwrap_err(), "missing dataset (dense)");
     }
 
@@ -71,7 +71,7 @@ fn genuine_absences_are_accepted() {
     b.add_group(finished);
     b.write(&nested).unwrap();
     {
-        let c = hdf5::File::open(&nested).unwrap();
+        let c = libhdf5::File::open(&nested).unwrap();
         assert_eq!(
             c.dataset("sub/inner").unwrap().read_raw::<i32>().unwrap(),
             vec![1]
@@ -111,7 +111,7 @@ fn corruption_is_never_mistaken_for_absence() {
             let path = dir.path().join(format!("corrupt_{width}_{at}.h5"));
             std::fs::write(&path, &bytes).unwrap();
 
-            let failure = match hdf5::File::open(&path) {
+            let failure = match libhdf5::File::open(&path) {
                 Err(e) => Some(e),
                 Ok(c) => (0..40).find_map(|i| match c.dataset(&format!("d{i}")) {
                     Ok(ds) => ds.read_raw::<i32>().err(),
@@ -121,7 +121,7 @@ fn corruption_is_never_mistaken_for_absence() {
 
             let Some(err) = failure else { continue };
             damaged += 1;
-            if err.contains_minor(hdf5::MinorErrorCode::NotFound) {
+            if err.contains_minor(libhdf5::MinorErrorCode::NotFound) {
                 accepted_by_bare_code += 1;
             }
             assert!(

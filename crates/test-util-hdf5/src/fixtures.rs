@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-#[cfg(feature = "hdf5")]
-use hdf5::File as Hdf5File;
-#[cfg(feature = "hdf5")]
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, File, FileBuilder};
+#[cfg(feature = "libhdf5")]
+use libhdf5::File as Hdf5File;
+#[cfg(feature = "libhdf5")]
+use libhdf5::file::LibraryVersion;
 
 /// Adds a `#refs#` group and two-dimensional row and column reference datasets.
 pub fn path_references_2d(builder: &mut FileBuilder) {
@@ -96,7 +96,7 @@ pub fn reference_target_group(builder: &mut FileBuilder) {
 }
 
 /// Adds the common object-reference target group `g/inner` to an open libhdf5 file.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn populate_libhdf5_reference_target(file: &Hdf5File) {
     let group = file.create_group("g").unwrap();
     group
@@ -155,7 +155,7 @@ pub fn edit_repack_starter(builder: &mut FileBuilder, doomed: &[i32]) {
 /// Creates a bounded libhdf5 file containing the common edit/repack starter topology.
 ///
 /// The returned file remains open so a specialized fixture can add metadata before closing it.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn libhdf5_edit_repack_starter(
     path: &Path,
     low: LibraryVersion,
@@ -171,7 +171,7 @@ pub fn libhdf5_edit_repack_starter(
 }
 
 /// Populates an open libhdf5 file with the common edit/repack starter topology.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn populate_libhdf5_edit_repack_starter(file: &Hdf5File, doomed: &[i32]) {
     file.new_dataset::<f64>()
         .shape((3,))

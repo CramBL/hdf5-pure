@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
 
 pub mod attributes;
 
@@ -14,8 +14,8 @@ pub mod attributes;
 ///
 /// Panics if libhdf5 cannot create `path` with 8-byte addresses, `sizeof_size`-wide lengths,
 /// and a `userblock`-byte userblock.
-pub fn create_libhdf5_file(path: &Path, sizeof_size: Sizeof, userblock: u64) -> hdf5::File {
-    hdf5::File::with_options()
+pub fn create_libhdf5_file(path: &Path, sizeof_size: Sizeof, userblock: u64) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_create_plist(|p| {
             p.sizes(SizeofInfo {
                 sizeof_addr: Sizeof::Bytes8,

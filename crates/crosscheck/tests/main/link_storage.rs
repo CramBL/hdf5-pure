@@ -1,19 +1,19 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::{Sizeof, SizeofInfo};
-use hdf5::plist::group_create::LinkCreationOrder;
-use hdf5::plist::link_create::CharEncoding;
-#[cfg(feature = "__hdf5-1.14")]
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{AttrValue, CharacterSet, Error, File, MessageType};
 use hdf5_pure_format::__private::{
     AccessMode, GroupLinkStorage, LinkCreationCounter, LinkCreationPolicy, LinkInfoMessage,
     LinkMessageV1, ObjectHeader, ObjectHeaderPrefix, OffsetWidth, OwnedLink, OwnedLinkTarget,
 };
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::{Sizeof, SizeofInfo};
+use libhdf5::plist::group_create::LinkCreationOrder;
+use libhdf5::plist::link_create::CharEncoding;
+#[cfg(feature = "__libhdf5-1.14")]
+use libhdf5::{MajorErrorCode, MinorErrorCode};
 use rstest::rstest;
 
 #[rstest]
@@ -27,7 +27,7 @@ fn libhdf5_link_messages_preserve_targets_encodings_and_creation_policy(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("links.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })
@@ -185,7 +185,7 @@ fn libhdf5_counter_boundaries_are_rejected_during_edit_preflight(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("counter.h5");
     write_counter_fixture(&path, order, MAX_COUNTER - remaining - 1);
-    let reference = hdf5::File::open_rw(&path).unwrap();
+    let reference = libhdf5::File::open_rw(&path).unwrap();
     reference.create_group("last").unwrap();
     assert_eq!(
         reference.info().unwrap().max_corder,
@@ -210,7 +210,7 @@ fn libhdf5_counter_boundaries_are_rejected_during_edit_preflight(
         "a group has assigned every link creation index its link-info message can record"
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     assert_eq!(reference.member_names().unwrap(), ["existing", "last"]);
     assert_eq!(
         reference.info().unwrap().max_corder,
@@ -236,7 +236,7 @@ fn attribute_edits_preserve_exhausted_counters_and_reject_unreproducible_counter
     };
     if supported {
         result.unwrap();
-        let reference = hdf5::File::open(&path).unwrap();
+        let reference = libhdf5::File::open(&path).unwrap();
         assert_eq!(reference.info().unwrap().max_corder, i64::MAX);
         assert_eq!(
             reference
@@ -259,7 +259,7 @@ fn attribute_edits_preserve_exhausted_counters_and_reject_unreproducible_counter
     }
 }
 
-#[cfg(feature = "__hdf5-1.14")]
+#[cfg(feature = "__libhdf5-1.14")]
 #[rstest]
 #[case::sign_bit(MAX_COUNTER + 1)]
 #[case::unsigned_last(u64::MAX - 1)]
@@ -268,7 +268,7 @@ fn libhdf5_rejects_counters_outside_the_nonnegative_signed_domain(#[case] counte
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("counter.h5");
     write_counter_fixture(&path, LinkCreationOrder::Tracked, counter);
-    let error = hdf5::File::open(&path)
+    let error = libhdf5::File::open(&path)
         .and_then(|file| file.member_names())
         .unwrap_err();
     assert!(
@@ -280,7 +280,7 @@ fn libhdf5_rejects_counters_outside_the_nonnegative_signed_domain(#[case] counte
 
 /// Writes a libhdf5 group and patches its Link Info counter with a recomputed header checksum.
 fn write_counter_fixture(path: &Path, order: LinkCreationOrder, counter: u64) {
-    let reference = hdf5::File::with_options()
+    let reference = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })

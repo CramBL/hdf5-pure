@@ -1,14 +1,14 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::dataset::AllocTime;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetAccessProperties;
 use hdf5_pure::{AttrValue, File, FileAccessProperties, MetadataCacheConfig, ReadSeekSource};
+use libhdf5::Extent;
+use libhdf5::dataset::AllocTime;
+use libhdf5::file::LibraryVersion;
 use ndarray::IxDyn;
 use rstest::rstest;
 use test_util_hdf5::file;
@@ -33,7 +33,7 @@ fn reads_with_and_without_a_retained_index_match_libhdf5(
     let path = directory.path().join("indexed.h5");
     libhdf5_create(&path, index);
     let whole = values();
-    let window = hdf5::File::open(&path)
+    let window = libhdf5::File::open(&path)
         .unwrap()
         .dataset("d")
         .unwrap()
@@ -85,7 +85,7 @@ fn shared_metadata_reads_preserve_native_values_and_userblock_coordinates(
     let path = test_util::temp::temp_path("shared-metadata.h5");
     let expected: Vec<i32> = (0..96).collect();
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|properties| {
                 properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
             })

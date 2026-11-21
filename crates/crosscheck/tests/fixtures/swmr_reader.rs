@@ -19,11 +19,11 @@ fn main() -> Result<(), Box<dyn StdError>> {
     }
     io::stdout().write_all(protocol::START)?;
     io::stdout().flush()?;
-    let file = hdf5::File::open_as(
+    let file = libhdf5::File::open_as(
         path,
         match mode {
-            Mode::Normal => hdf5::OpenMode::Read,
-            Mode::Swmr => hdf5::OpenMode::ReadSWMR,
+            Mode::Normal => libhdf5::OpenMode::Read,
+            Mode::Swmr => libhdf5::OpenMode::ReadSWMR,
         },
     )?;
     let dataset = file.dataset("d")?;

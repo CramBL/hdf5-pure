@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use hdf5_pure::FileBuilder;
 use rstest::rstest;
@@ -13,7 +13,7 @@ macro_rules! assert_hdf5_conversion {
         let path_pure = dir.path().join("pure.h5");
 
         {
-            let ref_file = hdf5::File::create(&path_ref).unwrap();
+            let ref_file = libhdf5::File::create(&path_ref).unwrap();
             let ref_ds = ref_file
                 .new_dataset::<$in_type>()
                 .shape([1])
@@ -30,7 +30,7 @@ macro_rules! assert_hdf5_conversion {
         builder.write(&path_pure).unwrap();
 
         {
-            let baseline_file = hdf5::File::open(&path_ref).unwrap();
+            let baseline_file = libhdf5::File::open(&path_ref).unwrap();
             let baseline_val = baseline_file
                 .dataset("data")
                 .unwrap()
@@ -40,7 +40,7 @@ macro_rules! assert_hdf5_conversion {
         }
 
         {
-            let pure_write_file = hdf5::File::open(&path_pure).unwrap();
+            let pure_write_file = libhdf5::File::open(&path_pure).unwrap();
             let pure_write_val = pure_write_file
                 .dataset("data")
                 .unwrap()

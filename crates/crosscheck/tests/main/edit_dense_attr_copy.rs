@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Object copy reproduces dense (fractal-heap) attribute storage (issue #87,
 //! follow-up to PR #78).
 //!
@@ -103,7 +103,7 @@ fn same_file_copy_reproduces_dense_dataset_and_group_attrs() {
     );
 
     // Reference C library: the copy's dense storage is valid in the new file.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let ds = c.dataset("payload_copy").unwrap();
     assert_eq!(ds.read_raw::<f64>().unwrap(), vec![1.5, 2.5, 3.5]);
     for (name, value) in dense_attr_set() {
@@ -159,7 +159,7 @@ fn copy_reproduces_a_multi_level_dense_name_index() {
 
     // libhdf5, opening each by name: a copy whose records landed out of
     // order still iterates cleanly and still fails to be searched.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let ds = c.dataset("payload_copy").unwrap();
     for i in [0, 1, COUNT / 2, COUNT - 1] {
         let name = format!("attr_{i:04}");
@@ -217,7 +217,7 @@ fn copy_reproduces_huge_dense_attrs() {
         other => panic!("huge attribute came back as {other:?}"),
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let ds = c.dataset("payload_copy").unwrap();
     assert_eq!(ds.attr("big").unwrap().read_raw::<i64>().unwrap(), big);
     for (name, value) in dense_attr_set() {
@@ -263,7 +263,7 @@ fn cross_file_copy_reproduces_dense_attrs() {
         expected_attr_map()
     );
 
-    let c = hdf5::File::open(&dst_path).unwrap();
+    let c = libhdf5::File::open(&dst_path).unwrap();
     let ds = c.dataset("payload").unwrap();
     for (name, value) in dense_attr_set() {
         let got: i64 = ds.attr(&name).unwrap().read_scalar().unwrap();
@@ -320,7 +320,7 @@ fn c_written_dense_attr_dataset_copies_in_place() {
         expected_attr_map()
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let ds = c.dataset("calibration_copy").unwrap();
     assert_eq!(ds.read_raw::<f64>().unwrap(), vec![0.99, 1.0, 1.01]);
     for (name, value) in dense_attr_set() {
@@ -345,13 +345,13 @@ fn cross_file_copy_refuses_variable_length_dense_attrs() {
         ds.write(&[1.0f64, 2.0]).unwrap();
         // Enough variable-length string attributes to force dense storage.
         for i in 0..DENSE_ATTR_COUNT {
-            ds.new_attr::<hdf5::types::VarLenUnicode>()
+            ds.new_attr::<libhdf5::types::VarLenUnicode>()
                 .shape(())
                 .create(format!("note_{i:02}").as_str())
                 .unwrap()
                 .write_scalar(
                     &format!("value {i}")
-                        .parse::<hdf5::types::VarLenUnicode>()
+                        .parse::<libhdf5::types::VarLenUnicode>()
                         .unwrap(),
                 )
                 .unwrap();

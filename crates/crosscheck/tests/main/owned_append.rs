@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Interop for owned-handle in-place append (issue #148, phase 2): append through
 //! a `File::open_rw` `Dataset` handle and confirm libhdf5
 //! (`hdf5-metno`) reads the grown dataset back exactly — for unfiltered and

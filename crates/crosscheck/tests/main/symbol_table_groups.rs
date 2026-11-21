@@ -1,15 +1,15 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Crosschecks symbol-table group paths, dataset values, and serialized link addresses.
 
 use std::path::Path;
 
-use hdf5::plist::file_create::SharedMessageIndex;
-use hdf5::plist::file_create::SharedMessageType;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::SuperblockVersion;
+use libhdf5::plist::file_create::SharedMessageIndex;
+use libhdf5::plist::file_create::SharedMessageType;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
 use rstest::rstest;
 use test_util_hdf5::symbol_table;
 
@@ -42,7 +42,7 @@ fn write_libhdf5_file(path: &Path, creation: Creation, links: usize) {
         shared_messages,
         superblock_version: _,
     } = creation;
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_earliest())
         .with_fcpl(|p| {
             p.userblock(userblock)
@@ -80,7 +80,7 @@ fn write_libhdf5_file(path: &Path, creation: Creation, links: usize) {
 }
 
 fn libhdf5_links(path: &Path, group: &str) -> Vec<(String, u64)> {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let mut links: Vec<(String, u64)> = file
         .group(group)
         .unwrap()

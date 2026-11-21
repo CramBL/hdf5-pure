@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Soft links in a version 1 (symbol-table) group, as libhdf5 writes them with the earliest
 //! library version as the low bound. Listing the group returns only its hard links, and an edit
 //! that converts the group to the latest format writes each soft link as a Link message.

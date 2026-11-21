@@ -1,8 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::file::LibraryVersion;
-use hdf5::plist::group_create::AttrCreationOrder;
-use hdf5::{IndexType, IterationOrder};
 use hdf5_pure::{Datatype, DatatypeByteOrder, File, FixedPointType, MessageType};
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
@@ -10,6 +7,9 @@ use hdf5_pure_format::__private::{
     AttributeMessage, Dataspace, DataspaceType, DatatypeLocation, DenseAttrCreationOrder,
     LinkInfoMessage, ObjectHeaderPrefix, ObjectHeaderWriter, PreparedDenseAttrs,
 };
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::group_create::AttrCreationOrder;
+use libhdf5::{IndexType, IterationOrder};
 use rstest::rstest;
 
 #[rstest]
@@ -30,7 +30,7 @@ fn libhdf5_reads_independently_placed_dense_attributes(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("placed.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })
@@ -166,7 +166,7 @@ fn libhdf5_reads_independently_placed_dense_attributes(
     let at = usize::try_from(userblock).unwrap();
     bytes[at..at + encoded.len()].copy_from_slice(&encoded);
     std::fs::write(&path, bytes).unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let mut names = native.attr_names().unwrap();
     names.sort();
     let mut expected_names: Vec<_> = attrs

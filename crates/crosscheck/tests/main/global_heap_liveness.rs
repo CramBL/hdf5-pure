@@ -1,20 +1,20 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::H5Type;
-use hdf5::Location;
-use hdf5::dataset::AllocTime;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::GroupCreate;
-use hdf5::plist::dataset_create::Layout;
-use hdf5::types::VarLenArray;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AddressRange;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::File;
 use hdf5_pure::PhysicalAddress;
+use libhdf5::Extent;
+use libhdf5::H5Type;
+use libhdf5::Location;
+use libhdf5::dataset::AllocTime;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::GroupCreate;
+use libhdf5::plist::dataset_create::Layout;
+use libhdf5::types::VarLenArray;
+use libhdf5::types::VarLenUnicode;
 use ndarray::ArrayView2;
 use ndarray::s;
 use rstest::rstest;
@@ -62,12 +62,12 @@ fn native_collections_survive_deletion_of_another_reference(
     file.close().unwrap();
 
     let before = {
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         payload.read(form, &file.group("g").unwrap())
     };
     assert_eq!(before, payload.expected(form));
     assert_collections_survive_owner_deletion(&path);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(payload.read(form, &file.group("g").unwrap()), before);
 }
 
@@ -111,7 +111,7 @@ fn native_chunked_collections_survive_deletion_of_another_reference(
     }
     drop(file);
     assert_collections_survive_owner_deletion(&path);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let values = file
         .dataset("strings")
         .unwrap()
@@ -155,7 +155,7 @@ fn linked_native_datasets_retain_their_collections_during_deletion(#[case] linki
     file.close().unwrap();
 
     assert_collections_survive_owner_deletion(&path);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         file.dataset("b/d")
             .unwrap()
@@ -176,7 +176,7 @@ fn linked_native_datasets_retain_their_collections_during_deletion(#[case] linki
 /// [`ChunkIndex::SingleChunk`], the dataset is one chunk. Under [`ChunkIndex::BTreeV1`], the
 /// caller creates the file with a lower bound earlier than 1.10.
 fn write_chunked<T: H5Type>(
-    group: &hdf5::Group,
+    group: &libhdf5::Group,
     name: &str,
     index: ChunkIndex,
     filtered: bool,
@@ -237,7 +237,7 @@ impl Form {
         }
     }
 
-    fn read<T: H5Type>(self, group: &hdf5::Group) -> Vec<T> {
+    fn read<T: H5Type>(self, group: &libhdf5::Group) -> Vec<T> {
         match self {
             Self::CompactAttribute => group.attr("a").unwrap().read_raw::<T>().unwrap(),
             Self::DenseAttribute => group
@@ -253,7 +253,7 @@ impl Form {
         }
     }
 
-    fn write<T: H5Type + Clone>(self, group: &hdf5::Group, values: &[T]) {
+    fn write<T: H5Type + Clone>(self, group: &libhdf5::Group, values: &[T]) {
         match self {
             Self::CompactAttribute => write_attribute(group, values),
             Self::DenseAttribute => {
@@ -326,7 +326,7 @@ impl Payload {
         }
     }
 
-    fn read(self, form: Form, group: &hdf5::Group) -> Values {
+    fn read(self, form: Form, group: &libhdf5::Group) -> Values {
         match self {
             Self::Strings => Values::Strings(form.read(group)),
             Self::Sequences => Values::Sequences(form.read(group)),
@@ -347,7 +347,7 @@ enum Values {
 }
 
 #[repr(C)]
-#[derive(Clone, Debug, PartialEq, hdf5::H5Type)]
+#[derive(Clone, Debug, PartialEq, libhdf5::H5Type)]
 struct Record {
     n: i32,
     s: VarLenUnicode,
@@ -382,8 +382,8 @@ fn write_attribute<T: H5Type>(location: &Location, values: &[T]) {
         .unwrap();
 }
 
-fn libhdf5_file(path: &Path, low: LibraryVersion) -> hdf5::File {
-    hdf5::File::with_options()
+fn libhdf5_file(path: &Path, low: LibraryVersion) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_bounds(low, LibraryVersion::latest()))
         .create(path)
         .unwrap()
@@ -448,7 +448,7 @@ fn assert_collections_survive_owner_deletion(path: &Path) {
                 "a surviving owner must retain its collection"
             );
         }
-        let file = hdf5::File::open(path).unwrap();
+        let file = libhdf5::File::open(path).unwrap();
         assert!(!file.link_exists("probe"));
         assert_eq!(
             file.dataset(&format!("pressure{index}"))

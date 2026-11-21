@@ -2,7 +2,7 @@
 //!
 //! Constructors from [`test_util_hdf5::native_fixtures`] write to owned temporary
 //! paths. Tests check native observations, decoded contents, and storage premises.
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use rstest::rstest;
 use test_util::temp;

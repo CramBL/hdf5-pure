@@ -1,10 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::fs;
 
-use hdf5::File as CFile;
-use hdf5::plist::GroupCreate;
-use hdf5::plist::file_access::LibraryVersion;
 use hdf5_pure::File;
 use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion};
 use hdf5_pure_core::BaseAddress;
@@ -19,6 +16,9 @@ use hdf5_pure_format::__private::{
     HugeIndirectKeyEncoding, HugeObjectRecordContext, HugeObjectReference, HugeObjectTrackerRecord,
 };
 use hdf5_pure_format::__private::{FractalHeapHeaderLocator, LengthWidth, OffsetWidth};
+use libhdf5::File as CFile;
+use libhdf5::plist::GroupCreate;
+use libhdf5::plist::file_access::LibraryVersion;
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util_hdf5::group_filter;
@@ -254,7 +254,7 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record(
 }
 
 #[rstest]
-#[cfg(feature = "__hdf5-bundled")]
+#[cfg(feature = "__libhdf5-bundled")]
 #[case::indirect(false)]
 #[case::direct(true)]
 fn c_written_filtered_huge_fixtures_expose_both_record_representations(#[case] direct: bool) {

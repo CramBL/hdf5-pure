@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for a chunked dataset whose partial edge chunks
 //! are stored with the filter pipeline skipped.
 //!
@@ -50,16 +50,6 @@ use std::cmp::Ordering;
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::Datatype as CDatatype;
-use hdf5::Extent;
-use hdf5::Hyperslab;
-use hdf5::SliceOrIndex;
-use hdf5::dataset::ChunkOpts;
-use hdf5::filters::Filter as CFilter;
-#[cfg(target_endian = "little")]
-use hdf5::types::VarLenArray;
-#[cfg(target_endian = "little")]
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AppendOptions;
 use hdf5_pure::BufferedAppender;
 use hdf5_pure::ChunkIndex;
@@ -80,8 +70,18 @@ use hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::SINGLE_INDEX_WITH_FILTER;
-use hdf5_sys::h5t;
-use hdf5_sys::h5t::H5T_order_t;
+use libhdf5::Datatype as CDatatype;
+use libhdf5::Extent;
+use libhdf5::Hyperslab;
+use libhdf5::SliceOrIndex;
+use libhdf5::dataset::ChunkOpts;
+use libhdf5::filters::Filter as CFilter;
+#[cfg(target_endian = "little")]
+use libhdf5::types::VarLenArray;
+#[cfg(target_endian = "little")]
+use libhdf5::types::VarLenUnicode;
+use libhdf5_sys::h5t;
+use libhdf5_sys::h5t::H5T_order_t;
 use ndarray::ArrayD;
 use ndarray::IxDyn;
 use ndarray::Slice;
@@ -184,7 +184,7 @@ fn extents_the_c_library_accepts(shape: &[usize], chunk: &[usize]) -> Vec<Extent
 }
 
 fn read_c_creation_properties(path: &Path) -> (Vec<CFilter>, Option<ChunkOpts>) {
-    let ds = hdf5::File::open(path).unwrap().dataset("d").unwrap();
+    let ds = libhdf5::File::open(path).unwrap().dataset("d").unwrap();
     (ds.filters(), ds.dcpl().unwrap().chunk_opts())
 }
 
@@ -362,7 +362,7 @@ fn a_libhdf5_append_filters_the_raw_edge_chunk_it_fills(
             .partial_edge_chunks_unfiltered(),
     );
 
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     let ds = file.dataset("d").unwrap();
     ds.resize([8]).unwrap();
     ds.write_slice(&[106, 107], 6..8).unwrap();
@@ -454,7 +454,7 @@ fn lossy_unfiltered_tails_append_and_filter_on_completion(
 
     append_lossy_tail(&path, &[1.0, 2.0, 3.46], staged);
     {
-        let file = hdf5::File::open_rw(&reference).unwrap();
+        let file = libhdf5::File::open_rw(&reference).unwrap();
         let ds = file.dataset("d").unwrap();
         ds.resize([5]).unwrap();
         ds.write(&[1.46, 1.56, 1.0, 2.0, 3.46]).unwrap();
@@ -618,7 +618,7 @@ fn reencode_lossy_tail(path: &Path, reference: &Path, values: &[f64], staged: bo
 }
 
 fn append_c_lossy_tail(path: &Path, values: &[f64]) {
-    let file = hdf5::File::open_rw(path).unwrap();
+    let file = libhdf5::File::open_rw(path).unwrap();
     let dataset = file.dataset("d").unwrap();
     let old_len = dataset.size();
     dataset.resize([old_len + values.len()]).unwrap();
@@ -629,7 +629,7 @@ fn append_c_lossy_tail(path: &Path, values: &[f64]) {
 
 fn little_endian_f64() -> CDatatype {
     let datatype = CDatatype::from_type::<f64>().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and `datatype` owns a live floating-point type.
         let status = unsafe { h5t::H5Tset_order(datatype.id(), H5T_order_t::H5T_ORDER_LE) };
         assert_eq!(status, 0);
@@ -652,7 +652,7 @@ fn append_lossy_tail(path: &Path, values: &[f64], staged: bool) {
 }
 
 fn layout_flags(path: &Path) -> ChunkedLayoutFlags {
-    let header = c_object::header_address(&hdf5::File::open(path).unwrap(), "d");
+    let header = c_object::header_address(&libhdf5::File::open(path).unwrap(), "d");
     let image = std::fs::read(path).unwrap();
     let parsed = ObjectHeader::parse(
         &image,
@@ -752,7 +752,7 @@ fn an_in_place_append_stores_each_written_chunk_as_both_libraries_read_it(
         (filter.pipeline(), Some(chunk_opts))
     );
     assert_eq!(
-        hdf5::File::open(&path)
+        libhdf5::File::open(&path)
             .unwrap()
             .dataset("d")
             .unwrap()
@@ -797,7 +797,7 @@ fn an_in_place_append_stores_each_written_chunk_as_both_libraries_read_it(
         chunks
     );
 
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     let ds = file.dataset("d").unwrap();
     ds.resize([12]).unwrap();
     ds.write_slice(&[111], 11..12).unwrap();
@@ -861,7 +861,7 @@ fn a_staged_append_stores_each_written_chunk_as_both_libraries_read_it(
         (filter.pipeline(), Some(chunk_opts))
     );
     assert_eq!(
-        hdf5::File::open(&path)
+        libhdf5::File::open(&path)
             .unwrap()
             .dataset("d")
             .unwrap()
@@ -896,7 +896,7 @@ fn a_staged_append_stores_each_written_chunk_as_both_libraries_read_it(
         chunks
     );
 
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     let ds = file.dataset("d").unwrap();
     ds.resize([12]).unwrap();
     ds.write_slice(&[111], 11..12).unwrap();
@@ -1279,7 +1279,7 @@ impl Restaged {
     }
 
     fn read_libhdf5(self, path: &Path) -> Vec<String> {
-        let ds = hdf5::File::open(path).unwrap().dataset("d").unwrap();
+        let ds = libhdf5::File::open(path).unwrap().dataset("d").unwrap();
         match self {
             Self::CompoundsFromLibhdf5 => ds
                 .read_raw::<Labeled>()
@@ -1321,7 +1321,7 @@ fn restaged_chunks(path: &Path, raw_edges: bool) -> Vec<(Vec<u64>, Option<u64>, 
 }
 
 #[cfg(target_endian = "little")]
-#[derive(hdf5::H5Type, Clone, Debug)]
+#[derive(libhdf5::H5Type, Clone, Debug)]
 #[repr(C)]
 struct Labeled {
     id: i32,
@@ -1329,7 +1329,7 @@ struct Labeled {
 }
 
 #[cfg(target_endian = "little")]
-fn libhdf5_create_restaged<T: hdf5::H5Type>(path: &Path, chunk_opts: ChunkOpts, values: &[T]) {
+fn libhdf5_create_restaged<T: libhdf5::H5Type>(path: &Path, chunk_opts: ChunkOpts, values: &[T]) {
     let file = file::libhdf5_create_v110(path);
     file.new_dataset::<T>()
         .deflate(DEFLATE_LEVEL)
@@ -1458,7 +1458,7 @@ impl ChunkedFixture<'_> {
         file.close().unwrap();
     }
 
-    fn libhdf5_create_dataset(self, file: &hdf5::File) -> hdf5::Dataset {
+    fn libhdf5_create_dataset(self, file: &libhdf5::File) -> libhdf5::Dataset {
         let builder = file
             .new_dataset_builder()
             .empty_as(ByteOrder::LittleEndian.i32_datatype());
@@ -1496,7 +1496,7 @@ impl ChunkedFixture<'_> {
     }
 
     fn libhdf5_write_last(self, path: &Path, value: i32) {
-        let file = hdf5::File::open_rw(path).unwrap();
+        let file = libhdf5::File::open_rw(path).unwrap();
         file.dataset("d")
             .unwrap()
             .write_slice(
@@ -1565,7 +1565,7 @@ impl ChunkedFixture<'_> {
             (self.filter.pipeline(), Some(chunk_opts))
         );
         assert_eq!(
-            hdf5::File::open(path)
+            libhdf5::File::open(path)
                 .unwrap()
                 .dataset("d")
                 .unwrap()
@@ -1714,7 +1714,7 @@ fn a_staged_overwrite_of_strings_stores_each_chunk_as_both_libraries_read_it(
     }
     assert_eq!(stored, expected);
 
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     file.dataset("d")
         .unwrap()
         .write_slice(&var_len_strings(["rewritten-9".to_owned()]), 9..10)

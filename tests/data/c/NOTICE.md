@@ -4,7 +4,7 @@
 Their notice records the producer, consumers, layout premises, and retention rationale.
 
 Native interoperability tests construct fresh files through
-`crates/test-util-hdf5/src/native_fixtures.rs`, under the optional `__hdf5-1.10`
+`crates/test-util-hdf5/src/native_fixtures.rs`, under the optional `__libhdf5-1.10`
 capability. `crates/crosscheck/tests/main/native_fixtures.rs` checks those files
 across reader backends.
 

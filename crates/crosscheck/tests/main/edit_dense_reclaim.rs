@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Interoperability tests for the reclamation of dense attribute and dense link storage.
 //!
 //! libhdf5 writes each file, [`File::open_rw`] edits it, and libhdf5 reads the result. The cases
@@ -7,10 +7,6 @@
 
 use std::path::Path;
 
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::plist::group_create::{GroupCreate, GroupCreateBuilder};
-use hdf5::{IndexType, IterationOrder};
 use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::DecodedStoredAddress;
@@ -32,6 +28,10 @@ use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::LinkMessage;
 use hdf5_pure_format::__private::LinkTarget;
 use hdf5_pure_format::__private::ObjectHeader;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::plist::group_create::{GroupCreate, GroupCreateBuilder};
+use libhdf5::{IndexType, IterationOrder};
 use rstest::rstest;
 
 use test_util::fractal_heap;
@@ -44,8 +44,8 @@ use test_util_hdf5::storage;
 
 use crate::heap_allocations::{self, AllocationClass, Heap};
 
-fn object_location(path: &Path, object: &str) -> (hdf5::File, hdf5::Location) {
-    let file = hdf5::File::open(path)
+fn object_location(path: &Path, object: &str) -> (libhdf5::File, libhdf5::Location) {
+    let file = libhdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
     let location = if object == "g" {
         (*file
@@ -131,7 +131,7 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
         );
         drop(pure);
 
-        let c = hdf5::File::open(&path).unwrap();
+        let c = libhdf5::File::open(&path).unwrap();
         absence::assert_libhdf5_absent(&c.dataset("d").unwrap_err(), "d");
         assert_eq!(attribute_names_by_name(&path, "g").len(), 12);
         assert!(
@@ -141,7 +141,7 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
         drop(c);
 
         {
-            let c = hdf5::File::open_rw(&path).unwrap();
+            let c = libhdf5::File::open_rw(&path).unwrap();
             c.new_dataset::<i32>()
                 .shape([4])
                 .create("after")
@@ -183,7 +183,7 @@ fn write_dense_link_reclaim_fixture(
     paged: bool,
     alias_group: bool,
 ) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
         .with_fcpl(|p| {
             p.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -412,7 +412,7 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
         );
         drop(pure);
 
-        let c = hdf5::File::open(&path).unwrap();
+        let c = libhdf5::File::open(&path).unwrap();
         absence::assert_libhdf5_absent(&c.group("g").unwrap_err(), "g");
         assert_eq!(
             c.dataset("shared_survivor")
@@ -496,7 +496,7 @@ fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
         );
     }
     assert_eq!(
-        hdf5::File::open(&path)
+        libhdf5::File::open(&path)
             .unwrap()
             .dataset("shared_survivor")
             .unwrap()
@@ -544,8 +544,8 @@ fn huge_name(prefix: &str, i: usize) -> String {
     format!("{prefix}{i}_{}", "z".repeat(5000))
 }
 
-fn create_dense_file(path: &Path, file_space: FileSpace) -> hdf5::File {
-    hdf5::File::with_options()
+fn create_dense_file(path: &Path, file_space: FileSpace) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
         .with_fcpl(|p| match file_space {
             FileSpace::Managers | FileSpace::ManagersAfterUserblock => {
@@ -570,7 +570,7 @@ fn create_dense_file(path: &Path, file_space: FileSpace) -> hdf5::File {
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()))
 }
 
-fn add_dense_objects(file: &hdf5::File, names: &DenseNames, huge_objects: usize) {
+fn add_dense_objects(file: &libhdf5::File, names: &DenseNames, huge_objects: usize) {
     let group = file.create_group("g").expect("create dense group");
     for (i, link_name) in (0i32..).zip(&names.links) {
         group
@@ -592,7 +592,7 @@ fn add_dense_objects(file: &hdf5::File, names: &DenseNames, huge_objects: usize)
     add_dense_attribute_dataset(file, names, huge_objects);
 }
 
-fn add_dense_attribute_dataset(file: &hdf5::File, names: &DenseNames, huge_objects: usize) {
+fn add_dense_attribute_dataset(file: &libhdf5::File, names: &DenseNames, huge_objects: usize) {
     let dataset = file
         .new_dataset::<i32>()
         .shape([4])
@@ -601,7 +601,7 @@ fn add_dense_attribute_dataset(file: &hdf5::File, names: &DenseNames, huge_objec
     add_dense_attributes(&dataset, names, huge_objects);
 }
 
-fn add_dense_attributes(owner: &hdf5::Location, names: &DenseNames, huge_objects: usize) {
+fn add_dense_attributes(owner: &libhdf5::Location, names: &DenseNames, huge_objects: usize) {
     for (i, attr_name) in (0i64..).zip(&names.attributes) {
         owner
             .new_attr::<i64>()
@@ -927,7 +927,7 @@ fn assert_page_classes(path: &Path, page_size: u64, allocations: &[(u64, u64, Pa
 }
 
 fn assert_c_reads_after_reclaim(path: &Path) {
-    let c = hdf5::File::open(path).unwrap();
+    let c = libhdf5::File::open(path).unwrap();
     absence::assert_libhdf5_absent(&c.group("g").unwrap_err(), "g");
     absence::assert_libhdf5_absent(&c.dataset("d").unwrap_err(), "d");
     assert_eq!(
@@ -1022,7 +1022,7 @@ fn c_written_heap_ghost_sections_have_only_physical_manager_ownership(
     let path = dir.path().join("dense_heap_ghost_sections.h5");
     write_dense_fixture(&path, file_space, &names, 0, false);
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let group = file.group("g").unwrap();
         for link in &names.links[..150] {
             group.unlink(link).unwrap();
@@ -1119,8 +1119,8 @@ fn rewriting_a_c_written_dense_attribute_set_reclaims_its_old_heap(
     if let Some(page_size) = file_space.page_size() {
         assert_page_classes(&path, page_size, &old);
     }
-    let c = hdf5::File::open(&path).unwrap();
-    let location: hdf5::Location = if owner == "a" {
+    let c = libhdf5::File::open(&path).unwrap();
+    let location: libhdf5::Location = if owner == "a" {
         (*c.group("a").unwrap()).clone()
     } else {
         (**c.dataset("d").unwrap()).clone()
@@ -1197,7 +1197,7 @@ fn a_surviving_hard_link_keeps_a_dense_heap_live(#[values(false, true)] managed_
 // libhdf5 1.10.11 allocates the persisted free-space managers of a paged file from the end of the
 // file at every close (`H5MF_settle_meta_data_fsm` in `H5MF.c`), and the rest of their pages stays
 // untracked, so each of its sessions grows the file.
-#[cfg(feature = "__hdf5-1.12")]
+#[cfg(feature = "__libhdf5-1.12")]
 #[rstest]
 fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_size(
     #[values(false, true)] managed_fsm: bool,
@@ -1223,7 +1223,7 @@ fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_
     let sizes: Vec<(u64, u64)> = (0..8)
         .map(|_| {
             {
-                let file = hdf5::File::open_rw(&path).unwrap();
+                let file = libhdf5::File::open_rw(&path).unwrap();
                 add_dense_objects(&file, &names, 1);
                 file.close().unwrap();
             }
@@ -1347,7 +1347,7 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
     }
     assert_c_reads_after_reclaim(&path);
     {
-        let c = hdf5::File::open_rw(&path).unwrap();
+        let c = libhdf5::File::open_rw(&path).unwrap();
         let group = c
             .create_group_builder()
             .set_gcpl(&filtered_link_gcpl())
@@ -1359,7 +1359,7 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
         drop(group);
         c.close().unwrap();
     }
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let mut names = c.group("g").unwrap().member_names().unwrap();
     names.sort();
     assert_eq!(names, filtered_link_names(links));

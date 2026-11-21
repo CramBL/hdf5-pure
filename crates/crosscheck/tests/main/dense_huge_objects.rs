@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Interoperability tests for dense heap reads and live storage protection.
 //!
 //! The fixtures include managed blocks, huge-object indexes and payloads, and internal free-space
@@ -28,7 +28,7 @@ fn long_name(i: usize, len: usize) -> String {
 ///
 /// The latest format makes the C library store the links densely in a fractal heap.
 fn write_group(path: &Path, names: &[String]) {
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_latest())
         .create(path)
         .unwrap();
@@ -145,7 +145,7 @@ fn reads_dense_attributes_stored_as_huge_objects() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("huge_attrs.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_latest())
             .create(&path)
             .unwrap();
@@ -187,7 +187,7 @@ fn c_written_dense_attribute_huge_storage_stays_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owned_huge_attrs.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_latest())
             .create(&path)
             .unwrap();
@@ -213,7 +213,7 @@ fn c_written_dense_attribute_huge_storage_stays_unavailable() {
         assert_huge_only_storage_unavailable(&path) > 0,
         "fixture should force a multi-node huge-object index"
     );
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     let dataset = reference.dataset("data").unwrap();
     assert_eq!(dataset.read_raw::<i32>().unwrap(), [7]);
     for index in 0..40 {

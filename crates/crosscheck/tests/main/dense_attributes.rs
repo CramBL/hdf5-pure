@@ -1,8 +1,8 @@
 //! Native conformance for dense dataset and root attributes.
 
-#![cfg(feature = "hdf5")]
-use hdf5::datatype::ByteOrder;
+#![cfg(feature = "libhdf5")]
 use hdf5_pure::DatatypeByteOrder;
+use libhdf5::datatype::ByteOrder;
 use rstest::rstest;
 use test_util::dense_attributes::Fixture;
 use test_util::temp;

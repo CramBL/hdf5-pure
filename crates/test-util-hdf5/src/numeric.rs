@@ -4,22 +4,22 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::path::Path;
 
-use hdf5::Datatype;
-use hdf5::H5Type;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::datatype::ByteOrder as NativeByteOrder;
-use hdf5::globals;
-use hdf5::types::TypeDescriptor;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::DatatypeByteOrder;
-use hdf5_sys::h5d;
-use hdf5_sys::h5p::H5P_DEFAULT;
-use hdf5_sys::h5s;
-use hdf5_sys::h5s::H5S_ALL;
-use hdf5_sys::h5t;
-use hdf5_sys::h5t::H5T_class_t;
-use hdf5_sys::h5t::H5T_order_t;
-use hdf5_sys::h5t::H5T_pad_t;
+use libhdf5::Datatype;
+use libhdf5::H5Type;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::datatype::ByteOrder as NativeByteOrder;
+use libhdf5::globals;
+use libhdf5::types::TypeDescriptor;
+use libhdf5_sys::h5d;
+use libhdf5_sys::h5p::H5P_DEFAULT;
+use libhdf5_sys::h5s;
+use libhdf5_sys::h5s::H5S_ALL;
+use libhdf5_sys::h5t;
+use libhdf5_sys::h5t::H5T_class_t;
+use libhdf5_sys::h5t::H5T_order_t;
+use libhdf5_sys::h5t::H5T_pad_t;
 
 /// Writes a filtered dataset named `values` and returns the reference library's decoded values.
 ///
@@ -86,14 +86,14 @@ pub fn write_chunked_sweep(path: &Path, rows: usize, sparse: bool) -> Vec<i32> {
 /// numeric, or the library cannot create the file or write the dataset.
 pub fn write_stored(path: &Path, datatype: &Datatype, bytes: &[u8], count: usize) {
     assert_eq!(bytes.len(), datatype.size() * count);
-    let file = hdf5::File::create(path).unwrap();
+    let file = libhdf5::File::create(path).unwrap();
     let dataset = file
         .new_dataset_builder()
         .empty_as(datatype)
         .shape(count)
         .create("values")
         .unwrap();
-    let status = hdf5::sync::sync(|| {
+    let status = libhdf5::sync::sync(|| {
         // SAFETY: The lock and live handles cover the calls, and the checked numeric type has
         // no pointer fields. `bytes` holds `count` complete elements, matching the dataset extent.
         unsafe {
@@ -160,7 +160,7 @@ impl ByteOrder {
             Self::BigEndian => H5T_order_t::H5T_ORDER_BE,
             Self::LittleEndian => H5T_order_t::H5T_ORDER_LE,
         };
-        let status = hdf5::sync::sync(|| {
+        let status = libhdf5::sync::sync(|| {
             // SAFETY: The library lock serializes access, and `datatype` owns a live
             // transient datatype throughout the call.
             unsafe { h5t::H5Tset_order(datatype.id(), order) }
@@ -169,7 +169,7 @@ impl ByteOrder {
         datatype
     }
 
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     pub(crate) fn native_order(self) -> NativeByteOrder {
         match self {
             Self::BigEndian => NativeByteOrder::BigEndian,
@@ -177,7 +177,7 @@ impl ByteOrder {
         }
     }
 
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     pub(crate) fn pure_order(self) -> DatatypeByteOrder {
         match self {
             Self::BigEndian => DatatypeByteOrder::BigEndian,
@@ -216,12 +216,12 @@ impl NumericClass {
         match self {
             Self::FixedPoint => Datatype::from_type::<u16>().unwrap(),
             Self::FloatingPoint => Datatype::from_type::<f32>().unwrap(),
-            Self::BitField => hdf5::sync::sync(|| {
+            Self::BitField => libhdf5::sync::sync(|| {
                 // SAFETY: The lock serializes access to the predefined bit-field datatype.
                 let id = unsafe { h5t::H5Tcopy(*globals::H5T_STD_B16LE) };
                 assert!(id >= 0);
                 // SAFETY: The returned handle owns the copied datatype ID.
-                unsafe { hdf5::from_id::<Datatype>(id) }.unwrap()
+                unsafe { libhdf5::from_id::<Datatype>(id) }.unwrap()
             }),
         }
     }
@@ -244,10 +244,10 @@ pub fn bit_padding(one: bool) -> H5T_pad_t {
 /// # Examples
 ///
 /// ```
-/// use hdf5::Datatype;
-/// use hdf5::types::CompoundField;
-/// use hdf5::types::CompoundType;
-/// use hdf5::types::TypeDescriptor;
+/// use libhdf5::Datatype;
+/// use libhdf5::types::CompoundField;
+/// use libhdf5::types::CompoundType;
+/// use libhdf5::types::TypeDescriptor;
 /// use test_util_hdf5::numeric;
 ///
 /// let datatype = Datatype::from_descriptor(&TypeDescriptor::Compound(CompoundType {
@@ -259,7 +259,7 @@ pub fn bit_padding(one: bool) -> H5T_pad_t {
 /// }))?;
 /// let padded = numeric::padded_compound(&datatype, [true, false, true]);
 /// assert_eq!(padded.size(), 8);
-/// # Ok::<(), hdf5::Error>(())
+/// # Ok::<(), libhdf5::Error>(())
 /// ```
 ///
 /// # Panics
@@ -270,12 +270,12 @@ pub fn padded_compound(datatype: &Datatype, padding: [bool; 3]) -> Datatype {
     let TypeDescriptor::Compound(compound) = datatype.to_descriptor().unwrap() else {
         panic!("expected compound datatype");
     };
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and the descriptor supplies the compound size.
         let id = unsafe { h5t::H5Tcreate(H5T_class_t::H5T_COMPOUND, compound.size) };
         assert!(id >= 0);
         // SAFETY: The returned handle owns the newly created datatype ID.
-        let datatype = unsafe { hdf5::from_id::<Datatype>(id) }.unwrap();
+        let datatype = unsafe { libhdf5::from_id::<Datatype>(id) }.unwrap();
         for field in compound.fields {
             let member = Datatype::from_descriptor(&field.ty).unwrap();
             let name = CString::new(field.name).unwrap();
@@ -312,21 +312,21 @@ pub fn padded_compound(datatype: &Datatype, padding: [bool; 3]) -> Datatype {
 /// # Examples
 ///
 /// ```
-/// use hdf5::Datatype;
+/// use libhdf5::Datatype;
 /// use test_util_hdf5::numeric;
 ///
 /// let base = Datatype::from_type::<f32>()?;
 /// let string = numeric::variable_length_string(&base);
 /// assert_eq!(string.size(), core::mem::size_of::<usize>());
-/// # Ok::<(), hdf5::Error>(())
+/// # Ok::<(), libhdf5::Error>(())
 /// ```
 pub fn variable_length_string(base: &Datatype) -> Datatype {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and `base` owns a live datatype.
         let id = unsafe { h5t::H5Tvlen_create(base.id()) };
         assert!(id >= 0);
         // SAFETY: The returned handle owns the newly created datatype ID.
-        let sequence = unsafe { hdf5::from_id::<Datatype>(id) }.unwrap();
+        let sequence = unsafe { libhdf5::from_id::<Datatype>(id) }.unwrap();
         let mut size = 0;
         assert_eq!(
             // SAFETY: The lock and live handle cover the call. A null buffer requests its encoded size.
@@ -344,7 +344,7 @@ pub fn variable_length_string(base: &Datatype) -> Datatype {
         let id = unsafe { h5t::H5Tdecode1(encoded.as_ptr().cast()) };
         assert!(id >= 0);
         // SAFETY: The returned handle owns the newly decoded datatype ID.
-        unsafe { hdf5::from_id::<Datatype>(id) }.unwrap()
+        unsafe { libhdf5::from_id::<Datatype>(id) }.unwrap()
     })
 }
 
@@ -359,22 +359,22 @@ pub fn variable_length_string(base: &Datatype) -> Datatype {
 ///
 /// ```
 /// # use std::error::Error;
-/// use hdf5::Datatype;
-/// use hdf5::types::TypeDescriptor;
+/// use libhdf5::Datatype;
+/// use libhdf5::types::TypeDescriptor;
 /// use test_util_hdf5::numeric;
 /// # let dir = tempfile::tempdir()?;
-/// # let file = hdf5::File::create(dir.path().join("strings.h5"))?;
+/// # let file = libhdf5::File::create(dir.path().join("strings.h5"))?;
 ///
 /// let datatype = Datatype::from_descriptor(&TypeDescriptor::VarLenAscii)?;
 /// let dataset = file.new_dataset_builder().empty_as(&datatype).shape(1).create("strings")?;
 /// numeric::write_variable_length_strings(&dataset, &[c"alpha"]);
 /// # Ok::<(), Box<dyn Error>>(())
 /// ```
-pub fn write_variable_length_strings(dataset: &hdf5::Dataset, values: &[&CStr]) {
+pub fn write_variable_length_strings(dataset: &libhdf5::Dataset, values: &[&CStr]) {
     let datatype = dataset.dtype().unwrap();
     let space = dataset.space().unwrap();
     let pointers: Vec<_> = values.iter().map(|value| value.as_ptr()).collect();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and the handles remain live throughout the calls.
         let count = unsafe {
             assert_eq!(h5t::H5Tis_variable_str(datatype.id()), 1);

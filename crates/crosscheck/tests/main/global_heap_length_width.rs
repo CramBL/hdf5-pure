@@ -1,10 +1,10 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::plist::file_create::Sizeof;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure_format::__private::LengthWidth;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 use test_util::global_heap;
 use test_util_hdf5::global_heap as libhdf5_heap;

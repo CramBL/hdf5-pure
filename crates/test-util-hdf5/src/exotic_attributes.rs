@@ -2,16 +2,16 @@
 
 use std::path::Path;
 
-use hdf5::Datatype;
-use hdf5::H5Type;
-use hdf5::Location;
-use hdf5::dataset::Layout;
-use hdf5::datatype::ByteOrder;
-use hdf5::types::FixedAscii;
-use hdf5::types::FixedUnicode;
-use hdf5::types::TypeDescriptor;
-use hdf5_sys::h5t;
-use hdf5_sys::h5t::H5T_str_t as NativePadding;
+use libhdf5::Datatype;
+use libhdf5::H5Type;
+use libhdf5::Location;
+use libhdf5::dataset::Layout;
+use libhdf5::datatype::ByteOrder;
+use libhdf5::types::FixedAscii;
+use libhdf5::types::FixedUnicode;
+use libhdf5::types::TypeDescriptor;
+use libhdf5_sys::h5t;
+use libhdf5_sys::h5t::H5T_str_t as NativePadding;
 
 use crate::numeric::ByteOrder as NumericOrder;
 
@@ -137,7 +137,7 @@ fn assert_attributes(owner: &Location) {
 }
 
 fn string_padding(datatype: &Datatype) -> NativePadding {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The datatype owns a live HDF5 handle, and the library lock serializes access.
         unsafe { h5t::H5Tget_strpad(datatype.id()) }
     })

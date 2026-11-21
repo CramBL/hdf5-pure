@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! A chunk index numbers its slots over the dataset's *maximum* chunk grid, and
 //! an Extensible Array rotates its unlimited dimension to the front first
 //! (issue #299). Both facts are invisible to a round trip through this crate
@@ -12,9 +12,9 @@
 //! or `maxshape == shape`, and growing the *first* dimension changes no
 //! multiplier, so three of the four obvious fixtures pass over the bug.
 
-use hdf5::dataset::AllocTime;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{ChunkIndex, Error, File, FileBuilder, FormatError, MaxExtent};
+use libhdf5::dataset::AllocTime;
 
 use test_util::extensible_array;
 use test_util_hdf5::{assertion, dataset, file};
@@ -187,7 +187,7 @@ fn c_write(path: &std::path::Path, shape: &[u64], chunks: &[u64], maxshape: &[Ma
             shape
                 .iter()
                 .zip(maxshape)
-                .map(|(&s, &m)| hdf5::Extent::new(s as usize, m.size().map(|m| m as usize)))
+                .map(|(&s, &m)| libhdf5::Extent::new(s as usize, m.size().map(|m| m as usize)))
                 .collect::<Vec<_>>(),
         )
         .create("d")
@@ -214,7 +214,7 @@ fn c_write_early_allocated(
             shape
                 .iter()
                 .zip(maxshape)
-                .map(|(&s, &m)| hdf5::Extent::new(s as usize, m.size().map(|m| m as usize)))
+                .map(|(&s, &m)| libhdf5::Extent::new(s as usize, m.size().map(|m| m as usize)))
                 .collect::<Vec<_>>(),
         )
         .create("d")
@@ -587,7 +587,10 @@ fn a_grown_multidimensional_dataset_reads_back_through_both_libraries() {
     let ds = file
         .new_dataset::<u32>()
         .chunk([2usize, 2])
-        .shape([hdf5::Extent::new(3, None), hdf5::Extent::new(3, Some(8))])
+        .shape([
+            libhdf5::Extent::new(3, None),
+            libhdf5::Extent::new(3, Some(8)),
+        ])
         .create("d")
         .unwrap();
     ds.write_raw(&values(&[3, 3])).unwrap();

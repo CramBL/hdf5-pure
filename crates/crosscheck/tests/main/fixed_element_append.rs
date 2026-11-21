@@ -1,10 +1,10 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use core::fmt::Debug;
 
-use hdf5::H5Type;
-use hdf5::types::FixedAscii as NativeAscii;
 use hdf5_pure::{File, FileAccessProperties, FixedAscii, H5Element, MemoryStrategy, SyncPolicy};
+use libhdf5::H5Type;
+use libhdf5::types::FixedAscii as NativeAscii;
 use rstest::rstest;
 
 use test_util_hdf5::dataset::{AppendFilters, AppendMode, Unlimited};
@@ -58,7 +58,7 @@ fn fixed_appends_match_libhdf5<T, N>(
         assert_eq!(target.read::<T>().unwrap(), values);
     }
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let target = file.dataset("values").unwrap();
         assert_eq!(target.shape(), [7]);
         assert_eq!(target.chunk(), Some(vec![4]));
@@ -72,8 +72,8 @@ fn fixed_appends_match_libhdf5<T, N>(
             match filters {
                 AppendFilters::Plain => vec![],
                 AppendFilters::ShuffleDeflate => vec![
-                    hdf5::filters::Filter::Shuffle,
-                    hdf5::filters::Filter::Deflate(hdf5_pure::DeflateLevel::Six.get()),
+                    libhdf5::filters::Filter::Shuffle,
+                    libhdf5::filters::Filter::Deflate(hdf5_pure::DeflateLevel::Six.get()),
                 ],
             }
         );

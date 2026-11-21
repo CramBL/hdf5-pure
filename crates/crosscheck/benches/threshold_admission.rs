@@ -22,7 +22,7 @@ fn main() -> ExitCode {
     }
     println!(
         "native={:?} memory=Bounded sync=OnClose",
-        hdf5::library_version()
+        libhdf5::library_version()
     );
     let directory = tempfile::tempdir().unwrap();
     for origin in [Origin::Native, Origin::Pure] {

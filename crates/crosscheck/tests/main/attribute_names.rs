@@ -1,11 +1,8 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use hdf5::Location;
-use hdf5::plist::attribute_create::CharEncoding;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
@@ -14,6 +11,9 @@ use hdf5_pure_format::__private::Dataspace;
 use hdf5_pure_format::__private::DataspaceType;
 use hdf5_pure_format::__private::DatatypeLocation;
 use hdf5_pure_format::OffsetWidth;
+use libhdf5::Location;
+use libhdf5::plist::attribute_create::CharEncoding;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 use test_util_hdf5::file;
 
@@ -73,7 +73,7 @@ fn attribute_name_punctuation_whitespace_and_maximum_length_round_trip(
     }
     names.sort();
     {
-        let c = hdf5::File::open(&path).unwrap();
+        let c = libhdf5::File::open(&path).unwrap();
         let group = c.group("group").unwrap();
         let dataset = c.dataset("data").unwrap();
         let owners: [&Location; 3] = [&c, &group, &dataset];
@@ -179,7 +179,7 @@ fn staged_attribute_names_declare_encoding_independently_of_value_type(
         std::fs::write(&path, builder.finish().unwrap()).unwrap();
     }
     {
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         let group = file.group("group").unwrap();
         let dataset = file.dataset("data").unwrap();
         let owners: [&Location; 3] = [&file, &group, &dataset];
@@ -267,7 +267,7 @@ fn c_reads_attributes_at_the_utf8_compact_storage_boundary(
         test_util::fractal_heap::has_fractal_heap(&std::fs::read(&path).unwrap()),
         dense
     );
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(file.attr_names().unwrap(), [name]);
     assert_eq!(file.loc_info().unwrap().num_attrs, 1);
     let attribute = file.attr(name).unwrap();
@@ -307,7 +307,7 @@ fn c_reads_attribute_name_encoding_after_compact_edits(
             .unwrap();
         file.commit().unwrap();
     }
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let group = file.group("group").unwrap();
     let dataset = file.dataset("data").unwrap();
     let owners: [&Location; 3] = [&file, &group, &dataset];

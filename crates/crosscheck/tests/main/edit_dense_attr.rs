@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! In-place attribute edits that land in dense (fractal-heap) storage (issue #102).
 //!
 //! `File::open_rw` used to refuse any attribute edit that touched a heap: an
@@ -68,7 +68,7 @@ fn write_compact(path: &std::path::Path) {
 /// Every attribute of `path`'s dataset `d`, read by libhdf5, so a
 /// heap this crate builds is checked by the library that defines the format.
 fn c_dataset_attrs(path: &std::path::Path) -> Vec<(String, i64)> {
-    let f = hdf5::File::open(path).unwrap();
+    let f = libhdf5::File::open(path).unwrap();
     let ds = f.dataset("d").unwrap();
     let mut out: Vec<(String, i64)> = ds
         .attr_names()
@@ -87,7 +87,7 @@ fn c_dataset_attrs(path: &std::path::Path) -> Vec<(String, i64)> {
 /// group at `path`. The heap these tests build is only worth as much as the
 /// library that defines the format can make of it, so every case checks at least
 /// one value this way.
-fn c_dataset_attr(file: &hdf5::File, dataset: &str, name: &str) -> i64 {
+fn c_dataset_attr(file: &libhdf5::File, dataset: &str, name: &str) -> i64 {
     file.dataset(dataset)
         .unwrap()
         .attr(name)
@@ -96,7 +96,7 @@ fn c_dataset_attr(file: &hdf5::File, dataset: &str, name: &str) -> i64 {
         .unwrap()
 }
 
-fn c_group_attr(file: &hdf5::File, group: &str, name: &str) -> i64 {
+fn c_group_attr(file: &libhdf5::File, group: &str, name: &str) -> i64 {
     file.group(group)
         .unwrap()
         .attr(name)
@@ -185,7 +185,7 @@ fn a_dense_object_takes_a_new_attribute() {
     assert_eq!(g.len(), DENSE_COUNT + 1);
     assert_eq!(g.get("added"), Some(&AttrValue::I64(98)));
 
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     assert_eq!(c_dataset_attr(&c, "d", "added"), 99);
     assert_eq!(c_dataset_attr(&c, "d", "attr_00"), 0);
     assert_eq!(c_group_attr(&c, "g", "added"), 98);
@@ -281,7 +281,7 @@ fn removing_every_dense_attribute_leaves_an_object_with_none() {
     let d = f.dataset("d").unwrap();
     assert!(d.attrs().unwrap().is_empty());
     assert_eq!(d.read_i32().unwrap(), vec![1, 2, 3, 4]);
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     assert_eq!(c.dataset("d").unwrap().attr_names().unwrap().len(), 0);
 }
 
@@ -313,7 +313,7 @@ fn an_attribute_too_large_for_the_object_header_goes_to_a_heap() {
     assert_eq!(attrs.get("big"), Some(&AttrValue::I64Array(big.clone())));
     assert_eq!(attrs.len(), 4, "the three compact ones came along");
 
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     let got: Vec<i64> = c
         .dataset("d")
         .unwrap()
@@ -380,8 +380,8 @@ fn a_variable_length_attribute_survives_a_dense_rebuild() {
     // `VarLenAsciiCharArray` as a variable-length sequence of one-character ASCII
     // strings, which is the type named here; what the read proves is that the
     // element references the rebuild patched resolve to the right heap bytes.
-    let c = hdf5::File::open(&p).unwrap();
-    let got: Vec<hdf5::types::VarLenArray<hdf5::types::FixedAscii<1>>> = c
+    let c = libhdf5::File::open(&p).unwrap();
+    let got: Vec<libhdf5::types::VarLenArray<libhdf5::types::FixedAscii<1>>> = c
         .dataset("d")
         .unwrap()
         .attr("names")
@@ -453,7 +453,7 @@ fn a_dataset_added_in_place_may_carry_a_dense_attribute_set() {
         (0..64).collect::<Vec<_>>(),
     );
 
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     for name in ["contig", "chunked"] {
         assert_eq!(
             c.dataset(name).unwrap().attr_names().unwrap().len(),
@@ -493,7 +493,7 @@ fn a_group_created_in_place_may_carry_a_dense_attribute_set() {
         assert_eq!(attrs.get(&name), Some(&AttrValue::I64(i as i64)));
     }
 
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     assert_eq!(c_group_attr(&c, "fresh", "attr_09"), 9);
 }
 
@@ -523,7 +523,7 @@ fn the_root_group_takes_a_dense_attribute_set() {
     // must be untouched by the root's move to a heap.
     assert_eq!(f.dataset("d").unwrap().attrs().unwrap().len(), 3);
 
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     assert_eq!(c_group_attr(&c, "/", "attr_04"), 4);
 }
 
@@ -559,7 +559,7 @@ fn a_dense_edit_keeps_a_chunked_dataset_readable() {
         f.dataset("d").unwrap().read_i32().unwrap(),
         (0..64).collect::<Vec<_>>(),
     );
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     assert_eq!(
         c.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         (0..64).collect::<Vec<_>>(),
@@ -601,7 +601,7 @@ fn a_bounded_session_edits_a_dense_attribute_set() {
         vec![1, 2, 3, 4]
     );
 
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     assert_eq!(c_dataset_attr(&c, "d", "added"), 42);
 }
 
@@ -651,7 +651,7 @@ fn an_attribute_name_past_its_length_field_is_refused_without_writing() {
 /// bounds are what give the objects the version 2 headers this engine edits.
 #[test]
 fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
-    use hdf5::{ObjectReference, ObjectReference1};
+    use libhdf5::{ObjectReference, ObjectReference1};
 
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("ref_attr.h5");
@@ -725,7 +725,7 @@ fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
 /// emerge from the rebuilt heap intact.
 #[test]
 fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("dense_ref_attr.h5");
@@ -767,7 +767,7 @@ fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
     // Counted through the C library: `AttrValue` has no reference variant, so
     // `attrs()` omits the reference attribute whether or not it survived, and
     // would report the same 13 either way.
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     let ds = c.dataset("d").unwrap();
     assert_eq!(ds.attr_names().unwrap().len(), DENSE_COUNT + 2);
     let v: i64 = ds.attr("added").unwrap().read_scalar().unwrap();
@@ -791,8 +791,8 @@ fn an_already_dense_object_keeps_its_reference_attribute_through_a_rebuild() {
 /// cost the edit for no gain.
 #[test]
 fn a_variable_length_of_references_does_not_block_the_move_to_a_heap() {
-    use hdf5::types::VarLenArray;
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::types::VarLenArray;
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("dimension_list.h5");
@@ -824,7 +824,7 @@ fn a_variable_length_of_references_does_not_block_the_move_to_a_heap() {
         fractal_heap::has_fractal_heap(&std::fs::read(&p).unwrap()),
         "ten attributes are past what the object header holds",
     );
-    let c = hdf5::File::open(&p).unwrap();
+    let c = libhdf5::File::open(&p).unwrap();
     let ds = c.dataset("d").unwrap();
     assert_eq!(ds.attr_names().unwrap().len(), 10);
     let lists = ds

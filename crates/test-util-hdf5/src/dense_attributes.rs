@@ -20,21 +20,21 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 use std::fmt::Debug;
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 use std::path::Path;
 
-#[cfg(feature = "hdf5")]
-use hdf5::Dataset;
-#[cfg(feature = "hdf5")]
-use hdf5::H5Type;
-#[cfg(feature = "hdf5")]
-use hdf5::Location;
-#[cfg(feature = "hdf5")]
-use hdf5::dataset::Layout as NativeLayout;
-#[cfg(feature = "hdf5")]
-use hdf5::datatype::ByteOrder;
+#[cfg(feature = "libhdf5")]
+use libhdf5::Dataset;
+#[cfg(feature = "libhdf5")]
+use libhdf5::H5Type;
+#[cfg(feature = "libhdf5")]
+use libhdf5::Location;
+#[cfg(feature = "libhdf5")]
+use libhdf5::dataset::Layout as NativeLayout;
+#[cfg(feature = "libhdf5")]
+use libhdf5::datatype::ByteOrder;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
@@ -305,7 +305,7 @@ pub fn assert_storage(file: &File, image: &[u8], fixture: Fixture, byte_order: D
     );
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Writes a native dense attribute fixture and closes the file.
 ///
 /// # Panics
@@ -333,7 +333,7 @@ pub fn write_libhdf5(path: &Path, fixture: Fixture) {
     file.close().unwrap();
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Checks native dataset and attribute metadata, byte order, and values.
 ///
 /// # Panics
@@ -363,7 +363,7 @@ pub fn assert_libhdf5_contents(path: &Path, fixture: Fixture, byte_order: ByteOr
     file.close().unwrap();
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 fn write_attributes(owner: &Location, fixture: Fixture) {
     for (name, value) in fixture.attributes() {
         owner
@@ -375,7 +375,7 @@ fn write_attributes(owner: &Location, fixture: Fixture) {
     }
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 fn assert_native_attributes(owner: &Location, fixture: Fixture, byte_order: ByteOrder) {
     let mut names = owner.attr_names().unwrap();
     names.sort();
@@ -398,7 +398,7 @@ fn assert_native_attributes(owner: &Location, fixture: Fixture, byte_order: Byte
     }
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 fn assert_native_dataset<T: H5Type + Debug + PartialEq>(
     dataset: &Dataset,
     expected: &[T],

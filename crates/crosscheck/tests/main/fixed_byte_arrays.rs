@@ -1,16 +1,16 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::types::{IntSize, TypeDescriptor};
 use hdf5_pure::{Datatype, File, FileBuilder, LibVer};
+use libhdf5::types::{IntSize, TypeDescriptor};
 use rstest::rstest;
 
 #[rstest]
 #[case::width_one_v18(vec![[0], [255], [128]], LibVer::V18)]
 #[case::width_three_v18(vec![[0, 255, 128], [1, 2, 3], [4, 5, 6], [7, 8, 9]], LibVer::V18)]
 #[case::empty_v18(Vec::<[u8; 7]>::new(), LibVer::V18)]
-#[cfg_attr(feature = "__hdf5-1.10", case::width_one_v110(vec![[0], [255], [128]], LibVer::V110))]
-#[cfg_attr(feature = "__hdf5-1.10", case::width_three_v110(vec![[0, 255, 128], [1, 2, 3], [4, 5, 6], [7, 8, 9]], LibVer::V110))]
-#[cfg_attr(feature = "__hdf5-1.10", case::empty_v110(Vec::<[u8; 7]>::new(), LibVer::V110))]
+#[cfg_attr(feature = "__libhdf5-1.10", case::width_one_v110(vec![[0], [255], [128]], LibVer::V110))]
+#[cfg_attr(feature = "__libhdf5-1.10", case::width_three_v110(vec![[0, 255, 128], [1, 2, 3], [4, 5, 6], [7, 8, 9]], LibVer::V110))]
+#[cfg_attr(feature = "__libhdf5-1.10", case::empty_v110(Vec::<[u8; 7]>::new(), LibVer::V110))]
 fn libhdf5_reads_typed_byte_arrays<const N: usize>(
     #[case] values: Vec<[u8; N]>,
     #[case] libver: LibVer,
@@ -25,7 +25,7 @@ fn libhdf5_reads_typed_byte_arrays<const N: usize>(
     }
     builder.write(&path).unwrap();
     assert_eq!(File::open(&path).unwrap().libver_bound(), libver);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     assert_eq!(dataset.shape(), [values.len()]);
     assert_eq!(dataset.chunk(), (libver >= LibVer::V110).then(|| vec![3]));
@@ -44,7 +44,7 @@ fn typed_byte_arrays_read_libhdf5_files<const N: usize>(#[case] values: Vec<[u8;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("values.h5");
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         file.new_dataset::<[u8; N]>()
             .shape([values.len()])
             .create("values")

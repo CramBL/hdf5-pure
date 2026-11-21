@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Cross-validation for Extensible-Array-indexed chunked datasets (one unlimited
 //! dimension), in both directions against the reference C HDF5 library.
 //!
@@ -14,8 +14,6 @@
 
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::datatype::ByteOrder as CByteOrder;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
@@ -30,6 +28,8 @@ use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::LengthWidth;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OffsetWidth;
+use libhdf5::Extent;
+use libhdf5::datatype::ByteOrder as CByteOrder;
 use rstest::rstest;
 use test_util::bytes;
 use test_util::checksum;
@@ -107,7 +107,7 @@ fn pure_initialization_supports_native_first_writes(
     }
     assert_eq!(std::fs::read(&path).unwrap(), image);
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let dataset = file.dataset("d").unwrap();
         assert_eq!(dataset.shape(), [0]);
         assert_eq!(dataset.num_chunks().unwrap(), 0);
@@ -164,7 +164,7 @@ fn pure_writes_c_reads() {
         let path = dir.path().join("ea.h5");
         write_with_pure(&path, n);
 
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         let ds = file.dataset("d").unwrap();
         let values = ds.read_raw::<i32>().unwrap();
         let expected: Vec<i32> = (0..n as i32).collect();
@@ -232,7 +232,7 @@ fn eahd_stats_match_c_after_an_in_place_append() {
         );
         // The append itself must still be right, or the stats above would be
         // describing a file nobody can read.
-        let file = hdf5::File::open(&pure_path).unwrap();
+        let file = libhdf5::File::open(&pure_path).unwrap();
         let values = file.dataset("d").unwrap().read_raw::<i32>().unwrap();
         assert_eq!(values, (0..grown as i32).collect::<Vec<_>>());
     }
@@ -296,7 +296,7 @@ fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
             maximum_bits,
         );
         {
-            let file = hdf5::File::open_rw(target).unwrap();
+            let file = libhdf5::File::open_rw(target).unwrap();
             let dataset = file.dataset("d").unwrap();
             dataset.write_raw(&values[..len]).unwrap();
             assert_eq!(dataset.read_raw::<i32>().unwrap(), values[..len]);
@@ -318,7 +318,7 @@ fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
         extensible_array::header_stats(&oracle)
     );
     let chunks = {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let dataset = file.dataset("d").unwrap();
         assert_eq!(dataset.read_raw::<i32>().unwrap(), values[..grown]);
         dataset.resize([final_len]).unwrap();
@@ -477,7 +477,7 @@ fn sparse_append_statistics_match_allocated_blocks(
     let stride = u64::from(image[header + HEADER_ELEMENT_SIZE]);
     let appended = vec![9i32; end - start];
     {
-        let file = hdf5::File::open_rw(&oracle).unwrap();
+        let file = libhdf5::File::open_rw(&oracle).unwrap();
         let dataset = file.dataset("d").unwrap();
         dataset.resize([end]).unwrap();
         dataset.write_slice(&appended, start..end).unwrap();
@@ -507,7 +507,7 @@ fn sparse_append_statistics_match_allocated_blocks(
     };
     assert_eq!(extensible_array::header_stats(&oracle), expected);
     assert_eq!(extensible_array::header_stats(&path), expected);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     let mut expected_values = vec![0i32; end];
     expected_values[0] = 7;
@@ -571,7 +571,7 @@ fn sparse_partial_tail_statistics_match_c_across_append_sessions(
     std::fs::copy(&path, &oracle).unwrap();
     let end = start + appended.len() + usize::from(!reopen);
     {
-        let file = hdf5::File::open_rw(&oracle).unwrap();
+        let file = libhdf5::File::open_rw(&oracle).unwrap();
         let dataset = file.dataset("d").unwrap();
         dataset.resize([end]).unwrap();
         dataset
@@ -602,7 +602,7 @@ fn sparse_partial_tail_statistics_match_c_across_append_sessions(
         extensible_array::header_stats(&path),
         extensible_array::header_stats(&oracle)
     );
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     let mut expected = vec![8];
     expected.extend_from_slice(&appended);
@@ -648,7 +648,7 @@ fn sparse_geometry_overflow_is_rejected_before_append_writes(
     std::fs::write(&path, image).unwrap();
     let extent = usize::try_from(u64::MAX - 11).unwrap();
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let dataset = file.dataset("d").unwrap();
         dataset.write_raw(&[7i32]).unwrap();
         dataset.resize([extent]).unwrap();

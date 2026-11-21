@@ -1,18 +1,18 @@
 use std::fmt::Debug;
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::H5Type;
-use hdf5::datatype::ByteOrder;
-use hdf5::filters::Filter;
-use hdf5::plist::dataset_create::{FillTime as NativeFillTime, Layout as NativeLayout};
-use hdf5::types::FixedAscii as NativeAscii;
-use hdf5::types::TypeDescriptor;
 use hdf5_pure::{
     AttrValue, DatasetBuilder, File, FileAccessProperties, FileBuilder, FileSpaceSettings,
     FileSpaceStrategy, FillTime, FixedAscii, H5Element, Layout, MaxExtent, MemoryStrategy,
     SyncPolicy,
 };
+use libhdf5::Extent;
+use libhdf5::H5Type;
+use libhdf5::datatype::ByteOrder;
+use libhdf5::filters::Filter;
+use libhdf5::plist::dataset_create::{FillTime as NativeFillTime, Layout as NativeLayout};
+use libhdf5::types::FixedAscii as NativeAscii;
+use libhdf5::types::TypeDescriptor;
 use rstest::rstest;
 use test_util_hdf5::dataset::AppendMode;
 use test_util_hdf5::file;
@@ -204,7 +204,7 @@ fn typed_fixed_elements_initialize_and_append_batches<T, N>(
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
     super::assert_deferred_layout(&path, "schema");
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let dataset = native.dataset("schema").unwrap();
     assert_eq!(
         dataset.dtype().unwrap().to_descriptor().unwrap(),
@@ -231,7 +231,7 @@ fn typed_fixed_elements_initialize_and_append_batches<T, N>(
     assert_eq!(dataset.read::<T>().unwrap(), values);
     drop(dataset);
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let dataset = native.dataset("schema").unwrap();
     assert_eq!(dataset.shape(), [7]);
     assert_eq!(dataset.num_chunks(), Some(2));
@@ -288,7 +288,7 @@ fn assert_native_schema<N: H5Type + Copy + Debug + PartialEq>(
     fill: N,
     expected_order: Option<ByteOrder>,
 ) {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let dataset = file.dataset("schema").unwrap();
     let datatype = dataset.dtype().unwrap();
     assert_eq!(datatype.to_descriptor().unwrap(), N::type_descriptor());

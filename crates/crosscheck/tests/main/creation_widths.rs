@@ -1,11 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::ObjectReference;
-use hdf5::ObjectReference1;
-use hdf5::ReferencedObject;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetBuilder;
@@ -29,6 +23,12 @@ use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT_DIRECT;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FractalHeapHeader;
+use libhdf5::ObjectReference;
+use libhdf5::ObjectReference1;
+use libhdf5::ReferencedObject;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 use test_util_hdf5::object_copy;
 
@@ -259,7 +259,7 @@ fn unlimited_maxima_at_narrow_lengths_reopen_with_the_length_width_maximum(
     assert_eq!(dataset.read_i32().unwrap(), values);
     drop(dataset);
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let dataset = native.dataset("d").unwrap();
     assert_eq!(
         dataset.space().unwrap().maxdims(),
@@ -363,7 +363,7 @@ fn assert_creates_file(
         Vec::<i32>::new()
     );
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native.create_plist().unwrap().get_sizes().unwrap(),
         native_sizes
@@ -412,9 +412,9 @@ fn assert_creates_file(
     assert_eq!(
         native.info().unwrap().storage_type,
         if dense {
-            hdf5::GroupStorageType::Dense
+            libhdf5::GroupStorageType::Dense
         } else {
-            hdf5::GroupStorageType::Compact
+            libhdf5::GroupStorageType::Compact
         }
     );
     assert!(
@@ -566,7 +566,7 @@ fn userblocks_unallocated_storage_and_large_attributes_preserve_widths(
         [0, 0]
     );
     pure.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native.attr("large").unwrap().read_raw::<u8>().unwrap(),
         vec![42; 33_000]
@@ -595,7 +595,7 @@ fn userblocks_unallocated_storage_and_large_attributes_preserve_widths(
         [7, 11]
     );
     repacked.close().unwrap();
-    let native = hdf5::File::open(&output).unwrap();
+    let native = libhdf5::File::open(&output).unwrap();
     assert_eq!(
         native.attr("large").unwrap().read_raw::<u8>().unwrap(),
         vec![42; 33_000]
@@ -631,7 +631,7 @@ fn legacy_reference_creation_and_repack_check_the_offset_width(
         .with_path_references(&["target"]);
     if offsets == OffsetWidth::Eight {
         builder.write(&created).unwrap();
-        let file = hdf5::File::open(&created).unwrap();
+        let file = libhdf5::File::open(&created).unwrap();
         let references = file
             .dataset("references")
             .unwrap()
@@ -656,7 +656,7 @@ fn legacy_reference_creation_and_repack_check_the_offset_width(
         );
     }
     let source = directory.path().join("native.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_create_plist(|properties| {
             properties.sizes(SizeofInfo {
                 sizeof_addr,
@@ -705,7 +705,7 @@ fn legacy_reference_creation_and_repack_check_the_offset_width(
         return;
     }
     result.unwrap();
-    let file = hdf5::File::open(&output).unwrap();
+    let file = libhdf5::File::open(&output).unwrap();
     assert_eq!(
         file.create_plist().unwrap().get_sizes().unwrap(),
         SizeofInfo {
@@ -754,7 +754,7 @@ fn dense_variable_length_attributes_resolve_every_collection(
     // 4, with room for the 24-byte "tail".
     assert_eq!(test_util::global_heap::collection_starts(&bytes).len(), 259);
     std::fs::write(&path, bytes).unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         file.create_plist().unwrap().get_sizes().unwrap(),
         SizeofInfo {
@@ -896,7 +896,7 @@ fn dense_huge_attributes_select_the_heap_id_and_tracker_geometry(
     );
     assert_eq!(tracker.total_records, huge_count as u64);
     std::fs::write(&path, bytes).unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     for index in 0..huge_count {
         assert_eq!(
             file.attr(&format!("large{index}"))
@@ -914,7 +914,7 @@ fn dense_huge_attributes_select_the_heap_id_and_tracker_geometry(
     if direct && !streamed {
         let output = directory.path().join("repacked.h5");
         hdf5_pure::repack(&path, &output, &RepackOptions::new()).unwrap();
-        let file = hdf5::File::open(&output).unwrap();
+        let file = libhdf5::File::open(&output).unwrap();
         assert_eq!(
             file.create_plist().unwrap().get_sizes().unwrap(),
             SizeofInfo {

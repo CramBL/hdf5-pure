@@ -1,7 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::File;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::MessageType;
@@ -11,6 +9,8 @@ use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::SymbolTableMessage;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
 use rstest::rstest;
 use test_util::bytes;
 use test_util_hdf5::__private::c_object;
@@ -25,7 +25,7 @@ fn symbol_table_messages_preserve_native_addresses_and_bytes(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("symbol-table.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_earliest())
         .with_fcpl(|properties| {
             properties.sizes(SizeofInfo {

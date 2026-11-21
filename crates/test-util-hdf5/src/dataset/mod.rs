@@ -1,16 +1,10 @@
 //! Dataset fixtures, append modes, and filter pipelines shared by tests.
 //!
 //! [`Unlimited`] fixtures have rank one and an unlimited dimension. Native construction through
-//! libhdf5 requires the `__hdf5-1.10` feature.
+//! libhdf5 requires the `__libhdf5-1.10` feature.
 
 use std::path::Path;
 
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::Datatype;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::Extent;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::dataset::ChunkOpts;
 use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
@@ -21,8 +15,14 @@ use hdf5_pure::H5Element;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::ScaleOffset;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure_format::__private::FormatWidths;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::Datatype;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::Extent;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::dataset::ChunkOpts;
 
 mod append;
 
@@ -92,7 +92,7 @@ pub fn write_finite_chunked_i32(
 /// # Panics
 ///
 /// Panics if libhdf5 rejects creation, resizing, or closure.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_native_empty_single_chunk_i32(path: &Path, widths: FormatWidths, filtered: bool) {
     write_native_empty_finite_chunked_i32(path, widths, filtered, FiniteChunkIndex::Single);
 }
@@ -105,7 +105,7 @@ pub fn write_native_empty_single_chunk_i32(path: &Path, widths: FormatWidths, fi
 /// # Panics
 ///
 /// Panics if libhdf5 rejects creation, resizing, or closure.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_native_empty_finite_chunked_i32(
     path: &Path,
     widths: FormatWidths,
@@ -352,7 +352,7 @@ impl AppendInteropFixture {
     }
 
     /// Returns a C-library-written filtered fixture seeded with `0..len`.
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     pub const fn filtered_libhdf5(len: usize, chunk: u64) -> Self {
         Self {
             source: AppendInteropSource::Libhdf5,
@@ -364,7 +364,7 @@ impl AppendInteropFixture {
     }
 
     /// Returns a C-library-written filtered fixture with deterministic incompressible values.
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     pub const fn incompressible_libhdf5(seed: u32, len: usize, chunk: u64) -> Self {
         Self {
             source: AppendInteropSource::Libhdf5,
@@ -388,7 +388,7 @@ impl AppendInteropFixture {
         let fixture = Unlimited::new("d", &values, self.chunk).filters(self.filters);
         match self.source {
             AppendInteropSource::Pure => fixture.pure_create(path),
-            #[cfg(feature = "__hdf5-1.10")]
+            #[cfg(feature = "__libhdf5-1.10")]
             AppendInteropSource::Libhdf5 => fixture.libhdf5_create(path),
         }
         values
@@ -397,7 +397,7 @@ impl AppendInteropFixture {
 
 #[derive(Clone, Copy, Debug)]
 enum AppendInteropSource {
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     Libhdf5,
     Pure,
 }
@@ -414,7 +414,7 @@ pub struct Unlimited<'a, T> {
     filters: Vec<Filter>,
     fill: Option<T>,
     partial_edge_chunks_unfiltered: bool,
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     stored: Option<Datatype>,
 }
 
@@ -427,7 +427,7 @@ impl<'a, T: Copy> Unlimited<'a, T> {
             filters: Vec::new(),
             fill: None,
             partial_edge_chunks_unfiltered: false,
-            #[cfg(feature = "__hdf5-1.10")]
+            #[cfg(feature = "__libhdf5-1.10")]
             stored: None,
         }
     }
@@ -451,7 +451,7 @@ impl<'a, T: Copy> Unlimited<'a, T> {
     /// Sets the datatype the file stores the elements in, in place of the datatype of `T`.
     ///
     /// Only `libhdf5_create` writes the setting.
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     pub fn stored_as(mut self, datatype: Datatype) -> Self {
         self.stored = Some(datatype);
         self
@@ -486,10 +486,10 @@ impl<T: H5Element> Unlimited<'_, T> {
             ref filters,
             fill,
             partial_edge_chunks_unfiltered,
-            #[cfg(feature = "__hdf5-1.10")]
+            #[cfg(feature = "__libhdf5-1.10")]
             ref stored,
         } = *self;
-        #[cfg(feature = "__hdf5-1.10")]
+        #[cfg(feature = "__libhdf5-1.10")]
         assert!(
             stored.is_none(),
             "hdf5-pure stores the datatype of its element type"
@@ -513,8 +513,8 @@ impl<T: H5Element> Unlimited<'_, T> {
     }
 }
 
-#[cfg(feature = "__hdf5-1.10")]
-impl<T: hdf5::H5Type + Copy> Unlimited<'_, T> {
+#[cfg(feature = "__libhdf5-1.10")]
+impl<T: libhdf5::H5Type + Copy> Unlimited<'_, T> {
     /// Has the C library write a file in the 1.10 format holding only this dataset.
     ///
     /// Flushes the dataset and file, and checks close before returning.
@@ -589,10 +589,10 @@ pub fn read_pure<T: H5Element>(path: &Path, name: &str) -> Vec<T> {
 }
 
 /// Every element of the dataset at `name`, read by the C library.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 #[track_caller]
-pub fn read_libhdf5<T: hdf5::H5Type>(path: &Path, name: &str) -> Vec<T> {
-    let file = hdf5::File::open(path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+pub fn read_libhdf5<T: libhdf5::H5Type>(path: &Path, name: &str) -> Vec<T> {
+    let file = libhdf5::File::open(path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
     let values = file
         .dataset(name)
         .unwrap_or_else(|e| panic!("open {name:?} in {path:?}: {e}"))
@@ -624,10 +624,10 @@ pub fn read_pure_strings(path: &Path, name: &str) -> Vec<String> {
 ///
 /// Panics if the file or the dataset cannot be opened, the strings cannot be read, or the file
 /// cannot be closed.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 #[track_caller]
 pub fn read_libhdf5_strings(path: &Path, name: &str) -> Vec<String> {
-    read_libhdf5::<hdf5::types::VarLenUnicode>(path, name)
+    read_libhdf5::<libhdf5::types::VarLenUnicode>(path, name)
         .into_iter()
         .map(|string| string.as_str().to_owned())
         .collect()
@@ -673,13 +673,13 @@ pub fn incompressible(seed: u32, len: usize) -> Vec<i32> {
         .collect()
 }
 
-#[cfg(feature = "__hdf5-1.10")]
-fn libhdf5_scale_offset(mode: ScaleOffset) -> hdf5::filters::ScaleOffset {
+#[cfg(feature = "__libhdf5-1.10")]
+fn libhdf5_scale_offset(mode: ScaleOffset) -> libhdf5::filters::ScaleOffset {
     match mode {
-        ScaleOffset::Integer(minbits) => hdf5::filters::ScaleOffset::Integer(
+        ScaleOffset::Integer(minbits) => libhdf5::filters::ScaleOffset::Integer(
             u16::try_from(minbits).expect("a minimum bit count libhdf5 takes"),
         ),
-        ScaleOffset::FloatDScale(scale) => hdf5::filters::ScaleOffset::FloatDScale(
+        ScaleOffset::FloatDScale(scale) => libhdf5::filters::ScaleOffset::FloatDScale(
             u8::try_from(scale).expect("a decimal scale factor libhdf5 takes"),
         ),
     }

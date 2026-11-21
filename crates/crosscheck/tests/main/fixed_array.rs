@@ -1,12 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
 use hdf5_pure::File;
@@ -26,6 +23,9 @@ use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LengthWidth;
 use hdf5_pure_format::__private::OffsetWidth;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
 use rstest::rstest;
 
 use test_util::bytes;
@@ -51,7 +51,7 @@ impl Fixture {
             deflate,
             sparse: _,
         } = self;
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
             .with_fcpl(|p| p.sizes(sizes).userblock(userblock))
             .create(path)
@@ -223,7 +223,7 @@ fn native_reads_independently_placed_complete_fixed_array_blocks(
     let start = usize::try_from(userblock).unwrap();
     image[start..start + superblock.len()].copy_from_slice(&superblock);
     fs::write(&path, &image).unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         fixture.writes().expected()

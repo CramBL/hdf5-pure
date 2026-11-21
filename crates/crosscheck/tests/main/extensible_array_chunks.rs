@@ -1,16 +1,16 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! The Extensible Array chunk index of the files libhdf5 writes, read back by hdf5-pure.
 
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
 use hdf5_pure::FormatError;
+use libhdf5::Extent;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
 use rstest::rstest;
 use test_util::checksum;
 use test_util_hdf5::reader::ReadBackend;
@@ -36,7 +36,7 @@ impl Fixture {
             deflate,
             sparse: _,
         } = self;
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
             .with_fcpl(|p| {
                 p.sizes(SizeofInfo {

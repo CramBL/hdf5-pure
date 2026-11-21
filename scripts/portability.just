@@ -79,7 +79,7 @@ test-32bit-hdf5 FEATURES="serde,ndarray,provenance":
         --target i686-unknown-linux-gnu \
         -p {{ CROSSCHECK }} \
         --no-default-features \
-        --features "hdf5,__hdf5-bundled,{{ FEATURES }}"
+        --features "libhdf5,__libhdf5-bundled,{{ FEATURES }}"
 
     cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
@@ -89,7 +89,7 @@ test-32bit-hdf5 FEATURES="serde,ndarray,provenance":
         --target i686-unknown-linux-gnu \
         -p {{ CROSSCHECK }} -p hdf5-pure --lib native_crosschecks \
         --no-default-features \
-        --features "hdf5,__hdf5-bundled,{{ FEATURES }}"
+        --features "libhdf5,__libhdf5-bundled,{{ FEATURES }}"
 
 # The crosschecks against the C library, cross-compiled and linked for the
 # same big-endian target `test-big-endian` checks. `QEMU_TEST_SHARD` defaults to `all`.
@@ -112,7 +112,7 @@ test-big-endian-hdf5 FEATURES="serde,ndarray,provenance":
         --target s390x-unknown-linux-gnu \
         -p {{ CROSSCHECK }} \
         --no-default-features \
-        --features "hdf5,__hdf5-bundled,{{ FEATURES }}" \
+        --features "libhdf5,__libhdf5-bundled,{{ FEATURES }}" \
         "${test_args[@]}"
 
     test_native() {
@@ -124,7 +124,7 @@ test-big-endian-hdf5 FEATURES="serde,ndarray,provenance":
             --target s390x-unknown-linux-gnu \
             -p {{ CROSSCHECK }} -p hdf5-pure --lib \
             --no-default-features \
-            --features "hdf5,__hdf5-bundled,{{ FEATURES }}" \
+            --features "libhdf5,__libhdf5-bundled,{{ FEATURES }}" \
             "$@"
     }
     case "${QEMU_TEST_SHARD-all}" in

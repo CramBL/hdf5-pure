@@ -1,4 +1,4 @@
-#![cfg(all(feature = "serde", feature = "hdf5"))]
+#![cfg(all(feature = "serde", feature = "libhdf5"))]
 //! Crosscheck: files produced by our serde layer are readable by the C HDF5
 //! library (via `hdf5-metno`). This gives us confidence that the `.mat` v7.3
 //! files we produce are valid HDF5 and follow MATLAB conventions that other
@@ -41,7 +41,7 @@ fn c_library_reads_nested_struct_file() {
     mat::to_file(&e, &path).unwrap();
 
     // Now open with hdf5-metno (C library).
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // Scalars in MATLAB are 1×1 datasets (not true HDF5 scalars).
     let trial = file.dataset("trial").unwrap();
@@ -63,13 +63,13 @@ fn c_library_reads_nested_struct_file() {
     let cfg = file.group("config").unwrap();
     let class_attr = cfg.attr("MATLAB_class").unwrap();
     let class_val = class_attr
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(class_val.as_str(), "struct");
     let fields_attr = cfg.attr("MATLAB_fields").unwrap();
     // MATLAB-compatible encoding is `H5T_VLEN { H5T_STRING { STRSIZE 1 } }`,
     // so we read as a VLEN of single-byte FixedAscii.
-    let raw: Vec<hdf5::types::VarLenArray<hdf5::types::FixedAscii<1>>> =
+    let raw: Vec<libhdf5::types::VarLenArray<libhdf5::types::FixedAscii<1>>> =
         fields_attr.read_raw().unwrap();
     let field_names: Vec<String> = raw
         .iter()
@@ -86,7 +86,7 @@ fn c_library_reads_nested_struct_file() {
     let name_class = name
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(name_class.as_str(), "char");
 }
@@ -109,7 +109,7 @@ fn c_library_reads_2d_matrix_with_matlab_orientation() {
     };
     mat::to_file(&s, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
 
     // HDF5 shape is [cols, rows] = [3, 2]; MATLAB will interpret as 2×3.
@@ -138,13 +138,13 @@ fn c_library_reads_complex_as_compound() {
     };
     mat::to_file(&w, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("signal").unwrap();
     assert_eq!(ds.shape(), vec![1, 3]);
 
     // Read as a compound {real: f64, imag: f64} type.
     #[repr(C)]
-    #[derive(hdf5::H5Type, Clone, Copy, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Copy, Debug)]
     struct Pair {
         real: f64,
         imag: f64,
@@ -160,7 +160,7 @@ fn c_library_reads_complex_as_compound() {
     // MATLAB_class is the real-number class for complex.
     let class_attr = ds.attr("MATLAB_class").unwrap();
     let cls = class_attr
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "double");
 }
@@ -188,12 +188,12 @@ fn c_library_reads_complex_int16_as_a_four_byte_compound() {
     };
     mat::to_file(&c, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("samples").unwrap();
     assert_eq!(ds.shape(), vec![1, 3]);
 
     #[repr(C)]
-    #[derive(hdf5::H5Type, Clone, Copy, Debug)]
+    #[derive(libhdf5::H5Type, Clone, Copy, Debug)]
     struct Pair {
         real: i16,
         imag: i16,
@@ -210,7 +210,7 @@ fn c_library_reads_complex_int16_as_a_four_byte_compound() {
     // The class names the component, not anything complex-specific.
     let class_attr = ds.attr("MATLAB_class").unwrap();
     let cls = class_attr
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "int16");
 }
@@ -232,7 +232,7 @@ fn c_library_reads_logical_as_uint8() {
     };
     mat::to_file(&f, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     let on = file.dataset("on").unwrap();
     assert_eq!(on.shape(), vec![1, 1]);
@@ -241,7 +241,7 @@ fn c_library_reads_logical_as_uint8() {
     let cls = on
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "logical");
 

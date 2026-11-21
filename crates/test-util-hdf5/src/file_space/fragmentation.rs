@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
-use hdf5::File as NativeFile;
-use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PersistedFreeSections;
 use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::SyncPolicy;
+use libhdf5::File as NativeFile;
+use libhdf5::plist::file_create::FileSpaceStrategy;
 
 /// The number of deleted datasets in an alternating PAGE fixture.
 #[derive(Clone, Copy, Debug)]

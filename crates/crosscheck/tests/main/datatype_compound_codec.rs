@@ -1,14 +1,10 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::ffi::CString;
 
-use hdf5::Datatype as NativeDatatype;
-use hdf5::file::LibraryVersion;
-use hdf5::globals;
-use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::File;
 use hdf5_pure_core::__private;
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 use hdf5_pure_core::ComplexType;
 use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, FloatingPointType, MessageType, VariableLengthType,
@@ -17,8 +13,12 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader, OffsetWidth,
 };
-use hdf5_sys::h5i::hid_t;
-use hdf5_sys::h5t::{self, H5T_class_t};
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::file::LibraryVersion;
+use libhdf5::globals;
+use libhdf5::plist::file_create::{Sizeof, SizeofInfo};
+use libhdf5_sys::h5i::hid_t;
+use libhdf5_sys::h5t::{self, H5T_class_t};
 use rstest::rstest;
 use test_util_hdf5::{lock, storage};
 
@@ -42,7 +42,7 @@ fn datatype_compound_codecs_preserve_native_sequences(
     );
 }
 
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 #[rstest]
 fn datatype_compound_codecs_preserve_native_complex(
     #[values(false, true)] big_endian: bool,
@@ -68,7 +68,7 @@ fn assert_native(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("compound.h5");
     let datatype = shape.native(placement, big_endian);
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_bounds(version, version))
         .with_fcpl(|properties| {
             properties.sizes(SizeofInfo {
@@ -131,7 +131,7 @@ fn assert_native(
     assert_eq!(
         parsed.version(),
         match shape {
-            #[cfg(feature = "__hdf5-2")]
+            #[cfg(feature = "__libhdf5-2")]
             Shape::Complex => DatatypeVersion::Five,
             Shape::Sequence => DatatypeVersion::Three,
         }
@@ -139,7 +139,7 @@ fn assert_native(
     if version == LibraryVersion::V110 {
         assert_eq!(message.version(), DatatypeVersion::Three);
     }
-    #[cfg(feature = "__hdf5-2")]
+    #[cfg(feature = "__libhdf5-2")]
     if matches!(shape, Shape::Complex) {
         assert_eq!(message.version(), DatatypeVersion::Five);
     }
@@ -148,21 +148,21 @@ fn assert_native(
 
 #[derive(Clone, Copy, Debug)]
 enum Shape {
-    #[cfg(feature = "__hdf5-2")]
+    #[cfg(feature = "__libhdf5-2")]
     Complex,
     Sequence,
 }
 
 impl Shape {
     fn native(self, placement: Placement, big_endian: bool) -> NativeDatatype {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             let base = if big_endian {
                 *globals::H5T_IEEE_F64BE
             } else {
                 *globals::H5T_IEEE_F64LE
             };
             let child = match self {
-                #[cfg(feature = "__hdf5-2")]
+                #[cfg(feature = "__libhdf5-2")]
                 // SAFETY: The predefined floating parent is live and the call creates a new ID.
                 Self::Complex => owned(unsafe { h5t::H5Tcomplex_create(base) }),
                 // SAFETY: The predefined parent is live and the call creates a new ID.
@@ -204,7 +204,7 @@ impl Shape {
             DatatypeByteOrder::LittleEndian
         });
         let (size, child) = match self {
-            #[cfg(feature = "__hdf5-2")]
+            #[cfg(feature = "__libhdf5-2")]
             Self::Complex => (
                 u32::try_from(placement.size()).unwrap(),
                 Datatype::Complex(ComplexType::new(component).unwrap()),
@@ -257,5 +257,5 @@ impl Placement {
 fn owned(id: hid_t) -> NativeDatatype {
     assert!(id >= 0);
     // SAFETY: Every caller transfers a newly created datatype ID exactly once.
-    unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
+    unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap()
 }

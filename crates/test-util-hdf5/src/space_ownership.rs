@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use hdf5::File as Hdf5File;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::GroupCreate;
-use hdf5::plist::file_create::SharedMessageIndex;
-use hdf5::plist::file_create::SharedMessageType;
+use libhdf5::File as Hdf5File;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::GroupCreate;
+use libhdf5::plist::file_create::SharedMessageIndex;
+use libhdf5::plist::file_create::SharedMessageType;
 
 /// Selects the messages shared between objects in a native fixture.
 #[derive(Clone, Copy, Debug)]

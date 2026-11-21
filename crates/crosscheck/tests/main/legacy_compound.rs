@@ -1,11 +1,11 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::types::CompoundField;
-use hdf5::types::CompoundType;
-use hdf5::types::IntSize;
-use hdf5::types::TypeDescriptor;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::File;
+use libhdf5::types::CompoundField;
+use libhdf5::types::CompoundType;
+use libhdf5::types::IntSize;
+use libhdf5::types::TypeDescriptor;
 use test_util::temp;
 use test_util_hdf5::legacy_compound;
 
@@ -13,7 +13,7 @@ use test_util_hdf5::legacy_compound;
 fn libhdf5_reads_compound_v1_array_members() {
     let path = temp::temp_path("native_compound_v1_array.h5");
     std::fs::write(&path, test_util::legacy_compound::file()).unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let dataset = native.dataset("data").unwrap();
     assert_eq!(
         dataset.dtype().unwrap().to_descriptor().unwrap(),
@@ -33,7 +33,7 @@ fn libhdf5_reads_compound_v1_array_members() {
 fn pure_reader_reads_libhdf5_compound_array_members() {
     let path = temp::temp_path("native_written_compound_array.h5");
     {
-        let native = hdf5::File::create(&path).unwrap();
+        let native = libhdf5::File::create(&path).unwrap();
         native
             .new_dataset_builder()
             .with_data(&[Record {
@@ -66,7 +66,7 @@ fn descriptor() -> TypeDescriptor {
     })
 }
 
-#[derive(hdf5::H5Type, Clone, Copy, Debug, PartialEq)]
+#[derive(libhdf5::H5Type, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 struct Record {
     arr: [i32; 4],

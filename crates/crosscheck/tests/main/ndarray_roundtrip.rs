@@ -1,6 +1,6 @@
 #![cfg(feature = "ndarray")]
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{Error, File, FileBuilder};
 use ndarray::{Array1, Array2, Array3, ArrayD, ShapeBuilder, array};
@@ -149,7 +149,7 @@ fn read_array_wrong_rank_errors() {
 // ---------------------------------------------------------------------------
 
 // Written in the 1.10 format, which a 1.8 library cannot open.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 fn crosscheck_2d_with_reference_library() {
     let dir = tempfile::tempdir().unwrap();
@@ -161,14 +161,14 @@ fn crosscheck_2d_with_reference_library() {
     fb.write(&path).unwrap();
 
     // The reference library must see the same shape and row-major values.
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("m").unwrap();
     assert_eq!(ds.shape(), vec![2, 3]);
     let read: Array2<f64> = ds.read_2d::<f64>().unwrap();
     assert_eq!(read, a);
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 fn crosscheck_3d_with_reference_library() {
     let dir = tempfile::tempdir().unwrap();
@@ -179,14 +179,14 @@ fn crosscheck_3d_with_reference_library() {
     fb.create_dataset("cube").with_ndarray(&a);
     fb.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("cube").unwrap();
     assert_eq!(ds.shape(), vec![2, 3, 4]);
     let read: ArrayD<i32> = ds.read_dyn::<i32>().unwrap();
     assert_eq!(read, a.into_dyn());
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 fn crosscheck_chunked_compressed_ndarray() {
     // ndarray write composes with the existing chunking/compression builders.
@@ -201,7 +201,7 @@ fn crosscheck_chunked_compressed_ndarray() {
         .with_deflate(DeflateLevel::Six);
     fb.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let read: Array2<f64> = file.dataset("m").unwrap().read_2d::<f64>().unwrap();
     assert_eq!(read, a);
 

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Native interoperability for dense attribute storage and name indexes.
 //!
 //! Native operations run in the explicit `dense-attributes` fixture binary.
@@ -202,7 +202,7 @@ fn c_reads_a_lone_huge_attribute(#[case] producer: Producer, #[case] others: usi
             builder.write(&path).unwrap();
         }
         Producer::Native => {
-            let file = hdf5::File::with_options()
+            let file = libhdf5::File::with_options()
                 .with_fapl(|properties| properties.libver_latest())
                 .with_fcpl(|properties| properties.attr_phase_change(0, 0))
                 .create(&path)
@@ -577,7 +577,7 @@ fn assert_native_corruption(path: &Path, corruption: HeapCorruption, payload: us
         }
         (corruption, observed) => panic!(
             "unexpected native result for {corruption:?} under HDF5 {:?}: {observed:?}",
-            hdf5::library_version()
+            libhdf5::library_version()
         ),
     }
 }

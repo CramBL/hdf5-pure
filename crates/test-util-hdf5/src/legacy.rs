@@ -19,19 +19,19 @@
 //! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 use std::fmt::Debug;
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 use std::path::Path;
 
-#[cfg(feature = "hdf5")]
-use hdf5::GroupStorageType;
-#[cfg(feature = "hdf5")]
-use hdf5::H5Type;
-#[cfg(feature = "hdf5")]
-use hdf5::dataset::Layout as NativeLayout;
-#[cfg(feature = "hdf5")]
-use hdf5::datatype::ByteOrder;
+#[cfg(feature = "libhdf5")]
+use libhdf5::GroupStorageType;
+#[cfg(feature = "libhdf5")]
+use libhdf5::H5Type;
+#[cfg(feature = "libhdf5")]
+use libhdf5::dataset::Layout as NativeLayout;
+#[cfg(feature = "libhdf5")]
+use libhdf5::datatype::ByteOrder;
 
 use hdf5_pure::{
     Datatype, DatatypeByteOrder, File, FixedPointType, FloatingPointType, Layout, SuperblockVersion,
@@ -162,7 +162,7 @@ pub fn assert_symbol_tables(file: &File, bytes: &[u8], fixture: Fixture) {
     );
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Writes a native legacy fixture and closes the file.
 ///
 /// # Panics
@@ -204,7 +204,7 @@ pub fn write_libhdf5(path: &Path, fixture: Fixture) {
     file.close().unwrap();
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Checks native symbol-table storage, dataset metadata, byte order, and values.
 ///
 /// # Panics
@@ -246,9 +246,9 @@ pub fn assert_libhdf5_contents(path: &Path, fixture: Fixture, byte_order: ByteOr
     file.close().unwrap();
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 fn assert_native_dataset<T: H5Type + Debug + PartialEq>(
-    file: &hdf5::File,
+    file: &libhdf5::File,
     path: &str,
     expected: &[T],
     byte_order: ByteOrder,

@@ -1,24 +1,24 @@
 use std::fmt::Debug;
 use std::path::Path;
 
-use hdf5::Datatype as NativeDatatype;
-use hdf5::Extent as NativeExtent;
-use hdf5::H5Type;
-use hdf5::ObjectReference;
-use hdf5::ObjectReference1;
-use hdf5::plist::dataset_create::{
-    DatasetCreate, FillTime as NativeFillTime, FillValue as NativeFillValue,
-};
-use hdf5::types::{FixedAscii as NativeAscii, IntSize, TypeDescriptor, VarLenUnicode};
 use hdf5_pure::{
     CharacterSet, DatasetBuilder, DatasetCreateProperties, Datatype, Error, File, FileBuilder,
     FillTime, FixedAscii, H5Element, MaxExtent, RepackOptions, StringPadding,
 };
-use hdf5_sys::h5d;
-use hdf5_sys::h5p;
-use hdf5_sys::h5p::H5P_DEFAULT;
-use hdf5_sys::h5s::H5S_ALL;
-use hdf5_sys::h5t::{self, H5T_cset_t, H5T_str_t};
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::Extent as NativeExtent;
+use libhdf5::H5Type;
+use libhdf5::ObjectReference;
+use libhdf5::ObjectReference1;
+use libhdf5::plist::dataset_create::{
+    DatasetCreate, FillTime as NativeFillTime, FillValue as NativeFillValue,
+};
+use libhdf5::types::{FixedAscii as NativeAscii, IntSize, TypeDescriptor, VarLenUnicode};
+use libhdf5_sys::h5d;
+use libhdf5_sys::h5p;
+use libhdf5_sys::h5p::H5P_DEFAULT;
+use libhdf5_sys::h5s::H5S_ALL;
+use libhdf5_sys::h5t::{self, H5T_cset_t, H5T_str_t};
 use rstest::rstest;
 use test_util_hdf5::dataset::AppendMode;
 use test_util_hdf5::file;
@@ -249,7 +249,7 @@ fn repack_preserves_source_string_fill_bytes(
     let destination = directory.path().join("repacked.h5");
     let datatype = NativeDatatype::from_type::<NativeAscii<4>>().unwrap();
     let properties = DatasetCreate::try_new().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock and live transient handles cover each call. The datatype is
         // a fixed four-byte string, and `fill` contains one complete element with no pointers.
         unsafe {
@@ -281,7 +281,7 @@ fn repack_preserves_source_string_fill_bytes(
         fill.repeat(3)
     };
     if allocated {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             // SAFETY: The lock and live handles cover the call. The fixed string datatype has
             // no pointers, and `expected` holds three complete elements matching the extent.
             unsafe {
@@ -331,7 +331,7 @@ fn repack_preserves_source_string_fill_bytes(
 #[rstest]
 #[case::object_reference(create_reference_fill)]
 #[case::variable_length(create_vlen_fill)]
-fn repack_rejects_source_fills_with_file_references(#[case] create: fn(&hdf5::File)) {
+fn repack_rejects_source_fills_with_file_references(#[case] create: fn(&libhdf5::File)) {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.h5");
     let destination = directory.path().join("destination.h5");
@@ -359,12 +359,12 @@ fn repack_rejects_source_fills_with_file_references(#[case] create: fn(&hdf5::Fi
     assert!(!destination.exists());
 }
 
-fn create_reference_fill(native: &hdf5::File) {
+fn create_reference_fill(native: &libhdf5::File) {
     native.create_group("target").unwrap();
     let reference = ObjectReference1::create(native, "target").unwrap();
     let datatype = NativeDatatype::from_type::<ObjectReference1>().unwrap();
     let properties = DatasetCreate::try_new().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock and live handles cover the call. The reference's pointer
         // addresses one complete legacy object reference of the matching memory datatype.
         unsafe {
@@ -383,7 +383,7 @@ fn create_reference_fill(native: &hdf5::File) {
         .unwrap();
 }
 
-fn create_vlen_fill(native: &hdf5::File) {
+fn create_vlen_fill(native: &libhdf5::File) {
     native
         .new_dataset::<VarLenUnicode>()
         .shape(3)
@@ -467,10 +467,10 @@ fn assert_source_string(
     expected: &[u8],
     allocated: bool,
 ) {
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let dataset = native.dataset("values").unwrap();
     let dtype = dataset.dtype().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access, and `dtype` owns the live string type.
         unsafe {
             assert_eq!(h5t::H5Tget_strpad(dtype.id()), native_padding);
@@ -499,7 +499,7 @@ fn assert_native(
     values: Option<&[u8]>,
     allocated: bool,
 ) {
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let dataset = native.dataset("values").unwrap();
     assert_eq!(dataset.dtype().unwrap().to_descriptor().unwrap(), *datatype);
     assert_eq!(dataset.dcpl().unwrap().get_fill_time().unwrap(), fill_time);
@@ -519,7 +519,7 @@ fn assert_native(
 }
 
 fn extend_native(path: &Path, elements: usize) {
-    let native = hdf5::File::open_rw(path).unwrap();
+    let native = libhdf5::File::open_rw(path).unwrap();
     native
         .dataset("values")
         .unwrap()
@@ -528,11 +528,11 @@ fn extend_native(path: &Path, elements: usize) {
     native.close().unwrap();
 }
 
-fn native_fill_bytes(dataset: &hdf5::Dataset) -> Vec<u8> {
+fn native_fill_bytes(dataset: &libhdf5::Dataset) -> Vec<u8> {
     let datatype = fixed_datatype(dataset);
     let properties = dataset.dcpl().unwrap();
     let mut bytes = vec![0; datatype.size()];
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock and live handles cover the call. `bytes` has exactly one complete
         // element of the checked fixed datatype, which has no pointers or variable-length data.
         unsafe {
@@ -545,10 +545,10 @@ fn native_fill_bytes(dataset: &hdf5::Dataset) -> Vec<u8> {
     bytes
 }
 
-fn native_element_bytes(dataset: &hdf5::Dataset) -> Vec<u8> {
+fn native_element_bytes(dataset: &libhdf5::Dataset) -> Vec<u8> {
     let datatype = fixed_datatype(dataset);
     let mut bytes = vec![0; datatype.size().checked_mul(dataset.size()).unwrap()];
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock and live handles cover the call. The initialized buffer holds the
         // complete dataset in its checked fixed datatype, with no pointers or variable lengths.
         unsafe {
@@ -568,7 +568,7 @@ fn native_element_bytes(dataset: &hdf5::Dataset) -> Vec<u8> {
     bytes
 }
 
-fn fixed_datatype(dataset: &hdf5::Dataset) -> NativeDatatype {
+fn fixed_datatype(dataset: &libhdf5::Dataset) -> NativeDatatype {
     let datatype = dataset.dtype().unwrap();
     match datatype.to_descriptor().unwrap() {
         TypeDescriptor::FixedAscii(_) | TypeDescriptor::FixedUnicode(_) => (),

@@ -17,7 +17,7 @@ fn main() -> ExitCode {
         eprintln!("writable-open measurements require an optimized build");
         return ExitCode::FAILURE;
     }
-    println!("native={:?}", hdf5::library_version());
+    println!("native={:?}", libhdf5::library_version());
     let directory = tempfile::tempdir().unwrap();
     for scale in [
         Fragmentation::Thousand,

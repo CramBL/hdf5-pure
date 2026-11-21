@@ -15,8 +15,8 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
 
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError, RepackOptions};
+use libhdf5::{MajorErrorCode, MinorErrorCode};
 
 use test_util::object_header::{MessageFlags, MessageType};
 
@@ -32,7 +32,7 @@ fn an_unknown_message_only_a_writer_must_understand_is_read_as_the_c_library_rea
     let path = dir.path().join("fail_if_unknown_for_write.h5");
     write_fixture_with_the_flagged_message(&path);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset(DATASET_NAME).unwrap().read_raw::<i32>().unwrap(),
         DATA
@@ -56,7 +56,7 @@ fn an_unknown_message_only_a_writer_must_understand_is_read_as_the_c_library_rea
     );
     drop(pure);
 
-    let c_err = hdf5::File::open_rw(&path).unwrap_err();
+    let c_err = libhdf5::File::open_rw(&path).unwrap_err();
     assert!(
         c_err.contains_major(MajorErrorCode::ObjectHeader),
         "{c_err}"
@@ -94,7 +94,7 @@ fn a_repack_reads_past_the_message_and_writes_a_destination_both_libraries_open_
          reproduces neither"
     );
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(
         c.dataset(DATASET_NAME).unwrap().read_raw::<i32>().unwrap(),
         pure_data
@@ -106,7 +106,7 @@ fn a_repack_reads_past_the_message_and_writes_a_destination_both_libraries_open_
     // shows the repack carried none into `dst`. This crate's open takes the file's exclusive
     // lock, so it goes first and is dropped before the C library's.
     File::open_rw(&dst).unwrap().dataset(DATASET_NAME).unwrap();
-    hdf5::File::open_rw(&dst).unwrap().close().unwrap();
+    libhdf5::File::open_rw(&dst).unwrap().close().unwrap();
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn a_cross_file_copy_reads_past_the_message_and_stops_only_at_the_version_1_head
     let src = dir.path().join("source.h5");
     let dst = dir.path().join("destination.h5");
     write_fixture_with_the_flagged_message(&src);
-    hdf5::File::create(&dst).unwrap().close().unwrap();
+    libhdf5::File::create(&dst).unwrap().close().unwrap();
 
     let source = File::open(&src).unwrap();
     let destination = File::open_rw(&dst).unwrap();
@@ -153,8 +153,8 @@ fn a_cross_file_copy_reads_past_the_message_and_stops_only_at_the_version_1_head
     drop(destination);
     drop(source);
 
-    let c_src = hdf5::File::open(&src).unwrap();
-    let c_dst = hdf5::File::create(dir.path().join("c_destination.h5")).unwrap();
+    let c_src = libhdf5::File::open(&src).unwrap();
+    let c_dst = libhdf5::File::create(dir.path().join("c_destination.h5")).unwrap();
     c_src
         .dataset(DATASET_NAME)
         .unwrap()

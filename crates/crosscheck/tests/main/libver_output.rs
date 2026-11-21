@@ -1,4 +1,4 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 //! Reference-C-library interop for the HDF5 1.8 output format
 //! (`FileBuilder::with_libver_bounds` with an upper bound of `LibVer::V18`).
 //!
@@ -34,7 +34,7 @@
 
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{AttrValue, File, FileBuilder, LibVer};
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::{FileAccessProperties, FileCreateProperties};
 
 use test_util::bytes;
@@ -77,7 +77,7 @@ fn c_reads_every_part_of_a_1_8_format_file() {
         "version 2 superblock"
     );
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let d = f.dataset("values").unwrap();
     assert_eq!(d.read_raw::<f64>().unwrap(), vec![1.0, 2.0, 3.0]);
     assert_eq!(d.attr_names().unwrap(), vec!["MATLAB_class".to_string()]);
@@ -117,7 +117,7 @@ fn c_writes_into_a_1_8_format_file() {
     b.write(&path).unwrap();
 
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<i32>()
             .shape([3])
             .create("added")
@@ -201,7 +201,7 @@ fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
     // libhdf5 reads the edited file whole, including the attribute the
     // edit added — which it can only count because the rewritten header carries
     // an Attribute Info message.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.dataset("flat").unwrap().read_raw::<i32>().unwrap(),
         vec![1, 2, 3]
@@ -216,7 +216,7 @@ fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
 /// reading `H5Pset_libver_bounds` has, where the low bound is a floor and the
 /// library is free to stay below the ceiling. libhdf5 reading the result
 /// is what says the file is a real one and not merely one this crate accepted.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 fn c_reads_a_file_written_at_a_lower_bound_of_latest() {
     let dir = tempfile::tempdir().unwrap();
@@ -265,7 +265,7 @@ fn c_reads_a_file_written_at_a_lower_bound_of_latest() {
         assert_eq!(f.libver_bound(), LibVer::WRITER_DEFAULT);
         drop(f);
 
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             f.dataset("values").unwrap().read_raw::<f64>().unwrap(),
             vec![1.0, 2.0, 3.0],
@@ -293,7 +293,7 @@ fn userblock_sizes_roundtrip_through_both_libraries(#[case] raw_size: u64) {
     }
     builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     builder.write(&pure_path).unwrap();
-    let c_file = hdf5::File::open(&pure_path).unwrap();
+    let c_file = libhdf5::File::open(&pure_path).unwrap();
     assert_eq!(c_file.userblock(), size.get());
     assert_eq!(
         c_file.dataset("data").unwrap().read_raw::<i32>().unwrap(),
@@ -306,7 +306,7 @@ fn userblock_sizes_roundtrip_through_both_libraries(#[case] raw_size: u64) {
     }
 
     let c_path = directory.path().join("c.h5");
-    let c_file = hdf5::File::with_options()
+    let c_file = libhdf5::File::with_options()
         .with_fcpl(|properties| properties.userblock(size.get()))
         .create(&c_path)
         .unwrap();

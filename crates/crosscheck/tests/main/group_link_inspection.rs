@@ -1,7 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::File as CFile;
-use hdf5::GroupStorageType;
+use libhdf5::File as CFile;
+use libhdf5::GroupStorageType;
 use rstest::rstest;
 use test_util_hdf5::dense_links::GroupOrder;
 

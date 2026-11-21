@@ -1,10 +1,8 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use core::num::NonZeroU16;
 use std::path::Path;
 
-use hdf5::plist::file_create::Sizeof;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::LengthWidth;
@@ -16,6 +14,8 @@ use hdf5_pure_format::__private::GlobalHeapMember;
 use hdf5_pure_format::__private::GlobalHeapObject;
 use hdf5_pure_format::__private::PreparedGlobalHeapCollection;
 use hdf5_pure_format::__private::VariableLengthDescriptor;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 use test_util::global_heap;
 use test_util_hdf5::global_heap as native_heap;
@@ -61,7 +61,7 @@ fn prepared_global_heap_reproduces_native_terminal_forms(
     assert_eq!(encoded, image[start..end]);
     image[start..end].copy_from_slice(&encoded);
     std::fs::write(&path, image).unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     let actual = dataset.read_raw::<VarLenUnicode>().unwrap();
     assert_eq!(
@@ -135,7 +135,7 @@ fn native_reader_reads_sparse_members_in_supplied_physical_order(
         [(u16::MAX, 0), (7, u16::MAX), (400, 9)]
     );
     std::fs::write(&path, image).unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     let actual = dataset.read_raw::<VarLenUnicode>().unwrap();
     assert_eq!(

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! SWMR-reader (refresh) tests: hdf5-pure follows an Extensible-Array dataset
 //! that an external HDF5 writer appends to.
 //!
@@ -14,7 +14,7 @@ use test_util_hdf5::dataset::Unlimited;
 /// Reopen `path` read-write and grow the dataset to `new_total` rows valued
 /// 0..new_total.
 fn c_extend(path: &std::path::Path, new_total: usize) {
-    let file = hdf5::File::open_rw(path).unwrap();
+    let file = libhdf5::File::open_rw(path).unwrap();
     let ds = file.dataset("d").unwrap();
     ds.resize((new_total,)).unwrap();
     let full: Vec<i32> = (0..new_total as i32).collect();

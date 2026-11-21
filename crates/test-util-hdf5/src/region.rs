@@ -3,12 +3,12 @@
 use std::fmt::Debug;
 use std::path::Path;
 
-use hdf5::dataset::Layout;
-use hdf5::datatype::ByteOrder;
-use hdf5::types::{
+use libhdf5::dataset::Layout;
+use libhdf5::datatype::ByteOrder;
+use libhdf5::types::{
     FixedAscii, FixedUnicode, FloatSize, TypeDescriptor, VarLenAscii, VarLenUnicode,
 };
-use hdf5::{H5Type, Hyperslab, SliceOrIndex};
+use libhdf5::{H5Type, Hyperslab, SliceOrIndex};
 use ndarray::IxDyn;
 
 use crate::file;
@@ -102,7 +102,7 @@ fn write_strings<T: H5Type + AsRef<str>>(
         .map(|index| parse(&format!("label-{index}")))
         .collect();
     write_dataset(path, layout, shape, &values);
-    hdf5::File::open(path)
+    libhdf5::File::open(path)
         .unwrap()
         .dataset("data")
         .unwrap()
@@ -142,7 +142,7 @@ fn write_dataset<T: H5Type>(path: &Path, layout: Layout, shape: &[usize], values
 /// # Panics
 ///
 /// Panics if the datatype descriptor cannot be read or is not an integer or floating-point type.
-pub fn numeric_bytes(datatype: &hdf5::Datatype, values: &[u8]) -> Vec<u8> {
+pub fn numeric_bytes(datatype: &libhdf5::Datatype, values: &[u8]) -> Vec<u8> {
     let descriptor = datatype.to_descriptor().unwrap();
     values
         .iter()

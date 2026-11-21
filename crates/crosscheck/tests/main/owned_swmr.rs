@@ -1,13 +1,13 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Native reads and file status flags for owned SWMR writers.
 
 use std::time::Duration;
 
-use hdf5::file::LibraryVersion;
 use hdf5_pure::File;
 use hdf5_pure::SuperblockStatus;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
+use libhdf5::file::LibraryVersion;
 use rstest::rstest;
 
 use test_util::process::{self, Fixture, Readiness};
@@ -49,7 +49,7 @@ fn a_superblock_reports_the_flags_the_c_library_wrote(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(libver, LibraryVersion::V110))
             .with_fcpl(|p| p.istore_k(indexed_storage_k))
             .create(&path)
@@ -99,7 +99,7 @@ fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
     #[expect(clippy::mem_forget, reason = "the test models a writer that crashed")]
     std::mem::forget(File::open_swmr_writer(&path).unwrap());
 
-    let c_err = hdf5::File::open(&path).expect_err("the C library refuses a flagged file");
+    let c_err = libhdf5::File::open(&path).expect_err("libhdf5 refuses a flagged file");
     assertion::native_file_marked_in_use(&c_err);
     assertion::file_marked_in_use(
         File::open(&path).unwrap_err(),
@@ -108,14 +108,14 @@ fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
     );
 
     // A SWMR read is what the flag exists to permit, in both libraries.
-    hdf5::File::open_as(&path, hdf5::OpenMode::ReadSWMR)
+    libhdf5::File::open_as(&path, libhdf5::OpenMode::ReadSWMR)
         .expect("the C library attaches a SWMR reader to a flagged file")
         .close()
         .unwrap();
     File::open_swmr(&path).expect("this crate attaches a SWMR reader too");
 
     File::clear_status_flags(&path).unwrap();
-    hdf5::File::open(&path)
+    libhdf5::File::open(&path)
         .expect("clearing the flag recovers the file for the C library")
         .close()
         .unwrap();

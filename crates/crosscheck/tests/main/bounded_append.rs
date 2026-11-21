@@ -1,14 +1,14 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for the bounded read-write backend (issue #147):
 //! files grown through the bounded engine read back byte-correct in the
 //! reference C library, both when the C library wrote the original file and
 //! when this crate did (unfiltered any-length and filtered whole-chunk).
 
-use hdf5::Extent;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
+use libhdf5::Extent;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::{file, file_space, paged, session};
@@ -96,7 +96,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
 
     // libhdf5 reads the data, recovers the persisting strategy, and its
     // free-space query parses the managers the finalize wrote.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("d").unwrap().read_raw::<i32>().unwrap(), expected);
     let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
     assert_eq!(
@@ -124,7 +124,7 @@ fn bounded_persist_on_c_created_file_reads_back() {
     let path = dir.path().join("c_persist.h5");
 
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -164,7 +164,7 @@ fn bounded_persist_on_c_created_file_reads_back() {
 #[test]
 #[cfg(target_endian = "little")]
 fn vlen_strings_read_on_bounded_and_mirror_files() {
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
     let dir = tempfile::tempdir().unwrap();
@@ -260,8 +260,8 @@ fn bounded_staged_commit_reads_back_in_c() {
     );
 
     // This crate writes a fixed-length string attribute, so read it as one.
-    let f = hdf5::File::open(&path).unwrap();
-    let units: hdf5::types::FixedUnicode<1> = f
+    let f = libhdf5::File::open(&path).unwrap();
+    let units: libhdf5::types::FixedUnicode<1> = f
         .dataset("d")
         .unwrap()
         .attr("units")
@@ -299,7 +299,7 @@ fn mirror_inplace_append_to_a_persisting_file_reads_back_in_c() {
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
     assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     // The C-library guard above serializes every C call in this suite.
     let free = f.free_space() as i64;
     f.close().unwrap();
@@ -336,7 +336,7 @@ fn mirror_inplace_append_to_a_paged_file_stays_page_aligned() {
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
     assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     // The C-library guard above serializes every C call in this suite.
     let free = f.free_space() as i64;
     f.close().unwrap();

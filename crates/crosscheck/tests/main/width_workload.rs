@@ -1,13 +1,13 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::Datatype;
-use hdf5::datatype::ByteOrder as NativeByteOrder;
-use hdf5::filters::Filter;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
+use libhdf5::Datatype;
+use libhdf5::datatype::ByteOrder as NativeByteOrder;
+use libhdf5::filters::Filter;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 use test_util_hdf5::__private::width_workload::{Case, Index, Phase};
 use test_util_hdf5::dataset;

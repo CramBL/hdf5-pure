@@ -1,15 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Dataset fill values and creation metadata read through libhdf5 and the pure reader.
 
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use hdf5::Extent;
-use hdf5::dataset::FillTime as ReferenceFillTime;
-use hdf5::file::LibraryVersion;
-#[cfg(target_pointer_width = "64")]
-use hdf5::plist::dataset_create::Layout;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetBuilder;
@@ -19,6 +13,12 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FillTime;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::ScaleOffset;
+use libhdf5::Extent;
+use libhdf5::dataset::FillTime as ReferenceFillTime;
+use libhdf5::file::LibraryVersion;
+#[cfg(target_pointer_width = "64")]
+use libhdf5::plist::dataset_create::Layout;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -85,8 +85,8 @@ fn creation_requests_preserve_reference_values_and_metadata(
         }
     }
     {
-        let reference = hdf5::File::open(&reference_path).unwrap();
-        let pure = hdf5::File::open(&pure_path).unwrap();
+        let reference = libhdf5::File::open(&reference_path).unwrap();
+        let pure = libhdf5::File::open(&pure_path).unwrap();
         let expected = reference.dataset("data").unwrap();
         let actual = pure.dataset("created").unwrap();
         assert_eq!(expected.shape(), [2, 3]);
@@ -161,8 +161,8 @@ enum CreationTarget {
 }
 
 /// Read a dataset's typed fill value back through libhdf5.
-fn c_fill_value<T: hdf5::H5Type>(path: &std::path::Path, name: &str) -> Option<T> {
-    let file = hdf5::File::open(path).unwrap();
+fn c_fill_value<T: libhdf5::H5Type>(path: &std::path::Path, name: &str) -> Option<T> {
+    let file = libhdf5::File::open(path).unwrap();
     let ds = file.dataset(name).unwrap();
     let fv = ds.dcpl().unwrap().get_fill_value_as::<T>().unwrap();
     file.close().unwrap();
@@ -218,7 +218,7 @@ fn c_sees_no_fill_value_when_pure_sets_none() {
 /// the default (`Earliest`) bound writes a version-2 message, `V110`/latest a
 /// version-3 message.
 fn c_write_i32_fill(path: &std::path::Path, low: LibraryVersion, high: LibraryVersion) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(low, high))
         .create(path)
         .unwrap();
@@ -265,13 +265,13 @@ fn pure_reads_c_written_fill_time_never(#[case] low: LibraryVersion, #[case] hig
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_never.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(low, high))
             .create(&path)
             .unwrap();
         file.new_dataset::<i32>()
             .fill_value(-7_i32)
-            .fill_time(hdf5::dataset::FillTime::Never)
+            .fill_time(libhdf5::dataset::FillTime::Never)
             .shape((3,))
             .create("d")
             .unwrap();
@@ -291,13 +291,13 @@ fn pure_reads_c_written_fill_time_alloc(#[case] low: LibraryVersion, #[case] hig
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_alloc.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(low, high))
             .create(&path)
             .unwrap();
         file.new_dataset::<i32>()
             .fill_value(42_i32)
-            .fill_time(hdf5::dataset::FillTime::Alloc)
+            .fill_time(libhdf5::dataset::FillTime::Alloc)
             .shape((3,))
             .create("d")
             .unwrap();
@@ -320,7 +320,7 @@ fn pure_reads_c_written_default_fill_time_as_if_set(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_default.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(low, high))
             .create(&path)
             .unwrap();
@@ -454,7 +454,7 @@ fn c_reads_pure_scaleoffset_dataset_data_and_fill() {
         .with_fill_value(-1_i32);
     fb.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("d").unwrap();
     assert_eq!(ds.read_raw::<i32>().unwrap(), data);
     assert_eq!(
@@ -477,7 +477,7 @@ fn c_reads_pure_scaleoffset_dataset_data_and_fill() {
 /// writing no new data, and read the whole dataset back through it.
 fn c_extend_and_read(path: &std::path::Path, to: usize) -> Vec<u32> {
     {
-        let f = hdf5::File::open_rw(path).unwrap();
+        let f = libhdf5::File::open_rw(path).unwrap();
         f.dataset("col").unwrap().resize((to,)).unwrap();
         f.close().unwrap();
     }
@@ -646,9 +646,9 @@ fn a_fill_time_of_never_still_pads_with_zeros() {
         let ds = file
             .new_dataset::<u32>()
             .chunk((4,))
-            .shape((hdf5::Extent::resizable(2),))
+            .shape((libhdf5::Extent::resizable(2),))
             .fill_value(77u32)
-            .fill_time(hdf5::dataset::FillTime::Never)
+            .fill_time(libhdf5::dataset::FillTime::Never)
             .create("col")
             .unwrap();
         ds.write_raw(&[1u32, 2]).unwrap();
@@ -656,9 +656,9 @@ fn a_fill_time_of_never_still_pads_with_zeros() {
     }
     // Premise: the fixture really does declare Never with a fill value set.
     {
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         let dcpl = f.dataset("col").unwrap().dcpl().unwrap();
-        assert_eq!(dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+        assert_eq!(dcpl.fill_time(), libhdf5::dataset::FillTime::Never);
         assert_eq!(dcpl.get_fill_value_as::<u32>().unwrap(), Some(77));
         f.close().unwrap();
     }
@@ -828,11 +828,11 @@ fn a_partial_chunk_of_single_byte_elements_is_filled() {
         .pure_create(&path);
 
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.dataset("col").unwrap().resize((8,)).unwrap();
         f.close().unwrap();
     }
-    let got = hdf5::File::open(&path)
+    let got = libhdf5::File::open(&path)
         .unwrap()
         .dataset("col")
         .unwrap()
@@ -856,11 +856,11 @@ fn c_reads_pure_written_fill_time_never() {
         .with_fill_time(FillTime::Never);
     fb.write(&path).unwrap();
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let contig_dcpl = f.dataset("contig").unwrap().dcpl().unwrap();
-    assert_eq!(contig_dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    assert_eq!(contig_dcpl.fill_time(), libhdf5::dataset::FillTime::Never);
     let chunked_dcpl = f.dataset("chunked").unwrap().dcpl().unwrap();
-    assert_eq!(chunked_dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    assert_eq!(chunked_dcpl.fill_time(), libhdf5::dataset::FillTime::Never);
     f.close().unwrap();
 }
 
@@ -874,9 +874,9 @@ fn c_reads_pure_written_fill_time_alloc() {
         .with_fill_time(FillTime::Alloc);
     fb.write(&path).unwrap();
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let dcpl = f.dataset("d").unwrap().dcpl().unwrap();
-    assert_eq!(dcpl.fill_time(), hdf5::dataset::FillTime::Alloc);
+    assert_eq!(dcpl.fill_time(), libhdf5::dataset::FillTime::Alloc);
     f.close().unwrap();
 }
 
@@ -891,9 +891,9 @@ fn c_reads_pure_written_fill_time_never_with_defined_fill() {
         .with_fill_time(FillTime::Never);
     fb.write(&path).unwrap();
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let dcpl = f.dataset("d").unwrap().dcpl().unwrap();
-    assert_eq!(dcpl.fill_time(), hdf5::dataset::FillTime::Never);
+    assert_eq!(dcpl.fill_time(), libhdf5::dataset::FillTime::Never);
     assert_eq!(dcpl.get_fill_value_as::<i32>().unwrap(), Some(-7));
     assert_eq!(
         f.dataset("d").unwrap().read_raw::<i32>().unwrap(),

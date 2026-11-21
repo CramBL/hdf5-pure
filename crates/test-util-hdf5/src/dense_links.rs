@@ -1,30 +1,30 @@
 //! Dense group-link fixtures and observations through libhdf5.
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use std::ffi::CString;
 use std::path::Path;
 
-use hdf5::File;
-use hdf5::Group;
-use hdf5::GroupStorageType;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::IndexType;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::IterationOrder;
-use hdf5::datatype::ByteOrder as CByteOrder;
-use hdf5::file::LibraryVersion;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::GroupCreate;
-use hdf5::plist::group_create::LinkCreationOrder;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::group_create::LinkPhaseChange;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::link_create::CharEncoding;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::LibVer;
+use libhdf5::File;
+use libhdf5::Group;
+use libhdf5::GroupStorageType;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::IndexType;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::IterationOrder;
+use libhdf5::datatype::ByteOrder as CByteOrder;
+use libhdf5::file::LibraryVersion;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::GroupCreate;
+use libhdf5::plist::group_create::LinkCreationOrder;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::group_create::LinkPhaseChange;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::link_create::CharEncoding;
 
 /// The library that writes a group-link fixture.
 #[derive(Clone, Copy, Debug)]
@@ -199,7 +199,7 @@ pub fn write_fixture(
 pub fn write_limit_fixture(path: &Path, link_name: &str, producer: Producer) {
     match producer {
         Producer::Libhdf5 => {
-            let reference = hdf5::FileBuilder::new()
+            let reference = libhdf5::FileBuilder::new()
                 .with_fapl(|properties| {
                     properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
                 })
@@ -224,7 +224,7 @@ pub fn write_limit_fixture(path: &Path, link_name: &str, producer: Producer) {
         }
         Producer::Pure => {
             let mut builder = FileBuilder::new();
-            if !cfg!(feature = "__hdf5-1.10") {
+            if !cfg!(feature = "__libhdf5-1.10") {
                 builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
             }
             for index in 0..MAX_COMPACT_LINKS {
@@ -245,7 +245,10 @@ pub fn write_limit_fixture(path: &Path, link_name: &str, producer: Producer) {
 /// Panics if libhdf5 cannot open the file or group.
 pub fn group(path: &Path, group_path: &str) -> GroupOracle {
     GroupOracle {
-        group: hdf5::File::open(path).unwrap().group(group_path).unwrap(),
+        group: libhdf5::File::open(path)
+            .unwrap()
+            .group(group_path)
+            .unwrap(),
     }
 }
 
@@ -255,7 +258,7 @@ pub fn group(path: &Path, group_path: &str) -> GroupOracle {
 ///
 /// Panics if libhdf5 cannot open, inspect, or read the file or dataset.
 pub fn observe_dataset(path: &Path, link_name: &str) -> DatasetObservation {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     DatasetObservation {
         storage: file.info().unwrap().storage_type,
         values: file.dataset(link_name).unwrap().read_raw::<i32>().unwrap(),
@@ -263,7 +266,7 @@ pub fn observe_dataset(path: &Path, link_name: &str) -> DatasetObservation {
 }
 
 fn write_libhdf5_fixture(path: &Path, count: usize, userblock: u64) {
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })
@@ -302,7 +305,7 @@ fn write_libhdf5_fixture(path: &Path, count: usize, userblock: u64) {
                 }
                 _ => {
                     group
-                        .commit_datatype(&name, &hdf5::Datatype::from_type::<i32>().unwrap())
+                        .commit_datatype(&name, &libhdf5::Datatype::from_type::<i32>().unwrap())
                         .unwrap();
                 }
             }
@@ -378,7 +381,7 @@ pub fn assert_inspection_group(
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create the file, configure or write its groups, or close it.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_inspection_fixture(path: &Path, order: GroupOrder) {
     let file = File::with_options()
         .with_fapl(|properties| {
@@ -393,11 +396,11 @@ pub fn write_inspection_fixture(path: &Path, order: GroupOrder) {
             .link_creation_order(order.creation_order())
             .finish()
             .unwrap();
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             assert_eq!(
                 // SAFETY: The library lock serializes access, and `properties` keeps the group
                 // creation property list live throughout the call.
-                unsafe { hdf5_sys::h5p::H5Pset_link_phase_change(properties.id(), 12, 4) },
+                unsafe { libhdf5_sys::h5p::H5Pset_link_phase_change(properties.id(), 12, 4) },
                 0
             );
         });
@@ -448,7 +451,7 @@ pub fn write_inspection_fixture(path: &Path, order: GroupOrder) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot open, inspect, or close the file or group.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn added_group_link_count(path: &Path, parent: &str) -> u64 {
     let file = File::open(path).unwrap();
     let group = file.group(&format!("/{parent}/added")).unwrap();
@@ -466,7 +469,7 @@ pub fn added_group_link_count(path: &Path, parent: &str) -> u64 {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, configure, populate, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_filtered_link_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
     let file = crate::file::libhdf5_create_v18(path);
     let properties = GroupCreate::build()
@@ -499,7 +502,7 @@ pub fn write_filtered_link_fixture(path: &Path, count: usize, thresholds: (u32, 
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, write, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_huge_inspection_fixture(path: &Path) {
     let file = File::with_options()
         .with_fapl(|properties| properties.libver_latest())
@@ -529,7 +532,7 @@ pub fn write_huge_inspection_fixture(path: &Path) {
 ///
 /// Panics if libhdf5 cannot configure, create, write, or close the fixture, or an index
 /// does not fit in [`i32`].
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_edit_fixture(
     path: &Path,
     group_path: &str,
@@ -542,7 +545,7 @@ pub fn write_edit_fixture(
         write_edit_root_fixture(path, count, thresholds);
         return;
     }
-    let reference = hdf5::FileBuilder::new()
+    let reference = libhdf5::FileBuilder::new()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })
@@ -553,11 +556,11 @@ pub fn write_edit_fixture(
     } else {
         let properties = GroupCreate::build().finish().unwrap();
         if let Some((max_compact, min_dense)) = thresholds {
-            hdf5::sync::sync(|| {
+            libhdf5::sync::sync(|| {
                 assert_eq!(
                     // SAFETY: The library lock serializes access and `properties` owns the live list.
                     unsafe {
-                        hdf5_sys::h5p::H5Pset_link_phase_change(
+                        libhdf5_sys::h5p::H5Pset_link_phase_change(
                             properties.id(),
                             max_compact,
                             min_dense,
@@ -578,37 +581,41 @@ pub fn write_edit_fixture(
     reference.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 fn write_edit_root_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
     let reference = create_with_root_link_properties(path, thresholds, GroupOrder::Untracked, 0);
     populate_edit_group(&reference, count);
     reference.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 fn create_with_root_link_properties(
     path: &Path,
     thresholds: (u32, u32),
     order: GroupOrder,
     userblock: u64,
 ) -> File {
-    let mut builder = hdf5::FileBuilder::new();
+    let mut builder = libhdf5::FileBuilder::new();
     builder.with_fapl(|properties| {
         properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
     });
     let properties = builder.fcpl().userblock(userblock).finish().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The library lock serializes access and `properties` owns the live list.
             unsafe {
-                hdf5_sys::h5p::H5Pset_link_phase_change(properties.id(), thresholds.0, thresholds.1)
+                libhdf5_sys::h5p::H5Pset_link_phase_change(
+                    properties.id(),
+                    thresholds.0,
+                    thresholds.1,
+                )
             },
             0
         );
         assert_eq!(
             // SAFETY: The library lock serializes access and `properties` owns the live list.
             unsafe {
-                hdf5_sys::h5p::H5Pset_link_creation_order(
+                libhdf5_sys::h5p::H5Pset_link_creation_order(
                     properties.id(),
                     order.creation_order().into(),
                 )
@@ -618,13 +625,13 @@ fn create_with_root_link_properties(
     });
     let access = builder.fapl().finish().unwrap();
     let filename = CString::new(path.to_str().unwrap()).unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access. The filename and property lists remain
         // live during creation, and `from_id` takes ownership of the newly created file handle.
         unsafe {
-            hdf5::from_id::<File>(hdf5_sys::h5f::H5Fcreate(
+            libhdf5::from_id::<File>(libhdf5_sys::h5f::H5Fcreate(
                 filename.as_ptr(),
-                hdf5_sys::h5f::H5F_ACC_TRUNC,
+                libhdf5_sys::h5f::H5F_ACC_TRUNC,
                 properties.id(),
                 access.id(),
             ))
@@ -638,22 +645,22 @@ fn create_with_root_link_properties(
 /// # Panics
 ///
 /// Panics if a name contains a null byte or libhdf5 cannot move the link.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn rename_link_bytes(group: &Group, old_name: &[u8], new_name: &[u8]) {
     let old_name = CString::new(old_name).unwrap();
     let new_name = CString::new(new_name).unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The library lock serializes access. The group and both terminated names
             // remain live, and the default property lists need no owned handles.
             unsafe {
-                hdf5_sys::h5l::H5Lmove(
+                libhdf5_sys::h5l::H5Lmove(
                     group.id(),
                     old_name.as_ptr(),
                     group.id(),
                     new_name.as_ptr(),
-                    hdf5_sys::h5p::H5P_DEFAULT,
-                    hdf5_sys::h5p::H5P_DEFAULT,
+                    libhdf5_sys::h5p::H5P_DEFAULT,
+                    libhdf5_sys::h5p::H5P_DEFAULT,
                 )
             },
             0
@@ -666,7 +673,7 @@ pub fn rename_link_bytes(group: &Group, old_name: &[u8], new_name: &[u8]) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot enumerate the group.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn creation_order_names(group: &Group) -> Vec<String> {
     let mut names = Vec::new();
     group
@@ -690,7 +697,7 @@ pub fn creation_order_names(group: &Group) -> Vec<String> {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, configure, populate, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_repack_link_fixture(path: &Path, order: GroupOrder, group_path: &str, count: usize) {
     let file = create_with_root_link_properties(
         path,
@@ -725,7 +732,7 @@ pub fn write_repack_link_fixture(path: &Path, order: GroupOrder, group_path: &st
         .unwrap();
     group.create_group("child").unwrap();
     group
-        .commit_datatype("type", &hdf5::Datatype::from_type::<i32>().unwrap())
+        .commit_datatype("type", &libhdf5::Datatype::from_type::<i32>().unwrap())
         .unwrap();
     group.link_soft("value", "soft").unwrap();
     group.link_external("外部.h5", "/目标", "external").unwrap();
@@ -750,14 +757,14 @@ pub fn write_repack_link_fixture(path: &Path, order: GroupOrder, group_path: &st
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create or configure the file or group, or if populating the group fails.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_group_info_fixture(
     path: &Path,
     thresholds: (u32, u32),
     estimates: (u32, u32),
     count: usize,
 ) {
-    let reference = hdf5::FileBuilder::new()
+    let reference = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
         .create(path)
         .unwrap();
@@ -768,11 +775,11 @@ pub fn write_group_info_fixture(
         })
         .finish()
         .unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The library lock serializes access and `properties` owns the live list.
             unsafe {
-                hdf5_sys::h5p::H5Pset_est_link_info(properties.id(), estimates.0, estimates.1)
+                libhdf5_sys::h5p::H5Pset_est_link_info(properties.id(), estimates.0, estimates.1)
             },
             0
         );
@@ -794,7 +801,7 @@ pub fn write_group_info_fixture(
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create or write a dataset, or an index does not fit in [`i32`].
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn populate_edit_group(group: &Group, count: usize) {
     for index in 0..count {
         group
@@ -819,7 +826,7 @@ const MAX_COMPACT_LINKS: usize = 8;
 ///
 /// Panics if libhdf5 cannot read or close the fixture, a value differs from the expected value,
 /// or a dataset index does not fit in [`i32`].
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_edit_group(
     path: &Path,
     group_path: &str,
@@ -865,7 +872,7 @@ pub fn assert_edit_group(
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, write, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_collision_edit_fixture(path: &Path, group_path: &str) {
     write_edit_fixture(path, group_path, 2000, None);
     {
@@ -904,7 +911,7 @@ pub fn write_collision_edit_fixture(path: &Path, group_path: &str) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_collision_edit(path: &Path, group_path: &str) {
     let reference = File::open(path).unwrap();
     let group = reference.group(group_path).unwrap();
@@ -939,7 +946,7 @@ pub fn assert_collision_edit(path: &Path, group_path: &str) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, write, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_descendant_edit_fixture(path: &Path) {
     write_edit_fixture(path, "/", 12, None);
     {
@@ -956,7 +963,7 @@ pub fn write_descendant_edit_fixture(path: &Path) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_descendant_edit(path: &Path) {
     let reference = File::open(path).unwrap();
     assert_eq!(
@@ -1008,7 +1015,7 @@ pub fn assert_descendant_edit(path: &Path) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, write, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_attribute_edit_fixture(path: &Path) {
     write_edit_fixture(path, "/g", 12, None);
     {
@@ -1035,7 +1042,7 @@ pub fn write_attribute_edit_fixture(path: &Path) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_attribute_edit(path: &Path, edit_attributes: bool) {
     let reference = File::open(path).unwrap();
     let group = reference.group("g").unwrap();
@@ -1067,7 +1074,7 @@ pub fn assert_attribute_edit(path: &Path, edit_attributes: bool) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, write, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_alias_edit_fixture(path: &Path, dataset: bool) {
     write_edit_fixture(path, "/g", 12, None);
     {
@@ -1084,7 +1091,7 @@ pub fn write_alias_edit_fixture(path: &Path, dataset: bool) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create, write, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_symbolic_edit_fixture(path: &Path) {
     write_edit_fixture(path, "/", 9, None);
     {
@@ -1107,7 +1114,7 @@ pub fn write_symbolic_edit_fixture(path: &Path) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_compact_symbolic_edit(path: &Path) {
     let reference = File::open(path).unwrap();
     assert_eq!(
@@ -1125,7 +1132,7 @@ pub fn assert_compact_symbolic_edit(path: &Path) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_dense_symbolic_edit(path: &Path) {
     let reference = File::open(path).unwrap();
     assert_eq!(
@@ -1141,7 +1148,7 @@ pub fn assert_dense_symbolic_edit(path: &Path) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_userblock_edit(path: &Path) {
     let reference = File::open(path).unwrap();
     assert_eq!(

@@ -5,7 +5,7 @@ use std::error::Error as StdError;
 use std::io::{self, Write};
 use std::path::Path;
 
-use hdf5::types::{IntSize, TypeDescriptor};
+use libhdf5::types::{IntSize, TypeDescriptor};
 use test_util_hdf5::absence;
 
 use protocol::{Attribute, Frame, Lookup, Operation, Rejection, Response, Stage};
@@ -40,7 +40,7 @@ fn execute(path: &Path, operation: Operation) -> Result<Response, Failure> {
         } else {
             16
         };
-        let file = native(Stage::Open, hdf5::File::open_rw(path))?;
+        let file = native(Stage::Open, libhdf5::File::open_rw(path))?;
         let added: Vec<i64> = (0..len).collect();
         let attribute = native(
             Stage::Create,
@@ -53,7 +53,7 @@ fn execute(path: &Path, operation: Operation) -> Result<Response, Failure> {
         native(Stage::Flush, file.flush())?;
         native(Stage::Close, file.close())?;
     }
-    let file = native(Stage::Open, hdf5::File::open(path))?;
+    let file = native(Stage::Open, libhdf5::File::open(path))?;
     let response = match operation {
         Operation::Count => Response::Count(native(Stage::Names, file.attr_names())?.len()),
         Operation::Lookup(names) => {
@@ -109,9 +109,9 @@ enum Failure {
     Native(Rejection),
 }
 
-fn native<T>(stage: Stage, result: hdf5::Result<T>) -> Result<T, Failure> {
+fn native<T>(stage: Stage, result: libhdf5::Result<T>) -> Result<T, Failure> {
     result.map_err(|error| match error {
-        hdf5::Error::HDF5(stack) => match stack.expand() {
+        libhdf5::Error::HDF5(stack) => match stack.expand() {
             Ok(stack) => Failure::Native(Rejection {
                 stage,
                 frames: stack
@@ -126,6 +126,6 @@ fn native<T>(stage: Stage, result: hdf5::Result<T>) -> Result<T, Failure> {
             }),
             Err(error) => Failure::Infrastructure(Box::new(error)),
         },
-        error @ hdf5::Error::Internal(_) => Failure::Infrastructure(Box::new(error)),
+        error @ libhdf5::Error::Internal(_) => Failure::Infrastructure(Box::new(error)),
     })
 }

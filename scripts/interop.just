@@ -43,14 +43,14 @@ test-hdf5-all FEATURES="serde,ndarray,provenance" PROFILE="test":
 test-hdf5 VERSION FEATURES="serde,ndarray,provenance" *ARGS: (hdf5-build VERSION)
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
-    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" {{ ARGS }}
+    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features "libhdf5,{{ FEATURES }}${release_feature:+,$release_feature}" {{ ARGS }}
 
 # Run one configured nextest group against libhdf5 `VERSION`.
 test-hdf5-group VERSION GROUP FEATURES="serde,ndarray,provenance": (hdf5-build VERSION)
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
     if [ -z "$release_feature" ]; then export NEXTEST_NO_TESTS=pass; fi && \
-    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -E 'group({{ GROUP }})'
+    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features "libhdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -E 'group({{ GROUP }})'
 
 test-extended-hdf5 VERSION FEATURES="serde,ndarray,provenance" *ARGS: (hdf5-build VERSION)
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
@@ -58,26 +58,26 @@ test-extended-hdf5 VERSION FEATURES="serde,ndarray,provenance" *ARGS: (hdf5-buil
     if [ -z "$release_feature" ]; then export NEXTEST_NO_TESTS=pass; fi && \
     cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure \
         --profile extended-interop \
-        --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" {{ ARGS }}
+        --features "libhdf5,{{ FEATURES }}${release_feature:+,$release_feature}" {{ ARGS }}
 
 # Clippy over the crosschecks, linking libhdf5 VERSION.
 lint-hdf5 VERSION FEATURES="serde,ndarray,provenance":
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
-    cargo clippy --locked -p {{ CROSSCHECK }} -p hdf5-pure --all-targets --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -- -D warnings
+    cargo clippy --locked -p {{ CROSSCHECK }} -p hdf5-pure --all-targets --features "libhdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -- -D warnings
 
 # The crosschecks linking the libhdf5 `hdf5-metno` bundles, built from source
 # on first use. Needs no HDF5 on the host.
 test-bundled *ARGS:
-    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features __hdf5-bundled,serde,ndarray {{ ARGS }}
+    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features __libhdf5-bundled,serde,ndarray {{ ARGS }}
 
 test-extended-bundled *ARGS:
-    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile extended-interop --features __hdf5-bundled,serde,ndarray {{ ARGS }}
+    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile extended-interop --features __libhdf5-bundled,serde,ndarray {{ ARGS }}
 
 # The crosschecks linking the HDF5 installed under HDF5_DIR. Pass the feature
-# naming its release series, as in `--features __hdf5-1.14`.
+# for its release series, as in `--features __libhdf5-1.14`.
 test-external-hdf5 *ARGS:
-    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features hdf5,serde,ndarray {{ ARGS }}
+    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features libhdf5,serde,ndarray {{ ARGS }}
 
 test-matio *ARGS:
     cargo nextest run --locked -p {{ CROSSCHECK }} --features serde,__matio {{ ARGS }}
@@ -86,5 +86,5 @@ test-matio *ARGS:
 hdf5-bundled-version:
     #!/usr/bin/env bash
     set -euo pipefail
-    manifest=$(cargo metadata --locked --features {{ CROSSCHECK }}/__hdf5-bundled --format-version 1 | jq -r '.packages[] | select(.name == "hdf5-metno-src") | .manifest_path')
+    manifest=$(cargo metadata --locked --features {{ CROSSCHECK }}/__libhdf5-bundled --format-version 1 | jq -r '.packages[] | select(.name == "hdf5-metno-src") | .manifest_path')
     awk '/^#define H5_VERS_(MAJOR|MINOR|RELEASE) / { v[++n] = $3 } END { print v[1] "." v[2] "." v[3] }' "$(dirname "$manifest")/ext/hdf5/src/H5public.h"

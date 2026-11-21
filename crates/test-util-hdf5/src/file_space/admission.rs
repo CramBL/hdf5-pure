@@ -8,7 +8,6 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
@@ -22,6 +21,7 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
 use hdf5_pure_format::__private::FormatWidths;
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use test_util::allocation_oracle::Coverage;
 use test_util::allocation_oracle::Interval;
 use test_util::bytes;
@@ -108,7 +108,7 @@ impl Chain {
     }
 
     fn write_native(self, path: &Path) {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|properties| properties.libver_latest().meta_block_size(1 << 20))
             .with_fcpl(|properties| {
                 properties.file_space_strategy(NativeStrategy::FreeSpaceManager {
@@ -345,7 +345,7 @@ impl Fixture {
         );
         let survivor = Coverage::new([Interval::new(keep.start, keep.end - keep.start).unwrap()]);
         file.close().unwrap();
-        let native = hdf5::File::open(path).unwrap();
+        let native = libhdf5::File::open(path).unwrap();
         assert_eq!(
             native.dataset("chunks").unwrap().read_raw::<u64>().unwrap(),
             vec![42; chain.chunks() * usize::try_from(chain.chunk_bytes() / 8).unwrap()]
@@ -562,7 +562,7 @@ pub struct Observation {
 ///
 /// Panics if opening, reading, or closing fails, or names or values differ.
 pub fn assert_native(path: &Path) {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     assert_eq!(file.member_names().unwrap(), ["keep"]);
     assert_eq!(
         file.dataset("keep").unwrap().read_raw::<u32>().unwrap(),

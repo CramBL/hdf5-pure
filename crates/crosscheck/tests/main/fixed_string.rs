@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! libhdf5 reads the fixed-width string datasets this crate
 //! writes (issue #355).
 //!
@@ -17,9 +17,9 @@
 //! Every call here goes through the safe `hdf5-metno` API, which serializes its
 //! own C calls through an internal lock, so these tests need no extra guard.
 
-use hdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
-use hdf5::{Conversion, Datatype};
 use hdf5_pure::FileBuilder;
+use libhdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
+use libhdf5::{Conversion, Datatype};
 use rstest::rstest;
 
 use test_util_hdf5::fixed_string;
@@ -36,7 +36,7 @@ fn the_c_library_reports_the_width_this_crate_declared() {
     fixed_string::matrix(&mut b);
     b.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     for (name, expected) in [
         ("derived_ascii", TypeDescriptor::FixedAscii(5)),
         ("sized_ascii", TypeDescriptor::FixedAscii(16)),
@@ -69,7 +69,7 @@ fn the_c_library_reads_back_every_value() {
     fixed_string::matrix(&mut b);
     b.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     let derived: Vec<FixedAscii<5>> = file
         .dataset("derived_ascii")
@@ -128,7 +128,7 @@ fn the_c_library_holds_each_charset_to_its_own_reader(
     b.create_dataset("utf8").with_strings(&["north"]).unwrap();
     b.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset(dataset_name).unwrap();
     let datatype = dataset.dtype().unwrap();
     assert_eq!(datatype.to_descriptor().unwrap(), source);
@@ -174,7 +174,7 @@ fn the_c_library_reads_a_multi_byte_value_whole() {
     fixed_string::utf8_units(&mut b);
     b.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("units").unwrap();
     assert_eq!(
         ds.dtype().unwrap().to_descriptor().unwrap(),
@@ -199,7 +199,7 @@ fn the_c_library_opens_an_all_empty_fixed_string_dataset() {
     fixed_string::empty_ascii(&mut b);
     b.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("blank").unwrap();
     assert_eq!(
         ds.dtype().unwrap().to_descriptor().unwrap(),
@@ -226,7 +226,7 @@ fn the_c_library_extends_a_declared_width_dataset() {
     b.write(&path).unwrap();
 
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let ds = file.dataset("station").unwrap();
         ds.resize([4]).unwrap();
         ds.write_slice(

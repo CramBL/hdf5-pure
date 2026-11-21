@@ -1,4 +1,4 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 //! An enumeration *attribute* written by libhdf5 must reach the
 //! caller, decoded through the enum's integer base type (#248).
 //!
@@ -17,12 +17,12 @@ use std::collections::{BTreeMap, HashMap};
 use hdf5_pure::{AttrValue, Datatype, File};
 
 /// Write attributes with the C library, then open the file with this crate.
-fn c_writes(write: impl FnOnce(&hdf5::File)) -> File {
+fn c_writes(write: impl FnOnce(&libhdf5::File)) -> File {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("enum_attrs.h5");
 
     {
-        let file = hdf5::File::create(&path).expect("the C library should create the file");
+        let file = libhdf5::File::create(&path).expect("libhdf5 should create the file");
         write(&file);
         file.close().expect("close");
     }
@@ -32,7 +32,7 @@ fn c_writes(write: impl FnOnce(&hdf5::File)) -> File {
 }
 
 /// Write attributes with the C library, then read them all back with this crate.
-fn c_writes_then_pure_reads(write: impl FnOnce(&hdf5::File)) -> HashMap<String, AttrValue> {
+fn c_writes_then_pure_reads(write: impl FnOnce(&libhdf5::File)) -> HashMap<String, AttrValue> {
     c_writes(write).root().attrs().expect("attrs")
 }
 

@@ -1,12 +1,7 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use core::num::NonZeroU16;
 
-use hdf5::Dataset;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
-use hdf5::types::VarLenArray;
-use hdf5::types::VarLenAscii;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::LengthWidth;
@@ -14,6 +9,11 @@ use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
 use hdf5_pure_format::__private::VariableLengthDescriptor;
+use libhdf5::Dataset;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
+use libhdf5::types::VarLenArray;
+use libhdf5::types::VarLenAscii;
 use rstest::rstest;
 use test_util::bytes;
 use test_util_hdf5::lock;
@@ -39,7 +39,7 @@ fn variable_length_descriptors_preserve_native_string_and_sequence_records(
     let _guard = lock::libhdf5_guard();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("descriptors.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_create_plist(|properties| {
             properties.sizes(SizeofInfo {
                 sizeof_addr,
@@ -115,7 +115,7 @@ enum Payload {
 }
 
 impl Payload {
-    fn create(self, file: &hdf5::File) -> Dataset {
+    fn create(self, file: &libhdf5::File) -> Dataset {
         match self {
             Self::Sequence => {
                 let values = [

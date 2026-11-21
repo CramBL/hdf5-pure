@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for issue #146: the unified append + edit session.
 //!
 //! Covers the fast, immediate `Dataset::append` and the staged
@@ -10,11 +10,11 @@
 //! compact-attribute walkers must accept it rather than mistake it for dense
 //! storage.
 
-use hdf5::Extent;
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::types::FixedAscii;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, File};
+use libhdf5::Extent;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::types::FixedAscii;
 use rstest::rstest;
 
 use test_util_hdf5::absence;
@@ -33,7 +33,7 @@ fn libhdf5_reads_appends_across_new_array_blocks(#[case] paged: bool, #[case] bo
     let path = dir.path().join("array_blocks.h5");
     let expected: Vec<String> = (0..340).map(|value| format!("{value:03}")).collect();
     {
-        let reference = hdf5::File::with_options()
+        let reference = libhdf5::File::with_options()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -188,7 +188,7 @@ fn hard_link_aliasing_append_inplace_stays_coherent() {
     let path = dir.path().join("alias.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         file.link_hard("d", "alias").unwrap();
         file.close().unwrap();
     }
@@ -234,7 +234,7 @@ fn c_dataset_with_attribute_info_accepts_set_dataset_attr() {
     }
 
     // Reference C library sees the data and both attributes.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let d = c.dataset("d").unwrap();
     assert_eq!(d.read_raw::<i32>().unwrap(), vec![1, 2, 3, 4]);
     let orig: i64 = d.attr("orig").unwrap().read_scalar().unwrap();
@@ -281,7 +281,7 @@ fn c_group_with_attribute_info_accepts_set_group_attr() {
         s.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let g = c.group("grp").unwrap();
     let orig: i64 = g.attr("orig").unwrap().read_scalar().unwrap();
     let added: i64 = g.attr("added").unwrap().read_scalar().unwrap();
@@ -312,7 +312,7 @@ fn set_dataset_attr_on_chunked_dataset_c_reads() {
 
     let expected: Vec<i32> = (0..12).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("d").unwrap().read_raw::<i32>().unwrap(), expected);
     let checked: i64 = c
         .dataset("d")
@@ -330,7 +330,7 @@ fn set_dataset_attr_multi_hard_link_refused() {
     let path = dir.path().join("c_ds_multilink.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         file.link_hard("d", "alias").unwrap();
         file.close().unwrap();
     }
@@ -405,7 +405,7 @@ fn combined_mixed_edits_c_readable() {
     }
 
     // Reference C library.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("log").unwrap().read_raw::<i32>().unwrap(),
         (0..10).collect::<Vec<_>>()
@@ -457,7 +457,7 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
         b.write(&path).unwrap();
     }
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         file.link_hard("d", "alias").unwrap();
         file.close().unwrap();
     }
@@ -537,7 +537,7 @@ fn an_append_into_freed_space_stays_c_readable() {
         s.close().unwrap();
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("log").unwrap().read_raw::<i32>().unwrap(),
         (0..8196).collect::<Vec<_>>()

@@ -1,7 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
@@ -14,6 +12,8 @@ use hdf5_pure_format::__private::LengthWidth;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ClassicAggregators;
 use hdf5_pure_space::__private::Extent;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 
 use test_util_hdf5::aggregation;
@@ -32,7 +32,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("aggregation.h5");
     // Creating metadata first and H5Pset_meta_block_size(0) isolate raw aggregation.
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110().meta_block_size(0))
         .with_fcpl(|fcpl| fcpl.file_space_strategy(CStrategy::PageAggregation))
         .create(&path)
@@ -162,7 +162,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
     assert_eq!(released.released(AllocationClass::Raw), None);
     assert_eq!(released.released(AllocationClass::Metadata), None);
 
-    let reopened = hdf5::File::open(&path).unwrap();
+    let reopened = libhdf5::File::open(&path).unwrap();
     assert_eq!(reopened.free_space(), 0);
     for object in workload.surviving_objects() {
         match object {

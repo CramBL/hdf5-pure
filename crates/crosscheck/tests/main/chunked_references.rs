@@ -1,10 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::ObjectReference;
-use hdf5::ObjectReference1;
-use hdf5::ReferencedObject;
-use hdf5::types::IntSize;
-use hdf5::types::TypeDescriptor;
 use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
@@ -17,6 +12,11 @@ use hdf5_pure::Object;
 use hdf5_pure::UserblockSize;
 #[cfg(feature = "provenance")]
 use hdf5_pure::VerifyResult;
+use libhdf5::ObjectReference;
+use libhdf5::ObjectReference1;
+use libhdf5::ReferencedObject;
+use libhdf5::types::IntSize;
+use libhdf5::types::TypeDescriptor;
 use rstest::rstest;
 
 #[rstest]
@@ -79,7 +79,7 @@ fn c_resolves_chunked_path_references_and_reads_chunk_records(
     #[cfg(feature = "provenance")]
     assert_eq!(references.verify_provenance().unwrap(), VerifyResult::Ok);
     let chunks = references.chunks().unwrap();
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let dataset = c.dataset("refs").unwrap();
     let values = dataset.read_raw::<ObjectReference1>().unwrap();
     let mut targets = Vec::new();
@@ -116,7 +116,7 @@ fn c_resolves_chunked_path_references_and_reads_chunk_records(
         assert_eq!(c_chunk.offset, chunk.offset);
         // `H5D__get_chunk_info` adds the userblock base to chunk addresses in HDF5 1.14.6
         // and 2.2.0. HDF5 1.10.11 and 1.12.3 return the stored address (`H5Dchunk.c`).
-        let address = if cfg!(feature = "__hdf5-1.14") {
+        let address = if cfg!(feature = "__libhdf5-1.14") {
             c_chunk.addr
         } else {
             c_chunk.addr + userblock.get()
@@ -135,7 +135,7 @@ fn c_resolves_chunked_path_references_and_reads_chunk_records(
 fn rust_resolves_c_created_chunked_reference_values(#[case] filtered: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c-references.h5");
-    let c = hdf5::File::create(&path).unwrap();
+    let c = libhdf5::File::create(&path).unwrap();
     c.new_dataset::<i32>()
         .shape([1])
         .create("target")

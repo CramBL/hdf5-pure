@@ -1,13 +1,13 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::filters::Filter;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FilterParameters;
+use libhdf5::filters::Filter;
 use rstest::rstest;
 
 #[rstest]
@@ -26,7 +26,7 @@ fn reads_c_deflate_values_and_level_metadata(
     }
     filters.push(Filter::Deflate(level.get()));
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let dataset = file
             .new_dataset::<i32>()
             .shape([4])
@@ -61,7 +61,7 @@ fn reads_c_deflate_values_and_level_metadata(
 }
 
 #[rstest]
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[case::level_zero(DeflateLevel::Zero)]
 #[case::level_six(DeflateLevel::Six)]
 #[case::level_nine(DeflateLevel::Nine)]
@@ -91,7 +91,7 @@ fn c_reads_requested_deflate_levels(
         file.root().create_dataset("data", configure).unwrap();
         file.commit().unwrap();
     }
-    let dataset = hdf5::File::open(&path).unwrap().dataset("data").unwrap();
+    let dataset = libhdf5::File::open(&path).unwrap().dataset("data").unwrap();
     assert_eq!(dataset.read_raw::<i32>().unwrap(), [1, 2, 3, 4]);
     let mut expected = Vec::new();
     if shuffle {

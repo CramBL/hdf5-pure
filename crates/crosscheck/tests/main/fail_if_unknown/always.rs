@@ -10,8 +10,8 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
 
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError};
+use libhdf5::{MajorErrorCode, MinorErrorCode};
 
 use test_util::object_header::{MessageFlags, MessageType};
 
@@ -24,7 +24,7 @@ fn an_unknown_message_that_must_always_be_understood_is_rejected_as_the_c_librar
     let path = dir.path().join("fail_if_unknown_always.h5");
     fixture::write_earliest_format_fixture(&path);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset(DATASET_NAME).unwrap().read_raw::<i32>().unwrap(),
         DATA
@@ -51,7 +51,7 @@ fn an_unknown_message_that_must_always_be_understood_is_rejected_as_the_c_librar
     );
     std::fs::write(&path, &bytes).unwrap();
 
-    let c_err = hdf5::File::open(&path).unwrap_err();
+    let c_err = libhdf5::File::open(&path).unwrap_err();
     assert!(
         c_err.contains_major(MajorErrorCode::ObjectHeader),
         "{c_err}"

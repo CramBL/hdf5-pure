@@ -1,15 +1,15 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Cross-validation for editing files with a userblock (the userblock slice of
 //! issue #104) against libhdf5. A single off-by-base address in
 //! an edited file makes the C library error or read garbage, so reading the
-//! result back through `hdf5` is the external tripwire that the editor stored
+//! result back through `libhdf5` is the external tripwire that the editor stored
 //! every root/link/layout address relative to the base address correctly.
 
-use hdf5::dataset::Layout;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
+use libhdf5::dataset::Layout;
+use libhdf5::file::LibraryVersion;
 
 use test_util_hdf5::{absence, assertion};
 
@@ -18,8 +18,8 @@ const UB: u64 = 512;
 /// Create a userblock file with libhdf5. The closure adds
 /// datasets; the file is created with a 512-byte userblock and the modern library
 /// bounds so its on-disk format matches what a real `.mat`-style file carries.
-fn c_userblock_file(path: &std::path::Path, build: impl FnOnce(&hdf5::File)) {
-    let file = hdf5::File::with_options()
+fn c_userblock_file(path: &std::path::Path, build: impl FnOnce(&libhdf5::File)) {
+    let file = libhdf5::File::with_options()
         .with_fcpl(|p| {
             p.userblock(UB);
             p
@@ -31,7 +31,7 @@ fn c_userblock_file(path: &std::path::Path, build: impl FnOnce(&hdf5::File)) {
     file.close().unwrap();
     // Sanity: the file really carries a userblock.
     assert_eq!(
-        hdf5::File::open(path).unwrap().userblock(),
+        libhdf5::File::open(path).unwrap().userblock(),
         UB,
         "C library did not produce a userblock file"
     );
@@ -87,7 +87,7 @@ fn pure_userblock_file_edited_then_read_by_c_library() {
     );
 
     // reference C library reader — the real interop proof.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("alpha").unwrap().read_raw::<f64>().unwrap(),
         vec![9.0, 8.0, 7.0]
@@ -132,7 +132,7 @@ fn real_mat_edited_then_read_by_c_library() {
     // libhdf5 opens the edited real .mat file and reads both the added
     // dataset and an untouched original — proving every address survived the edit
     // relative to the 512-byte MATLAB userblock.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("hdf5_pure_probe")
             .unwrap()
@@ -197,7 +197,7 @@ fn userblock_chunked_add_and_overwrite_read_by_c_library() {
     assert_eq!(f.dataset("added").unwrap().read_f64().unwrap(), added);
 
     // reference C library reader — the real interop proof.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("c").unwrap().read_raw::<f64>().unwrap(), updated);
     assert_eq!(
         c.dataset("added").unwrap().read_raw::<f64>().unwrap(),
@@ -248,7 +248,7 @@ fn userblock_chunked_reclaimed_space_reused_read_by_c_library() {
         s.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("c").unwrap().read_raw::<f64>().unwrap(), updated);
     assert_eq!(
         c.dataset("reuse").unwrap().read_raw::<f64>().unwrap(),
@@ -304,7 +304,7 @@ fn userblock_contiguous_undefined_address_relocates_read_by_c_library() {
         vec![1.0, 2.0]
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("blank").unwrap().read_raw::<i32>().unwrap(),
         vec![5, 6, 7]
@@ -358,7 +358,7 @@ fn userblock_compact_overwrite_read_by_c_library() {
         vec![9, 8, 7, 6]
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("cpt").unwrap().read_raw::<i32>().unwrap(),
         vec![9, 8, 7, 6]
@@ -421,7 +421,7 @@ fn userblock_delete_then_reuse_read_by_c_library() {
     assertion::path_not_found(f.dataset("c").unwrap_err(), "c");
     assert_eq!(f.dataset("reuse").unwrap().read_f64().unwrap(), reuse);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("reuse").unwrap().read_raw::<f64>().unwrap(),
         reuse
@@ -475,7 +475,7 @@ fn userblock_copy_read_by_c_library() {
     }
 
     let expected_c: Vec<i32> = (0..400).collect();
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("alpha_copy").unwrap().read_raw::<f64>().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
@@ -531,7 +531,7 @@ fn userblock_extensible_array_add_read_by_c_library() {
         s.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("ea").unwrap().read_raw::<f64>().unwrap(), added);
     assert_eq!(
         c.dataset("keep").unwrap().read_raw::<i32>().unwrap(),

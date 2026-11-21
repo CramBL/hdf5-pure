@@ -1,4 +1,4 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 //! libhdf5 must read a `.mat` written by the streaming path.
 //!
 //! This exercises the combination nothing else does: a userblock-offset file
@@ -51,7 +51,7 @@ fn c_reads_a_produced_dataset_streamed_to_disk() {
     mb.write_f64("meta", &[1, 2], &[1.0, 2.0]).unwrap();
     mb.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).expect("the C library should open the streamed file");
+    let file = libhdf5::File::open(&path).expect("libhdf5 should open the streamed file");
     let ds = file.dataset("samples").expect("dataset should exist");
     // HDF5 storage shape is the MATLAB shape reversed.
     assert_eq!(ds.shape(), vec![DIMS[1], DIMS[0]]);
@@ -68,6 +68,7 @@ fn c_reads_a_produced_dataset_streamed_to_disk() {
 
     // The MATLAB class attribute survives the streaming path. It is a
     // fixed-length ASCII string, which is what MATLAB itself writes.
-    let class: hdf5::types::FixedAscii<6> = ds.attr("MATLAB_class").unwrap().read_scalar().unwrap();
+    let class: libhdf5::types::FixedAscii<6> =
+        ds.attr("MATLAB_class").unwrap().read_scalar().unwrap();
     assert_eq!(class.as_str(), "double");
 }

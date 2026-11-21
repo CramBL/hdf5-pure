@@ -1,20 +1,20 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::GroupStorageType;
-use hdf5::datatype::ByteOrder as CByteOrder;
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileSpaceSettings;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::LibVer;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_format::__private::GROUP_HEAP_MAX_MANAGED_OBJECT;
+use libhdf5::GroupStorageType;
+use libhdf5::datatype::ByteOrder as CByteOrder;
 use rstest::rstest;
 use test_util_hdf5::dense_links;
 use test_util_hdf5::dense_links::ChildObservation;
@@ -36,7 +36,7 @@ fn libhdf5_and_file_writer_group_links_match(
     crosscheck(count, userblock, streamed, producer, group_path, |_| {});
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::direct(FileSpaceStrategy::None, false)]
 #[case::aggregate(FileSpaceStrategy::Aggr, false)]
@@ -170,7 +170,7 @@ fn crosscheck(
 
 fn pure_fixture(count: usize, userblock: u64) -> FileBuilder {
     let mut builder = FileBuilder::new();
-    if !cfg!(feature = "__hdf5-1.10") {
+    if !cfg!(feature = "__libhdf5-1.10") {
         builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     }
     if userblock != 0 {
@@ -183,11 +183,11 @@ fn pure_fixture(count: usize, userblock: u64) -> FileBuilder {
             0 => {
                 let data = [i32::try_from(index).unwrap(), 17];
                 let root_dataset = builder.create_dataset(&name).with_i32_data(&data);
-                if index % 6 == 0 && cfg!(feature = "__hdf5-1.10") {
+                if index % 6 == 0 && cfg!(feature = "__libhdf5-1.10") {
                     root_dataset.with_chunks(&[1]);
                 }
                 let dataset = group.create_dataset(&name).with_i32_data(&data);
-                if index % 6 == 0 && cfg!(feature = "__hdf5-1.10") {
+                if index % 6 == 0 && cfg!(feature = "__libhdf5-1.10") {
                     dataset.with_chunks(&[1]);
                 }
             }

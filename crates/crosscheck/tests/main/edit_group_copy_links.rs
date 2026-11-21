@@ -1,17 +1,17 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::GroupStorageType;
-use hdf5::IndexType;
-use hdf5::IterationOrder;
-use hdf5::LinkInfo;
-use hdf5::LinkType;
-use hdf5::plist::group_create::LinkCreationOrder;
-use hdf5::plist::link_create::CharEncoding;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
+use libhdf5::GroupStorageType;
+use libhdf5::IndexType;
+use libhdf5::IterationOrder;
+use libhdf5::LinkInfo;
+use libhdf5::LinkType;
+use libhdf5::plist::group_create::LinkCreationOrder;
+use libhdf5::plist::link_create::CharEncoding;
 use rstest::rstest;
 use test_util_hdf5::file;
 use test_util_hdf5::object_copy::Origin;
@@ -152,7 +152,7 @@ fn write_linked_group(path: &Path) {
     file.close().unwrap();
 }
 
-fn write_values(group: &hdf5::Group, dataset_name: &str, values: &[i32]) {
+fn write_values(group: &libhdf5::Group, dataset_name: &str, values: &[i32]) {
     group
         .new_dataset::<i32>()
         .shape([values.len()])

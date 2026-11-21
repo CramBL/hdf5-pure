@@ -1,4 +1,4 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::FileBuilder;
@@ -40,7 +40,7 @@ fn c_reads_attached_and_detached_group_hierarchies() {
     drop(builder.create_group("discarded").finish());
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let mut names = file.member_names().unwrap();
     names.sort();
     assert_eq!(names, ["attached", "detached"]);

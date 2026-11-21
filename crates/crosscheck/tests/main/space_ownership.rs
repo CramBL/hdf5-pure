@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
@@ -65,7 +65,7 @@ fn native_filtered_heap_storage_stays_unavailable_during_an_unrelated_edit() {
     file.commit().unwrap();
     storage::assert_unavailable(&file, &allocations);
     file.close().unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let mut names = file.group("filtered").unwrap().member_names().unwrap();
     names.sort();
     assert_eq!(
@@ -109,7 +109,7 @@ fn assert_shared_storage_survives_edit(path: &Path, storage: SharedStorage, dens
             .collect::<Vec<_>>(),
     );
     file.close().unwrap();
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     assert!(!file.link_exists("probe"));
     match storage {
         SharedStorage::Dataspace => {

@@ -1,14 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::str::FromStr;
 
-use hdf5::plist::file_access::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy as NativeSpace;
-use hdf5::plist::group_create::{AttrCreationOrder, GroupCreateBuilder};
-use hdf5::types::{VarLenAscii, VarLenUnicode};
-use hdf5::{H5Type, ObjectReference, ObjectReference1, ReferencedObject};
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FormatError, MemoryStrategy, MessageType,
     PhysicalAddress,
@@ -20,6 +15,11 @@ use hdf5_pure_format::__private::{
     AccessMode, AttributeInfoMessage, AttributeMessage, FormatWidths, MessageFlags, ObjectHeader,
     ObjectHeaderPrefix,
 };
+use libhdf5::plist::file_access::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeSpace;
+use libhdf5::plist::group_create::{AttrCreationOrder, GroupCreateBuilder};
+use libhdf5::types::{VarLenAscii, VarLenUnicode};
+use libhdf5::{H5Type, ObjectReference, ObjectReference1, ReferencedObject};
 use rstest::rstest;
 
 use test_util_hdf5::heap_allocations;
@@ -82,7 +82,7 @@ fn ordered_attribute_batches_preserve_values_and_creation_indices(
         info.max_creation_index,
         Some(u16::try_from(added + 3).unwrap())
     );
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let location = owner.location(&native);
     let mut actual_names = location.attr_names().unwrap();
     actual_names.sort();
@@ -177,7 +177,7 @@ fn compact_attribute_edits_use_stored_policy(
         owner.attributes(&File::open(&path).unwrap()),
         expected_values
     );
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let location = owner.location(&file);
     let expected: Vec<String> = (0..count).map(attr_name).collect();
     assert_eq!(location.attr_names().unwrap(), expected);
@@ -193,8 +193,8 @@ fn compact_attribute_edits_use_stored_policy(
             assert_eq!(
                 location
                     .attr_by_index(
-                        hdf5::IndexType::CreationOrder,
-                        hdf5::IterationOrder::Increasing,
+                        libhdf5::IndexType::CreationOrder,
+                        libhdf5::IterationOrder::Increasing,
                         u64::try_from(index).unwrap()
                     )
                     .unwrap()
@@ -264,7 +264,7 @@ fn oversized_attributes_override_compact_policy(
             ("large".to_string(), AttrValue::I64Array(value.clone())),
         ])
     );
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let location = owner.location(&file);
     assert_eq!(
         location.attr("a000").unwrap().read_scalar::<i64>().unwrap(),
@@ -376,7 +376,7 @@ fn dense_attribute_deletions_use_stored_policy(
         owner.attributes(&File::open(&path).unwrap()),
         expected_values
     );
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let location = owner.location(&file);
     let names: Vec<_> = surviving.iter().copied().map(attr_name).collect();
     assert_eq!(location.attr_names().unwrap(), names);
@@ -386,7 +386,7 @@ fn dense_attribute_deletions_use_stored_policy(
                 location
                     .attr(&attr_name(index))
                     .unwrap()
-                    .read_scalar::<hdf5::types::VarLenUnicode>()
+                    .read_scalar::<libhdf5::types::VarLenUnicode>()
                     .unwrap()
                     .as_str(),
                 "new variable-length value"
@@ -412,8 +412,8 @@ fn dense_attribute_deletions_use_stored_policy(
             assert_eq!(
                 location
                     .attr_by_index(
-                        hdf5::IndexType::CreationOrder,
-                        hdf5::IterationOrder::Increasing,
+                        libhdf5::IndexType::CreationOrder,
+                        libhdf5::IterationOrder::Increasing,
                         u64::try_from(position).unwrap()
                     )
                     .unwrap()
@@ -464,7 +464,7 @@ fn oversized_survivor_keeps_dense_attribute_storage(
     let path = directory.path().join("oversized-survivor.h5");
     create_fixture(&path, owner, order, 8, 6, 9);
     let big: Vec<i64> = (0..10_000).collect();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let location = owner.location(&native);
     location
         .new_attr::<i64>()
@@ -500,7 +500,7 @@ fn oversized_survivor_keeps_dense_attribute_storage(
     }
     assert_eq!(inspect_storage(&path, owner, true, order, 10), policy);
     assert_eq!(owner.attributes(&File::open(&path).unwrap()), expected);
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let location = owner.location(&native);
     assert_eq!(location.attr_names().unwrap(), ["a007", "a008", "large"]);
     assert_eq!(
@@ -524,8 +524,8 @@ fn oversized_survivor_keeps_dense_attribute_storage(
             assert_eq!(
                 location
                     .attr_by_index(
-                        hdf5::IndexType::CreationOrder,
-                        hdf5::IterationOrder::Increasing,
+                        libhdf5::IndexType::CreationOrder,
+                        libhdf5::IterationOrder::Increasing,
                         u64::try_from(position).unwrap()
                     )
                     .unwrap()
@@ -559,7 +559,7 @@ fn repack_preserves_attribute_policy_form_and_creation_metadata(
     let destination = directory.path().join("repacked.h5");
     create_fixture(&source, owner, order, 32, 24, initial);
     let times = {
-        let native = hdf5::File::open_rw(&source).unwrap();
+        let native = libhdf5::File::open_rw(&source).unwrap();
         let location = owner.location(&native);
         for index in 0..removed {
             location.delete_attr(&attr_name(index)).unwrap();
@@ -587,7 +587,7 @@ fn repack_preserves_attribute_policy_form_and_creation_metadata(
     assert_eq!(read_header(&destination, owner).0, prefix);
     assert_reconstruction(&destination, owner, order, dense, initial, &values);
     {
-        let native = hdf5::File::open(&destination).unwrap();
+        let native = libhdf5::File::open(&destination).unwrap();
         let info = owner.location(&native).loc_info().unwrap();
         assert_eq!((info.atime, info.mtime, info.ctime, info.btime), times);
         native.close().unwrap();
@@ -662,7 +662,7 @@ fn assert_reconstruction_policy(
             assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [19]);
         }
     }
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let location = owner.location(&native);
     assert_eq!(
         owner.native_policy(&native),
@@ -691,8 +691,8 @@ fn assert_reconstruction_policy(
             assert_eq!(
                 location
                     .attr_by_index(
-                        hdf5::IndexType::CreationOrder,
-                        hdf5::IterationOrder::Increasing,
+                        libhdf5::IndexType::CreationOrder,
+                        libhdf5::IterationOrder::Increasing,
                         u64::try_from(position).unwrap()
                     )
                     .unwrap()
@@ -729,7 +729,7 @@ fn repack_preserves_other_attribute_policies_and_empty_sets(
     let destination = directory.path().join("output.h5");
     create_fixture(&source, owner, order, maximum, minimum, initial);
     {
-        let native = hdf5::File::open_rw(&source).unwrap();
+        let native = libhdf5::File::open_rw(&source).unwrap();
         let location = owner.location(&native);
         for index in 0..removed {
             location.delete_attr(&attr_name(index)).unwrap();
@@ -831,7 +831,7 @@ fn repack_preserves_vlen_committed_types_and_nonlexical_creation_order(
         .map(|index| (attr_name(index), u32::try_from(index).unwrap()))
         .collect();
     {
-        let native = hdf5::File::open_rw(&source).unwrap();
+        let native = libhdf5::File::open_rw(&source).unwrap();
         let location = owner.location(&native);
         location
             .new_attr::<i64>()
@@ -953,7 +953,7 @@ fn repack_keeps_an_oversized_survivor_dense_until_it_is_removed(
     let data: Vec<i64> = (0..10_000).collect();
     assert!(data.len() * std::mem::size_of::<i64>() > hdf5_pure::OBJECT_HEADER_MESSAGE_MAX);
     {
-        let native = hdf5::File::open_rw(&source).unwrap();
+        let native = libhdf5::File::open_rw(&source).unwrap();
         let location = owner.location(&native);
         location
             .new_attr::<i64>()
@@ -991,7 +991,7 @@ fn repack_keeps_an_oversized_survivor_dense_until_it_is_removed(
         ])
     );
     {
-        let native = hdf5::File::open(&destination).unwrap();
+        let native = libhdf5::File::open(&destination).unwrap();
         let location = owner.location(&native);
         assert_eq!(location.attr_names().unwrap(), ["a032", "huge"]);
         assert_eq!(
@@ -1115,7 +1115,7 @@ fn compact_reversion_preserves_references_and_rejects_dense_promotion(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reference-reversion.h5");
     let mut values = lifecycle_fixture(&path, owner, session);
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let location = owner.location(&native);
     location
         .new_attr::<ObjectReference1>()
@@ -1152,7 +1152,7 @@ fn compact_reversion_preserves_references_and_rejects_dense_promotion(
     );
     let before = std::fs::read(&path).unwrap();
     {
-        let native = hdf5::File::open(&path).unwrap();
+        let native = libhdf5::File::open(&path).unwrap();
         let location = owner.location(&native);
         let mut names: Vec<_> = values
             .keys()
@@ -1274,7 +1274,7 @@ fn shared_attributes_reject_edits_without_changing_file_bytes(
     assert!(file.has_staged_edits());
     drop(file);
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     for name in ["g0", "g1"] {
         let group = native.group(name).unwrap();
         assert_eq!(group.attr_names().unwrap(), ["shared"]);
@@ -1346,7 +1346,7 @@ impl Value {
 }
 
 fn lifecycle_fixture(path: &Path, owner: Owner, session: Session) -> BTreeMap<String, Value> {
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
         .with_fcpl(|p| {
             p.attr_phase_change(32, 24)
@@ -1397,7 +1397,7 @@ fn lifecycle_fixture(path: &Path, owner: Owner, session: Session) -> BTreeMap<St
         .unwrap()
         .write(&[7, 11])
         .unwrap();
-    let datatype = hdf5::Datatype::from_type::<i32>().unwrap();
+    let datatype = libhdf5::Datatype::from_type::<i32>().unwrap();
     native.commit_datatype("integer_type", &datatype).unwrap();
     let mut values: BTreeMap<_, _> = (0..33)
         .map(|index| {
@@ -1536,7 +1536,7 @@ fn assert_lifecycle_with_indices(
         }
         storage::assert_unavailable(&file, &live);
     }
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let location = owner.location(&native);
     assert_eq!(
         location.attr_names().unwrap(),
@@ -1578,7 +1578,7 @@ enum Owner {
 }
 
 impl Owner {
-    fn native_policy(self, native: &hdf5::File) -> (u32, u32) {
+    fn native_policy(self, native: &libhdf5::File) -> (u32, u32) {
         let pair = match self {
             Self::Dataset => native
                 .dataset(self.path())
@@ -1639,7 +1639,7 @@ impl Owner {
         }
     }
 
-    fn location(self, file: &hdf5::File) -> hdf5::Location {
+    fn location(self, file: &libhdf5::File) -> libhdf5::Location {
         match self {
             Self::Dataset => (**file.dataset(self.path()).unwrap()).clone(),
             Self::Group | Self::Root => (*file.group(self.path()).unwrap()).clone(),
@@ -1655,7 +1655,7 @@ fn create_fixture(
     minimum: u16,
     count: usize,
 ) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
         .with_fcpl(|p| {
             p.attr_phase_change(u32::from(maximum), u32::from(minimum))
@@ -1788,8 +1788,8 @@ fn read_named_header(
 }
 
 fn assert_native_values(
-    native: &hdf5::File,
-    location: &hdf5::Location,
+    native: &libhdf5::File,
+    location: &libhdf5::Location,
     values: &BTreeMap<String, Value>,
 ) {
     assert_native_values_with_indices(native, location, values, fixture_creation_index);
@@ -1797,8 +1797,8 @@ fn assert_native_values(
 
 /// Checks native values and creation order against `creation_index`.
 fn assert_native_values_with_indices(
-    native: &hdf5::File,
-    location: &hdf5::Location,
+    native: &libhdf5::File,
+    location: &libhdf5::Location,
     values: &BTreeMap<String, Value>,
     creation_index: impl Fn(&str) -> u32,
 ) {
@@ -1847,8 +1847,8 @@ fn assert_native_values_with_indices(
         assert_eq!(
             location
                 .attr_by_index(
-                    hdf5::IndexType::CreationOrder,
-                    hdf5::IterationOrder::Increasing,
+                    libhdf5::IndexType::CreationOrder,
+                    libhdf5::IterationOrder::Increasing,
                     u64::try_from(position).unwrap()
                 )
                 .unwrap()

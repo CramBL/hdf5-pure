@@ -3,7 +3,7 @@
 //! The libraries are separate, so the locks are too: a libmatio test does not wait on a libhdf5
 //! one.
 
-#[cfg(any(feature = "hdf5", feature = "__matio"))]
+#[cfg(any(feature = "libhdf5", feature = "__matio"))]
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Serializes the tests that take it over the whole of their bodies, since libhdf5 is not built
@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 ///
 /// The helpers in this crate never take it themselves: a test holding it would deadlock on the
 /// first helper it calls.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn libhdf5_guard() -> MutexGuard<'static, ()> {
     static LIBHDF5: Mutex<()> = Mutex::new(());
     LIBHDF5.lock().unwrap_or_else(PoisonError::into_inner)

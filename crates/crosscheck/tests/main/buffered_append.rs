@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for issue #262: the two on-disk shapes this
 //! change newly produces must be readable by the C library, not merely by this
 //! crate's own reader.
@@ -52,7 +52,7 @@ fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
 
     // libhdf5's own view of the shape, not just the values it hands back:
     // a padding-as-data misread would show up as a longer dataset.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("d").unwrap().shape(), vec![13]);
     f.close().unwrap();
 }
@@ -144,7 +144,7 @@ fn c_library_reads_an_owned_buffered_completion_of_its_dataset() {
             .collect::<Vec<_>>()
     );
     appender.finish().unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.shape(), [7]);
     assert_eq!(dataset.read_raw::<i32>().unwrap(), [0, 1, 2, 3, 4, 5, 6]);

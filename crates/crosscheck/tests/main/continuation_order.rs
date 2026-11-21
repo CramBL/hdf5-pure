@@ -1,10 +1,7 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::path::Path;
 
-use hdf5::File as NativeFile;
-use hdf5::IndexType;
-use hdf5::IterationOrder;
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -16,6 +13,9 @@ use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use libhdf5::File as NativeFile;
+use libhdf5::IndexType;
+use libhdf5::IterationOrder;
 use rstest::rstest;
 use test_util::object_header::v1;
 use test_util::temp;
@@ -30,7 +30,7 @@ fn compact_links_spread_over_continuation_blocks_list_in_the_native_order_of_the
     let file = File::open(&path).unwrap();
     assert_root_refers_to_nested_continuation_blocks(&path, &file);
 
-    let c_names = hdf5::File::open(&path)
+    let c_names = libhdf5::File::open(&path)
         .unwrap()
         .links(IndexType::Name, IterationOrder::Native)
         .unwrap()

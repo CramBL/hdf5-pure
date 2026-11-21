@@ -1,26 +1,26 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Cross-validation tests: write with hdf5-pure, read with the official C HDF5 library.
 //!
 //! These tests verify that files produced by hdf5-pure are valid HDF5 files
 //! readable by the reference C implementation.
 
-use hdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, File, FileBuilder, VlenStringReadOptions,
 };
+use libhdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
 
 use rstest::rstest;
 use test_util_hdf5::numeric;
 use test_util_hdf5::{file, fixtures};
 
-/// Read a MATLAB-style variable-length ASCII attribute from an `hdf5::Attribute`.
+/// Read a MATLAB-style variable-length ASCII attribute from an `libhdf5::Attribute`.
 /// Our serializer emits the same `H5T_VLEN { H5T_STRING { STRSIZE 1 } }` shape
 /// that real MATLAB and matio emit, so reading via `VarLenArray<FixedAscii<1>>`
 /// matches. Returns the decoded strings in order.
-fn read_vl_ascii_attr(attr: &hdf5::Attribute) -> Vec<String> {
-    let raw: Vec<hdf5::types::VarLenArray<hdf5::types::FixedAscii<1>>> =
+fn read_vl_ascii_attr(attr: &libhdf5::Attribute) -> Vec<String> {
+    let raw: Vec<libhdf5::types::VarLenArray<libhdf5::types::FixedAscii<1>>> =
         attr.read_raw().expect("VLEN{string,1} attr");
     raw.iter()
         .map(|vl| vl.iter().flat_map(|c| c.as_str().chars()).collect())
@@ -43,7 +43,7 @@ fn crosscheck_f64_dataset() {
         .with_shape(&[5]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
@@ -60,7 +60,7 @@ fn crosscheck_f32_dataset() {
         .with_f32_data(&[1.5f32, 2.5, 3.5]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f32>().unwrap();
     assert_eq!(values, vec![1.5f32, 2.5, 3.5]);
@@ -77,7 +77,7 @@ fn crosscheck_i8_dataset() {
         .with_i8_data(&[-128, -1, 0, 1, 127]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<i8>().unwrap();
     assert_eq!(values, vec![-128, -1, 0, 1, 127]);
@@ -94,7 +94,7 @@ fn crosscheck_i16_dataset() {
         .with_i16_data(&[-32768, 0, 32767]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<i16>().unwrap();
     assert_eq!(values, vec![-32768, 0, 32767]);
@@ -111,7 +111,7 @@ fn crosscheck_i32_dataset() {
         .with_i32_data(&[-100, 0, 100, i32::MAX]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<i32>().unwrap();
     assert_eq!(values, vec![-100, 0, 100, i32::MAX]);
@@ -128,7 +128,7 @@ fn crosscheck_i64_dataset() {
         .with_i64_data(&[i64::MIN, 0, i64::MAX]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<i64>().unwrap();
     assert_eq!(values, vec![i64::MIN, 0, i64::MAX]);
@@ -143,7 +143,7 @@ fn crosscheck_u8_dataset() {
     builder.create_dataset("data").with_u8_data(&[0, 128, 255]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<u8>().unwrap();
     assert_eq!(values, vec![0, 128, 255]);
@@ -160,7 +160,7 @@ fn crosscheck_u16_dataset() {
         .with_u16_data(&[0, 1000, 65535]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<u16>().unwrap();
     assert_eq!(values, vec![0, 1000, 65535]);
@@ -177,7 +177,7 @@ fn crosscheck_u32_dataset() {
         .with_u32_data(&[0, 1_000_000, u32::MAX]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<u32>().unwrap();
     assert_eq!(values, vec![0, 1_000_000, u32::MAX]);
@@ -194,7 +194,7 @@ fn crosscheck_u64_dataset() {
         .with_u64_data(&[0, 1, u64::MAX]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<u64>().unwrap();
     assert_eq!(values, vec![0, 1, u64::MAX]);
@@ -217,7 +217,7 @@ fn crosscheck_2d_f64_dataset() {
         .with_shape(&[2, 3]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("matrix").unwrap();
     let shape = ds.shape();
     assert_eq!(shape, vec![2, 3]);
@@ -240,7 +240,7 @@ fn crosscheck_multiple_datasets() {
     builder.create_dataset("z").with_u8_data(&[0xFF, 0x00]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     let x = file.dataset("x").unwrap().read_raw::<f64>().unwrap();
     assert_eq!(x, vec![1.0, 2.0, 3.0]);
@@ -268,7 +268,7 @@ fn crosscheck_group_with_dataset() {
     builder.add_group(grp.finish());
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let grp = file.group("sensors").unwrap();
     let member_names = grp.member_names().unwrap();
     assert_eq!(member_names, vec!["temperature"]);
@@ -295,7 +295,7 @@ fn crosscheck_nested_groups() {
     builder.add_group(outer.finish());
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     let outer_data = file
         .dataset("outer/outer_data")
@@ -336,7 +336,7 @@ fn crosscheck_f64_attribute() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let attr = file.attr("scale").unwrap();
     let val = attr.read_scalar::<f64>().unwrap();
     assert!((val - 0.5).abs() < 1e-15);
@@ -352,7 +352,7 @@ fn crosscheck_i64_attribute() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let attr = file.attr("version").unwrap();
     let val = attr.read_scalar::<i64>().unwrap();
     assert_eq!(val, 42);
@@ -368,7 +368,7 @@ fn crosscheck_i32_attribute() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let attr = file.attr("MATLAB_int_decode").unwrap();
     let val = attr.read_scalar::<i32>().unwrap();
     assert_eq!(val, 1);
@@ -384,7 +384,7 @@ fn crosscheck_u32_attribute() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let attr = file.attr("MATLAB_empty").unwrap();
     let val = attr.read_scalar::<u32>().unwrap();
     assert_eq!(val, 1);
@@ -400,7 +400,7 @@ fn crosscheck_string_attribute() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let mut attr_names = file.attr_names().unwrap();
     attr_names.sort();
     assert_eq!(attr_names, ["description"]);
@@ -428,7 +428,7 @@ fn crosscheck_ascii_string_attribute() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let mut attr_names = file.attr_names().unwrap();
     attr_names.sort();
     assert_eq!(attr_names, ["MATLAB_class"]);
@@ -456,7 +456,7 @@ fn crosscheck_dataset_attributes() {
         .set_attr("scale", AttrValue::F64(0.001));
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let mut attr_names = ds.attr_names().unwrap();
     attr_names.sort();
@@ -489,7 +489,7 @@ fn crosscheck_group_attributes() {
     builder.add_group(grp.finish());
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let grp = file.group("sensors").unwrap();
     let mut attr_names = grp.attr_names().unwrap();
     attr_names.sort();
@@ -526,7 +526,7 @@ fn crosscheck_userblock() {
     std::fs::write(&path, &bytes).unwrap();
 
     // C HDF5 should still read the file correctly
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values, vec![1.0, 2.0, 3.0]);
@@ -549,7 +549,7 @@ fn crosscheck_chunked_dataset() {
         .with_chunks(&[25]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values.len(), 100);
@@ -576,7 +576,7 @@ fn crosscheck_paged_fixed_array() {
         .with_chunks(&[1]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values.len(), n);
@@ -603,7 +603,7 @@ fn crosscheck_paged_fixed_array_deflate() {
         .with_deflate(DeflateLevel::Four);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values.len(), n);
@@ -699,7 +699,7 @@ fn crosscheck_deflate_compressed() {
         .with_deflate(DeflateLevel::Six);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values.len(), 200);
@@ -723,7 +723,7 @@ fn crosscheck_shuffle_deflate() {
         .with_deflate(DeflateLevel::Four);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values.len(), 100);
@@ -746,7 +746,7 @@ fn crosscheck_fletcher32_all_ones_written_by_pure_read_by_c() {
         .with_fletcher32();
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<i32>().unwrap();
     assert_eq!(values, data);
@@ -759,7 +759,7 @@ fn crosscheck_fletcher32_all_ones_written_by_c_read_by_pure() {
 
     let data = vec![-1i32; 128];
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let ds = file
             .new_dataset::<i32>()
             .chunk([64])
@@ -805,13 +805,13 @@ fn crosscheck_compound_f64_pairs() {
     builder.write(&path).unwrap();
 
     // libhdf5 should be able to open the file and see the dataset
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("complex").unwrap();
     assert_eq!(ds.shape(), vec![3]);
 }
 
 #[repr(C)]
-#[derive(hdf5::H5Type, Clone, Copy, Debug, PartialEq)]
+#[derive(libhdf5::H5Type, Clone, Copy, Debug, PartialEq)]
 struct PaddedTuple(
     #[hdf5(rename = "0")] i8,
     #[hdf5(rename = "1")] u64,
@@ -850,7 +850,7 @@ fn c_library_reads_explicit_offset_compound() {
         .with_compound_data(datatype, raw, expected.len() as u64);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let actual: Vec<PaddedTuple> = file.dataset("padded").unwrap().read_raw().unwrap();
     assert_eq!(actual, expected);
 }
@@ -871,11 +871,11 @@ fn pure_reader_decodes_c_written_padded_compound(
         PaddedTuple(3, 77, -6.25, 5.75),
     ];
     let datatype = numeric::padded_compound(
-        &hdf5::Datatype::from_type::<PaddedTuple>().unwrap(),
+        &libhdf5::Datatype::from_type::<PaddedTuple>().unwrap(),
         [low, high, internal],
     );
 
-    let file = hdf5::File::create(&path).unwrap();
+    let file = libhdf5::File::create(&path).unwrap();
     file.new_dataset_builder()
         .empty_as(&datatype)
         .shape(expected.len())
@@ -907,11 +907,11 @@ fn pure_reader_decodes_c_written_padded_compound(
 }
 
 #[repr(C)]
-#[derive(hdf5::H5Type, Clone, Copy, Debug, PartialEq)]
+#[derive(libhdf5::H5Type, Clone, Copy, Debug, PartialEq)]
 struct NestedInner(#[hdf5(rename = "0")] i8, #[hdf5(rename = "1")] u64);
 
 #[repr(C)]
-#[derive(hdf5::H5Type, Clone, Copy, Debug, PartialEq)]
+#[derive(libhdf5::H5Type, Clone, Copy, Debug, PartialEq)]
 struct NestedOuter(#[hdf5(rename = "0")] NestedInner, #[hdf5(rename = "1")] f32);
 
 #[test]
@@ -947,7 +947,7 @@ fn c_library_reads_nested_explicit_compound() {
         .with_compound_data(outer, raw, expected.len() as u64);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let actual: Vec<NestedOuter> = file.dataset("nested").unwrap().read_raw().unwrap();
     assert_eq!(actual, expected);
 }
@@ -968,7 +968,7 @@ fn crosscheck_large_dataset() {
     builder.create_dataset("big").with_f64_data(&data);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("big").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values.len(), n);
@@ -988,7 +988,7 @@ fn crosscheck_empty_file() {
     let builder = FileBuilder::new();
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let members = file.member_names().unwrap();
     assert!(members.is_empty());
 }
@@ -1011,7 +1011,7 @@ fn crosscheck_varlen_ascii_array_attr() {
     builder.write(&path).unwrap();
 
     // C library should be able to open and read the VL attribute
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let attr = file.attr("MATLAB_fields").unwrap();
     let vals = read_vl_ascii_attr(&attr);
     assert_eq!(vals, vec!["x", "y", "velocity"]);
@@ -1044,7 +1044,7 @@ fn crosscheck_varlen_ascii_array_attr_in_dense_storage() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(file.attr_names().unwrap().len(), 13);
     let attr = file.attr("MATLAB_fields").unwrap();
     assert_eq!(read_vl_ascii_attr(&attr), expected);
@@ -1068,7 +1068,7 @@ fn crosscheck_dense_attributes_past_a_userblock() {
     }
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     assert_eq!(ds.attr_names().unwrap().len(), 12);
     for i in 0..12i64 {
@@ -1094,7 +1094,7 @@ fn crosscheck_dense_attributes() {
     }
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     assert_eq!(values, vec![1.0, 2.0, 3.0]);
@@ -1126,7 +1126,7 @@ fn crosscheck_empty_dataset_zero_dims() {
         .with_shape(&[0, 0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("empty").unwrap();
     let shape = ds.shape();
     assert_eq!(shape, vec![0, 0]);
@@ -1153,7 +1153,7 @@ fn crosscheck_matlab_empty_shape_marker() {
         .set_attr("MATLAB_empty", AttrValue::U32(1));
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     assert_eq!(ds.shape(), vec![2]);
     let values: Vec<u64> = ds.read_1d().unwrap().to_vec();
@@ -1162,7 +1162,7 @@ fn crosscheck_matlab_empty_shape_marker() {
     // Verify dataset-level attributes
     let class_attr = ds.attr("MATLAB_class").unwrap();
     let class_val = class_attr
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(class_val.as_str(), "double");
 
@@ -1180,7 +1180,7 @@ fn crosscheck_path_references_2d_shape() {
     fixtures::path_references_2d(&mut builder);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     let row = file.dataset("row_refs").unwrap();
     assert_eq!(row.shape(), vec![1, 4]);
@@ -1199,7 +1199,7 @@ fn crosscheck_matlab_refs_subsystem_pattern() {
     builder.write(&path).unwrap();
 
     // --- Verify with C HDF5 ---
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // Group structure
     let mut root_members = file.member_names().unwrap();
@@ -1230,7 +1230,7 @@ fn crosscheck_matlab_refs_subsystem_pattern() {
     // Dataset-level attribute
     let class_attr = data.attr("MATLAB_class").unwrap();
     let class_val = class_attr
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(class_val.as_str(), "string");
 }
@@ -1277,7 +1277,7 @@ fn crosscheck_varlen_ascii_array_encoding_vs_metno() {
     assert_eq!(forge_bytes[obj0 + 16], b'x');
 
     // --- Read back with C library ---
-    let file = hdf5::File::open(&forge_path).unwrap();
+    let file = libhdf5::File::open(&forge_path).unwrap();
     let attr = file.attr("MATLAB_fields").unwrap();
     assert_eq!(attr.shape(), vec![3]);
 
@@ -1301,7 +1301,7 @@ fn crosscheck_varlen_ascii_on_nested_group() {
     fixtures::nested_matlab_struct(&mut builder);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let grp = file.group("my_struct").unwrap();
 
     // Read VL attribute on the nested group
@@ -1313,7 +1313,7 @@ fn crosscheck_varlen_ascii_on_nested_group() {
     // Verify ASCII attr
     let class_attr = grp.attr("MATLAB_class").unwrap();
     let class_val = class_attr
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(class_val.as_str(), "struct");
 
@@ -1377,7 +1377,7 @@ fn crosscheck_userblock_all_address_types() {
     builder.write(&path).unwrap();
 
     // --- Verify with C library ---
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // Root VL attr
     let root_fields = file.attr("MATLAB_fields").unwrap();
@@ -1386,7 +1386,9 @@ fn crosscheck_userblock_all_address_types() {
 
     // Root ASCII attr
     let class = file.attr("MATLAB_class").unwrap();
-    let cv = class.read_scalar::<hdf5::types::FixedAscii<32>>().unwrap();
+    let cv = class
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
+        .unwrap();
     assert_eq!(cv.as_str(), "struct");
 
     // Contiguous datasets
@@ -1430,7 +1432,7 @@ fn crosscheck_group_only_no_datasets() {
     fixtures::group_only_matlab_struct(&mut builder);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // outer group has only sub-groups, no datasets
     let outer = file.group("outer").unwrap();
@@ -1439,7 +1441,9 @@ fn crosscheck_group_only_no_datasets() {
     assert_eq!(members, ["a", "b"]);
 
     let class = outer.attr("MATLAB_class").unwrap();
-    let cv = class.read_scalar::<hdf5::types::FixedAscii<32>>().unwrap();
+    let cv = class
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
+        .unwrap();
     assert_eq!(cv.as_str(), "struct");
 
     // Leaf data
@@ -1461,7 +1465,7 @@ fn crosscheck_group_only_no_datasets() {
     // Sub-group attrs
     let a_class = file.group("outer/a").unwrap().attr("MATLAB_class").unwrap();
     let acv = a_class
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(acv.as_str(), "double");
 }
@@ -1480,7 +1484,7 @@ fn crosscheck_long_ascii_class_attr() {
     );
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("x").unwrap();
     let attr = ds.attr("MATLAB_class").unwrap();
 
@@ -1490,7 +1494,9 @@ fn crosscheck_long_ascii_class_attr() {
         TypeDescriptor::FixedAscii(15)
     );
 
-    let val = attr.read_scalar::<hdf5::types::FixedAscii<32>>().unwrap();
+    let val = attr
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
+        .unwrap();
     assert_eq!(val.as_str(), "canonical empty");
 }
 
@@ -1517,12 +1523,14 @@ fn crosscheck_matlab_struct_pattern() {
     builder.add_group(g.finish());
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let grp = file.group("mystruct").unwrap();
 
     // Struct class
     let class = grp.attr("MATLAB_class").unwrap();
-    let cv = class.read_scalar::<hdf5::types::FixedAscii<32>>().unwrap();
+    let cv = class
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
+        .unwrap();
     assert_eq!(cv.as_str(), "struct");
 
     // Field list
@@ -1543,7 +1551,7 @@ fn crosscheck_matlab_struct_pattern() {
         .unwrap()
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(f1_class.as_str(), "double");
 
@@ -1576,7 +1584,7 @@ fn crosscheck_matlab_cell_array() {
 
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // Cell reference dataset
     let mycell = file.dataset("mycell").unwrap();
@@ -1584,7 +1592,7 @@ fn crosscheck_matlab_cell_array() {
     let cell_class = mycell
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cell_class.as_str(), "cell");
 
@@ -1622,7 +1630,7 @@ fn crosscheck_matlab_userblock_header() {
     std::fs::write(&path, &bytes).unwrap();
 
     // C library should still read the file
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let vals: Vec<f64> = file.dataset("data").unwrap().read_1d().unwrap().to_vec();
     assert_eq!(vals, vec![3.14]);
 
@@ -1648,10 +1656,10 @@ fn crosscheck_read_scale_offset_int_from_c_lib() {
     let n = 250usize;
     let data: Vec<i32> = (0..n).map(|i| 1000 + (i as i32 % 37)).collect();
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let ds = file
             .new_dataset::<i32>()
-            .scale_offset(hdf5::filters::ScaleOffset::Integer(0))
+            .scale_offset(libhdf5::filters::ScaleOffset::Integer(0))
             .chunk([40])
             .shape([n])
             .create("data")
@@ -1677,10 +1685,10 @@ fn crosscheck_read_scale_offset_float_from_c_lib() {
     let n = 200usize;
     let data: Vec<f64> = (0..n).map(|i| 5.0 + (i as f64) * 0.01).collect();
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let ds = file
             .new_dataset::<f64>()
-            .scale_offset(hdf5::filters::ScaleOffset::FloatDScale(decimals))
+            .scale_offset(libhdf5::filters::ScaleOffset::FloatDScale(decimals))
             .chunk([64])
             .shape([n])
             .create("data")
@@ -1717,7 +1725,7 @@ fn crosscheck_scale_offset_int_compressed() {
         .with_scale_offset(hdf5_pure::ScaleOffset::Integer(0));
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<i32>().unwrap();
     assert_eq!(values, data);
@@ -1742,7 +1750,7 @@ fn crosscheck_scale_offset_float_dscale() {
         .with_scale_offset(hdf5_pure::ScaleOffset::FloatDScale(decimals));
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<f64>().unwrap();
     let tol = 0.5 * 10f64.powi(-decimals);
@@ -1770,7 +1778,7 @@ fn crosscheck_scale_offset_then_deflate() {
         .with_deflate(DeflateLevel::Five);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
     let values = ds.read_raw::<i32>().unwrap();
     assert_eq!(values, data);
@@ -1781,7 +1789,7 @@ fn crosscheck_scale_offset_then_deflate() {
 fn crosscheck_vlen_string_dataset() {
     // hdf5-pure writes a variable-length UTF-8 string dataset; the reference C
     // library reads back the values and confirms the datatype is VL Unicode.
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen_strings.h5");
@@ -1802,7 +1810,7 @@ fn crosscheck_vlen_string_dataset() {
     );
 
     // libhdf5 agrees on values and that the type is VL Unicode.
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("labels").unwrap();
     let vals = ds.read_raw::<VarLenUnicode>().unwrap();
     let got: Vec<String> = vals.iter().map(|v| v.as_str().to_string()).collect();
@@ -1821,7 +1829,7 @@ fn crosscheck_vlen_strings_span_multiple_heap_collections() {
     // at 1. Pin that against the reference library, not just our own reader: it
     // is what proves the per-collection indices and addresses agree with the
     // format rather than only with this crate's reader.
-    use hdf5::types::VarLenUnicode;
+    use libhdf5::types::VarLenUnicode;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen_multi_collection.h5");
@@ -1835,7 +1843,7 @@ fn crosscheck_vlen_strings_span_multiple_heap_collections() {
     builder.create_dataset("labels").with_vlen_strings(&refs);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("labels").unwrap();
     let vals = ds.read_raw::<VarLenUnicode>().unwrap();
     assert_eq!(vals.len(), count);
@@ -1867,7 +1875,7 @@ fn an_empty_string_attribute_does_not_hide_its_neighbours() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // Iteration is where the zero-size datatype used to fail.
     let mut names = file.attr_names().unwrap();
@@ -1886,7 +1894,7 @@ fn an_empty_string_attribute_does_not_hide_its_neighbours() {
     let healthy = file.attr("healthy").unwrap();
     assert_eq!(
         healthy
-            .read_scalar::<hdf5::types::FixedAscii<1>>()
+            .read_scalar::<libhdf5::types::FixedAscii<1>>()
             .unwrap()
             .as_str(),
         "v"
@@ -1897,7 +1905,7 @@ fn an_empty_string_attribute_does_not_hide_its_neighbours() {
     let utf8 = file.attr("empty_utf8").unwrap();
     assert_eq!(utf8.size(), 1);
     assert!(
-        utf8.read_scalar::<hdf5::types::FixedUnicode<1>>()
+        utf8.read_scalar::<libhdf5::types::FixedUnicode<1>>()
             .unwrap()
             .as_str()
             .is_empty()
@@ -1906,7 +1914,7 @@ fn an_empty_string_attribute_does_not_hide_its_neighbours() {
     assert_eq!(ascii.size(), 1);
     assert!(
         ascii
-            .read_scalar::<hdf5::types::FixedAscii<1>>()
+            .read_scalar::<libhdf5::types::FixedAscii<1>>()
             .unwrap()
             .as_str()
             .is_empty()

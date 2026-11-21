@@ -1,10 +1,10 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::Datatype;
-use hdf5::dataset::Layout;
 use hdf5_pure::Error;
 use hdf5_pure::FormatError;
-use hdf5_sys::h5t;
+use libhdf5::Datatype;
+use libhdf5::dataset::Layout;
+use libhdf5_sys::h5t;
 use rstest::rstest;
 use test_util::temp;
 use test_util_hdf5::file;
@@ -161,7 +161,7 @@ fn converts_fill_across_numeric_readers(
 ) {
     let path = temp::temp_path("fill_windows.h5");
     let count = 600_003;
-    let status = hdf5::sync::sync(|| {
+    let status = libhdf5::sync::sync(|| {
         // SAFETY: The library lock and live transient numeric datatype cover the calls.
         // The optional twelve-bit range fits within the sixteen-bit integer representation.
         unsafe {
@@ -221,7 +221,7 @@ fn rejects_empty_nonnumeric_reads(
     {
         let reference = file::libhdf5_create_v18(&path);
         reference
-            .new_dataset::<hdf5::types::FixedAscii<4>>()
+            .new_dataset::<libhdf5::types::FixedAscii<4>>()
             .shape([0])
             .create("values")
             .unwrap();
@@ -256,12 +256,12 @@ enum NumericSelection {
 
 fn i32_enumeration() -> Datatype {
     let base = Datatype::from_type::<i32>().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access and `base` owns a live integer datatype.
         let id = unsafe { h5t::H5Tenum_create(base.id()) };
         assert!(id >= 0);
         // SAFETY: The returned handle owns the newly created enumeration datatype.
-        let datatype = unsafe { hdf5::from_id::<Datatype>(id) }.unwrap();
+        let datatype = unsafe { libhdf5::from_id::<Datatype>(id) }.unwrap();
         for (name, value) in [(c"min", i32::MIN), (c"zero", 0), (c"max", i32::MAX)] {
             // SAFETY: The lock and live handle cover the call, and `value` has the enumeration's
             // native `i32` representation. Each name is a distinct, null-terminated string.

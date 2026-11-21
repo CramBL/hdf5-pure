@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for the layout / filter introspection API
 //! (issue #149). The reference library *writes* datasets in every storage class
 //! and chunk-index kind; this crate must classify them identically and — the
@@ -14,9 +14,6 @@
 use core::num::NonZeroU32;
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::dataset::Layout as CLayout;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
 use hdf5_pure::FilterParameters;
@@ -24,6 +21,9 @@ use hdf5_pure::{Chunk, ChunkIndex, File, FileBuilder, Layout, MaxExtent, Message
 use hdf5_pure::{Error, FormatError};
 use hdf5_pure_format::__private::{AccessMode, ObjectHeader};
 use hdf5_pure_format::__private::{FormatWidths, LengthWidth, OffsetWidth};
+use libhdf5::Extent;
+use libhdf5::dataset::Layout as CLayout;
+use libhdf5::file::LibraryVersion;
 use rstest::rstest;
 use test_util::data_layout;
 use test_util_hdf5::dataset;
@@ -124,7 +124,7 @@ fn chunk_dimensions_written_by_pure_are_readable_by_libhdf5(
         file.commit().unwrap();
         file.close().unwrap();
     }
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let narrow_dataset = file.dataset("i32").unwrap();
     let wide_dataset = file.dataset("i64").unwrap();
     let edited = file.dataset("edited").unwrap();
@@ -195,7 +195,7 @@ fn chunk_dimensions_written_by_libhdf5_are_readable_by_pure(
         file.close().unwrap();
     }
     {
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         assert_eq!(chunk_dimension_encoding_length(&file, &path, "i32"), width);
         assert_eq!(chunk_dimension_encoding_length(&file, &path, "i64"), width);
         file.close().unwrap();
@@ -216,7 +216,7 @@ fn chunk_dimensions_written_by_libhdf5_are_readable_by_pure(
     assert_eq!(wide_dataset.read_i64().unwrap(), wide);
 }
 
-fn chunk_dimension_encoding_length(file: &hdf5::File, path: &Path, name: &str) -> u8 {
+fn chunk_dimension_encoding_length(file: &libhdf5::File, path: &Path, name: &str) -> u8 {
     let header = c_object::header_address(file, name);
     let image = std::fs::read(path).unwrap();
     let parsed = ObjectHeader::parse(
@@ -240,8 +240,8 @@ fn chunk_dimension_encoding_length(file: &hdf5::File, path: &Path, name: &str) -
 /// A reference-library file whose datasets are created under the given libver
 /// bounds. `V18/V18` forces the classic (v1 B-tree) chunked format; `V110/latest`
 /// enables the v4 indices (single-chunk, fixed array, extensible array, v2 B-tree).
-fn c_file(path: &std::path::Path, low: LibraryVersion, high: LibraryVersion) -> hdf5::File {
-    hdf5::File::with_options()
+fn c_file(path: &std::path::Path, low: LibraryVersion, high: LibraryVersion) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(low, high))
         .create(path)
         .unwrap()
@@ -500,8 +500,14 @@ fn c_shuffle_then_deflate_pipeline() {
     );
     assert_eq!(deflate.client_data(), vec![6], "deflate level");
     assert_eq!(shuffle.client_data(), vec![4], "shuffle element size (i32)");
-    assert_eq!(u32::from(shuffle.flags()), hdf5_sys::h5z::H5Z_FLAG_OPTIONAL);
-    assert_eq!(u32::from(deflate.flags()), hdf5_sys::h5z::H5Z_FLAG_OPTIONAL);
+    assert_eq!(
+        u32::from(shuffle.flags()),
+        libhdf5_sys::h5z::H5Z_FLAG_OPTIONAL
+    );
+    assert_eq!(
+        u32::from(deflate.flags()),
+        libhdf5_sys::h5z::H5Z_FLAG_OPTIONAL
+    );
     // The reference wrapper records filters as OPTIONAL (filter-flags bit 0),
     // "the same way h5py does it", so a reader may skip one it lacks. Our
     // `is_optional` reflects that faithfully — unlike the pure writer, which

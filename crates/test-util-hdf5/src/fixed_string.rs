@@ -25,19 +25,19 @@ use hdf5_pure::{FileBuilder, MaxExtent};
 /// native.close()?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 #[track_caller]
-pub fn read_libhdf5_attribute<const N: usize>(location: &hdf5::Location, name: &str) -> String {
+pub fn read_libhdf5_attribute<const N: usize>(location: &libhdf5::Location, name: &str) -> String {
     let attribute = location
         .attr(name)
         .unwrap_or_else(|error| panic!("open attribute {name:?}: {error}"));
     assert!(attribute.is_scalar());
     assert_eq!(
         attribute.dtype().unwrap().to_descriptor().unwrap(),
-        hdf5::types::TypeDescriptor::FixedUnicode(N)
+        libhdf5::types::TypeDescriptor::FixedUnicode(N)
     );
     attribute
-        .read_scalar::<hdf5::types::FixedUnicode<N>>()
+        .read_scalar::<libhdf5::types::FixedUnicode<N>>()
         .unwrap_or_else(|error| panic!("read attribute {name:?}: {error}"))
         .as_str()
         .to_owned()

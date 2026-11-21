@@ -13,24 +13,24 @@ repository.workspace = true
 # The same tiers as `hdf5-pure-crosscheck`, which forwards each of its own to the one here.
 [features]
 # Links the reference HDF5 C library for the helpers that call it.
-hdf5 = ["dep:hdf5", "dep:hdf5-sys", "ndarray"]
+libhdf5 = ["dep:libhdf5", "dep:libhdf5-sys", "ndarray"]
 # The release series of the linked libhdf5, each implying the one below.
-"__hdf5-1.10" = ["hdf5"]
-"__hdf5-1.12" = ["__hdf5-1.10", "hdf5-sys/deprecated"]
-"__hdf5-1.14" = ["__hdf5-1.12"]
-"__hdf5-2" = ["__hdf5-1.14"]
+"__libhdf5-1.10" = ["libhdf5"]
+"__libhdf5-1.12" = ["__libhdf5-1.10", "libhdf5-sys/deprecated"]
+"__libhdf5-1.14" = ["__libhdf5-1.12"]
+"__libhdf5-2" = ["__libhdf5-1.14"]
 # Builds and links the libhdf5 that `hdf5-metno` bundles.
-__hdf5-bundled = ["hdf5/static", "__hdf5-2"]
+__libhdf5-bundled = ["libhdf5/static", "__libhdf5-2"]
 # The helpers for the tests that link the system libmatio.
 __matio = []
 
 [dependencies]
-hdf5 = { workspace = true, optional = true, features = ["lzf"] }
-# The C bindings used by fixture writers.
-hdf5-sys = { workspace = true, optional = true }
 hdf5-pure = { workspace = true, features = ["std"] }
 hdf5-pure-core.workspace = true
 hdf5-pure-format.workspace = true
+libhdf5 = { workspace = true, optional = true, features = ["lzf"] }
+# The C bindings used by fixture writers.
+libhdf5-sys = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
 # The temporary directory that holds an image opened through a path backend.
 tempfile.workspace = true

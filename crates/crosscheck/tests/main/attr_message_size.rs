@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for the compact-attribute message-size limit
 //! (issue #190).
 //!
@@ -57,7 +57,7 @@ fn c_reads_the_largest_accepted_root_attribute() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let got: Vec<i64> = file.attr("labels").unwrap().read_raw().unwrap();
     assert_eq!(got, values);
     file.close().unwrap();
@@ -86,7 +86,7 @@ fn c_reads_one_element_past_the_compact_boundary() {
         "one element past the compact limit must select heap storage"
     );
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let got: Vec<i64> = file.attr("labels").unwrap().read_raw().unwrap();
     assert_eq!(got, values);
     file.close().unwrap();
@@ -105,7 +105,7 @@ fn c_reads_the_largest_accepted_dataset_attribute() {
         .set_attr("labels", AttrValue::I64Array(values.clone()));
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let got: Vec<i64> = file
         .dataset("x")
         .unwrap()

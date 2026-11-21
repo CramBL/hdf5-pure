@@ -1,7 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::{AttrValue, File, FileBuilder};
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 
 #[rstest]
@@ -64,7 +64,7 @@ fn c_reads_one_attribute_with_the_replacement_value(
     );
     builder.add_group(group.finish());
     builder.write(&path).unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_attributes(&file, after, dense);
     assert_attributes(&file.group("group").unwrap(), after, dense);
     assert_attributes(&file.dataset("data").unwrap(), after, dense);
@@ -95,7 +95,7 @@ fn stage_attributes(
     );
 }
 
-fn assert_attributes(owner: &hdf5::Location, after: AttributeForm, dense: bool) {
+fn assert_attributes(owner: &libhdf5::Location, after: AttributeForm, dense: bool) {
     let mut expected = vec![
         "first".to_string(),
         "last".to_string(),
@@ -167,7 +167,7 @@ fn rust_reads_the_attribute_updated_by_c(#[case] fillers: i32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c-replacement.h5");
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let attribute = file.new_attr::<i32>().create("replace").unwrap();
         attribute.write_scalar(&7).unwrap();
         for index in 0..fillers {

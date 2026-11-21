@@ -18,21 +18,21 @@
 
 use std::path::Path;
 
-use hdf5::Dataset;
-use hdf5::Datatype;
-use hdf5::File;
-use hdf5::GroupStorageType;
-use hdf5::H5Type;
-use hdf5::Location;
-use hdf5::LocationType;
-use hdf5::ObjectReference;
-use hdf5::ObjectReference1;
-use hdf5::ReferencedObject;
-use hdf5::dataset::Layout;
-use hdf5::datatype::ByteOrder;
-use hdf5::types::FixedAscii;
-use hdf5::types::TypeDescriptor;
-use hdf5::types::VarLenArray;
+use libhdf5::Dataset;
+use libhdf5::Datatype;
+use libhdf5::File;
+use libhdf5::GroupStorageType;
+use libhdf5::H5Type;
+use libhdf5::Location;
+use libhdf5::LocationType;
+use libhdf5::ObjectReference;
+use libhdf5::ObjectReference1;
+use libhdf5::ReferencedObject;
+use libhdf5::dataset::Layout;
+use libhdf5::datatype::ByteOrder;
+use libhdf5::types::FixedAscii;
+use libhdf5::types::TypeDescriptor;
+use libhdf5::types::VarLenArray;
 
 /// Checks the complete valid graph through libhdf5.
 ///

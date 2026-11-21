@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
@@ -56,7 +56,7 @@ fn seeded_chunk_deletion_preserves_publication_reopen_and_reuse(
         values
     );
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native
             .dataset("replacement")

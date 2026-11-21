@@ -1,30 +1,30 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::file::LibraryVersion;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::File;
 use hdf5_pure::FreeSections;
 use hdf5_pure::PhysicalAddress;
+use libhdf5::file::LibraryVersion;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::types::VarLenUnicode;
 use tempfile::TempDir;
 use test_util::global_heap;
 use test_util::widths::Widths;
 use test_util_hdf5::aggregation;
 use test_util_hdf5::file_space;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use test_util_hdf5::paged;
 
 #[test]
 fn libhdf5_reads_every_remaining_value_after_unreferenced_collections_are_reclaimed() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("reclaim.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })
@@ -35,12 +35,12 @@ fn libhdf5_reads_every_remaining_value_after_unreferenced_collections_are_reclai
     write_delete_and_read_back(&path, LibraryVersion::V18);
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[test]
 fn libhdf5_reads_every_remaining_value_after_unreferenced_collections_are_reclaimed_in_pages() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("reclaim.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
         })
@@ -127,7 +127,7 @@ fn write_delete_and_read_back(path: &Path, low: LibraryVersion) {
     );
     file.close().unwrap();
 
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let mut names = file.member_names().unwrap();
     names.sort();
     assert_eq!(names, ["b", "tail"]);
@@ -144,8 +144,8 @@ fn write_delete_and_read_back(path: &Path, low: LibraryVersion) {
     );
 }
 
-fn reopen_libhdf5_file(path: &Path, low: LibraryVersion) -> hdf5::File {
-    hdf5::File::with_options()
+fn reopen_libhdf5_file(path: &Path, low: LibraryVersion) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_bounds(low, LibraryVersion::latest()))
         .open_rw(path)
         .unwrap()
@@ -170,5 +170,5 @@ fn collection_of_each_dataset(path: &Path) -> BTreeMap<&'static str, u64> {
 
 const SESSIONS: [&[&str]; 3] = [&["a", "b"], &["c", "d"], &["e"]];
 const STRINGS: [&str; 2] = ["alpha", "beta"];
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 const PAGE_SIZE: u64 = 4096;

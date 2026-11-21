@@ -1,6 +1,6 @@
 //! Native group fixtures with repeated hard links or tree-shaped object graphs.
 
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
@@ -84,7 +84,7 @@ impl TreeGraph {
         file.close().unwrap();
     }
 
-    pub(crate) fn assert_read_by_c_library(self, group: &hdf5::Group) {
+    pub(crate) fn assert_read_by_c_library(self, group: &libhdf5::Group) {
         match self {
             Self::AliasOutsideSource => {
                 assert_eq!(group.member_names().unwrap(), vec!["d"]);
@@ -122,13 +122,13 @@ impl TreeGraph {
     }
 }
 
-fn create_source_group(path: &Path) -> (hdf5::File, hdf5::Group) {
+fn create_source_group(path: &Path) -> (libhdf5::File, libhdf5::Group) {
     let file = file::libhdf5_create_v110(path);
     let g = file.create_group("g").unwrap();
     (file, g)
 }
 
-fn write_i32(group: &hdf5::Group, name: &str, values: &[i32]) {
+fn write_i32(group: &libhdf5::Group, name: &str, values: &[i32]) {
     group
         .new_dataset::<i32>()
         .shape((values.len(),))

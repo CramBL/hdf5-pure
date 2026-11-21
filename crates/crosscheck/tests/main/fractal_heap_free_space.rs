@@ -1,4 +1,4 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::fs;
 
@@ -32,7 +32,7 @@ fn parses_c_written_managed_free_space(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("managed-space.h5");
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_latest())
         .with_fcpl(|properties| properties.userblock(userblock))
         .create(&path)
@@ -191,7 +191,7 @@ fn parses_c_written_managed_free_space(
             FormatError::InvalidFractalHeapGeometry
         );
     }
-    #[cfg(feature = "__hdf5-1.10")]
+    #[cfg(feature = "__libhdf5-1.10")]
     if count == 1300 {
         let indirect = parsed
             .sections()
@@ -250,7 +250,7 @@ fn parses_c_written_managed_free_space(
             (FractalHeapSectionClass::NormalRow, 589824, 16363, 6, 0, 4)
         );
     }
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let group = c.group("g").unwrap();
     if attributes {
         assert_eq!(group.attr_names().unwrap().len(), count);
@@ -271,7 +271,7 @@ fn parses_c_written_managed_free_space(
 fn c_written_dense_link_fixture_matches_the_preserved_metadata_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fixture.h5");
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_latest())
         .create(&path)
         .unwrap();

@@ -1,9 +1,9 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::path::Path;
 
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File, FormatError};
+use libhdf5::{MajorErrorCode, MinorErrorCode};
 use rstest::rstest;
 use test_util_hdf5::soft_link::GroupFormat;
 
@@ -26,7 +26,7 @@ fn dataset_lookups_follow_soft_link_paths(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("soft.h5");
     format.generate(&path);
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         reference
             .dataset(spelling)
@@ -81,7 +81,7 @@ fn group_lookups_follow_soft_link_paths(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("soft.h5");
     format.generate(&path);
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         reference
             .group(spelling)
@@ -225,7 +225,7 @@ fn reference_lookup_reports_missing_targets_and_cycles(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("soft.h5");
     format.generate(&path);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let error = file.dataset(spelling).unwrap_err();
     assert!(
         error.contains_major(MajorErrorCode::SymbolTable),

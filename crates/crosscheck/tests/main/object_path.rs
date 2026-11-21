@@ -1,18 +1,18 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Object paths, resolved over one file by libhdf5 and by hdf5-pure.
 //!
 //! libhdf5's traversal is the oracle for the grammar: which spellings name one object, where
 //! an absolute path opened on a group starts, that `..` is an ordinary link name, and which path
 //! neither library accepts as the target of a write.
 
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, File};
+use libhdf5::{MajorErrorCode, MinorErrorCode};
 use rstest::rstest;
 
 /// Writes a file holding `/b`, `/a/b` and `/a`, where `/b` reads 2 and `/a/b` reads 1, so that a
 /// path resolved from the root and the same path resolved from `a` reach different data.
 fn nested_file(path: &std::path::Path) {
-    let f = hdf5::File::create(path).unwrap();
+    let f = libhdf5::File::create(path).unwrap();
     f.new_dataset::<i32>()
         .shape((1,))
         .create("b")
@@ -45,7 +45,7 @@ fn both_libraries_resolve_every_spelling_of_a_path_to_one_dataset(#[case] spelli
     let path = dir.path().join("nested.h5");
     nested_file(&path);
 
-    let c_read = hdf5::File::open(&path)
+    let c_read = libhdf5::File::open(&path)
         .unwrap()
         .dataset(spelling)
         .unwrap_or_else(|e| panic!("the C library rejected {spelling:?}: {e}"))
@@ -74,7 +74,7 @@ fn both_libraries_walk_a_path_opened_on_a_group_from_the_same_place(
     let path = dir.path().join("nested.h5");
     nested_file(&path);
 
-    let c_file = hdf5::File::open(&path).unwrap();
+    let c_file = libhdf5::File::open(&path).unwrap();
     let c_read = c_file
         .group("a")
         .unwrap()
@@ -102,7 +102,7 @@ fn both_libraries_read_two_dots_as_an_ordinary_link_name() {
     let path = dir.path().join("two_dots.h5");
 
     {
-        let f = hdf5::File::create(&path).unwrap();
+        let f = libhdf5::File::create(&path).unwrap();
         f.new_dataset::<i32>()
             .shape((1,))
             .create("b")
@@ -128,7 +128,7 @@ fn both_libraries_read_two_dots_as_an_ordinary_link_name() {
         f.close().unwrap();
     }
 
-    let c_file = hdf5::File::open(&path).unwrap();
+    let c_file = libhdf5::File::open(&path).unwrap();
     let mut members = c_file.group("a").unwrap().member_names().unwrap();
     members.sort();
     assert_eq!(members, ["..", "b"]);
@@ -160,7 +160,7 @@ fn neither_library_deletes_a_group_through_a_path_that_spells_no_link(
     nested_file(&path);
 
     {
-        let c_file = hdf5::File::open_rw(&path).unwrap();
+        let c_file = libhdf5::File::open_rw(&path).unwrap();
         let a = c_file.group("a").unwrap();
         let c_err = a.unlink(spelling).unwrap_err();
         assert!(c_err.contains_major(major), "{c_err}");

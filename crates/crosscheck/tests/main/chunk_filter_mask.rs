@@ -1,10 +1,10 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::dataset::ChunkOpts;
-use hdf5::filters::Filter as CFilter;
 use hdf5_pure::{File, FilterDisposition, FilterId, RepackOptions};
+use libhdf5::dataset::ChunkOpts;
+use libhdf5::filters::Filter as CFilter;
 use rstest::rstest;
 use test_util_hdf5::chunk_filter;
 use test_util_hdf5::dataset;

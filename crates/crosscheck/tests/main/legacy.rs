@@ -1,8 +1,8 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 //! Native conformance for independent symbol-table files and files written by the reference library.
 
-use hdf5::datatype::ByteOrder;
 use hdf5_pure::DatatypeByteOrder;
+use libhdf5::datatype::ByteOrder;
 use rstest::rstest;
 use test_util::legacy::Fixture;
 use test_util::temp;
