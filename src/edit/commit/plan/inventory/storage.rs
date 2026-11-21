@@ -15,10 +15,10 @@ use super::prospective::ProspectiveCollections;
 use super::{AppliedEditInventory, OriginalEdits, PreparedEditInventory};
 use crate::edit::WriteEngine;
 use crate::edit::analysis::heap::qualification::{OriginalCollections, ParentStorage};
-use crate::edit::analysis::ownership::AllocationKind;
+use crate::edit::analysis::ownership::{AllocationKind, ObjectAllocation};
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::{
-    AnalysisPhase, CountProtectionError, ProtectedCounts, ReconstructionSource,
+    AnalysisPhase, CountProtectionError, PreservedReferences, ProtectedCounts, ReconstructionSource,
 };
 use crate::edit::commit::heap;
 use crate::edit::commit::heap::HeapMutationFailure;
@@ -144,6 +144,59 @@ impl OriginalStorage {
         result.capture_integrity(engine, phase, source, !qualified_owners);
 
         result
+    }
+
+    /// Selects original reference summaries whose complete object storage will be excluded
+    /// from placement. Application must check these exclusions before using the summaries.
+    ///
+    /// Explicit in-place writes can modify existing value and index ranges. Their prepared
+    /// forms do not all identify a checked owner, so they leave reuse unavailable.
+    pub(super) fn preserved_references(
+        &self,
+        phase: &mut AnalysisPhase<'_>,
+        original: &OriginalEdits,
+        dispositions: &ReconstructionDispositions,
+        tree: &PreparedTree,
+    ) -> PreservedReferences {
+        let Some(owners) = original.owners() else {
+            return PreservedReferences::default();
+        };
+        let source = owners.source();
+        if !tree.inplace_writes.is_empty()
+            || self.integrity.is_err()
+            || self.source.as_ref() != Some(source)
+        {
+            return PreservedReferences::default();
+        }
+        let mut references = phase.take_preserved_references(source, |object, allocations| {
+            !allocations.is_empty()
+                && allocations
+                    .iter()
+                    .all(|allocation| self.protects_owner_allocation(object, *allocation))
+        });
+        references.exclude(
+            dispositions
+                .predecessors()
+                .values()
+                .map(|old| old.source.object()),
+        );
+        references
+    }
+
+    fn protects_owner_allocation(&self, object: ObjectId, allocation: ObjectAllocation) -> bool {
+        let range = allocation.range();
+        self.allocations
+            .binary_search_by_key(&range.start(), |protected| protected.range.start())
+            .is_ok_and(|index| {
+                self.allocations[index]
+                    == StorageAllocation {
+                        range,
+                        origin: StorageOrigin::Owner {
+                            object,
+                            kind: allocation.kind(),
+                        },
+                    }
+            })
     }
 
     /// Withholds retirement of protected original owners and unobserved storage.
@@ -418,7 +471,7 @@ impl PreparedEditInventory {
 ///
 /// Pending frees include deferred chunk retirement at the engine's current length. The editor
 /// checks allocator and retirement ranges against original storage and retains the outcome.
-/// With original candidates, the editor decodes heap references in a new phase after application
+/// With original candidates, the editor collects heap references in a new phase after application
 /// and retains root-applicability failures independently of reference interpretation.
 /// [`Self::publish_compacting_members`] derives member removal permission from these observations.
 /// Other completion callbacks require independently established mutation permission.
@@ -443,6 +496,7 @@ impl<'a> PendingEditInventory<'a> {
             dispositions,
             storage,
             collections,
+            references,
         } = applied;
         let AppliedTree {
             counts,
@@ -463,6 +517,11 @@ impl<'a> PendingEditInventory<'a> {
             &dispositions,
             &collections,
             pending.root,
+            if exclusion.is_ok() {
+                references
+            } else {
+                PreservedReferences::default()
+            },
         );
         let session = engine.context.allocations.session();
         Self {

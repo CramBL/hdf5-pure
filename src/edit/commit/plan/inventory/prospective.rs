@@ -9,6 +9,7 @@ use super::dispositions::AppliedDispositions;
 use crate::edit::WriteEngine;
 use crate::edit::allocation::AllocationSession;
 use crate::edit::analysis::AnalysisPhase;
+use crate::edit::analysis::PreservedReferences;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::heap::ReachableHeapReferences;
 use crate::edit::analysis::heap::qualification::OriginalCollections;
@@ -33,13 +34,15 @@ pub(in crate::edit::commit) struct ProspectiveCollections {
 impl ProspectiveCollections {
     /// Collects references in a new phase after tree placement and in-place writes.
     ///
-    /// Records retained-root association failures independently of the decoded references.
+    /// Reuses complete facts for preserved identities after checking root applicability.
+    /// Records retained-root association failures independently of reference observations.
     pub(super) fn collect(
         engine: &WriteEngine,
         original: &OriginalEdits,
         dispositions: &AppliedDispositions,
         collections: &OriginalCollections,
         root: PhysicalAddress,
+        references: PreservedReferences,
     ) -> Self {
         if matches!(collections.qualification(), OriginalQualification::Empty) {
             return Self::default();
@@ -50,10 +53,13 @@ impl ProspectiveCollections {
                 Self::residual_roots(engine, original, dispositions, collections, &mut roots)
             })
             .is_some();
-        let references = Some(
-            AnalysisPhase::prospective(engine, root)
-                .heap_references_reachable_from(roots.iter().copied()),
-        );
+        let mut phase = AnalysisPhase::prospective(engine, root);
+        if applicable && let Some(replacements) = dispositions.replacements() {
+            let mut references = references;
+            references.exclude(replacements.values().copied());
+            phase = phase.with_preserved_references(references);
+        }
+        let references = Some(phase.heap_references_reachable_from(roots.iter().copied()));
         Self {
             root: Some(root),
             session: Some(engine.context.allocations.session()),
