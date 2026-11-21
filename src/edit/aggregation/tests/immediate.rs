@@ -21,11 +21,11 @@ use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
 use crate::PhysicalAddress;
 use crate::SyncPolicy;
-use crate::chunk_index_inplace::alloc_probe;
 use crate::edit::AppendTarget;
 use crate::edit::WriteEngine;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::extensible_array::test_allocations::BlockAllocations;
 use crate::image::FileImage;
 use crate::image::MirrorImage;
 use crate::image::WriteBuffering;
@@ -61,13 +61,22 @@ fn staged_and_immediate_edits_share_aggregate_windows(
     let raw = state.policy.unused(AllocationClass::Raw).unwrap();
     let metadata = state.policy.unused(AllocationClass::Metadata).unwrap();
     let fsm_hit = engine.space.largest(AllocationClass::Raw) >= ByteLength::new(16);
-    alloc_probe::take();
+    let before = BlockAllocations::read(&engine.image.disk_bytes().unwrap(), "values");
+    disk_log::start();
     engine
         .append_inplace_i32("values", &(initial..end).collect::<Vec<_>>())
         .unwrap();
-    let (data_blocks, super_blocks) = alloc_probe::take();
+    let operations = disk_log::take();
+    let allocated =
+        BlockAllocations::read(&engine.image.disk_bytes().unwrap(), "values").new_since(&before);
+    allocated.assert_issued(&operations);
+    assert_eq!(!allocated.data.is_empty(), end != 8);
+    if chunk == 1 {
+        assert!(!allocated.super_blocks.is_empty());
+    }
     let after = engine.aggregation.unwrap();
     if end == 8 {
+        assert!(allocated.super_blocks.is_empty());
         assert_eq!(after.eoa, state.eoa);
         assert_eq!(
             after.policy.unused(AllocationClass::Metadata),
@@ -83,14 +92,10 @@ fn staged_and_immediate_edits_share_aggregate_windows(
         }
     } else {
         assert!(after.eoa > state.eoa);
-        assert!(data_blocks > 0);
         assert_ne!(
             after.policy.unused(AllocationClass::Metadata),
             Some(metadata)
         );
-    }
-    if chunk == 1 {
-        assert!(super_blocks > 0);
     }
     let ownership = engine.storage_snapshot();
     assert_eq!(ownership.logical_size, ownership.physical_size);

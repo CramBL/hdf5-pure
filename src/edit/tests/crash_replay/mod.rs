@@ -24,11 +24,11 @@ use crate::FileSpaceSettings;
 use crate::PersistedFreeSpacePolicy;
 use crate::access_mode::AccessMode;
 use crate::address::{BaseAddress, BaseAddressExt};
-use crate::chunk_index_inplace::alloc_probe;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendTarget, MemoryStrategy, SyncPolicy, WriteEngine};
 use crate::error::{Error, FormatError};
+use crate::extensible_array::test_allocations::BlockAllocations;
 use crate::file_lock::FileLocking;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
@@ -88,10 +88,6 @@ struct Recording {
     /// be compared against it.
     real: std::path::PathBuf,
     ops: Vec<DiskOp>,
-    /// Fresh Extensible-Array blocks the recorded window allocated, by kind.
-    /// See [`assert_allocated`](Self::assert_allocated).
-    data_blocks: usize,
-    super_blocks: usize,
 }
 
 impl Recording {
@@ -100,13 +96,9 @@ impl Recording {
     /// writes are part of what a crash can interrupt, so they belong in the log.
     fn of(label: &str, path: &Path, work: impl FnOnce(&Path)) -> Self {
         let base = std::fs::read(path).expect("the starting file");
-        // Discard whatever the warm-up allocated, so the counts below describe
-        // the recorded window rather than the whole test.
-        alloc_probe::take();
         disk_log::start();
         work(path);
         let ops = disk_log::take();
-        let (data_blocks, super_blocks) = alloc_probe::take();
         // The recorded order itself, on request. This is what shows the
         // address-order inversion directly: with a barrier the block at
         // end-of-file is issued before the pointer naming it, and without one the
@@ -125,8 +117,6 @@ impl Recording {
             base,
             real: path.to_path_buf(),
             ops,
-            data_blocks,
-            super_blocks,
         }
     }
 
@@ -146,17 +136,18 @@ impl Recording {
     ///    observe it. Deleting a barrier and shrinking `CHUNK` back to 1 makes
     ///    the sweeps pass again with condition 1 still satisfied, so nothing but
     ///    this catches it.
-    fn assert_positioned(&self, data_blocks: usize, super_blocks: usize) {
+    fn assert_positioned(&self, data_blocks: usize, super_blocks: usize) -> BlockAllocations {
+        let before = BlockAllocations::read(&self.base, "d");
+        let bytes = std::fs::read(&self.real).unwrap();
+        let allocated = BlockAllocations::read(&bytes, "d").new_since(&before);
         assert!(
-            self.data_blocks >= data_blocks && self.super_blocks >= super_blocks,
-            "{}: the recorded window allocated {} data block(s) and {} super block(s), \
-             short of the {data_blocks} and {super_blocks} it is positioned for. \
-             Nothing below can see a barrier that is not crossed.",
-            self.label,
-            self.data_blocks,
-            self.super_blocks
+            allocated.data.len() >= data_blocks && allocated.super_blocks.len() >= super_blocks,
+            "{}: expected at least {data_blocks} new data blocks and {super_blocks} new super \
+             blocks, got {allocated:?}",
+            self.label
         );
-        let pages = std::fs::metadata(&self.real).unwrap().len() / GATHER_PAGE;
+        allocated.assert_issued(&self.ops);
+        let pages = bytes.len() as u64 / GATHER_PAGE;
         assert!(
             pages >= MIN_PAGES,
             "{}: the file spans {pages} gather pages of {GATHER_PAGE} bytes, under the \
@@ -165,6 +156,7 @@ impl Recording {
              which is atomic, and no replayed prefix can fall between them.",
             self.label
         );
+        allocated
     }
 
     /// Demand that a *publish* write in this recording crosses a gather-page
@@ -641,8 +633,8 @@ const ROUND: i32 = CHUNK as i32;
 /// A window at 270 — the obvious round number — crosses no super-block
 /// allocation at all, and a sweep positioned there passes with both barriers
 /// deleted while still replaying five hundred prefixes and calling every one of
-/// them clean. [`crate::chunk_index_inplace::alloc_probe`] is what turns that
-/// into a failure rather than a silently narrower sweep.
+/// them clean. [`Recording::assert_positioned`] checks that the recorded writes
+/// initialized new blocks that are reachable from the final index.
 const WARMUP_ROUNDS: i32 = 230;
 /// Recorded rounds.
 const ROUNDS: i32 = 90;
@@ -1611,10 +1603,15 @@ fn publishing_into_a_live_super_block_survives_a_crash_at_every_write() {
     // floors, so the super-block *ceiling* is its own assertion: a window that
     // allocated one would be back at the case the ordering already hides, and
     // would sweep clean however the publish were written.
-    rec.assert_positioned(1, 0);
-    assert_eq!(
-        rec.super_blocks, 0,
-        "the window must publish *into* a live super block, not allocate one"
+    assert!(
+        !BlockAllocations::read(&rec.base, "d")
+            .super_blocks
+            .is_empty()
+    );
+    let allocated = rec.assert_positioned(1, 0);
+    assert!(
+        allocated.super_blocks.is_empty(),
+        "the window must publish into a live super block"
     );
     rec.replay_every_prefix(
         dir.path(),
