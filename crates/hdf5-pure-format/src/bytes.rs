@@ -262,8 +262,6 @@ pub fn write_stored_address_at(
         OffsetWidth::Four => *array_at_mut::<4>(buf, pos)? = (addr.get() as u32).to_le_bytes(),
         OffsetWidth::Eight => *array_at_mut::<8>(buf, pos)? = addr.get().to_le_bytes(),
     }
-    #[cfg(test)]
-    crate::field_observations::offset(width);
     Ok(())
 }
 
@@ -306,8 +304,6 @@ pub(crate) fn try_write_decoded_address(
         OffsetWidth::Four => buf.extend_from_slice(&(stored.get() as u32).to_le_bytes()),
         OffsetWidth::Eight => buf.extend_from_slice(&stored.get().to_le_bytes()),
     }
-    #[cfg(test)]
-    crate::field_observations::offset(width);
     Ok(())
 }
 
@@ -416,8 +412,6 @@ pub fn write_length_at(
         }
         LengthWidth::Eight => *array_at_mut::<8>(buf, pos)? = value.to_le_bytes(),
     }
-    #[cfg(test)]
-    crate::field_observations::length(width);
     Ok(())
 }
 
@@ -444,8 +438,6 @@ pub(crate) fn write_offset(buf: &mut Vec<u8>, val: u64, width: OffsetWidth) {
         OffsetWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
         OffsetWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
     }
-    #[cfg(test)]
-    crate::field_observations::offset(width);
 }
 
 /// Appends the length `val` to `buf` as a little-endian field of `width` bytes.
@@ -468,8 +460,6 @@ pub(crate) fn write_length(buf: &mut Vec<u8>, val: u64, width: LengthWidth) {
         LengthWidth::Four => buf.extend_from_slice(&(val as u32).to_le_bytes()),
         LengthWidth::Eight => buf.extend_from_slice(&val.to_le_bytes()),
     }
-    #[cfg(test)]
-    crate::field_observations::length(width);
 }
 
 /// Borrows an input array at `position`.

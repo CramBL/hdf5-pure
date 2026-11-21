@@ -9,10 +9,178 @@ use hdf5_pure_format::__private::{
     FormatWidths, FractalHeapHeader, LayoutVersion, LinkInfoMessage, LinkMessage, LinkTarget,
 };
 use rstest::rstest;
+use test_util::bytes::push_uint;
+use test_util::checksum;
 use test_util::data_layout;
 use test_util::dataspace;
+use test_util::fixed_array;
 use test_util::fractal_heap;
 use test_util::widths::Widths;
+
+#[rstest]
+#[case::two_eight(OffsetWidth::Two, LengthWidth::Eight)]
+#[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
+#[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
+fn metadata_fields_use_independent_file_widths(
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+    #[values(1, 8, 64, 1_025)] entries: u64,
+    #[values(false, true)] mixed: bool,
+) {
+    let widths = FormatWidths { offsets, lengths };
+    let wire = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
+    let space = Dataspace {
+        space_type: DataspaceType::Simple,
+        rank: 2,
+        dimensions: vec![3, 5],
+        max_dimensions: Some(vec![MaxExtent::Fixed(7), MaxExtent::Fixed(9)]),
+    };
+    assert_eq!(
+        space.serialize(lengths.get()).unwrap(),
+        dataspace::v2_with_widths(
+            2,
+            dataspace::Flags::MAX_DIMS,
+            dataspace::Kind::SIMPLE,
+            &[3, 5],
+            Some(&[7, 9]),
+            wire,
+        )
+    );
+    assert_fixed_array_fields(widths, wire, entries);
+    assert_manager_fields(widths, wire, entries, mixed);
+}
+
+fn assert_fixed_array_fields(widths: FormatWidths, wire: Widths, entries: u64) {
+    const HEADER: u64 = 4096;
+    const PAGE_BITS: u8 = 10;
+    let records: Vec<_> = (0..entries)
+        .map(|slot| format::ChunkRecord {
+            address: StoredAddress::new(1024 + 4 * slot),
+            stored_size: 4,
+            filter_mask: 0,
+        })
+        .collect();
+    let fixtures: Vec<_> = records
+        .iter()
+        .map(|record| {
+            Some(fixed_array::Entry {
+                address: record.address.get(),
+                stored_size: 4,
+                filter_mask: 0,
+            })
+        })
+        .collect();
+    let header_len = 12 + (wire.offset + wire.length) as u64;
+    let block = HEADER + header_len;
+    let plan = format::FixedArrayPlan::new(entries, 4, widths, false).unwrap();
+    let placement = plan
+        .place(StoredAddress::new(HEADER), StoredAddress::new(block))
+        .unwrap();
+    let expected = [
+        (
+            StoredAddress::new(HEADER),
+            fixed_array::header(
+                wire,
+                fixed_array::Client::Plain,
+                PAGE_BITS,
+                entries,
+                Some(block),
+            ),
+        ),
+        (
+            StoredAddress::new(block),
+            fixed_array::data_block(
+                wire,
+                fixed_array::Client::Plain,
+                PAGE_BITS,
+                &fixtures,
+                HEADER,
+            ),
+        ),
+    ];
+    assert_eq!(
+        placement
+            .serialize_blocks(&format::IndexSlots::dense(&records))
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        placement.blocks().collect::<Vec<_>>(),
+        expected.map(|(at, bytes)| (at, bytes.len() as u64))
+    );
+}
+
+fn assert_manager_fields(widths: FormatWidths, wire: Widths, entries: u64, mixed: bool) {
+    const HEADER: u64 = 256;
+    const LIST: u64 = 512;
+    let (first, stride) = match (wire.offset, entries) {
+        (2, 1_025) => (4096, 24),
+        (_, 1_025) => (16_384, 32),
+        _ => (8192, 32),
+    };
+    let sections: Vec<_> = (0..entries)
+        .map(|slot| format::FreeSection {
+            addr: StoredAddress::new(first + stride * slot),
+            size: if mixed && slot % 2 == 1 { 24 } else { 16 },
+        })
+        .collect();
+    let mut expected_list = b"FSSE\0".to_vec();
+    push_uint(&mut expected_list, HEADER, wire.offset);
+    let count_width = if entries <= u64::from(u8::MAX) { 1 } else { 2 };
+    for size in [16, 24] {
+        let same_size = sections.iter().filter(|section| section.size == size);
+        let count = same_size.clone().count();
+        if count != 0 {
+            push_uint(&mut expected_list, count as u64, count_width);
+            push_uint(&mut expected_list, size, wire.length);
+            for section in same_size {
+                push_uint(&mut expected_list, section.addr.get(), wire.offset);
+                expected_list.push(0);
+            }
+        }
+    }
+    checksum::append(&mut expected_list);
+
+    let mut expected_header = b"FSHD\0\x01".to_vec();
+    let total = sections.iter().map(|section| section.size).sum();
+    for value in [total, entries, entries, 0] {
+        push_uint(&mut expected_header, value, wire.length);
+    }
+    for field in [3, 80, 120, u16::from(widths.offsets.get()) * 8 - 1] {
+        expected_header.extend_from_slice(&field.to_le_bytes());
+    }
+    let max_section = match widths.lengths {
+        LengthWidth::Two => 0xfffd,
+        LengthWidth::Four => 0xffff_fffd,
+        LengthWidth::Eight => i64::MAX as u64,
+    };
+    push_uint(&mut expected_header, max_section, wire.length);
+    push_uint(&mut expected_header, LIST, wire.offset);
+    for _ in 0..2 {
+        push_uint(
+            &mut expected_header,
+            expected_list.len() as u64,
+            wire.length,
+        );
+    }
+    checksum::append(&mut expected_header);
+
+    let (header, list) = format::serialize_free_space_manager(
+        widths,
+        &sections,
+        StoredAddress::new(HEADER),
+        StoredAddress::new(LIST),
+        format::SECTION_CLASS_SIMPLE,
+    )
+    .unwrap();
+    assert_eq!(header, expected_header);
+    assert_eq!(list, expected_list);
+    let header = format::FreeSpaceManagerHeader::parse(widths, &header).unwrap();
+    let mut parsed =
+        format::parse_section_info(widths, &list, StoredAddress::new(HEADER), &header).unwrap();
+    parsed.sort_unstable_by_key(|section| section.addr);
+    assert_eq!(parsed, sections);
+}
 
 #[rstest]
 #[case::two(LengthWidth::Two, 0xffff)]
