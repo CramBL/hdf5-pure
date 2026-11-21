@@ -52,7 +52,6 @@ impl PendingEditInventory<'_> {
             collections,
             prospective,
             pending,
-            relocations: _,
             exclusion,
         } = self;
         let mut decisions = MemberDecisions::collect(collections, prospective, storage);
@@ -83,7 +82,6 @@ impl PendingEditInventory<'_> {
             collections,
             prospective,
             pending,
-            relocations: _,
             exclusion: _,
         } = self;
         engine
