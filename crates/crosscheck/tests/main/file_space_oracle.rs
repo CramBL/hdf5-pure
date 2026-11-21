@@ -178,7 +178,7 @@ fn rust_created_files_without_datasets_have_expected_manager_metadata(
 #[case::fsm_aggr(FileSpaceStrategy::FsmAggr)]
 #[case::page(FileSpaceStrategy::Page)]
 #[case::none(FileSpaceStrategy::None)]
-fn endurance_checkpoints_match_libhdf5(#[case] strategy: FileSpaceStrategy) {
+fn extended_endurance_checkpoints_match_libhdf5(#[case] strategy: FileSpaceStrategy) {
     let case = format!(
         "endurance/{strategy:?}/persist={}/page=4096/threshold=1/base=0",
         strategy != FileSpaceStrategy::None
@@ -213,7 +213,7 @@ fn endurance_checkpoints_match_libhdf5(#[case] strategy: FileSpaceStrategy) {
 #[case::final_fsm(Lifecycle::ReopenBeforeFinalCheck, Strategy::FsmAggr)]
 #[case::final_page(Lifecycle::ReopenBeforeFinalCheck, Strategy::Page)]
 #[case::frequent_fsm(Lifecycle::ReopenFrequently, Strategy::FsmAggr)]
-fn churn_checkpoints_match_libhdf5(
+fn extended_churn_checkpoints_match_libhdf5(
     #[case] lifecycle: Lifecycle,
     #[case] strategy: Strategy,
     #[values(Base::Zero, Base::Userblock)] base: Base,

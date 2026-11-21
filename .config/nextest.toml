@@ -7,6 +7,7 @@
 nextest-version = "0.9.145"
 
 [profile.default]
+default-filter = 'not test(/(^|::)extended_/)'
 # A test that takes 30s is reported; one that takes 90s fails the run.
 #
 # This exists because of what #269 found: a single test spent 117s issuing one
@@ -42,12 +43,28 @@ fail-fast = false
 # Select the external suite and facade reference-library unit tests.
 [profile.interop]
 default-filter = '''
-package(hdf5-pure-crosscheck) |
-(package(hdf5-pure) & test(/::native_crosschecks::/))
+(
+    package(hdf5-pure-crosscheck) |
+    (package(hdf5-pure) & test(/::native_crosschecks::/))
+) & not test(/(^|::)extended_/)
 '''
 fail-fast = false
 
+[profile.extended]
+inherits = "ci"
+default-filter = 'test(/(^|::)extended_/)'
+
+[profile.extended-interop]
+inherits = "interop"
+default-filter = '''
+(
+    package(hdf5-pure-crosscheck) |
+    (package(hdf5-pure) & test(/::native_crosschecks::/))
+) & test(/(^|::)extended_/)
+'''
+
 [test-groups]
+extended = { max-threads = "num-cpus" }
 # Semantic labels for the HDF5 crosschecks. They all retain nextest's normal
 # concurrency. CI selects them one at a time to make subsystem failures visible.
 # Any crosscheck test not matched below stays in `@global`, which CI runs as
@@ -59,6 +76,10 @@ storage = { max-threads = "num-cpus" }
 editing = { max-threads = "num-cpus" }
 types = { max-threads = "num-cpus" }
 compat = { max-threads = "num-cpus" }
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)extended_/)'
+test-group = "extended"
 
 [[profile.default.overrides]]
 filter = '''

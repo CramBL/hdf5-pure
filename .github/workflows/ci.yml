@@ -66,11 +66,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.run == 'true'
-    env:
+    env: &test-env
       # Keep unused Rust versions out of the cache compiler identity.
       RUSTUP_HOME: ${{ github.workspace }}/../rustup
 
-    strategy:
+    strategy: &test-matrix
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -79,15 +79,18 @@ jobs:
           - name: full
 
     steps:
-      - name: Checkout
+      - &test-checkout
+        name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install Rust
+      - &test-rust
+        name: Install Rust
         run: rustup toolchain install --profile minimal
 
-      - name: Enable optimized tests with debug checks
+      - &test-profile
+        name: Enable optimized tests with debug checks
         if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
         shell: bash
         run: |
@@ -98,7 +101,8 @@ jobs:
             echo 'CARGO_PROFILE_TEST_LTO=off'
           } >> "$GITHUB_ENV"
 
-      - name: Install and select mold
+      - &test-mold
+        name: Install and select mold
         id: mold
         if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
         shell: bash
@@ -126,7 +130,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' && (matrix.config.name == 'full' || matrix.os == 'ubuntu-latest') }}
           cache-on-failure: true
 
-      - name: Install tools
+      - &test-tools
+        name: Install tools
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.148,cargo-hack,just@1.59.0
@@ -148,6 +153,32 @@ jobs:
       - name: Doctests
         run: just ${{ matrix.config.name == 'full' && 'doctest-full' || 'doctest' }}
 
+  extended-tests:
+    name: extended tests / ${{ matrix.os }} / ${{ matrix.config.name }}
+    runs-on: ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    env: *test-env
+    strategy: *test-matrix
+
+    steps:
+      - *test-checkout
+      - *test-rust
+      - *test-profile
+      - *test-mold
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ matrix.os == 'ubuntu-latest' && matrix.config.name == 'default' && format('ci-test-opt1-{0}', steps.mold.outputs.identity) || 'ci' }}
+          save-if: false
+          cache-on-failure: true
+
+      - *test-tools
+
+      - name: Extended tests
+        run: just ${{ matrix.config.name == 'full' && 'test-extended-full' || 'test-extended' }}
+
   # Tests std and deflate without defaults, then each full-public feature beside the defaults.
   feature-tests:
     name: feature tests / ubuntu-latest / ${{ matrix.shard }}
@@ -157,21 +188,17 @@ jobs:
     env:
       RUSTUP_HOME: ${{ github.workspace }}/../rustup
 
-    strategy:
+    strategy: &feature-test-matrix
       fail-fast: false
       matrix:
         shard: [0, 1, 2]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      - *test-checkout
+      - *test-rust
 
-      - name: Install Rust
-        run: rustup toolchain install --profile minimal
-
-      - name: Enable optimized tests with debug checks
+      - &feature-test-profile
+        name: Enable optimized tests with debug checks
         shell: bash
         run: |
           {
@@ -181,7 +208,8 @@ jobs:
             echo 'CARGO_PROFILE_TEST_LTO=off'
           } >> "$GITHUB_ENV"
 
-      - name: Install and select mold
+      - &feature-test-mold
+        name: Install and select mold
         id: mold
         shell: bash
         run: |
@@ -200,17 +228,15 @@ jobs:
             echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTDOCFLAGS=-C link-arg=-fuse-ld=mold'
           } >> "$GITHUB_ENV"
 
-      - name: Cache Cargo
+      - &feature-test-cache
+        name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: ${{ format('ci-test-opt1-{0}', steps.mold.outputs.identity) }}
           save-if: false
           cache-on-failure: true
 
-      - name: Install tools
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: cargo-nextest@0.9.148,cargo-hack,just@1.59.0
+      - *test-tools
 
       - name: Tests and doctests by feature
         shell: bash
@@ -223,6 +249,34 @@ jobs:
           for ((index = SHARD_INDEX; index < ${#configurations[@]}; index += SHARD_COUNT)); do
             cargo hack -p hdf5-pure --features "${configurations[index]}" nextest run --locked --no-default-features
             cargo hack -p hdf5-pure --features "${configurations[index]}" test --locked --doc --no-default-features
+          done
+
+  extended-feature-tests:
+    name: extended feature tests / ubuntu-latest / ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    env: *test-env
+    strategy: *feature-test-matrix
+
+    steps:
+      - *test-checkout
+      - *test-rust
+      - *feature-test-profile
+      - *feature-test-mold
+      - *feature-test-cache
+      - *test-tools
+
+      - name: Extended tests by feature
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ strategy.job-total }}
+        run: |
+          configurations_text="$(just --evaluate FEATURE_TEST_CONFIGURATIONS)"
+          read -r -a configurations <<< "$configurations_text"
+          for ((index = SHARD_INDEX; index < ${#configurations[@]}; index += SHARD_COUNT)); do
+            cargo hack -p hdf5-pure --features "${configurations[index]}" nextest run --locked --no-default-features --profile extended
           done
 
   lint:
@@ -353,7 +407,7 @@ jobs:
   ci-ci-guard:
     name: ci-ci-guard
     runs-on: ubuntu-latest
-    needs: [changes, test, feature-tests, lint, feature-topology, docs-rs]
+    needs: [changes, test, extended-tests, feature-tests, extended-feature-tests, lint, feature-topology, docs-rs]
     permissions:
       contents: none
     if: always()

@@ -40,6 +40,12 @@ test *ARGS:
 test-full *ARGS:
     cargo nextest run --locked {{ WORKSPACE }} {{ FULL_PUBLIC }} {{ ARGS }}
 
+test-extended *ARGS:
+    cargo nextest run --locked {{ WORKSPACE }} --profile extended {{ ARGS }}
+
+test-extended-full *ARGS:
+    cargo nextest run --locked {{ WORKSPACE }} {{ FULL_PUBLIC }} --profile extended {{ ARGS }}
+
 # The facade's tests with std and deflate without defaults, followed by
 # each full-public feature beside the defaults.
 test-each-feature *ARGS:
