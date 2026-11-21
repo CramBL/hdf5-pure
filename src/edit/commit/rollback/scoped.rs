@@ -4,8 +4,6 @@ use hdf5_pure_core::PhysicalAddress;
 
 use crate::edit::WriteEngine;
 use crate::error::Error;
-#[cfg(test)]
-use crate::error::FormatError;
 
 /// Borrows the engine exclusively to journal writes and control their completion.
 ///
@@ -57,37 +55,7 @@ impl<'engine> JournalScope<'engine> {
         let checkpoint = engine.inplace_undo.len();
         let mut scope = Self { engine, checkpoint };
         let result = apply(&mut scope);
-        scope.complete_issued(result, false)
-    }
-
-    /// Retains the whole journal after issuing an unpublished operation's writes.
-    ///
-    /// Uses the completion and restoration rules of [`Self::run_issued`] with a checkpoint of
-    /// zero. Successful completion retains all journal entries for the enclosing commit.
-    /// If `apply` or completion fails, attempts to restore all entries, including those recorded
-    /// before this call.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::Internal`] if publication was attempted. Otherwise returns the
-    /// operation, completion, or restoration errors described by [`Self::run_issued`].
-    #[cfg(test)]
-    pub(in crate::edit) fn run_rootless(
-        engine: &'engine mut WriteEngine,
-        apply: impl FnOnce(&mut Self) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        if engine.publication.attempted() {
-            return Err(FormatError::Internal(
-                "rootless writes follow a publication attempt".into(),
-            )
-            .into());
-        }
-        let mut scope = Self {
-            engine,
-            checkpoint: 0,
-        };
-        let result = apply(&mut scope);
-        scope.complete_issued(result, true)
+        scope.complete_issued(result)
     }
 
     /// Records prior bytes before writing at a physical file position.
@@ -121,36 +89,17 @@ impl<'engine> JournalScope<'engine> {
         self.engine.image().len()
     }
 
-    fn complete_issued(self, result: Result<(), Error>, retain: bool) -> Result<(), Error> {
+    fn complete_issued(self, result: Result<(), Error>) -> Result<(), Error> {
         let Self { engine, checkpoint } = self;
         if engine.inplace_undo.len() == checkpoint {
             return result;
         }
-        let result = result
-            .and_then(|()| engine.image.flush())
-            .and_then(|()| engine.barrier());
-        match result {
+        match result.and_then(|()| issue_writes(engine)) {
             Ok(()) => {
-                if !retain {
-                    engine.inplace_undo.truncate(checkpoint);
-                }
+                engine.inplace_undo.truncate(checkpoint);
                 Ok(())
             }
-            Err(refusal) => {
-                let restore = engine
-                    .undo_inplace_since(checkpoint)
-                    .and_then(|()| engine.image.flush());
-                match restore {
-                    Ok(()) => Err(refusal),
-                    Err(restore) => {
-                        engine.make_allocation_uncertain();
-                        Err(Error::CommitPartiallyApplied {
-                            refusal: Box::new(refusal),
-                            restore: Box::new(restore),
-                        })
-                    }
-                }
-            }
+            Err(refusal) => Err(restore_issued_writes(engine, checkpoint, refusal)),
         }
     }
 
@@ -179,6 +128,27 @@ impl<'engine> JournalScope<'engine> {
                     restore: Box::new(restore),
                 }),
             },
+        }
+    }
+}
+
+fn issue_writes(engine: &mut WriteEngine) -> Result<(), Error> {
+    engine.image.flush()?;
+    engine.barrier()
+}
+
+fn restore_issued_writes(engine: &mut WriteEngine, checkpoint: usize, refusal: Error) -> Error {
+    let restore = engine
+        .undo_inplace_since(checkpoint)
+        .and_then(|()| engine.image.flush());
+    match restore {
+        Ok(()) => refusal,
+        Err(restore) => {
+            engine.make_allocation_uncertain();
+            Error::CommitPartiallyApplied {
+                refusal: Box::new(refusal),
+                restore: Box::new(restore),
+            }
         }
     }
 }

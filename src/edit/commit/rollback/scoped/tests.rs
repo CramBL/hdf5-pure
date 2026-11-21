@@ -24,7 +24,35 @@ use crate::error::FormatError;
 use crate::image::WriteBuffering;
 use crate::writer::FileBuilder;
 
-use super::JournalScope;
+use super::{JournalScope, issue_writes, restore_issued_writes};
+
+impl<'engine> JournalScope<'engine> {
+    /// Issues unpublished writes while retaining the entire journal on success.
+    /// On failure, restores the whole journal, including entries from before this call.
+    pub(in crate::edit) fn run_rootless(
+        engine: &'engine mut WriteEngine,
+        apply: impl FnOnce(&mut Self) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        if engine.publication.attempted() {
+            return Err(FormatError::Internal(
+                "rootless writes follow a publication attempt".into(),
+            )
+            .into());
+        }
+        let mut scope = Self {
+            engine,
+            checkpoint: 0,
+        };
+        let result = apply(&mut scope);
+        let engine = scope.engine;
+        if engine.inplace_undo.is_empty() {
+            return result;
+        }
+        result
+            .and_then(|()| issue_writes(engine))
+            .map_err(|refusal| restore_issued_writes(engine, 0, refusal))
+    }
+}
 
 #[rstest]
 #[case::success(Outcome::Success)]
