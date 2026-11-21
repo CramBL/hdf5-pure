@@ -89,13 +89,6 @@ pub(crate) use fixed::FixedInitialization;
 pub(crate) use single::SingleAppend;
 pub(crate) use single::SingleIndex;
 
-/// Counts Extensible-Array data-block and super-block allocations on the current thread.
-///
-/// Crash-prefix tests require allocations within the recorded window to exercise the
-/// allocation-specific ordering barriers.
-#[cfg(test)]
-pub(crate) mod alloc_probe;
-
 /// One stored Extensible-Array element: the chunk address, plus (for filtered
 /// arrays) the stored/compressed chunk size and this chunk's filter mask. The
 /// size and mask are ignored for unfiltered arrays (client id 0).
@@ -1302,8 +1295,6 @@ impl Located {
         let existing = file.read_addr_at(dblk_ptr_off)?;
         let dblk_addr = if existing.is_undefined(file.widths().offsets) {
             let new_addr = self.alloc_undef_data_block(file, dblk_nelmts, block_offset_rel)?;
-            #[cfg(test)]
-            alloc_probe::note_data_block();
             // As in `ensure_super_block`: an appended block sits above its parent
             // pointer, so they need a barrier between them or an address-ordered
             // flush names a block that is not there yet.
@@ -1411,8 +1402,6 @@ impl Located {
             self.ea_bits.block_offset_width(),
         )?;
         let allocation = file.allocate(&super_block, AllocationClass::Metadata)?;
-        #[cfg(test)]
-        alloc_probe::note_super_block();
         // The block exists before anything names it. When its bytes were appended
         // they sit above the slot below, which is in the index block near the
         // front, so without this the two are one barrier-free window and a
@@ -3946,20 +3935,25 @@ mod tests {
         #[case] data_block: bool,
         #[case] super_block: bool,
     ) {
+        use crate::extensible_array::test_allocations::BlockAllocations;
+
         let mut store = WindowProbeStore::open(build_unlimited(start, 1));
         let (mut loc, datatype) = locate(&store);
+        let before = BlockAllocations::read(&store.data, "d");
         store.reset_counters();
-        alloc_probe::take();
         append_i32s(&mut store, &mut loc, &datatype, start..end);
-        let (data_blocks, super_blocks) = alloc_probe::take();
+        let allocated = BlockAllocations::read(&store.data, "d").new_since(&before);
         assert_eq!(
-            (data_blocks > 0, super_blocks > 0),
+            (
+                !allocated.data.is_empty(),
+                !allocated.super_blocks.is_empty()
+            ),
             (data_block, super_block)
         );
         let mut expected = vec![AllocationClass::Raw; (end - start) as usize];
         expected.extend(core::iter::repeat_n(
             AllocationClass::Metadata,
-            data_blocks + super_blocks,
+            allocated.data.len() + allocated.super_blocks.len(),
         ));
         assert_eq!(*store.allocations.borrow(), expected);
         assert_eq!(read_i32s(&store, &loc), (0..end).collect::<Vec<_>>());
