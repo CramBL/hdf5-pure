@@ -23,7 +23,7 @@ use crate::edit::analysis::{
 use crate::edit::commit::heap;
 use crate::edit::commit::heap::HeapMutationFailure;
 use crate::edit::commit::plan::PreparedTree;
-use crate::edit::commit::publish::{AppliedTree, PublicationError, PublishedTree};
+use crate::edit::commit::publish::{PublicationError, PublishedTree};
 use crate::edit::dataset::MovingWrite;
 use crate::edit::retirement::PendingRootFrees;
 use crate::error::{Error, FormatError};
@@ -484,26 +484,21 @@ pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     collections: OriginalCollections,
     prospective: ProspectiveCollections,
     pending: PendingRootFrees,
-    relocations: BTreeMap<ObjectId, ObjectId>,
     exclusion: Result<(), StorageConflict>,
 }
 
 impl<'a> PendingEditInventory<'a> {
     fn new(engine: &'a mut WriteEngine, applied: AppliedEditInventory) -> Self {
         let AppliedEditInventory {
-            tree,
+            counts,
+            retirement,
+            freed,
             original,
             dispositions,
             storage,
             collections,
             references,
         } = applied;
-        let AppliedTree {
-            counts,
-            retirement,
-            freed,
-            relocations,
-        } = tree;
         let pending = retirement.into_pending_frees(freed, engine.image.len());
         let exclusion = storage.exclude_space(engine).and_then(|()| {
             for &(range, class) in pending.batch.entries() {
@@ -533,7 +528,6 @@ impl<'a> PendingEditInventory<'a> {
             collections,
             prospective,
             pending,
-            relocations,
             exclusion,
         }
     }
@@ -566,8 +560,9 @@ impl<'a> PendingEditInventory<'a> {
             }
             Ok(heap::after_publication(published, decisions.plans()))
         };
-        self.dispositions
-            .replacements()
+        let relocations = self
+            .dispositions
+            .into_replacements()
             .ok_or(Error::EditUnsupported(
                 "original predecessor replacement cannot be established",
             ))?;
@@ -584,7 +579,6 @@ impl<'a> PendingEditInventory<'a> {
             collections: _,
             prospective: _,
             pending,
-            relocations,
             exclusion: _,
         } = self;
         let result = match counts {
