@@ -77,9 +77,9 @@ The body, when there is one, follows a blank line and explains why. Issue refere
 
 ## Testing
 
-[TESTING.md](TESTING.md) defines where tests and helpers belong, the evidence a change needs, and the rules for fixtures, native crosschecks, child processes, and specialized suites. Follow it when adding or changing tests. [ARCHITECTURE.md](ARCHITECTURE.md#test-helpers) explains the helper dependencies.
-
-`just test` runs the ordinary suite with the default features, and `just test-full` with the full public feature profile. Run doctests separately with `just doctest` or `just doctest-full`. `just interop::test-bundled` runs the native interoperability suite with bundled libhdf5.
+Follow [TESTING.md](TESTING.md#choosing-tests) for test selection, organization,
+and fixture requirements. See its [recipe table](TESTING.md#running-tests) for
+ordinary, extended, and native suites.
 
 ## Documentation
 
@@ -99,7 +99,7 @@ When reviewing, we look for:
 - The code should be readable.
 - The code should have helpful doc comments.
 - The code should follow [CODE_STYLE.md](CODE_STYLE.md).
-- The evidence required by [TESTING.md](TESTING.md#writing-a-test) is there.
+- The tests meet the execution, evidence, and coverage requirements in [TESTING.md](TESTING.md).
 
 Each `0.x.0` release may break the public API, so a breaking change in a pull request is acceptable. We still avoid one when we can, and when we cannot we deprecate the old item with `#[deprecated]` first.
 
