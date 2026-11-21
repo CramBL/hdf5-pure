@@ -1,6 +1,6 @@
 ---
 source: src/image/observations/tests.rs
-expression: report
+expression: report.finish()
 ---
 Buffering configuration
   Metric          Bytes
@@ -8,18 +8,9 @@ Buffering configuration
   Pending budget      8
   File growth         0
 
-Buffering observations
-  Metric                          Pending  Flushed
-  ------------------------------  -------  -------
-  Pending runs (count)                  2        0
-  Pending bytes                         4        0
-  Pending capacity (bytes)              4        0
-  Flush peak (bytes)                    0       44
-  Flush peak capacity (bytes)           0       82
-  Clean-gap reads (calls)               0        1
-  Clean-gap reads (bytes)               0       38
-  Explicit buffer copies (bytes)        4        6
-  Issued writes (calls)                 0        1
-  Issued writes (bytes)                 0       42
-  Mirror bytes                          0        0
-  Mirror capacity (bytes)               0        0
+Issued span
+  Metric         Bytes
+  -------------  -----
+  Offset             2
+  Length            42
+  Preserved gap     38

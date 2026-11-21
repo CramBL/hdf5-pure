@@ -89,9 +89,7 @@ fn copies_complete_overlapping_records_and_only_the_free_header(
             [..original.len()],
         expected
     );
-    let work = engine.image.buffering_work();
-    assert_eq!((work.pending_runs, work.pending_bytes), (0, 0));
-    assert_eq!(work.mirror_bytes > 0, mirror);
+    assert_no_pending_writes(&mut engine);
     let undo_bytes: usize = engine
         .inplace_undo
         .iter()
@@ -220,7 +218,7 @@ fn failure_restores_parent_and_descriptors_or_seals_uncertainty(
             engine.image().read_exact_at(descriptor.get(), 8).unwrap(),
             [0; 8]
         );
-        assert_eq!(engine.image.buffering_work().pending_bytes, 0);
+        assert_no_pending_writes(&mut engine);
         engine.context.allocations.available().unwrap();
     }
     assert!(engine.inplace_undo.is_empty());
@@ -256,7 +254,7 @@ fn streamed_source_and_undo_reads_have_separate_byte_costs() {
     );
     assert!(moved > COPY_BYTES as u64);
     assert!(moved + header < original.len() as u64);
-    assert_eq!(engine.image.buffering_work().write_bytes, moved + header);
+    assert_eq!(engine.image.issued_write_bytes(), moved + header);
 }
 
 #[test]
@@ -275,7 +273,7 @@ fn source_read_failure_precedes_any_destination_write() {
         "{error:?}"
     );
     assert!(engine.inplace_undo.is_empty());
-    assert_eq!(engine.image.buffering_work().write_bytes, 0);
+    assert_eq!(engine.image.issued_writes(), 0);
 }
 
 #[test]
@@ -394,7 +392,13 @@ fn later_rootless_failure_restores_every_parent_before_original_descriptors() {
         [0; 8]
     );
     assert!(engine.inplace_undo.is_empty());
-    assert_eq!(engine.image.buffering_work().pending_bytes, 0);
+    assert_no_pending_writes(&mut engine);
+}
+
+fn assert_no_pending_writes(engine: &mut WriteEngine) {
+    disk_log::start();
+    engine.image.flush().unwrap();
+    assert!(disk_log::take().is_empty());
 }
 
 fn fixture(session: bool, mirror: bool) -> (TempPath, WriteEngine, PhysicalAddress, Vec<u8>) {
