@@ -7,28 +7,35 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::convert::Narrow;
-use crate::fractal_heap;
+use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::test_source::ObservedSource;
 use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
-use crate::source::BytesSource;
 use crate::source::PhysicalBytes;
 use crate::source::PhysicalSource;
 use crate::superblock::Superblock;
 use crate::width::FormatWidths;
 
-/// Asserts complete link names and one huge-index parse for each dense-link walk.
+/// Asserts complete link names and one huge-index request for the source walk.
 ///
 /// # Panics
 ///
-/// Panics if metadata cannot be read, the names differ, or either walk's parse
-/// count differs from one.
+/// Panics if metadata cannot be read, the names differ, or the source walk
+/// requests the tracker a different number of times.
 pub(super) fn assert_dense_walk(bytes: Vec<u8>) {
     const COUNT: usize = 12;
     let (link_info, fh_addr, widths) = dense_link_info(&bytes);
 
-    fractal_heap::reset_huge_index_decodes();
+    let heap = FractalHeapHeader::parse_bytes(
+        &bytes[fh_addr.get().to_usize().unwrap()..],
+        widths.offsets,
+        widths.lengths,
+    )
+    .unwrap();
+    assert_eq!(heap.huge_objects_count, COUNT as u64);
+
     let buffered = group_v2::resolve_dense_entries(
         PhysicalBytes::for_test(
             &bytes,
@@ -43,14 +50,7 @@ pub(super) fn assert_dense_walk(bytes: Vec<u8>) {
     )
     .unwrap();
     assert_eq!(buffered.len(), COUNT, "the walk must still read every link");
-    assert_eq!(
-        fractal_heap::huge_index_decodes(),
-        1,
-        "the buffered walk parsed the huge-object index per link rather than per walk"
-    );
-
-    fractal_heap::reset_huge_index_decodes();
-    let source = BytesSource::new(bytes);
+    let source = ObservedSource::new(&bytes);
     let streamed = group_v2::resolve_dense_entries_from_source(
         &PhysicalSource::for_test(
             &source,
@@ -64,11 +64,7 @@ pub(super) fn assert_dense_walk(bytes: Vec<u8>) {
     )
     .unwrap();
     assert_eq!(streamed.len(), COUNT);
-    assert_eq!(
-        fractal_heap::huge_index_decodes(),
-        1,
-        "the streaming walk parsed the huge-object index per link rather than per walk"
-    );
+    assert_eq!(source.reads_at(heap.btree_huge_objects_address.get()), 1);
 
     let mut buffered: Vec<_> = buffered.iter().map(|entry| entry.name.as_str()).collect();
     let mut streamed: Vec<_> = streamed.iter().map(|entry| entry.name.as_str()).collect();

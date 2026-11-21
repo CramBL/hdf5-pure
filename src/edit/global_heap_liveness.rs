@@ -302,8 +302,6 @@ impl WriteEngine {
         slots: &ReferenceSlots,
         referenced: &mut impl HeapReferenceSink,
     ) -> Result<bool, HeapReferenceError> {
-        #[cfg(test)]
-        DATASET_VALUE_WORK.with(|work| work.set(work.get() + 1));
         Ok(match spec.storage() {
             RawReadStorage::Compact { data } => {
                 self.collect_element_collections(
@@ -618,11 +616,6 @@ fn holds_unlocated_address(datatype: &Datatype) -> bool {
 /// The number of elements the analysis reads from a contiguous dataset at a time.
 // The literal is non-zero, and the `unwrap` in a constant is evaluated at compile time.
 const ELEMENT_BATCH: NonZeroU64 = NonZeroU64::new(4096).unwrap();
-
-#[cfg(test)]
-std::thread_local! {
-    pub(in crate::edit) static DATASET_VALUE_WORK: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
-}
 
 #[cfg(test)]
 mod tests;
