@@ -1,11 +1,6 @@
 //! Iterative full-tree traversal with distinct node addresses and a work limit.
 
-#[cfg(test)]
-use core::cell::Cell;
-
 use alloc::collections::BTreeSet;
-#[cfg(test)]
-use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -27,8 +22,6 @@ pub(super) struct V2TreeVisitState<'layout> {
     kind: V2WalkKind,
     work: u64,
     limit: u64,
-    #[cfg(test)]
-    copied_bytes: Option<Rc<Cell<usize>>>,
 }
 
 impl<'layout> V2TreeVisitState<'layout> {
@@ -51,8 +44,6 @@ impl<'layout> V2TreeVisitState<'layout> {
             kind,
             work: 0,
             limit,
-            #[cfg(test)]
-            copied_bytes: None,
         }
     }
 
@@ -79,7 +70,9 @@ impl<'layout> V2TreeVisitState<'layout> {
                         if matches!(kind, V2WalkKind::Records) {
                             records.reserve(view.record_count());
                             for index in 0..view.record_count() {
-                                records.push(self.copy_record(view.record(index)?));
+                                records.push(BTreeV2Record {
+                                    data: view.record(index)?.to_vec(),
+                                });
                             }
                         }
                     } else {
@@ -90,23 +83,6 @@ impl<'layout> V2TreeVisitState<'layout> {
             }
         }
         Ok(records)
-    }
-
-    /// Enables record-byte counting through `counter`.
-    #[cfg(test)]
-    pub(super) fn with_copy_counter(mut self, counter: Rc<Cell<usize>>) -> Self {
-        self.copied_bytes = Some(counter);
-        self
-    }
-
-    fn copy_record(&self, bytes: &[u8]) -> BTreeV2Record {
-        #[cfg(test)]
-        if let Some(counter) = &self.copied_bytes {
-            counter.set(counter.get().saturating_add(bytes.len()));
-        }
-        BTreeV2Record {
-            data: bytes.to_vec(),
-        }
     }
 
     fn next(&mut self) -> Result<Option<V2VisitStep<'layout>>, FormatError> {
@@ -132,8 +108,9 @@ impl<'layout> V2TreeVisitState<'layout> {
     fn push(&mut self, view: &BTreeV2NodeView<'layout, '_>) -> Result<(), FormatError> {
         for index in (0..=view.record_count()).rev() {
             if index < view.record_count() && matches!(self.kind, V2WalkKind::Records) {
-                let record = self.copy_record(view.record(index)?);
-                self.pending.push(V2VisitStep::Record(record));
+                self.pending.push(V2VisitStep::Record(BTreeV2Record {
+                    data: view.record(index)?.to_vec(),
+                }));
             }
             if let Some(child) = view.child(index)? {
                 self.charge()?;
