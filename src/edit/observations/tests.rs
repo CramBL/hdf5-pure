@@ -11,7 +11,7 @@ use test_util::snapshot::text::{Report, Value};
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::block::{BlockRequest, EncodingDependency};
 use crate::edit::test_util as edit_test_util;
-use crate::free_space_manager::{ManagerProjection, ManagerWork};
+use crate::free_space_manager::ManagerProjection;
 use crate::image::WriteBuffering;
 use crate::source::Source;
 use crate::{FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, UserblockSize};
@@ -148,21 +148,10 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
             DiskOp::SetLen(_) => panic!("reservation emission unexpectedly resized the file"),
         })
         .collect();
-    let projection =
-        ManagerProjection::new(engine.space.admitted_snapshot(), engine.widths()).unwrap();
-    let manager_work = projection.work();
-    assert_eq!(
-        manager_work.managers,
-        u64::from(matches!(layout, Layout::Fragmented))
-    );
-    assert_eq!(
-        manager_work.sections,
-        if matches!(layout, Layout::Fragmented) {
-            2
-        } else {
-            0
-        }
-    );
+    let widths = engine.widths();
+    let free = engine.space.admitted_snapshot();
+    let projection = ManagerProjection::new(free, widths).unwrap();
+    let projected_len = projection.encoded_len();
     let manager_start = addresses.relative(PhysicalAddress::new(end)).unwrap();
     let manager_plan = projection.into_plan(manager_start).unwrap();
     let manager_end = manager_plan.end();
@@ -171,16 +160,14 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let encoded_len: usize = encoded
-        .iter()
-        .map(|manager| manager.header.len() + manager.section_list.len())
-        .sum();
-    let encoded_capacity: usize = encoded
-        .iter()
-        .map(|manager| manager.header.capacity() + manager.section_list.capacity())
-        .sum();
-    assert_eq!(encoded_len as u64, manager_work.encoded_bytes);
-    assert!(encoded_capacity >= encoded_len);
+    let (decoded, encoded_len) = edit_test_util::decode_manager_sections(&encoded, widths);
+    assert_eq!(
+        encoded.len(),
+        usize::from(matches!(layout, Layout::Fragmented))
+    );
+    assert_eq!(decoded, free.reusable_sections().collect::<Vec<_>>());
+    assert_eq!(encoded_len, projected_len);
+    assert_eq!(encoded_len, manager_end.get() - manager_start.get());
     let sections: Vec<_> = engine
         .space
         .admitted_snapshot()
@@ -230,28 +217,13 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
             ]
         }),
     );
-    let ManagerWork {
-        managers,
-        sections,
-        section_capacity,
-        encoded_bytes,
-    } = manager_work;
     report.metrics(
-        "Manager projection",
+        "Manager encoding",
         "Value",
         [
-            ("Managers (count)", managers),
-            ("Sections (count)", sections),
-            ("Section capacity (elements)", section_capacity),
-            ("Measured encoding (bytes)", encoded_bytes),
-            (
-                "Encoded metadata (bytes)",
-                u64::try_from(encoded_len).unwrap(),
-            ),
-            (
-                "Encoded metadata capacity (bytes)",
-                u64::try_from(encoded_capacity).unwrap(),
-            ),
+            ("Managers (count)", encoded.len() as u64),
+            ("Sections (count)", decoded.len() as u64),
+            ("Encoded metadata (bytes)", encoded_len),
         ],
     );
     report.table(

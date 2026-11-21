@@ -23,15 +23,12 @@ Free sections
              243     16  Dead
              467     48  Dead
 
-Manager projection
-  Metric                             Value
-  ---------------------------------  -----
-  Managers (count)                       1
-  Sections (count)                       2
-  Section capacity (elements)            2
-  Measured encoding (bytes)            135
-  Encoded metadata (bytes)             135
-  Encoded metadata capacity (bytes)    146
+Manager encoding
+  Metric                    Value
+  ------------------------  -----
+  Managers (count)              1
+  Sections (count)              2
+  Encoded metadata (bytes)    135
 
 Issued writes
   Physical address  Bytes
