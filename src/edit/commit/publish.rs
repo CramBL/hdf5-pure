@@ -1226,7 +1226,7 @@ impl WriteEngine {
                     .ok_or_else(|| {
                         FormatError::Internal("a PAGE gap precedes its reservation".into())
                     })?;
-                self.fill_zeros(FileRange::new(
+                self.image.fill_zeros(FileRange::new(
                     physical.start().checked_add(offset)?,
                     gap.len().get(),
                 )?)?;
@@ -1252,7 +1252,7 @@ impl WriteEngine {
                 .ok_or_else(|| {
                     FormatError::Internal("a PAGE gap precedes its reservation".into())
                 })?;
-            self.fill_zeros(FileRange::new(
+            self.image.fill_zeros(FileRange::new(
                 physical.start().checked_add(offset)?,
                 gap.len().get(),
             )?)?;

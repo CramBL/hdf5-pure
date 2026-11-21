@@ -541,10 +541,13 @@ fn streamed_reservations_issue_each_fragment_once(#[case] fragments: u64) {
 }
 
 #[test]
-fn streamed_aggregate_capacity_is_padded_once_after_all_fragments() {
+fn streamed_aggregate_issues_payload_before_zeroing_spare_capacity() {
     let (_directory, mut engine) = engine(FileSpaceStrategy::Aggr, 0);
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
     let start = engine.image.len();
-    observations::reset_zeros();
+    disk_log::start();
     let allocation = engine
         .store()
         .allocate_emitted(
@@ -553,30 +556,28 @@ fn streamed_aggregate_capacity_is_padded_once_after_all_fragments() {
             |address, write| {
                 assert_eq!(address.get(), start);
                 write(&[43; 7])?;
-                assert_eq!(observations::zero_work(), ZeroWork::default());
                 write(&[47; 9])?;
-                assert_eq!(observations::zero_work(), ZeroWork::default());
                 Ok(())
             },
         )
         .unwrap();
+    let mut offset = start;
+    let desired = [[43; 7].as_slice(), &[47; 9], &[0; 2_032]].concat();
+    for operation in disk_log::take() {
+        let DiskOp::Write { offset: at, bytes } = operation else {
+            panic!("expected a write, got {operation:?}");
+        };
+        assert_eq!(at, offset);
+        let local = usize::try_from(at - start).unwrap();
+        assert_eq!(bytes, desired[local..local + bytes.len()]);
+        offset += u64::try_from(bytes.len()).unwrap();
+    }
+    assert_eq!(offset, start + 2_048);
     assert_eq!(allocation.range().length(), 16);
     assert_eq!(engine.image.len(), start + 2_048);
     assert_eq!(
-        observations::zero_work(),
-        ZeroWork {
-            calls: 1,
-            bytes: 2_032,
-            scratch_peak: 4_096
-        }
-    );
-    assert_eq!(
-        engine.image().read_exact_at(start, 16).unwrap(),
-        [vec![43; 7], vec![47; 9]].concat()
-    );
-    assert_eq!(
-        engine.image().read_exact_at(start + 16, 2_032).unwrap(),
-        [0; 2_032]
+        engine.image().read_exact_at(start, desired.len()).unwrap(),
+        desired
     );
 }
 

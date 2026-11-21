@@ -58,7 +58,7 @@ pub(super) fn emit(
 }
 
 /// Returns the smaller of the range length and the zero batch limit.
-pub(crate) fn scratch_length(range: FileRange) -> usize {
+fn scratch_length(range: FileRange) -> usize {
     // The minimum is bounded by ZERO_BATCH_BYTES, which is represented by usize.
     usize::try_from(range.length().min(ZERO_BATCH_BYTES as u64))
         .expect("a bounded zero batch fits in usize")

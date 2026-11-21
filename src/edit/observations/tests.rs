@@ -9,7 +9,6 @@ use test_util::snapshot::text::{Report, Value};
 
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::block::{BlockRequest, EncodingDependency};
-use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::free_space_manager::{ManagerProjection, ManagerWork};
 use crate::image::WriteBuffering;
@@ -82,7 +81,6 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
         .read_exact_at(0, usize::try_from(original_len).unwrap())
         .unwrap();
     let before = engine.image.buffering_work();
-    observations::reset_zeros();
     let requests = [
         request(64, 16, PageType::Raw),
         request(48, 48, PageType::Meta),
@@ -143,23 +141,6 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
     }
     engine.image.flush().unwrap();
     let after = engine.image.buffering_work();
-    let zeros = observations::zero_work();
-    assert_eq!(
-        zeros,
-        match layout {
-            Layout::Appended => ZeroWork {
-                calls: 2,
-                bytes: 96,
-                scratch_peak: 48
-            },
-            Layout::Fragmented => ZeroWork::default(),
-            Layout::Paged | Layout::PagedUserblock => ZeroWork {
-                calls: 4,
-                bytes: 8176,
-                scratch_peak: 4048
-            },
-        }
-    );
     let projection =
         ManagerProjection::new(engine.space.admitted_snapshot(), engine.widths()).unwrap();
     let manager_work = projection.work();
@@ -266,20 +247,6 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
             ),
         ],
     );
-    let ZeroWork {
-        calls,
-        bytes,
-        scratch_peak,
-    } = zeros;
-    report.metrics(
-        "Zero generation",
-        "Value",
-        [
-            ("Requests (count)", calls),
-            ("Requested bytes", bytes),
-            ("Scratch peak (bytes)", scratch_peak),
-        ],
-    );
     report.metrics(
         "Image I/O",
         "Value",
@@ -309,7 +276,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
 }
 
 #[test]
-fn aggregate_zero_observations_include_complete_scratch_capacity() {
+fn raw_aggregate_initializes_unused_capacity_to_zero() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("aggregate.h5");
     let mut builder = FileBuilder::new();
@@ -317,20 +284,11 @@ fn aggregate_zero_observations_include_complete_scratch_capacity() {
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
     let start = engine.image.len();
-    observations::reset_zeros();
     assert_eq!(
         engine
             .alloc_or_append_typed(&[7], AllocationClass::Raw)
             .unwrap(),
         start
-    );
-    assert_eq!(
-        observations::zero_work(),
-        ZeroWork {
-            calls: 1,
-            bytes: 2047,
-            scratch_peak: 4096
-        }
     );
     assert_eq!(engine.image.len(), start + 2048);
     let mut expected = vec![0; 2048];
