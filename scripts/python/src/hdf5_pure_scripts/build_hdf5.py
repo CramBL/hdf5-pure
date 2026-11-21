@@ -169,8 +169,8 @@ def vcpkg_installed() -> Path:
 
 
 def vcpkg_zlib_import_library(installed: Path) -> Path:
-    """`z.lib` from zlib 1.3.2 on, `zlib.lib` before."""
-    for name in ("z.lib", "zlib.lib"):
+    """Find the import library for the installed Windows zlib."""
+    for name in ("libz.lib", "z.lib", "zlib.lib"):
         candidate = installed / "lib" / name
         if candidate.is_file():
             return candidate

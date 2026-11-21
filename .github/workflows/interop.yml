@@ -189,11 +189,15 @@ jobs:
       - &hdf5-zlib-install
         name: Install zlib
         if: runner.os == 'Windows'
+        id: zlib-install
         shell: pwsh
         run: |
           & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-Content "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/share/zlib/vcpkg_abi_info.txt"
+          $abi = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/share/zlib/vcpkg_abi_info.txt"
+          Get-Content -LiteralPath $abi
+          $hash = (Get-FileHash -LiteralPath $abi -Algorithm SHA256).Hash
+          "abi=$hash" >> $env:GITHUB_OUTPUT
 
       - name: Save the zlib binary cache
         if: >-
@@ -211,7 +215,8 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with: &hdf5-build-cache
           path: tmp/hdf5/${{ matrix.version }}
-          key: hdf5-${{ matrix.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/python/src/hdf5_pure_scripts/build_hdf5.py', 'scripts/hdf5-releases.toml') }}
+          # On Windows the HDF5 DLL imports the zlib DLL from the installed package.
+          key: hdf5-${{ matrix.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/python/src/hdf5_pure_scripts/build_hdf5.py', 'scripts/hdf5-releases.toml') }}${{ runner.os == 'Windows' && format('-zlib-{0}', steps.zlib-install.outputs.abi) || '' }}
 
       - name: Build HDF5 ${{ matrix.version }}
         run: just interop::hdf5-build "$HDF5_VERSION"
