@@ -1945,7 +1945,7 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
     let mut ab = AppendBuilder::new();
     ab.append_i32(&(64..END).collect::<Vec<_>>());
     engine
-        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &ab, 4)
+        .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &ab)
         .unwrap();
 
     assert_eq!(
@@ -2043,7 +2043,7 @@ fn inplace_appends_keep_new_index_allocations_in_metadata_pages() {
         let mut ab = AppendBuilder::new();
         ab.append_i32(&range.collect::<Vec<_>>());
         engine
-            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &ab, 4)
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &ab)
             .unwrap();
     }
 

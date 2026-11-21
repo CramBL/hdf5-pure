@@ -278,9 +278,7 @@ fn failed_flag_publication_preserves_the_confirmed_context(
     assert_eq!(error.to_string(), "injected disk write failure");
     assert_eq!(engine.context.superblock(), &before);
     if clearing {
-        engine
-            .append_inplace_i32_phased("d", &[5, 6, 7, 8], 4)
-            .unwrap();
+        engine.append_inplace_i32("d", &[5, 6, 7, 8]).unwrap();
         assert!(engine.context.superblock().eof_address > before.eof_address);
         assert_eq!(
             engine.context.superblock().consistency_flags(),
@@ -449,9 +447,7 @@ fn context_tracks_root_publication_and_ordered_append(
         engine.context.superblock().eof_address,
         published.eof_address
     );
-    engine
-        .append_inplace_i32_phased("d", &[5, 6, 7, 8], 4)
-        .unwrap();
+    engine.append_inplace_i32("d", &[5, 6, 7, 8]).unwrap();
     assert_eq!(engine.context.superblock().root_group_address, root);
     assert_eq!(engine.context.superblock().eof_address, engine.image.len());
     let bytes = engine.page_publication_snapshot().unwrap();
@@ -942,7 +938,6 @@ fn bounded_persist_append_without_finalize_is_readable() {
             .append_inplace_gathered(
                 AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
                 &ab,
-                4,
             )
             .unwrap();
     }
@@ -981,7 +976,6 @@ fn bounded_paged_reopen_after_publication_stays_aligned_and_readable() {
             .append_inplace_gathered(
                 AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
                 &ab,
-                4,
             )
             .unwrap();
     }
@@ -999,7 +993,6 @@ fn bounded_paged_reopen_after_publication_stays_aligned_and_readable() {
             .append_inplace_gathered(
                 AppendTarget::Header(ObjectId::new(PhysicalAddress::new(addr))),
                 &ab,
-                4,
             )
             .unwrap();
         engine.finalize_persist().unwrap();
@@ -1145,8 +1138,7 @@ fn a_page_buffered_session_flushes_when_it_exceeds_its_budget() {
     s.set_sync_policy(SyncPolicy::OnClose);
     s.set_page_buffer_size(WRITE_GATHER_BYTES).unwrap();
     let before = s.image.issued_writes();
-    s.append_inplace_i32_phased("t0", &vec![7i32; 1 << 20], 4)
-        .unwrap();
+    s.append_inplace_i32("t0", &vec![7i32; 1 << 20]).unwrap();
     let during = s.image.issued_writes() - before;
     s.force_sync().unwrap();
     s.release_status_flags().unwrap();
@@ -1212,13 +1204,12 @@ fn page_buffer_budget_controls_writes_within_publication_batches(
             if scattered {
                 for round in 0..4 {
                     for t in 0..8 {
-                        s.append_inplace_i32_phased(&std::format!("t{t}"), &[round; 64], 4)
+                        s.append_inplace_i32(&std::format!("t{t}"), &[round; 64])
                             .unwrap();
                     }
                 }
             } else {
-                s.append_inplace_i32_phased("t0", &vec![7i32; 1 << 20], 4)
-                    .unwrap();
+                s.append_inplace_i32("t0", &vec![7i32; 1 << 20]).unwrap();
             }
         }
     };
@@ -1477,7 +1468,7 @@ fn a_barrier_orders_the_publish_point_last_under_every_policy() {
              leaves a root pointing at bytes that are not in the file"
         );
         let before = s.image.issued_write_order().len();
-        s.append_inplace_i32_phased("t0", &[7; 64], 4).unwrap();
+        s.append_inplace_i32("t0", &[7; 64]).unwrap();
         let order = s.image.issued_write_order()[before..].to_vec();
         let highest = order
             .iter()
@@ -1550,7 +1541,7 @@ fn a_finished_operation_has_nothing_left_to_write() {
     s.set_sync_policy(SyncPolicy::OnClose);
 
     let before_append = s.image.issued_writes();
-    s.append_inplace_i32_phased("t0", &[7; 64], 4).unwrap();
+    s.append_inplace_i32("t0", &[7; 64]).unwrap();
     let after_append = s.image.issued_writes();
     assert!(
         after_append > before_append,
@@ -1608,7 +1599,7 @@ fn finalize_persist_has_nothing_left_to_write() {
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.set_sync_policy(SyncPolicy::OnClose);
-    s.append_inplace_i32_phased("t0", &[7; 64], 4).unwrap();
+    s.append_inplace_i32("t0", &[7; 64]).unwrap();
 
     s.finalize_persist().unwrap();
     let after = s.image.issued_writes();
@@ -1757,8 +1748,7 @@ fn sync_policy_governs_every_barrier() {
 
         let syncs = Arc::new(AtomicU64::new(0));
         let mut s = WriteEngine::open_sync_counting(&path, policy, Arc::clone(&syncs)).unwrap();
-        s.append_inplace_i32_phased("d", &[8, 9, 10, 11], 4)
-            .unwrap();
+        s.append_inplace_i32("d", &[8, 9, 10, 11]).unwrap();
         let after_append = syncs.load(Ordering::Relaxed);
         let mut db = crate::type_builders::DatasetBuilder::new("added");
         db.with_f64_data(&[2.5f64; 8]).with_shape(&[8]);
@@ -1878,10 +1868,9 @@ fn sync_policy_governs_the_persisting_and_flag_barriers() {
             issued,
             "{policy:?}: the consistency-flag write was left gathered"
         );
-        s.append_inplace_i32_phased("d", &[8, 9, 10, 11], 4)
-            .unwrap();
-        s.append_inplace_i32_phased("d", &[12], 4).unwrap();
-        s.append_inplace_i32_phased("d", &[13], 4).unwrap();
+        s.append_inplace_i32("d", &[8, 9, 10, 11]).unwrap();
+        s.append_inplace_i32("d", &[12]).unwrap();
+        s.append_inplace_i32("d", &[13]).unwrap();
         let before_close = syncs.load(Ordering::Relaxed);
         s.finalize_persist().unwrap();
         let after_close = syncs.load(Ordering::Relaxed) - before_close;
@@ -2197,7 +2186,7 @@ fn gather_workload(session: &mut WriteEngine) -> (u64, u64) {
     for round in 0..4 {
         for t in 0..4 {
             session
-                .append_inplace_i32_phased(&std::format!("t{t}"), &[round; 64], 4)
+                .append_inplace_i32(&std::format!("t{t}"), &[round; 64])
                 .unwrap();
         }
     }

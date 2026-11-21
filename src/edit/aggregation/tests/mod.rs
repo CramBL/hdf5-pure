@@ -458,9 +458,7 @@ fn immediate_growth_keeps_previous_reserves_disjoint() {
     let before = engine.image.len();
     let policy = engine.aggregation.unwrap();
     let raw = policy.policy.unused(AllocationClass::Raw).unwrap();
-    engine
-        .append_inplace_i32_phased("append", &[5, 6, 7, 8], 4)
-        .unwrap();
+    engine.append_inplace_i32("append", &[5, 6, 7, 8]).unwrap();
     assert_eq!(engine.image.len(), before);
     let after = engine.aggregation.unwrap();
     assert_eq!(
