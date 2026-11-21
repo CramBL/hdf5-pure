@@ -385,7 +385,7 @@ test_util_hdf5::hdf5_1_10_tests! {
 mod group_links;
 pub(crate) mod object_header;
 #[cfg(test)]
-pub(crate) mod observations;
+mod observations;
 mod paged_persistence;
 mod reclaim;
 #[cfg(test)]
@@ -2978,16 +2978,10 @@ impl WriteEngine {
             .require_range(FileRange::new(PhysicalAddress::new(target), 0)?)?;
         if target > len {
             let range = FileRange::new(PhysicalAddress::new(len), target - len)?;
-            self.fill_zeros(range)?;
+            self.image.fill_zeros(range)?;
         }
         debug_assert_eq!(self.image.len(), target);
         Ok(())
-    }
-
-    fn fill_zeros(&mut self, range: FileRange) -> Result<(), Error> {
-        #[cfg(test)]
-        observations::record_zeros(range.length(), crate::image::zeros::scratch_length(range));
-        self.image.fill_zeros(range)
     }
 
     /// Appends `bytes` and returns their physical starting address.

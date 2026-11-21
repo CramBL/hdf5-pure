@@ -32,13 +32,6 @@ Manager projection
   Encoded metadata (bytes)               0
   Encoded metadata capacity (bytes)      0
 
-Zero generation
-  Metric                Value
-  --------------------  -----
-  Requests (count)          2
-  Requested bytes          96
-  Scratch peak (bytes)     48
-
 Image I/O
   Metric                          Value
   ------------------------------  -----

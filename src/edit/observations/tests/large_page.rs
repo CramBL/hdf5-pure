@@ -5,7 +5,6 @@ use rstest::rstest;
 
 use crate::edit::WriteEngine;
 use crate::edit::block::{BlockRequest, EncodingDependency};
-use crate::edit::observations::{self, ZeroWork};
 use crate::image::WriteBuffering;
 use crate::source::{MetadataCacheConfig, Source};
 use crate::{
@@ -16,7 +15,7 @@ use crate::{
 #[rstest]
 #[case::quarter_megabyte(262_144)]
 #[case::four_megabytes(4_194_304)]
-fn large_page_reservations_bound_zero_scratch_and_copy_work(
+fn large_page_reservations_preserve_padding_and_buffering_limits(
     #[case] page: u64,
     #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] backing: MemoryStrategy,
     #[values(Buffering::Unbuffered, Buffering::Operation, Buffering::Session)] buffering: Buffering,
@@ -50,7 +49,6 @@ fn large_page_reservations_bound_zero_scratch_and_copy_work(
     let start = engine.image.len();
     assert_eq!(start % page, 0);
     let before = engine.image.buffering_work();
-    observations::reset_zeros();
     let requests = [
         request(64, 16, PageType::Raw),
         request(48, 48, PageType::Meta),
@@ -83,15 +81,6 @@ fn large_page_reservations_bound_zero_scratch_and_copy_work(
     assert_eq!(plan.write_next(&[8; 48]).unwrap().get(), start + page);
     assert_eq!(plan.write_next(&[9; 32]).unwrap().get(), start + 2 * page);
     plan.finish().unwrap();
-    let zeros = observations::zero_work();
-    assert_eq!(
-        zeros,
-        ZeroWork {
-            calls: 4,
-            bytes: 2 * page - 16,
-            scratch_peak: 65_536
-        }
-    );
     assert_eq!(engine.image.len(), end);
     assert_eq!(end, start + 2 * page + 80);
     assert_eq!(engine.space.paged_tail_type(), Some(Some(PageType::Raw)));
@@ -161,6 +150,61 @@ fn large_page_reservations_bound_zero_scratch_and_copy_work(
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len() as u64, end);
     assert_eq!(&bytes[start as usize..], expected);
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn large_page_commit_bounds_padding_allocations() {
+    use test_util::allocation;
+
+    use crate::{File, FileAccessProperties};
+
+    const PAGE: usize = 4 * 1024 * 1024;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("padding.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(PAGE as u64).unwrap()),
+    );
+    builder.write(&path).unwrap();
+    let original_len = std::fs::metadata(&path).unwrap().len() as usize;
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
+    )
+    .unwrap();
+    let expected = [17, 23, 41, 59];
+    file.root()
+        .create_dataset("numbers", |builder| {
+            builder.with_i32_data(&expected);
+        })
+        .unwrap();
+    let ((), commit) = allocation::measure("large_page_commit_padding", || {
+        file.commit().unwrap();
+    });
+    assert!(!file.has_staged_edits());
+    let committed_len = usize::try_from(file.file_size()).unwrap();
+    file.close().unwrap();
+
+    let stored = std::fs::read(&path).unwrap();
+    let gap = stored[original_len..committed_len]
+        .split(|&byte| byte != 0)
+        .max_by_key(|run| run.len())
+        .unwrap();
+    assert!(gap.len() > PAGE / 2);
+    let (control, copy) = allocation::measure("large_page_commit_padding_control", || gap.to_vec());
+    assert_eq!(control, gap);
+    assert!(copy.peak_bytes >= gap.len() as u64);
+    assert!(commit.peak_bytes < 128 * 1024, "{commit:?}");
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(
+        reopened.dataset("numbers").unwrap().read_i32().unwrap(),
+        expected
+    );
+    assert_eq!(reopened.superblock().eof_address, stored.len() as u64);
+    reopened.close().unwrap();
 }
 
 #[derive(Clone, Copy)]
