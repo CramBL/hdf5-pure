@@ -548,8 +548,10 @@ name = "hdf5-pure-space"
 version = "0.48.0"
 dependencies = [
  "hdf5-pure-core",
+ "heapscope",
  "proptest",
  "rstest",
+ "test-util",
 ]
 
 [[package]]
