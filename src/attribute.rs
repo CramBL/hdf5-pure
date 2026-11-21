@@ -530,6 +530,7 @@ mod tests {
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
     use crate::data_read;
+    use crate::fractal_heap::test_source::ObservedSource;
     use crate::message_flags::MessageFlags;
     use crate::reader::OpenedSource;
     use crate::source;
@@ -942,10 +943,6 @@ mod tests {
                 origin: 0,
             }
         }
-
-        fn reads_at(&self, offset: u64) -> usize {
-            self.reads.borrow().iter().filter(|&&o| o == offset).count()
-        }
     }
 
     impl Source for CountingSource {
@@ -1017,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dense_walk_parses_its_huge_object_index_once() {
+    fn a_dense_attribute_walk_requests_its_huge_index_once() {
         const COUNT: usize = 6;
         let bytes = file_with_huge_attributes(COUNT);
         let (info, fh_addr, widths) = dense_attribute_info(&bytes);
@@ -1027,10 +1024,9 @@ mod tests {
             widths.lengths,
         )
         .unwrap();
-        let btree_addr = heap.btree_huge_objects_address;
-
-        let source = CountingSource::new(bytes);
-        let attrs = extract_dense_attributes_from_source(
+        assert_eq!(heap.huge_objects_count, COUNT as u64);
+        let source = ObservedSource::new(&bytes);
+        let streamed = extract_dense_attributes_from_source(
             &OpenedSource::for_test(
                 &source,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
@@ -1045,57 +1041,54 @@ mod tests {
             },
         )
         .unwrap();
-
-        assert_eq!(
-            attrs.len(),
-            COUNT,
-            "the walk must still read every attribute"
-        );
-        assert_eq!(
-            source.reads_at(btree_addr.get()),
-            1,
-            "the huge-object B-tree header was re-read per object"
-        );
+        let walk_resident = || {
+            extract_dense_attributes(
+                source::zero_base_bytes(&bytes),
+                AccessMode::ReadOnly,
+                &info,
+                fh_addr,
+                widths,
+                None,
+            )
+            .unwrap()
+        };
+        #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        let buffered = {
+            let (attrs, work) =
+                test_util::allocation::measure("resident_dense_attributes", walk_resident);
+            // Count allocations across the complete walk. Rebuilding the
+            // tracker for each attribute can leave peak memory nearly unchanged.
+            assert!((COUNT as u64..=72).contains(&work.blocks), "{work}");
+            attrs
+        };
+        #[cfg(not(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+        let buffered = walk_resident();
+        let streamed = streamed
+            .into_iter()
+            .map(|attr| attr.message)
+            .collect::<Vec<_>>();
+        assert_eq!(streamed.len(), COUNT);
+        assert_eq!(streamed, buffered);
+        assert_eq!(source.reads_at(heap.btree_huge_objects_address.get()), 1);
     }
 
     #[test]
-    fn a_buffered_dense_walk_parses_its_huge_object_index_once() {
-        const COUNT: usize = 6;
-        let bytes = file_with_huge_attributes(COUNT);
-        let (info, fh_addr, widths) = dense_attribute_info(&bytes);
-
-        crate::fractal_heap::reset_huge_index_decodes();
-        let attrs = extract_dense_attributes(
-            source::zero_base_bytes(&bytes),
-            AccessMode::ReadOnly,
-            &info,
-            fh_addr,
-            widths,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            attrs.len(),
-            COUNT,
-            "the walk must still read every attribute"
-        );
-        assert_eq!(
-            crate::fractal_heap::huge_index_decodes(),
-            1,
-            "the huge-object index was parsed per object rather than per walk"
-        );
-    }
-
-    #[test]
-    fn a_managed_dense_walk_never_parses_a_huge_object_index() {
+    fn a_managed_dense_walk_ignores_an_unreadable_huge_tracker() {
         // Enough attributes to force dense storage, none of them large enough to
         // exceed the heap's managed-object limit.
         const COUNT: usize = 40;
-        let bytes = file_with_managed_attributes(COUNT);
+        let mut bytes = file_with_managed_attributes(COUNT);
         let (info, fh_addr, widths) = dense_attribute_info(&bytes);
+        let at = fh_addr.get().to_usize().unwrap();
+        let mut heap =
+            FractalHeapHeader::parse_bytes(&bytes[at..], widths.offsets, widths.lengths).unwrap();
+        assert_eq!(heap.huge_objects_count, 0);
+        let tracker = bytes.len() as u64;
+        bytes.extend_from_slice(&[0; 64]);
+        heap.btree_huge_objects_address = StoredAddress::new(tracker);
+        let header = heap.serialize(widths.offsets, widths.lengths).unwrap();
+        bytes[at..at + header.len()].copy_from_slice(&header);
 
-        crate::fractal_heap::reset_huge_index_decodes();
         let buffered = extract_dense_attributes(
             source::zero_base_bytes(&bytes),
             AccessMode::ReadOnly,
@@ -1105,7 +1098,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let source = BytesSource::new(bytes);
+        let source = ObservedSource::new(&bytes);
         let streamed = extract_dense_attributes_from_source(
             &OpenedSource::for_test(
                 &source,
@@ -1122,13 +1115,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(buffered.len(), COUNT, "the walk must read every attribute");
+        let streamed = streamed
+            .into_iter()
+            .map(|attr| attr.message)
+            .collect::<Vec<_>>();
         assert_eq!(streamed.len(), COUNT);
-        assert_eq!(
-            crate::fractal_heap::huge_index_decodes(),
-            0,
-            "a heap with no huge object parsed an index it has no use for"
-        );
+        assert_eq!(streamed, buffered);
+        for value in 0..COUNT as i64 {
+            let name = format!("a{value}");
+            let attribute = streamed.iter().find(|attr| attr.name == name).unwrap();
+            assert_eq!(attribute.raw_data, value.to_le_bytes());
+        }
+        assert_eq!(source.reads_at(tracker), 0);
     }
 
     #[test]
