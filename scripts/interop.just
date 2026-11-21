@@ -52,6 +52,14 @@ test-hdf5-group VERSION GROUP FEATURES="serde,ndarray,provenance": (hdf5-build V
     if [ -z "$release_feature" ]; then export NEXTEST_NO_TESTS=pass; fi && \
     cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -E 'group({{ GROUP }})'
 
+test-extended-hdf5 VERSION FEATURES="serde,ndarray,provenance" *ARGS: (hdf5-build VERSION)
+    release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
+    eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
+    if [ -z "$release_feature" ]; then export NEXTEST_NO_TESTS=pass; fi && \
+    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure \
+        --profile extended-interop \
+        --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" {{ ARGS }}
+
 # Clippy over the crosschecks, linking libhdf5 VERSION.
 lint-hdf5 VERSION FEATURES="serde,ndarray,provenance":
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
@@ -62,6 +70,9 @@ lint-hdf5 VERSION FEATURES="serde,ndarray,provenance":
 # on first use. Needs no HDF5 on the host.
 test-bundled *ARGS:
     cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile interop --features __hdf5-bundled,serde,ndarray {{ ARGS }}
+
+test-extended-bundled *ARGS:
+    cargo nextest run --locked -p {{ CROSSCHECK }} -p hdf5-pure --profile extended-interop --features __hdf5-bundled,serde,ndarray {{ ARGS }}
 
 # The crosschecks linking the HDF5 installed under HDF5_DIR. Pass the feature
 # naming its release series, as in `--features __hdf5-1.14`.

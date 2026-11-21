@@ -72,6 +72,9 @@ Before making a function longer, consider splitting part of it out into a functi
 
 If a function's semantics or implementation are strongly dependent on one of its arguments, and the argument is defined in a type within the current crate, prefer using a method on the type. Similarly, if a function is taking multiple arguments that originate from the same common type in all call sites it is a strong candidate for becoming a method on the type.
 
+Test helpers can be ordinary functions in the owning test module. Add methods to
+library types when the operation belongs to the library implementation or API.
+
 ### Order arguments from most generic to most specific
 
 Put the most generic arguments first (the file, the reader or writer context) and the most specific last (the chunk index, the element offset). Call sites then read the same way from function to function, with the context first.
@@ -185,6 +188,8 @@ We prefer not to elide lifetimes when naming types that are generic over lifetim
 ## Modules
 
 A module is a file. An inline module (`mod foo { .. }`) has two uses: `#[cfg(test)] mod tests` at the bottom of the file it tests, and a private module that seals a trait, so that the trait's bound cannot be implemented outside the crate. Everything else that would be an inline module is a file.
+
+Apply the file rule once a separate module helps organize the tests.
 
 [TESTING.md](TESTING.md#where-tests-and-helpers-belong) defines test module ownership and integration-test bundling.
 
