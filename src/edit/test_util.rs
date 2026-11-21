@@ -35,6 +35,7 @@ use crate::address::BaseAddressExt;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::edit::EditBacking;
 use crate::edit::MemoryStrategy;
 use crate::edit::SpaceOwnership;
 use crate::edit::WriteEngine;
@@ -340,22 +341,31 @@ pub(in crate::edit) fn open_counted_engine_with_bytes(
 /// # Panics
 ///
 /// Panics if the fixture cannot be opened for editing.
-pub(crate) fn open_observed_engine(path: &Path, reads: Arc<Mutex<Vec<FileRange>>>) -> WriteEngine {
-    WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
+pub(crate) fn open_observed_engine(
+    path: &Path,
+    backing: EditBacking,
+    reads: Arc<Mutex<Vec<FileRange>>>,
+) -> WriteEngine {
+    let mut session = WriteEngine::open_imaged(path, Some(FileLocking::Enabled), |handle, len| {
+        let image: Box<dyn crate::image::FileImage> = match backing {
+            EditBacking::Bounded => Box::new(HandleImage::new(
+                handle,
+                len,
+                MetadataCacheConfig::disabled(),
+            )),
+            EditBacking::Mirrored => Box::new(WriteEngine::read_mirror(handle)?),
+        };
         Ok(Box::new(
-            CountingImage::new(
-                Box::new(HandleImage::new(
-                    handle,
-                    len,
-                    MetadataCacheConfig::disabled(),
-                )),
-                Arc::default(),
-                Arc::default(),
-            )
-            .with_read_ranges(reads),
+            CountingImage::new(image, Arc::default(), Arc::default()).with_read_ranges(reads),
         ))
     })
-    .unwrap()
+    .unwrap();
+    if backing == EditBacking::Bounded {
+        assert!(super::bounded_only_limitation(&session).is_none());
+        session.bounded = true;
+        session.batched_appends = true;
+    }
+    session
 }
 
 /// Deletes `g` after checking its reclaim plan against its subtree's allocations.
