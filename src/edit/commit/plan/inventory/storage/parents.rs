@@ -35,7 +35,8 @@ impl PendingEditInventory<'_> {
     /// and retirement and checks any required allocation class.
     /// If preparation fails, storage exclusions and the pending retirement batch remain unchanged.
     /// On success, returns the original compaction plans after removing retirement actions
-    /// from the map.
+    /// from the map. The allocator check remains valid because installing the batch only
+    /// removes protected ranges and leaves the allocator unchanged.
     ///
     /// # Errors
     ///
@@ -52,7 +53,7 @@ impl PendingEditInventory<'_> {
             collections,
             prospective,
             pending,
-            exclusion,
+            exclusion_conflict,
         } = self;
         let mut decisions = MemberDecisions::collect(collections, prospective, storage);
         decisions.include_session_parents(dispositions, prospective);
@@ -60,7 +61,7 @@ impl PendingEditInventory<'_> {
             engine,
             storage,
             pending,
-            std::mem::replace(exclusion, Ok(())).err(),
+            exclusion_conflict.take(),
             decisions,
         )
         .map(ParentRelease::apply)
@@ -82,7 +83,7 @@ impl PendingEditInventory<'_> {
             collections,
             prospective,
             pending,
-            exclusion: _,
+            exclusion_conflict: _,
         } = self;
         engine
             .context

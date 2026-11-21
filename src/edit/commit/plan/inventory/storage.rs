@@ -484,7 +484,7 @@ pub(in crate::edit::commit) struct PendingEditInventory<'a> {
     collections: OriginalCollections,
     prospective: ProspectiveCollections,
     pending: PendingRootFrees,
-    exclusion: Result<(), StorageConflict>,
+    exclusion_conflict: Option<StorageConflict>,
 }
 
 impl<'a> PendingEditInventory<'a> {
@@ -500,19 +500,22 @@ impl<'a> PendingEditInventory<'a> {
             references,
         } = applied;
         let pending = retirement.into_pending_frees(freed, engine.image.len());
-        let exclusion = storage.exclude_space(engine).and_then(|()| {
-            for &(range, class) in pending.batch.entries() {
-                storage.exclude(range, SpaceClaim::Retirement(class))?;
-            }
-            Ok(())
-        });
+        let exclusion_conflict = storage
+            .exclude_space(engine)
+            .and_then(|()| {
+                for &(range, class) in pending.batch.entries() {
+                    storage.exclude(range, SpaceClaim::Retirement(class))?;
+                }
+                Ok(())
+            })
+            .err();
         let prospective = ProspectiveCollections::collect(
             engine,
             &original,
             &dispositions,
             &collections,
             pending.root,
-            if exclusion.is_ok() {
+            if exclusion_conflict.is_none() {
                 references
             } else {
                 PreservedReferences::default()
@@ -528,7 +531,7 @@ impl<'a> PendingEditInventory<'a> {
             collections,
             prospective,
             pending,
-            exclusion,
+            exclusion_conflict,
         }
     }
 
@@ -566,10 +569,6 @@ impl<'a> PendingEditInventory<'a> {
             .ok_or(Error::EditUnsupported(
                 "original predecessor replacement cannot be established",
             ))?;
-        if self.exclusion.is_ok() {
-            self.exclusion = self.storage.exclude_space(self.engine);
-        }
-        self.exclusion.map_err(Error::from)?;
         let Self {
             engine,
             session: _,
@@ -579,7 +578,7 @@ impl<'a> PendingEditInventory<'a> {
             collections: _,
             prospective: _,
             pending,
-            exclusion: _,
+            exclusion_conflict: _,
         } = self;
         let result = match counts {
             Some(counts) => {
