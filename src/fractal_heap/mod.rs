@@ -43,6 +43,8 @@ use crate::width::FormatWidths;
 use crate::width::{LengthWidth, OffsetWidth};
 
 mod stored;
+#[cfg(test)]
+pub(crate) mod test_source;
 
 pub(crate) use stored::HeapObjectReader;
 pub(crate) use stored::HeapSource;
@@ -142,32 +144,6 @@ impl HugeObjectReadLimits {
     };
 }
 
-#[cfg(test)]
-std::thread_local! {
-    /// How many huge-object indexes have been decoded on this thread.
-    ///
-    /// Parsing one index per object rather than one per walk returns exactly the
-    /// same objects while making the walk quadratic in their number, so the
-    /// count of decodes is the only thing a test can hold the invariant to. The
-    /// walks build their reader internally, so the count has to be reachable
-    /// from outside the reader that did the decoding; it is per-thread because
-    /// the test harness runs tests concurrently, and each test's walk runs on
-    /// its own thread.
-    static HUGE_INDEX_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
-
-/// Start counting huge-object index decodes on this thread from zero.
-#[cfg(test)]
-pub(crate) fn reset_huge_index_decodes() {
-    HUGE_INDEX_DECODES.with(|count| count.set(0));
-}
-
-/// How many huge-object indexes this thread has decoded since the last reset.
-#[cfg(test)]
-pub(crate) fn huge_index_decodes() -> usize {
-    HUGE_INDEX_DECODES.with(|count| count.get())
-}
-
 impl HugeObjectIndex {
     fn decode<'bytes>(
         read: &impl Fn(FileRange) -> Result<MetadataBytes<'bytes>, FormatError>,
@@ -246,8 +222,6 @@ impl HugeObjectIndex {
         if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             return Err(FormatError::InvalidFractalHeapGeometry);
         }
-        #[cfg(test)]
-        HUGE_INDEX_DECODES.with(|count| count.set(count.get() + 1));
         Ok(Self { entries })
     }
 
@@ -510,6 +484,7 @@ mod tests {
     use crate::source::PhysicalSource;
     use crate::test_data;
 
+    use super::test_source::ObservedSource;
     use super::*;
 
     // "The Data Storage - Filter Pipeline Message", format specification version 4.0, defines
@@ -622,27 +597,6 @@ mod tests {
                 available: available.to_u64()
             }
         );
-    }
-
-    struct HeaderSource<'a> {
-        bytes: &'a [u8],
-        reads: RefCell<Vec<(u64, usize)>>,
-    }
-
-    impl Source for HeaderSource<'_> {
-        fn len(&self) -> u64 {
-            self.bytes.len() as u64
-        }
-
-        fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
-            self.reads.borrow_mut().push((offset, bytes.len()));
-            BytesSource::new(self.bytes).read_at(offset, bytes)
-        }
-
-        fn read_metadata_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
-            self.reads.borrow_mut().push((offset, length));
-            BytesSource::new(self.bytes).read_metadata_at(offset, length)
-        }
     }
 
     #[test]
@@ -895,10 +849,7 @@ mod tests {
         let id = parse_id(&header, &bytes);
         let mut image = vec![0; 64];
         image[0x20..0x23].copy_from_slice(b"abc");
-        let source = HeaderSource {
-            bytes: &image,
-            reads: RefCell::new(Vec::new()),
-        };
+        let source = ObservedSource::new(&image);
         let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
         let stored = PhysicalSource::for_test(&source, addresses).stored();
         let resident = PhysicalBytes::for_test(&image, addresses).stored().unwrap();
@@ -1373,14 +1324,8 @@ mod tests {
         }
     }
 
-    /// One reader parses the heap's huge-object index once, however many huge
-    /// objects are read through it, on both backends.
-    ///
-    /// Parsing it per object returns exactly the same bytes while making a walk
-    /// over the heap quadratic in the number of huge objects, so only the parse
-    /// count separates the two.
     #[test]
-    fn a_reader_parses_the_huge_object_index_once() {
+    fn a_reader_requests_the_huge_index_once_per_batch() {
         const COUNT: u64 = 5;
 
         // Attributes too large for a managed heap object, so the heap holds
@@ -1414,7 +1359,6 @@ mod tests {
         };
         let ids: Vec<Vec<u8>> = (1..=COUNT).map(heap_id).collect();
 
-        reset_huge_index_decodes();
         let mut reader = HeapObjectReader::new(
             HeapSource::resident(source::zero_base_bytes(&bytes)),
             &heap,
@@ -1426,32 +1370,31 @@ mod tests {
             .iter()
             .map(|id| reader.read(parse_id(&heap, id)).unwrap())
             .collect();
-        assert_eq!(
-            huge_index_decodes(),
-            1,
-            "buffered reads re-parsed the index"
-        );
-
-        reset_huge_index_decodes();
-        let source = BytesSource::new(bytes.clone());
+        let source = ObservedSource::new(&bytes);
         let stored = source::zero_base_source(&source);
-        let mut reader = HeapObjectReader::new(
-            HeapSource::new(&stored),
-            &heap,
-            StoredAddress::new(frhp as u64),
-            AccessMode::ReadOnly,
-            FORMAT_WIDTHS,
-        );
+        let open = || {
+            HeapObjectReader::new(
+                HeapSource::new(&stored),
+                &heap,
+                StoredAddress::new(frhp as u64),
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+            )
+        };
+        let mut reader = open();
         let streamed: Vec<Vec<u8>> = ids
             .iter()
             .map(|id| reader.read(parse_id(&heap, id)).unwrap())
             .collect();
-        assert_eq!(
-            huge_index_decodes(),
-            1,
-            "streaming reads re-parsed the index"
-        );
+        assert_eq!(heap.huge_objects_count, COUNT);
+        let tracker = heap.btree_huge_objects_address.get();
+        assert_eq!(source.reads_at(tracker), 1);
 
+        source.reads.borrow_mut().clear();
+        for (id, expected) in ids.iter().zip(&streamed) {
+            assert_eq!(open().read(parse_id(&heap, id)).unwrap(), *expected);
+        }
+        assert_eq!(source.reads_at(tracker), COUNT as usize);
         assert_eq!(buffered, streamed);
         assert_eq!(buffered.len(), COUNT as usize);
         for (i, object) in buffered.iter().enumerate() {
@@ -1825,10 +1768,7 @@ mod tests {
             Some(HugeFilters::new(test_data::deflate_pipeline(), 0)),
             base,
         );
-        let source = HeaderSource {
-            bytes: &heap.image,
-            reads: RefCell::new(Vec::new()),
-        };
+        let source = ObservedSource::new(&heap.image);
         let stored = PhysicalSource::for_test(
             &source,
             AddressContext::from_effective_base(BaseAddress::new(base)),
@@ -1841,7 +1781,6 @@ mod tests {
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         );
-        reset_huge_index_decodes();
         assert_eq!(
             reader.read(parse_id(&heap.header, &heap.id)).unwrap(),
             heap.decoded
@@ -1850,7 +1789,6 @@ mod tests {
             reader.read(parse_id(&heap.header, &heap.id)).unwrap(),
             heap.decoded
         );
-        assert_eq!(huge_index_decodes(), 1);
         let reads = source.reads.borrow();
         assert_eq!(
             reads
@@ -1860,13 +1798,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(base + HUGE_PAYLOAD_AT, heap.encoded_size as usize); 2]
         );
-        assert_eq!(
-            reads
-                .iter()
-                .filter(|&&(address, _)| address == base + HUGE_TRACKER_AT)
-                .count(),
-            1
-        );
+        assert_eq!(source.reads_at(base + HUGE_TRACKER_AT), 1);
+        assert_eq!(source.reads_at(base + HUGE_NODE_AT), 1);
+        let metadata_bytes = reads
+            .iter()
+            .filter(|&&(address, _)| address != base + HUGE_PAYLOAD_AT)
+            .map(|&(_, length)| length)
+            .sum::<usize>();
+        assert!((1..=128).contains(&metadata_bytes), "{reads:?}");
     }
 
     #[rstest]
@@ -1950,8 +1889,8 @@ mod tests {
         second.image.extend_from_slice(&second.decoded);
         second.record[..8].copy_from_slice(&payload_at.to_le_bytes());
         second.write_tracker(vec![second.record.clone()]);
-        let first_source = BytesSource::new(&first.image);
-        let second_source = BytesSource::new(&second.image);
+        let first_source = ObservedSource::new(&first.image);
+        let second_source = ObservedSource::new(&second.image);
         let first_stored = source::zero_base_source(&first_source);
         let second_stored = source::zero_base_source(&second_source);
         let input = |resident, stored| {
@@ -1977,12 +1916,53 @@ mod tests {
         );
         let first_id = parse_id(&first.header, &first.id);
         let second_id = parse_id(&second.header, &second.id);
-        reset_huge_index_decodes();
         assert_eq!(first_reader.read(first_id).unwrap(), first.decoded);
         assert_eq!(second_reader.read(second_id).unwrap(), second.decoded);
         assert_eq!(first_reader.read(first_id).unwrap(), first.decoded);
         assert_eq!(second_reader.read(second_id).unwrap(), second.decoded);
-        assert_eq!(huge_index_decodes(), 2);
+        assert_eq!(
+            first_source.reads_at(HUGE_TRACKER_AT),
+            usize::from(streaming)
+        );
+        assert_eq!(
+            second_source.reads_at(HUGE_TRACKER_AT),
+            usize::from(streaming)
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn resident_huge_lookups_reuse_the_index_allocation() {
+        use test_util::allocation;
+
+        const LOOKUPS: u64 = 8;
+        let heap = HugeHeap::new(false, None, 0);
+        let id = parse_id(&heap.header, &heap.id);
+        let open = || {
+            HeapObjectReader::new(
+                HeapSource::resident(source::zero_base_bytes(&heap.image)),
+                &heap.header,
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+            )
+        };
+        let mut reader = open();
+        assert_eq!(reader.read(id).unwrap(), heap.decoded);
+        let ((), cached) = allocation::measure("resident_cached_huge_lookups", || {
+            for _ in 0..LOOKUPS {
+                assert_eq!(reader.read(id).unwrap(), heap.decoded);
+            }
+        });
+        let ((), fresh) = allocation::measure("resident_fresh_huge_lookups", || {
+            for _ in 0..LOOKUPS {
+                assert_eq!(open().read(id).unwrap(), heap.decoded);
+            }
+        });
+        let payload = heap.decoded.len() as u64 * LOOKUPS;
+        let budget = payload + 256;
+        assert!((payload..=budget).contains(&cached.bytes), "{cached}");
+        assert!(fresh.bytes > budget, "{fresh}");
     }
 
     #[rstest]
