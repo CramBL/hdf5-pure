@@ -769,12 +769,4 @@ struct StagedMark {
 }
 
 #[cfg(test)]
-impl StagedEdits {
-    /// Returns the operation counts for equality checks in editor tests.
-    pub(super) fn snapshot(&self) -> impl Eq + use<> {
-        self.mark()
-    }
-}
-
-#[cfg(test)]
 mod tests;
