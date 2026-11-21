@@ -307,41 +307,6 @@ pub(crate) trait FileImage: Source + Send + Sync {
     /// whether allocator rollback or rejection of further session writes is required.
     fn discard_pending_writes(&mut self);
 
-    /// Every issued write as `(offset, length)`, in the order it went out. What
-    /// a count cannot say: that a publish point followed the bytes it names.
-    #[cfg(test)]
-    fn issued_write_order(&self) -> Vec<(u64, u64)>;
-
-    /// Reserves capacity for at least `_additional` more issued-write observations.
-    ///
-    /// Returns `true` if the image supports reserving its observation storage. The default
-    /// implementation returns `false`. Tests reserve outside measured allocation regions.
-    ///
-    /// # Panics
-    ///
-    /// Panics if reserving supported observation storage would overflow its capacity.
-    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn reserve_write_observations(&mut self, _additional: usize) -> bool {
-        false
-    }
-
-    /// How many writes this image has issued against the file since it was
-    /// opened, for the tests that assert what an operation costs. Distinct from
-    /// what the engine *called*: turning many of those into one is the point.
-    #[cfg(test)]
-    fn issued_writes(&self) -> u64 {
-        self.issued_write_order().len() as u64
-    }
-
-    /// How many bytes those writes carried. Distinct from the count because the
-    /// two answer different questions: joining runs lowers the count, and
-    /// declining to write bytes that are about to be truncated away lowers only
-    /// this.
-    #[cfg(test)]
-    fn issued_write_bytes(&self) -> u64 {
-        self.issued_write_order().iter().map(|&(_, n)| n).sum()
-    }
-
     /// Adopt `mode` for every write from here on, flushing anything already
     /// buffered that the new mode would not have held.
     ///
@@ -398,14 +363,6 @@ pub(crate) struct BufferedWrites {
     /// read must not fall past the end of the actual file — which trails the
     /// image's logical end-of-file whenever an append is still pending.
     on_disk_len: u64,
-    /// Every write actually issued against the handle, as `(offset, length)` in
-    /// the order it went out — the figure this whole type exists to lower, and
-    /// the *order*, which is what says a publish point followed the bytes it
-    /// names. Recording cannot change what is gathered, so it is carried only
-    /// where it is read: the unit tests. `cfg(test)` is the lib's own test build,
-    /// so the integration tests that measure allocation never compile this.
-    #[cfg(test)]
-    issued_order: Vec<(u64, u64)>,
 }
 
 impl BufferedWrites {
@@ -418,15 +375,7 @@ impl BufferedWrites {
             runs: BTreeMap::new(),
             pending_bytes: 0,
             on_disk_len,
-            #[cfg(test)]
-            issued_order: Vec::new(),
         }
-    }
-
-    /// Every issued write as `(offset, length)`, in the order it went out.
-    #[cfg(test)]
-    pub(crate) fn issued_order(&self) -> &[(u64, u64)] {
-        &self.issued_order
     }
 
     /// Reads the complete file at the length reported by the retained handle.
@@ -853,8 +802,6 @@ impl BufferedWrites {
         self.handle.write_all(bytes).map_err(Error::Io)?;
         #[cfg(test)]
         disk_log::write_all(&mut self.handle, offset, bytes).map_err(Error::Io)?;
-        #[cfg(test)]
-        self.issued_order.push((offset, bytes.len() as u64));
         self.on_disk_len = self.on_disk_len.max(offset + bytes.len() as u64);
         Ok(())
     }
@@ -1083,17 +1030,6 @@ impl FileImage for MirrorImage {
         self.writes.discard_pending_writes();
     }
 
-    #[cfg(test)]
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.writes.issued_order().to_vec()
-    }
-
-    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn reserve_write_observations(&mut self, additional: usize) -> bool {
-        self.writes.issued_order.reserve(additional);
-        true
-    }
-
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.writes.set_mode(mode)
     }
@@ -1155,6 +1091,8 @@ pub(crate) fn read_at_handle_io(
     }
     let mut h = handle;
     h.seek(SeekFrom::Start(offset))?;
+    #[cfg(test)]
+    disk_log::record_read_request(offset, buf.len());
     h.read_exact(buf)?;
     Ok(())
 }
@@ -1502,17 +1440,6 @@ impl FileImage for HandleImage {
         self.writes.discard_pending_writes();
     }
 
-    #[cfg(test)]
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.writes.issued_order().to_vec()
-    }
-
-    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn reserve_write_observations(&mut self, additional: usize) -> bool {
-        self.writes.issued_order.reserve(additional);
-        true
-    }
-
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.writes.set_mode(mode)
     }
@@ -1683,15 +1610,6 @@ impl FileImage for CountingImage {
         self.inner.discard_pending_writes();
     }
 
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.inner.issued_write_order()
-    }
-
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn reserve_write_observations(&mut self, additional: usize) -> bool {
-        self.inner.reserve_write_observations(additional)
-    }
-
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.inner.set_write_buffering(mode)
     }
@@ -1804,10 +1722,6 @@ impl FileImage for TornWriteImage {
         self.inner.discard_pending_writes();
     }
 
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.inner.issued_write_order()
-    }
-
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.inner.set_write_buffering(mode)
     }
@@ -1885,11 +1799,6 @@ impl FileImage for SourceOnlyImage {
 
     fn discard_pending_writes(&mut self) {
         self.0.discard_pending_writes();
-    }
-
-    #[cfg(test)]
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.0.issued_write_order()
     }
 
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
@@ -2490,13 +2399,13 @@ mod tests {
 
             let (path, mut img) =
                 gathering_named(dir.path(), "one_page", &initial, backing, GATHERED);
-            let before = img.issued_writes();
+            disk_log::start_write_ranges(1);
             img.write_at(2, b"XX").unwrap();
             img.write_at(40, b"YY").unwrap();
             img.ordering_barrier().unwrap();
             assert_eq!(
-                img.issued_writes() - before,
-                1,
+                disk_log::take_write_ranges(),
+                [(2, 40)],
                 "{backing:?}: two writes in one page are one write"
             );
             let mut want = initial.clone();
@@ -2510,13 +2419,13 @@ mod tests {
 
             let (path2, mut img2) =
                 gathering_named(dir.path(), "two_pages", &initial, backing, GATHERED);
-            let before = img2.issued_writes();
+            disk_log::start_write_ranges(2);
             img2.write_at(2, b"XX").unwrap();
             img2.write_at(2 + PAGE, b"YY").unwrap();
             img2.ordering_barrier().unwrap();
             assert_eq!(
-                img2.issued_writes() - before,
-                2,
+                disk_log::take_write_ranges(),
+                [(2, 2), (2 + PAGE, 2)],
                 "{backing:?}: two writes a page apart stay two"
             );
             let mut want2 = initial.clone();
@@ -2577,12 +2486,11 @@ mod tests {
             let (path, mut img) = gathering(dir.path(), b"abcdefgh", backing, GATHERED);
 
             img.append(&[9u8; 200]).unwrap();
-            let before = img.issued_writes();
+            disk_log::start_write_ranges(0);
             img.truncate(8).unwrap();
 
-            assert_eq!(
-                img.issued_writes(),
-                before,
+            assert!(
+                disk_log::take_write_ranges().is_empty(),
                 "{backing:?}: bytes about to stop existing were written out first"
             );
             assert_eq!(img.len(), 8, "{backing:?}");
@@ -2591,12 +2499,12 @@ mod tests {
             // A run straddling the cut keeps its half below it, and carries only
             // that half. Here the write happens either way, so it is the *bytes*
             // that say whether the doomed half rode along.
-            let before = img.issued_write_bytes();
+            disk_log::start_write_ranges(1);
             img.write_at(1, b"ZZZZZZ").unwrap();
             img.truncate(4).unwrap();
             assert_eq!(
-                img.issued_write_bytes() - before,
-                3,
+                disk_log::take_write_ranges(),
+                [(1, 3)],
                 "{backing:?}: the part of the run past the cut was written anyway"
             );
             assert_eq!(std::fs::read(&path).unwrap(), b"aZZZ", "{backing:?}");

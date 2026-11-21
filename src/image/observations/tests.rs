@@ -53,7 +53,9 @@ fn foundation_buffering_observations_preserve_clean_gaps(
     assert_eq!(image.disk_bytes().unwrap(), initial);
 
     disk_log::start();
+    disk_log::start_read_ranges();
     image.flush().unwrap();
+    assert_eq!(disk_log::take_read_ranges(), [(4, 38)]);
     assert_eq!(
         disk_log::take(),
         [DiskOp::Write {

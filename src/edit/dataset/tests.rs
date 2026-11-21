@@ -109,7 +109,7 @@ fn empty_page_creation_reserves_only_defined_index_storage(
         Some(PageTransition::Unchanged)
     );
     let before_sections: Vec<_> = engine.space.admitted_snapshot().sections().collect();
-    let before_writes = engine.image.issued_write_order().len();
+    disk_log::start_write_ranges(0);
     let mut dataset = DatasetBuilder::new("d");
     if allocated {
         dataset.with_i32_data(&[]).with_shape(&[0]);
@@ -154,11 +154,9 @@ fn empty_page_creation_reserves_only_defined_index_storage(
     };
     let has_index = unlimited && allocated;
     assert_eq!(address.is_some(), has_index);
-    if has_index {
-        assert!(engine.image.issued_write_order().len() > before_writes);
-    } else {
+    assert_eq!(!disk_log::take_write_ranges().is_empty(), has_index);
+    if !has_index {
         assert_eq!(engine.end_of_allocation().unwrap(), before_eoa);
-        assert_eq!(engine.image.issued_write_order().len(), before_writes);
         assert_eq!(
             engine
                 .space
@@ -387,7 +385,7 @@ fn page_creation_emits_retained_chunks_without_an_aggregate_payload_buffer(#[cas
     )
     .unwrap();
     let geometry = set.array_geometry().unwrap();
-    let writes = engine.image.issued_write_order().len();
+    disk_log::start_write_ranges(count + 64);
     let (header, measured) =
         allocation::measure(&format!("page_creation_encoding_{count}"), || {
             engine.write_array_chunk_set(&set, geometry).unwrap()
@@ -398,8 +396,8 @@ fn page_creation_emits_retained_chunks_without_an_aggregate_payload_buffer(#[cas
         raw.len()
     );
     assert!(!header.layout_message.is_empty());
-    let issued = engine.image.issued_write_order();
-    let payload = &issued[writes..writes + count];
+    let issued = disk_log::take_write_ranges();
+    let payload = &issued[..count];
     let start = payload[0].0;
     assert_eq!(
         payload,

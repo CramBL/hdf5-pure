@@ -66,8 +66,7 @@ fn measure(entries: u64, chunks: u32) -> Measured {
     let target = ObjectPathBuf::parse("d");
     engine.append_geometry(AppendTarget::Path(&target)).unwrap();
     let block = data_block(&engine);
-    assert!(engine.image.reserve_write_observations(2_048));
-    let prior_writes = engine.image.issued_write_order().len();
+    disk_log::start_write_ranges(2_048);
     let end = i32::try_from(chunks * 4).unwrap();
     let raw = (1..end).flat_map(i32::to_le_bytes).collect::<Vec<_>>();
     let region = format!("fixed_array_{entries}_{chunks}");
@@ -80,7 +79,7 @@ fn measure(entries: u64, chunks: u32) -> Measured {
         )
     });
     result.unwrap();
-    assert!(engine.image.issued_write_order().len() > prior_writes);
+    assert!(!disk_log::take_write_ranges().is_empty());
     assert_eq!(measured.live_bytes, 0, "{measured:?}");
     assert!(measured.peak_bytes < 32_768, "{measured:?}");
     assert!(measured.blocks > 0, "{measured:?}");

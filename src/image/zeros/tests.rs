@@ -266,6 +266,7 @@ fn buffered_zero_rewrites_issue_one_contiguous_run(#[case] backing: Backing) {
     image.fill_zeros(range(1, (length - 2) as u64)).unwrap();
 
     assert!(image.disk_bytes().unwrap().is_empty());
+    disk_log::start_write_ranges(1);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let region = format!("buffered_zero_flush_{backing:?}");
@@ -275,7 +276,7 @@ fn buffered_zero_rewrites_issue_one_contiguous_run(#[case] backing: Backing) {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     image.flush().unwrap();
-    assert_eq!(image.issued_write_order(), [(0, length as u64)]);
+    assert_eq!(disk_log::take_write_ranges(), [(0, length as u64)]);
     drop(image);
     assert_eq!(fs::read(&path).unwrap(), vec![0; length]);
 }

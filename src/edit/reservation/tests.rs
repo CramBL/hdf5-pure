@@ -688,8 +688,7 @@ fn bounded_unbuffered_emission_keeps_heap_below_payload_size(#[case] count: usiz
     let requests = [request(length, PageType::Raw)];
     let mut plan = planned(&mut engine, &requests);
     let start = plan.reservations()[0].range().start().get();
-    let before_writes = plan.engine.image.issued_writes();
-    let before_bytes = plan.engine.image.issued_write_bytes();
+    disk_log::start_write_ranges(count);
     let (address, measured) = allocation::measure(&format!("streamed_reservation_{count}"), || {
         plan.write_next_with(|writer| {
             for _ in 0..count {
@@ -700,14 +699,9 @@ fn bounded_unbuffered_emission_keeps_heap_below_payload_size(#[case] count: usiz
         .unwrap()
     });
     assert_eq!(address.get(), start);
-    assert_eq!(
-        plan.engine.image.issued_writes() - before_writes,
-        count as u64
-    );
-    assert_eq!(
-        plan.engine.image.issued_write_bytes() - before_bytes,
-        length
-    );
+    let writes = disk_log::take_write_ranges();
+    assert_eq!(writes.len(), count);
+    assert_eq!(writes.iter().map(|&(_, bytes)| bytes).sum::<u64>(), length);
     assert!(plan.engine.image.as_slice().is_none());
     assert!(measured.live_bytes < 4_096, "{measured}");
     assert!(

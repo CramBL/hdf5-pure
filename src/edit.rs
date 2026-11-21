@@ -2816,15 +2816,6 @@ impl WriteEngine {
         self.image.set_write_buffering(mode)
     }
 
-    /// Every write this session issued, as `(offset, length)` in the order it
-    /// went out. Same reasoning as [`set_write_buffering`](Self::set_write_buffering):
-    /// the image is private, and a test that asks whether a publish left the
-    /// engine as one write has nowhere else to look.
-    #[cfg(test)]
-    pub(crate) fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.image.issued_write_order()
-    }
-
     /// The durability barrier a write path calls for, data and metadata both —
     /// issued unless this session's [`SyncPolicy`] leaves the `fsync` cadence to
     /// the application.

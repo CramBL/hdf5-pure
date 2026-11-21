@@ -596,10 +596,6 @@ impl FileImage for FailureImage {
         self.inner.discard_pending_writes();
     }
 
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.inner.issued_write_order()
-    }
-
     fn as_slice(&self) -> Option<&[u8]> {
         self.inner.as_slice()
     }

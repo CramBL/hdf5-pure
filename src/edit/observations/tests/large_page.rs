@@ -50,6 +50,7 @@ fn large_page_reservations_preserve_padding_and_buffering_limits(
     let start = engine.image.len();
     assert_eq!(start % page, 0);
     disk_log::start();
+    disk_log::start_read_ranges();
     let requests = [
         request(64, 16, PageType::Raw),
         request(48, 48, PageType::Meta),
@@ -90,6 +91,7 @@ fn large_page_reservations_preserve_padding_and_buffering_limits(
     disk_log::start();
     engine.image.flush().unwrap();
     let after_flush = disk_log::take();
+    assert!(disk_log::take_read_ranges().is_empty());
 
     let mut next = start;
     for operation in before_flush.iter().chain(&after_flush) {
