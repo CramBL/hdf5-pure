@@ -12,7 +12,6 @@ use hdf5_pure_core::StoredAddress;
 use super::FreeClass;
 use super::PageType;
 use super::PagedPostFree;
-use crate::admission::AdmissionWork;
 use crate::admission::OrderedReturns;
 use crate::admission::Release;
 use crate::admission::TrackedSpace;
@@ -38,7 +37,6 @@ impl PagedPostFree {
         &mut self,
         threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, FreeClass)>,
-        work: &mut AdmissionWork,
     ) -> Vec<(Extent, FreeClass)> {
         let mut extents = extents.into_iter();
         let Some(first) = extents.next() else {
@@ -54,10 +52,9 @@ impl PagedPostFree {
         let mut returned = vec![first, second];
         returned.extend(extents);
         // Returned allocations retain their original lengths and are mutually disjoint.
-        let returned =
-            OrderedReturns::new(returned, work).expect("returned allocations do not overlap");
-        let admission = PageAdmission::new(self, threshold, returned, work);
-        let ([meta, raw, dead], dropped) = admission.run(work);
+        let returned = OrderedReturns::new(returned).expect("returned allocations do not overlap");
+        let admission = PageAdmission::new(self, threshold, returned);
+        let ([meta, raw, dead], dropped) = admission.run();
         self.meta = meta;
         self.raw = raw;
         self.dead = dead;
@@ -90,7 +87,6 @@ impl<'a> PageAdmission<'a> {
         post: &'a PagedPostFree,
         threshold: ByteLength,
         returned: OrderedReturns<FreeClass>,
-        work: &mut AdmissionWork,
     ) -> Self {
         let PagedPostFree {
             page_size,
@@ -99,13 +95,12 @@ impl<'a> PageAdmission<'a> {
             dead,
             unclassified,
         } = post;
-        let mut classes = [meta, raw, dead].map(|list| ClassIndex::new(list, work));
+        let mut classes = [meta, raw, dead].map(ClassIndex::new);
         let mut entries = Vec::new();
         let mut queue = VecDeque::new();
         for (extent, class) in returned {
-            work.visit_extent();
             let state = if extent.len() >= threshold {
-                classes[ClassIndex::slot(class)].insert(extent, work);
+                classes[ClassIndex::slot(class)].insert(extent);
                 AdmissionState::Admitted
             } else {
                 queue.push_back(entries.len());
@@ -134,7 +129,7 @@ impl<'a> PageAdmission<'a> {
     /// # Panics
     ///
     /// Panics if an admitted return overlaps indexed space of its class.
-    fn run(self, work: &mut AdmissionWork) -> ([FreeList; 3], Vec<(Extent, FreeClass)>) {
+    fn run(self) -> ([FreeList; 3], Vec<(Extent, FreeClass)>) {
         let Self {
             page_size,
             mut classes,
@@ -144,7 +139,6 @@ impl<'a> PageAdmission<'a> {
         } = self;
         while let Some(index) = queue.pop_front() {
             debug_assert!(returned[index].state == AdmissionState::Queued);
-            work.visit_queue();
             returned[index].state = AdmissionState::Pending;
             let PendingReturn {
                 extent,
@@ -152,22 +146,16 @@ impl<'a> PageAdmission<'a> {
                 state: _,
             } = returned[index];
             let unclassified_merge = if extent.len() >= ByteLength::new(page_size.get()) {
-                unclassified.adjoins_observed(extent, || work.lookup())
+                unclassified.adjoins(extent)
             } else {
                 false
             };
-            if !unclassified_merge
-                && !classes
-                    .iter()
-                    .any(|list| list.merges(extent, page_size, work))
-            {
+            if !unclassified_merge && !classes.iter().any(|list| list.merges(extent, page_size)) {
                 continue;
             }
             returned[index].state = AdmissionState::Admitted;
-            let run = classes[ClassIndex::slot(class)].insert(extent, work);
-            work.lookup();
+            let run = classes[ClassIndex::slot(class)].insert(extent);
             let left = returned.binary_search_by_key(&run.start(), |entry| entry.extent.end());
-            work.lookup();
             let right = returned.binary_search_by_key(&run.end(), |entry| entry.extent.start());
             for neighbor in [left, right].into_iter().flatten() {
                 if returned[neighbor].state == AdmissionState::Pending {
@@ -181,7 +169,7 @@ impl<'a> PageAdmission<'a> {
             .filter(|entry| entry.state == AdmissionState::Pending)
             .map(|entry| (entry.extent, entry.class))
             .collect();
-        (classes.map(|list| list.into_list(work)), dropped)
+        (classes.map(ClassIndex::into_list), dropped)
     }
 }
 
@@ -219,17 +207,13 @@ impl ClassIndex {
         }
     }
 
-    /// Copies canonical extents into an address index, observing each input and insertion.
-    fn new(list: &FreeList, work: &mut AdmissionWork) -> Self {
+    /// Copies canonical extents into an address index, keyed by each extent's start address.
+    fn new(list: &FreeList) -> Self {
         Self {
             regions: list
                 .extents()
                 .iter()
-                .map(|&extent| {
-                    work.index_extent();
-                    work.insert_extent();
-                    (extent.start(), extent)
-                })
+                .map(|&extent| (extent.start(), extent))
                 .collect(),
         }
     }
@@ -239,10 +223,9 @@ impl ClassIndex {
     /// # Panics
     ///
     /// Panics if `extent` overlaps an indexed extent.
-    fn insert(&mut self, extent: Extent, work: &mut AdmissionWork) -> Extent {
+    fn insert(&mut self, extent: Extent) -> Extent {
         let mut start = extent.start();
         let mut end = extent.end();
-        work.lookup();
         if let Some((&address, &previous)) = self.regions.range(..start).next_back() {
             assert!(
                 previous.end() <= start,
@@ -251,10 +234,8 @@ impl ClassIndex {
             if previous.end() == start {
                 start = previous.start();
                 self.regions.remove(&address);
-                work.remove_extent();
             }
         }
-        work.lookup();
         if let Some((&address, &next)) = self.regions.range(start..).next() {
             assert!(
                 end <= next.start(),
@@ -263,31 +244,22 @@ impl ClassIndex {
             if end == next.start() {
                 end = next.end();
                 self.regions.remove(&address);
-                work.remove_extent();
             }
         }
         // The returned allocation and its adjacent canonical extents have checked enclosing endpoints.
         let run = Extent::between(start, end).expect("adjacent extents have a nonempty union");
         self.regions.insert(start, run);
-        work.insert_extent();
         run
     }
 
     /// Tests within-page or whole-unit adjacency for this class.
-    fn merges(
-        &self,
-        extent: Extent,
-        page_size: FileSpacePageSize,
-        work: &mut AdmissionWork,
-    ) -> bool {
+    fn merges(&self, extent: Extent, page_size: FileSpacePageSize) -> bool {
         let page_size = ByteLength::new(page_size.get());
-        work.lookup();
         let left = self
             .regions
             .range(..extent.start())
             .next_back()
             .map(|(_, &region)| region);
-        work.lookup();
         let right = self.regions.get(&extent.end()).copied();
         [left, right].into_iter().flatten().any(|region| {
             if extent.len() < page_size {
@@ -298,11 +270,11 @@ impl ClassIndex {
         })
     }
 
-    /// Constructs a canonical free list, observing each output extent.
-    fn into_list(self, work: &mut AdmissionWork) -> FreeList {
+    /// Constructs a canonical free list.
+    fn into_list(self) -> FreeList {
         let Self { regions } = self;
         // Insertion keeps each class's extents sorted, disjoint and coalesced.
-        FreeList::from_sorted(regions.into_values().inspect(|_| work.integrate_extent()))
+        FreeList::from_sorted(regions.into_values())
             .expect("indexed free extents are sorted and disjoint")
     }
 }

@@ -353,7 +353,7 @@ pub(super) fn release_reference(
     eoa: StoredAddress,
     extents: Vec<(Extent, FreeClass)>,
 ) -> StoredAddress {
-    let mut dropped = release_each_reference(post, threshold, extents.iter().copied(), &mut 0);
+    let mut dropped = release_each_reference(post, threshold, extents.iter().copied());
     let page_size = post.page_size.get();
     if threshold > page_size {
         let dropped_extents: BTreeSet<_> = dropped.iter().map(|&(extent, _)| extent).collect();
@@ -384,18 +384,16 @@ pub(super) fn release_reference(
             post,
             threshold,
             pages.into_iter().map(|page| (page, RAW)),
-            &mut 0,
         ));
     }
     post.give_back(eoa, dropped)
 }
 
-/// Counts scalar admission attempts in the repeated-pass reference model.
+/// Admits returns with a scalar pass repeated until no more returns can be admitted.
 pub(super) fn release_each_reference(
     post: &mut PagedPostFree,
     threshold: u64,
     extents: impl IntoIterator<Item = (Extent, FreeClass)>,
-    attempts: &mut usize,
 ) -> Vec<(Extent, FreeClass)> {
     let (mut pending, eligible): (Vec<_>, Vec<_>) = extents
         .into_iter()
@@ -406,7 +404,6 @@ pub(super) fn release_each_reference(
     loop {
         let offered = pending.len();
         pending.retain(|&(extent, class)| {
-            *attempts += 1;
             post.release(ByteLength::new(threshold), extent, class) == Release::Drop
         });
         if pending.len() == offered {

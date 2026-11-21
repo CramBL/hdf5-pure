@@ -9,7 +9,6 @@ use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::StoredAddress;
 
-use super::admission::AdmissionWork;
 use super::admission::OrderedReturns;
 use super::admission::TrackedSpace;
 use super::allocation::AllocationClass;
@@ -646,35 +645,17 @@ impl PagedEdit {
     }
 
     /// Builds the PAGE free-space state that a commit would publish.
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid caller geometry as described by [`Self::with_padding`] and
+    /// [`PagedPostFree::release_batch`].
     pub(crate) fn post_free(
         &self,
         threshold: ByteLength,
         eoa: StoredAddress,
         freed: impl IntoIterator<Item = (Extent, FreeClass)>,
         old_blocks: impl IntoIterator<Item = Extent>,
-    ) -> (PagedPostFree, StoredAddress) {
-        self.post_free_with_work(
-            threshold,
-            eoa,
-            freed,
-            old_blocks,
-            &mut AdmissionWork::default(),
-        )
-    }
-
-    /// Builds a post-free candidate with observations of admission and padding integration.
-    ///
-    /// # Panics
-    ///
-    /// Panics on invalid caller geometry as described by [`Self::with_padding`] and
-    /// [`PagedPostFree::release_batch`].
-    fn post_free_with_work(
-        &self,
-        threshold: ByteLength,
-        eoa: StoredAddress,
-        freed: impl IntoIterator<Item = (Extent, FreeClass)>,
-        old_blocks: impl IntoIterator<Item = Extent>,
-        work: &mut AdmissionWork,
     ) -> (PagedPostFree, StoredAddress) {
         let Self {
             page_size,
@@ -688,15 +669,15 @@ impl PagedEdit {
         } = self;
         let mut post = PagedPostFree {
             page_size: *page_size,
-            meta: Self::with_padding(meta, meta_pad, work),
-            raw: Self::with_padding(raw, raw_pad, work),
+            meta: Self::with_padding(meta, meta_pad),
+            raw: Self::with_padding(raw, raw_pad),
             dead: dead.clone(),
             unclassified: unclassified.clone(),
         };
         let old_blocks = old_blocks
             .into_iter()
             .map(|extent| (extent, FreeClass::Page(PageType::Meta)));
-        let eoa = post.release_all(threshold, eoa, freed.into_iter().chain(old_blocks), work);
+        let eoa = post.release_all(threshold, eoa, freed.into_iter().chain(old_blocks));
         Self::promote_whole_free_pages(
             &mut post.meta,
             &mut post.raw,
@@ -736,7 +717,7 @@ impl PagedEdit {
     ///
     /// Panics if multiple padding extents overlap each other or `list`. A scalar tail overlapping
     /// `list` can panic in debug builds.
-    fn with_padding(list: &FreeList, padding: &[Extent], work: &mut AdmissionWork) -> FreeList {
+    fn with_padding(list: &FreeList, padding: &[Extent]) -> FreeList {
         if padding.len() <= 1 {
             let mut list = list.clone();
             if let Some(&extent) = padding.first() {
@@ -745,16 +726,12 @@ impl PagedEdit {
             return list;
         }
         // Padding consists of distinct allocation-created remainders, already admitted as tails.
-        let padding =
-            OrderedReturns::new(padding.iter().map(|&extent| (extent, ())).collect(), work)
-                .expect("allocation padding is disjoint");
-        let padding = FreeList::from_sorted(padding.into_iter().map(|(extent, ())| {
-            work.visit_extent();
-            extent
-        }))
-        .expect("ordered padding is sorted and disjoint");
+        let padding = OrderedReturns::new(padding.iter().map(|&extent| (extent, ())).collect())
+            .expect("allocation padding is disjoint");
+        let padding = FreeList::from_sorted(padding.into_iter().map(|(extent, ())| extent))
+            .expect("ordered padding is sorted and disjoint");
         // Allocation padding excludes all previously tracked free space.
-        FreeList::from_lists_observed([list, &padding], || work.visit_extent())
+        FreeList::from_lists([list, &padding])
             .expect("allocation padding is disjoint from tracked free space")
     }
 
@@ -1048,13 +1025,12 @@ impl PagedPostFree {
         threshold: ByteLength,
         eoa: StoredAddress,
         extents: impl IntoIterator<Item = (Extent, FreeClass)>,
-        work: &mut AdmissionWork,
     ) -> StoredAddress {
         let extents: Vec<_> = extents.into_iter().collect();
-        let mut dropped = self.release_batch(threshold, extents.iter().copied(), work);
+        let mut dropped = self.release_batch(threshold, extents.iter().copied());
         if threshold > ByteLength::new(self.page_size.get()) {
             let completed = self.pages_completed_by_merges(&extents, &dropped);
-            dropped.extend(self.release_pages(threshold, completed, work));
+            dropped.extend(self.release_pages(threshold, completed));
         }
         self.give_back(eoa, dropped)
     }
@@ -1101,7 +1077,6 @@ impl PagedPostFree {
         &mut self,
         threshold: ByteLength,
         pages: BTreeSet<Extent>,
-        work: &mut AdmissionWork,
     ) -> Vec<(Extent, FreeClass)> {
         let pages: Vec<_> = pages.into_iter().collect();
         // The set contains distinct whole pages in ascending address order.
@@ -1115,7 +1090,6 @@ impl PagedPostFree {
             pages
                 .into_iter()
                 .map(|page| (page, FreeClass::Page(PageType::Raw))),
-            work,
         )
     }
 
@@ -1178,7 +1152,7 @@ impl TrackedSpace for PagedPostFree {
         threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, FreeClass)>,
     ) -> Vec<(Extent, FreeClass)> {
-        self.release_batch(threshold, extents, &mut AdmissionWork::default())
+        self.release_batch(threshold, extents)
     }
 }
 
@@ -2011,7 +1985,6 @@ mod tests {
                     Extent::new(StoredAddress::new(addr), ByteLength::new(len)).unwrap(),
                     RAW
                 )),
-                &mut AdmissionWork::default(),
             ),
             StoredAddress::new(expected)
         );
@@ -2060,7 +2033,6 @@ mod tests {
                             .unwrap(),
                         RAW
                     )],
-                    &mut AdmissionWork::default(),
                 ),
                 paged_sections(&post)
             ),

@@ -5,7 +5,6 @@ use core::fmt;
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::{FileSpacePageSize, StoredAddress};
 
-use super::admission::AdmissionWork;
 use super::admission::TrackedSpace;
 use super::extent::Extent;
 use super::persistence::TRAILING_RESERVE_TAILS;
@@ -108,18 +107,6 @@ impl FreeList {
     ///
     /// Returns [`FreeListError::Overlap`] if extents from different lists overlap.
     pub(crate) fn from_lists<const N: usize>(lists: [&Self; N]) -> Result<Self, FreeListError> {
-        Self::from_lists_observed(lists, || {})
-    }
-
-    /// Merges canonical lists, calling `visit` for each consumed input extent.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FreeListError::Overlap`] if extents from different lists overlap.
-    pub(crate) fn from_lists_observed<const N: usize>(
-        lists: [&Self; N],
-        mut visit: impl FnMut(),
-    ) -> Result<Self, FreeListError> {
         let mut regions = lists.map(|list| list.regions.iter());
         Self::from_sorted(core::iter::from_fn(|| {
             let (index, _) = regions
@@ -132,11 +119,7 @@ impl FreeList {
                         .map(|extent| (index, extent.start()))
                 })
                 .min_by_key(|&(_, start)| start)?;
-            let next = regions[index].next().copied();
-            if next.is_some() {
-                visit();
-            }
-            next
+            regions[index].next().copied()
         }))
     }
 
@@ -635,25 +618,17 @@ impl FreeList {
     }
 
     /// Returns `true` if a region adjoins `extent`.
-    pub fn adjoins(&self, extent: Extent) -> bool {
-        self.adjoins_observed(extent, || {})
-    }
-
-    /// Tests endpoint adjacency, calling `lookup` before each binary search.
     ///
-    /// Performs one or two searches, stopping after a matching end address. The query may
-    /// overlap other regions.
-    pub(crate) fn adjoins_observed(&self, extent: Extent, mut lookup: impl FnMut()) -> bool {
-        lookup();
+    /// Performs one or two binary searches, stopping after a matching end address. The query
+    /// may overlap other regions.
+    pub fn adjoins(&self, extent: Extent) -> bool {
         self.regions
             .binary_search_by_key(&extent.start(), |region| region.end())
             .is_ok()
-            || {
-                lookup();
-                self.regions
-                    .binary_search_by_key(&extent.end(), |region| region.start())
-                    .is_ok()
-            }
+            || self
+                .regions
+                .binary_search_by_key(&extent.end(), |region| region.start())
+                .is_ok()
     }
 
     /// Returns `true` if a region adjoins `extent` inside one `unit`, at an address that is not a
@@ -753,7 +728,7 @@ impl TrackedSpace for FreeList {
         threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, ())>,
     ) -> Vec<(Extent, ())> {
-        self.release_batch(threshold, extents, &mut AdmissionWork::default())
+        self.release_batch(threshold, extents)
     }
 }
 
@@ -1373,13 +1348,7 @@ mod tests {
             extent(200, ByteLength::new(20)),
         ])
         .unwrap();
-        let mut lookups = 0;
-        assert_eq!(
-            free.adjoins_observed(extent(start, ByteLength::new(len)), || lookups += 1),
-            expected
-        );
         assert_eq!(free.adjoins(extent(start, ByteLength::new(len))), expected);
-        assert_eq!(lookups, if start == 120 { 1 } else { 2 });
     }
 
     const THRESHOLD: u64 = 64;

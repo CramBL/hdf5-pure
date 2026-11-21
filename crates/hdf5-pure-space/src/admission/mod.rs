@@ -11,7 +11,6 @@ use super::paged::FreeClass;
 
 mod batch;
 
-pub(crate) use batch::AdmissionWork;
 pub(crate) use batch::OrderedReturns;
 
 /// Nonempty, disjoint allocations in stored-address order, with their free-space classes.
