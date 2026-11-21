@@ -16,7 +16,7 @@ use crate::edit::WriteEngine;
 use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::heap::qualification::OriginalQualification;
 use crate::edit::commit::plan::inventory::members::MemberDecisions;
-use crate::edit::commit::plan::inventory::members::ParentDisposition;
+use crate::edit::commit::plan::inventory::members::ParentAction;
 use crate::edit::retirement::PendingRootFrees;
 use crate::edit::retirement::ProvenRetirementBatch;
 use crate::edit::retirement::RetirementMergeError;
@@ -34,8 +34,8 @@ impl PendingEditInventory<'_> {
     /// Accepts enclosing protection for retained parents. Requires exact ranges for compaction
     /// and retirement and checks any required allocation class.
     /// If preparation fails, storage exclusions and the pending retirement batch remain unchanged.
-    /// On success, returns the original compaction plans after filtering retained and retired
-    /// dispositions from the decision map.
+    /// On success, returns the original compaction plans after removing retirement actions
+    /// from the map.
     ///
     /// # Errors
     ///
@@ -181,10 +181,7 @@ impl<'a> ParentRelease<'a> {
                     .into_iter()
                     .flatten()
                 {
-                    if matches!(
-                        decisions.dispositions().get(&address),
-                        None | Some(ParentDisposition::Retain)
-                    ) {
+                    if !decisions.actions().contains_key(&address) {
                         Self::protect_enclosing(storage, address, range)?;
                     } else {
                         Self::protect(
@@ -199,10 +196,9 @@ impl<'a> ParentRelease<'a> {
         let end = PhysicalAddress::new(engine.image.len());
         let mut released = BTreeSet::new();
         let mut parents = Vec::new();
-        for (&address, disposition) in decisions.dispositions() {
-            match disposition {
-                ParentDisposition::Retain => {}
-                ParentDisposition::Compact(plan) => {
+        for (&address, action) in decisions.actions() {
+            match action {
+                ParentAction::Compact(plan) => {
                     Self::protect(storage, plan.range(), None)?;
                     if plan.range().end() > end {
                         return Err(ParentPreparationError::Bounds {
@@ -211,7 +207,7 @@ impl<'a> ParentRelease<'a> {
                         });
                     }
                 }
-                ParentDisposition::Retire(retirement) => {
+                ParentAction::Retire(retirement) => {
                     if !retirement
                         .session()
                         .same(&engine.context.allocations.session())

@@ -16,12 +16,13 @@ use crate::edit::analysis::ReconstructionSource;
 use crate::edit::analysis::heap::qualification::QualifiedParentAllocation;
 use crate::edit::analysis::heap::qualification::{OriginalCollections, OriginalQualification};
 
-/// One exclusive action for each qualified heap parent.
+/// At most one mutation or retirement action per physical heap parent.
 ///
-/// Parent allocation release requires separate permission.
+/// Parents without actions stay protected. Parent allocation release requires separate
+/// permission.
 #[derive(Default)]
 pub(in crate::edit::commit) struct MemberDecisions {
-    actions: BTreeMap<PhysicalAddress, ParentDisposition>,
+    actions: BTreeMap<PhysicalAddress, ParentAction>,
 }
 
 impl MemberDecisions {
@@ -77,11 +78,10 @@ impl MemberDecisions {
             if let Some(retirement) = retired {
                 result
                     .actions
-                    .insert(address, ParentDisposition::Retire(retirement));
+                    .insert(address, ParentAction::Retire(retirement));
                 continue;
             }
             let Some(indices) = removed.get(&address) else {
-                result.actions.insert(address, ParentDisposition::Retain);
                 continue;
             };
             let compaction = original
@@ -94,10 +94,9 @@ impl MemberDecisions {
                         .compact(|member| indices.contains(&member.index()))
                         .ok()
                 });
-            result.actions.insert(
-                address,
-                compaction.map_or(ParentDisposition::Retain, ParentDisposition::Compact),
-            );
+            if let Some(plan) = compaction {
+                result.actions.insert(address, ParentAction::Compact(plan));
+            }
         }
         result
     }
@@ -105,18 +104,18 @@ impl MemberDecisions {
     /// Borrows at most one compaction plan per protected parent.
     pub(in crate::edit::commit) fn plans(&self) -> impl Iterator<Item = &GlobalHeapCompaction> {
         self.actions.values().filter_map(|action| match action {
-            ParentDisposition::Compact(plan) => Some(plan),
-            ParentDisposition::Retain | ParentDisposition::Retire(_) => None,
+            ParentAction::Compact(plan) => Some(plan),
+            ParentAction::Retire(_) => None,
         })
     }
 
-    pub(super) fn dispositions(&self) -> &BTreeMap<PhysicalAddress, ParentDisposition> {
+    pub(super) fn actions(&self) -> &BTreeMap<PhysicalAddress, ParentAction> {
         &self.actions
     }
 
     pub(super) fn into_compactions(mut self) -> Self {
         self.actions
-            .retain(|_, action| matches!(action, ParentDisposition::Compact(_)));
+            .retain(|_, action| matches!(action, ParentAction::Compact(_)));
         self
     }
 
@@ -129,7 +128,7 @@ impl MemberDecisions {
             if let Some(retirement) = parent.retirement(dispositions, prospective) {
                 self.actions.insert(
                     address,
-                    ParentDisposition::Retire(ParentRetirement::from_session(retirement)),
+                    ParentAction::Retire(ParentRetirement::from_session(retirement)),
                 );
             }
         }
@@ -138,13 +137,10 @@ impl MemberDecisions {
 
 /// An exclusive prepared action for one global heap parent.
 ///
-/// The planner stores one disposition per physical parent. Publication, allocation release, and
-/// changes to storage protection require separate checks.
-pub(in crate::edit::commit) enum ParentDisposition {
+/// Publication, allocation release, and changes to storage protection require separate checks.
+pub(in crate::edit::commit) enum ParentAction {
     /// A checked compaction plan for selected obsolete members.
     Compact(GlobalHeapCompaction),
-    /// The original allocation is preserved without member mutation.
-    Retain,
     /// Original whole-parent retirement evidence with matching source and session associations.
     Retire(ParentRetirement),
 }
