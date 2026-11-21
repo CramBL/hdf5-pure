@@ -989,11 +989,6 @@ impl WriteEngine {
                 );
                 let address = base.relative(reservation.range().start())?;
                 let bytes = index.build_at(widths, &combined, chunk_bytes, has_filters, address)?;
-                #[cfg(test)]
-                {
-                    super::observations::record_index_encoding();
-                    super::observations::record_index(bytes.len(), bytes.capacity());
-                }
                 plan.write_next(&bytes)?;
                 address
             } else {
@@ -1414,8 +1409,6 @@ impl WriteEngine {
         };
         let reuse = self.fresh_page_boundary.is_none()
             && if paged {
-                #[cfg(test)]
-                super::observations::record_raw_capacity_scan();
                 self.space.largest(AllocationClass::Raw) > ByteLength::new(0)
             } else {
                 self.space.reusable_sections().next().is_some()
