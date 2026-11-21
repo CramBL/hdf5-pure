@@ -5,7 +5,7 @@ use std::path::Path;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
-use test_util::disk_log;
+use test_util::disk_log::{self, DiskOp, IoEvent};
 
 use super::ZERO_BATCH_BYTES;
 use crate::error::{Error, FormatError};
@@ -36,6 +36,7 @@ fn zero_ranges_preserve_contents_lengths_and_visibility(
         .set_write_buffering(buffering.mode(2 * ZERO_BATCH_BYTES))
         .unwrap();
     assert_eq!(image.read_metadata(0, 32).unwrap().as_ref(), &[7; 32]);
+    disk_log::start();
     image.write_at(0, &[9]).unwrap();
     let start = if append { initial.len() } else { 16 };
     image
@@ -52,17 +53,17 @@ fn zero_ranges_preserve_contents_lengths_and_visibility(
         &expected[..32]
     );
     let before = image.disk_bytes().unwrap();
-    if matches!(buffering, Buffering::Unbuffered) || length >= 2 * ZERO_BATCH_BYTES {
+    let issued = disk_log::take();
+    let direct = matches!(buffering, Buffering::Unbuffered) || length >= 2 * ZERO_BATCH_BYTES;
+    if direct {
         assert_eq!(before, expected);
-        assert_eq!(image.buffering_work().pending_bytes, 0);
-        assert_eq!(
-            image.buffering_work().write_calls,
-            1 + length.div_ceil(ZERO_BATCH_BYTES) as u64
-        );
+        assert_eq!(issued.len(), 1 + length.div_ceil(ZERO_BATCH_BYTES));
     } else {
         assert_eq!(before, initial);
-        assert!(image.buffering_work().pending_bytes > 0);
+        assert!(issued.is_empty());
     }
+
+    disk_log::start();
     image.ordering_barrier().unwrap();
     if matches!(buffering, Buffering::Session) {
         assert_eq!(image.disk_bytes().unwrap(), before);
@@ -71,26 +72,22 @@ fn zero_ranges_preserve_contents_lengths_and_visibility(
     }
     image.flush().unwrap();
     assert_eq!(image.disk_bytes().unwrap(), expected);
-    let work = image.buffering_work();
-    assert_eq!(work.pending_bytes, 0);
+    let writes = disk_log::take();
+    if direct {
+        assert!(writes.is_empty());
+    } else {
+        let end = if length == 0 { 1 } else { start + length };
+        assert_eq!(
+            writes,
+            [DiskOp::Write {
+                offset: 0,
+                bytes: expected[..end].to_vec()
+            }]
+        );
+    }
     assert_eq!(
-        work.clean_gap_bytes,
-        if length > 0
-            && length < 2 * ZERO_BATCH_BYTES
-            && !matches!(buffering, Buffering::Unbuffered)
-        {
-            (start - 1) as u64
-        } else {
-            0
-        }
-    );
-    assert_eq!(
-        work.mirror_bytes,
-        if matches!(backing, Backing::Mirrored) {
-            expected.len() as u64
-        } else {
-            0
-        }
+        image.as_slice().map(|mirror| mirror.len()),
+        matches!(backing, Backing::Mirrored).then_some(expected.len())
     );
     drop(image);
     assert_eq!(fs::read(&path).unwrap(), expected);
@@ -107,6 +104,7 @@ fn zero_ranges_reject_growth_outside_append(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("bounds.bin");
     let mut image = image(&path, &[7; 16], backing);
+    disk_log::start();
     let error = image.fill_zeros(range(start, length)).unwrap_err();
     assert!(
         matches!(error, Error::Format(FormatError::UnexpectedSourceEof { expected, available: 16 }) if expected == start + length),
@@ -114,7 +112,7 @@ fn zero_ranges_reject_growth_outside_append(
     );
     assert_eq!(image.len(), 16);
     assert_eq!(image.disk_bytes().unwrap(), [7; 16]);
-    assert_eq!(image.buffering_work().write_calls, 0);
+    assert!(disk_log::take().is_empty());
     drop(image);
 }
 
@@ -191,6 +189,7 @@ fn zero_failure_keeps_successful_prefix_progress(
         .set_write_buffering(buffering.mode(ZERO_BATCH_BYTES * 2))
         .unwrap();
     let start = if append { initial.len() } else { 0 };
+    disk_log::start();
     disk_log::fail_write_after(1, prefix);
     let error = image
         .fill_zeros(range(start as u64, 3 * ZERO_BATCH_BYTES as u64))
@@ -200,8 +199,25 @@ fn zero_failure_keeps_successful_prefix_progress(
         image.len(),
         (initial.len() + if append { ZERO_BATCH_BYTES } else { 0 }) as u64
     );
-    assert_eq!(image.buffering_work().write_calls, 1);
-    assert_eq!(image.buffering_work().pending_bytes, 0);
+    let issued = disk_log::finish();
+    assert_eq!(
+        issued
+            .events
+            .iter()
+            .filter(|event| matches!(event, IoEvent::Write { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        issued.operations[0],
+        DiskOp::Write {
+            offset: start as u64,
+            bytes: vec![0; ZERO_BATCH_BYTES]
+        }
+    );
+    disk_log::start();
+    image.flush().unwrap();
+    assert!(disk_log::take().is_empty());
     let mut expected = initial;
     let written = ZERO_BATCH_BYTES + prefix.min(ZERO_BATCH_BYTES);
     expected.resize(expected.len().max(start + written), 0);
@@ -224,7 +240,7 @@ fn zero_failure_keeps_successful_prefix_progress(
 #[rstest]
 #[case::bounded(Backing::Bounded)]
 #[case::mirrored(Backing::Mirrored)]
-fn zero_batches_record_one_explicit_pending_copy_per_byte(#[case] backing: Backing) {
+fn buffered_zero_rewrites_issue_one_contiguous_run(#[case] backing: Backing) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("copies.bin");
     let mut image = image(&path, &[], backing);
@@ -233,26 +249,35 @@ fn zero_batches_record_one_explicit_pending_copy_per_byte(#[case] backing: Backi
         .set_write_buffering(Buffering::Session.mode(length * 2))
         .unwrap();
     image.fill_zeros(range(0, length as u64)).unwrap();
-    let extended = image.buffering_work();
-    assert_eq!(extended.pending_runs, 1);
-    assert_eq!(extended.pending_bytes, length as u64);
-    assert!(extended.pending_capacity >= length as u64);
-    assert_eq!(extended.copied_bytes, length as u64);
-    assert_eq!(extended.write_calls, 0);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let region = format!("buffered_zero_rewrite_{backing:?}");
+        let ((), rewrite) = test_util::allocation::measure(&region, || {
+            image.fill_zeros(range(1, (length - 2) as u64)).unwrap();
+        });
+        assert!(rewrite.bytes <= 2 * ZERO_BATCH_BYTES as u64, "{rewrite}");
+        assert!(rewrite.live_bytes < ZERO_BATCH_BYTES as u64, "{rewrite}");
+        let (control, copy) =
+            test_util::allocation::measure(&format!("{region}_control"), || vec![0_u8; length]);
+        assert_eq!(control.len(), length);
+        assert!(copy.peak_bytes >= length as u64);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     image.fill_zeros(range(1, (length - 2) as u64)).unwrap();
-    let contained = image.buffering_work();
-    assert_eq!(contained.pending_runs, 1);
-    assert_eq!(contained.copied_bytes, (2 * length - 2) as u64);
-    assert_eq!(contained.pending_capacity, extended.pending_capacity);
+
+    assert!(image.disk_bytes().unwrap().is_empty());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let region = format!("buffered_zero_flush_{backing:?}");
+        let ((), flushed) = test_util::allocation::measure(&region, || image.flush().unwrap());
+        assert!(flushed.peak_bytes < ZERO_BATCH_BYTES as u64, "{flushed}");
+        assert!(flushed.live_bytes < ZERO_BATCH_BYTES as u64, "{flushed}");
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     image.flush().unwrap();
-    let flushed = image.buffering_work();
-    assert_eq!(flushed.write_calls, 1);
-    assert_eq!(flushed.write_bytes, length as u64);
-    assert_eq!(flushed.copied_bytes, contained.copied_bytes);
-    assert_eq!(flushed.clean_gap_bytes, 0);
-    assert_eq!(flushed.flush_peak_bytes, length as u64);
-    assert_eq!(image.read_exact_at(0, length).unwrap(), vec![0; length]);
+    assert_eq!(image.issued_write_order(), [(0, length as u64)]);
     drop(image);
+    assert_eq!(fs::read(&path).unwrap(), vec![0; length]);
 }
 
 #[rstest]
@@ -266,11 +291,17 @@ fn empty_zero_ranges_leave_pending_writes_unchanged(#[case] backing: Backing) {
         .set_write_buffering(Buffering::Session.mode(32))
         .unwrap();
     image.write_at(0, &[9]).unwrap();
-    let before = image.buffering_work();
     image.fill_zeros(range(u64::MAX, 0)).unwrap();
-    assert_eq!(image.buffering_work(), before);
     assert_eq!(image.disk_bytes().unwrap(), [7; 16]);
-    image.discard_pending_writes();
+    disk_log::start();
+    image.flush().unwrap();
+    assert_eq!(
+        disk_log::take(),
+        [DiskOp::Write {
+            offset: 0,
+            bytes: vec![9]
+        }]
+    );
     drop(image);
 }
 
@@ -290,15 +321,21 @@ fn failed_zero_flush_keeps_pending_ownership(
     disk_log::fail_write_after(0, prefix);
     assert_injected(image.flush().unwrap_err(), "injected disk write failure");
     assert_eq!(image.len(), 32);
-    assert_eq!(image.buffering_work().pending_bytes, 16);
     assert_eq!(image.read_exact_at(8, 16).unwrap(), [0; 16]);
     let mut expected = vec![7; 32];
     expected[8..8 + prefix].fill(0);
     assert_eq!(image.disk_bytes().unwrap(), expected);
+    disk_log::start();
     image.flush().unwrap();
+    assert_eq!(
+        disk_log::take(),
+        [DiskOp::Write {
+            offset: 8,
+            bytes: vec![0; 16]
+        }]
+    );
     expected[8..24].fill(0);
     assert_eq!(image.disk_bytes().unwrap(), expected);
-    assert_eq!(image.buffering_work().pending_bytes, 0);
     drop(image);
     assert_eq!(fs::read(&path).unwrap(), expected);
 }

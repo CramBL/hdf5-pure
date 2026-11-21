@@ -767,7 +767,7 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
             }
         })
         .unwrap();
-    let before = engine.image.buffering_work();
+    disk_log::start();
     let initial_len = engine.image.len();
     let root = engine
         .context
@@ -777,10 +777,21 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
     engine
         .commit_persisting(root, ReturnedExtents::default(), TailPlacement::Anywhere)
         .unwrap();
-    let pending = engine.image.buffering_work();
-    assert!(pending.pending_bytes <= 65_536);
+    let before_flush = disk_log::take();
+    disk_log::start();
     engine.image.flush().unwrap();
-    let after = engine.image.buffering_work();
+    let after_flush = disk_log::take();
+    let flush_bytes = |operations: &[DiskOp]| {
+        operations
+            .iter()
+            .map(|operation| match operation {
+                DiskOp::Write { bytes, .. } => bytes.len() as u64,
+                DiskOp::SetLen(_) => 0,
+            })
+            .sum::<u64>()
+    };
+    let final_flush_bytes = flush_bytes(&after_flush);
+    assert!(final_flush_bytes <= 65_536);
     let (chunks, mut owned) = persistence_allocations(&engine);
     assert!(chunks.len() > 1);
     let list = owned
@@ -788,9 +799,6 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
         .find(|block| block.len() > ByteLength::new(65_536))
         .unwrap();
     assert!(chunks.iter().any(|chunk| chunk.start() >= list.end()));
-    assert_eq!(after.clean_gap_calls - before.clean_gap_calls, 0);
-    assert_eq!(after.clean_gap_bytes - before.clean_gap_bytes, 0);
-    assert!(after.flush_peak_bytes <= 65_536);
     let end = engine.image.len();
     let appended = end - initial_len;
     owned.sort_unstable_by_key(|block| block.start());
@@ -811,17 +819,14 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
     assert!(padding > 0);
     let owned_bytes = owned.iter().map(|block| block.len().get()).sum::<u64>();
     assert_eq!(appended, owned_bytes + padding);
-    assert!(after.write_bytes - before.write_bytes >= appended);
-    assert!(after.write_bytes - before.write_bytes <= appended + 4_096);
-    assert!(after.copied_bytes - before.copied_bytes <= 2 * appended);
-    assert!(after.copied_bytes > before.copied_bytes);
-    match memory {
-        MemoryStrategy::Bounded => assert_eq!(after.mirror_bytes, 0),
-        MemoryStrategy::Mirrored => assert_eq!(after.mirror_bytes, engine.image.len()),
-        MemoryStrategy::Auto => panic!("the case must select an explicit backing"),
-    }
-    eprintln!(
-        "{memory:?} session={session}: appended={appended}, owned={owned_bytes}, padding={padding}, work={after:?}, before={before:?}"
+    let written = flush_bytes(&before_flush) + final_flush_bytes;
+    assert!(
+        (appended..=appended + 4_096).contains(&written),
+        "{written}"
+    );
+    assert_eq!(
+        engine.image.as_slice().map(|mirror| mirror.len() as u64),
+        (memory == MemoryStrategy::Mirrored).then_some(end)
     );
     assert_manager_allocations_owned(&engine);
 }

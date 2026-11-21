@@ -5,6 +5,7 @@ use hdf5_pure_space::__private::{
     AllocationClass, Extent, PageType, ReservationRequest, SessionSpace,
 };
 use rstest::rstest;
+use test_util::disk_log::{self, DiskOp};
 use test_util::snapshot::text::{Report, Value};
 
 use crate::address::{StoredAddress, StoredAddressExt};
@@ -80,7 +81,7 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
         .image()
         .read_exact_at(0, usize::try_from(original_len).unwrap())
         .unwrap();
-    let before = engine.image.buffering_work();
+    disk_log::start();
     let requests = [
         request(64, 16, PageType::Raw),
         request(48, 48, PageType::Meta),
@@ -140,7 +141,13 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
         assert_eq!(engine.space.reusable_bytes().unwrap(), ByteLength::new(64));
     }
     engine.image.flush().unwrap();
-    let after = engine.image.buffering_work();
+    let writes: Vec<_> = disk_log::take()
+        .into_iter()
+        .map(|operation| match operation {
+            DiskOp::Write { offset, bytes } => (offset, bytes.len() as u64),
+            DiskOp::SetLen(_) => panic!("reservation emission unexpectedly resized the file"),
+        })
+        .collect();
     let projection =
         ManagerProjection::new(engine.space.admitted_snapshot(), engine.widths()).unwrap();
     let manager_work = projection.work();
@@ -247,27 +254,12 @@ fn foundation_reservations_preserve_capacity_geometry_and_contents(
             ),
         ],
     );
-    report.metrics(
-        "Image I/O",
-        "Value",
-        [
-            (
-                "Issued writes (calls)",
-                after.write_calls - before.write_calls,
-            ),
-            (
-                "Issued writes (bytes)",
-                after.write_bytes - before.write_bytes,
-            ),
-            (
-                "Clean-gap reads (bytes)",
-                after.clean_gap_bytes - before.clean_gap_bytes,
-            ),
-            (
-                "Explicit buffer copies (bytes)",
-                after.copied_bytes - before.copied_bytes,
-            ),
-        ],
+    report.table(
+        "Issued writes",
+        ["Physical address", "Bytes"],
+        writes
+            .iter()
+            .map(|&(offset, length)| [Value::Number(offset), Value::Number(length)]),
     );
     let report = report.finish();
     drop(engine);
