@@ -769,7 +769,6 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
         .unwrap();
     let before = engine.image.buffering_work();
     let initial_len = engine.image.len();
-    crate::edit::observations::reset_zeros();
     let root = engine
         .context
         .addresses()
@@ -782,23 +781,36 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
     assert!(pending.pending_bytes <= 65_536);
     engine.image.flush().unwrap();
     let after = engine.image.buffering_work();
-    let zeros = crate::edit::observations::zero_work();
-    let (chunks, owned) = persistence_allocations(&engine);
+    let (chunks, mut owned) = persistence_allocations(&engine);
     assert!(chunks.len() > 1);
     let list = owned
         .iter()
         .find(|block| block.len() > ByteLength::new(65_536))
         .unwrap();
     assert!(chunks.iter().any(|chunk| chunk.start() >= list.end()));
-    assert!(zeros.bytes > 0);
-    assert!(zeros.scratch_peak > 0);
-    assert!(zeros.scratch_peak <= 65_536);
     assert_eq!(after.clean_gap_calls - before.clean_gap_calls, 0);
     assert_eq!(after.clean_gap_bytes - before.clean_gap_bytes, 0);
     assert!(after.flush_peak_bytes <= 65_536);
-    let appended = engine.image.len() - initial_len;
+    let end = engine.image.len();
+    let appended = end - initial_len;
+    owned.sort_unstable_by_key(|block| block.start());
+    let stored = issued_bytes(&engine);
+    let mut cursor = initial_len;
+    let mut padding = 0;
+    for (start, next) in owned
+        .iter()
+        .map(|block| (block.start().get(), block.end().get()))
+        .chain(std::iter::once((end, end)))
+    {
+        assert!(cursor <= start, "{cursor}..{start}");
+        let gap = &stored[usize::try_from(cursor).unwrap()..usize::try_from(start).unwrap()];
+        assert!(gap.iter().all(|&byte| byte == 0), "{cursor}..{start}");
+        padding += start - cursor;
+        cursor = next;
+    }
+    assert!(padding > 0);
     let owned_bytes = owned.iter().map(|block| block.len().get()).sum::<u64>();
-    assert_eq!(appended, owned_bytes + zeros.bytes);
+    assert_eq!(appended, owned_bytes + padding);
     assert!(after.write_bytes - before.write_bytes >= appended);
     assert!(after.write_bytes - before.write_bytes <= appended + 4_096);
     assert!(after.copied_bytes - before.copied_bytes <= 2 * appended);
@@ -809,7 +821,7 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
         MemoryStrategy::Auto => panic!("the case must select an explicit backing"),
     }
     eprintln!(
-        "{memory:?} session={session}: appended={appended}, owned={owned_bytes}, zeros={zeros:?}, work={after:?}, before={before:?}"
+        "{memory:?} session={session}: appended={appended}, owned={owned_bytes}, padding={padding}, work={after:?}, before={before:?}"
     );
     assert_manager_allocations_owned(&engine);
 }

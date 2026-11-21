@@ -9,7 +9,6 @@ use test_util_hdf5::dataset::FiniteChunkIndex;
 
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::WriteEngine;
-use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
@@ -89,19 +88,15 @@ mod growth;
 mod initialization;
 
 #[rstest]
-fn raw_fallback_prepares_the_chosen_address_before_bounded_padding(
-    #[values(0, 262_144)] base: u64,
-) {
+fn raw_fallback_pads_to_the_prepared_address(#[values(0, 262_144)] base: u64) {
     let (_directory, mut engine) = engine(base);
     let start = engine.image.len();
     let address = PhysicalAddress::new(start + PAGE - 19);
-    observations::reset_zeros();
     assert_eq!(
         engine
             .store()
             .append_into_raw_page(0, |at| {
                 assert_eq!(at, address);
-                assert_eq!(observations::zero_work(), ZeroWork::default());
                 Ok(Vec::<u8>::new())
             })
             .unwrap(),
@@ -120,14 +115,6 @@ fn raw_fallback_prepares_the_chosen_address_before_bounded_padding(
             .unwrap(),
         vec![0; (PAGE - 19) as usize]
     );
-    assert_eq!(
-        observations::zero_work(),
-        ZeroWork {
-            calls: 1,
-            bytes: PAGE - 19,
-            scratch_peak: 65_536
-        }
-    );
 }
 
 #[rstest]
@@ -141,7 +128,7 @@ fn raw_fallback_without_a_gap_emits_no_zeros(#[case] same_type: bool) {
         engine.pad_to_page().unwrap();
     }
     let start = engine.image.len();
-    observations::reset_zeros();
+    disk_log::start();
     assert_eq!(
         engine
             .store()
@@ -152,8 +139,8 @@ fn raw_fallback_without_a_gap_emits_no_zeros(#[case] same_type: bool) {
             .unwrap(),
         start
     );
+    assert!(disk_log::take().is_empty());
     assert_eq!(engine.image.len(), start);
-    assert_eq!(observations::zero_work(), ZeroWork::default());
     assert_eq!(engine.space.paged_tail_type(), Some(Some(PageType::Raw)));
 }
 
@@ -163,7 +150,7 @@ fn raw_fallback_without_a_gap_emits_no_zeros(#[case] same_type: bool) {
 fn raw_fallback_preparation_errors_precede_padding(#[case] length: bool) {
     let (_directory, mut engine) = engine(PAGE);
     let start = engine.image.len();
-    observations::reset_zeros();
+    disk_log::start();
     let error = engine
         .store()
         .append_into_raw_page(0, |at| {
@@ -179,18 +166,15 @@ fn raw_fallback_preparation_errors_precede_padding(#[case] length: bool) {
         matches!(&error, Error::Format(FormatError::Internal(reason)) if reason == if length { "prepared allocation length differs from its reservation" } else { "injected preparation error" }),
         "{error:?}"
     );
+    assert!(disk_log::take().is_empty());
     assert_eq!(engine.image.len(), start);
     assert_eq!(engine.space.paged_tail_type(), Some(Some(PageType::Meta)));
     assert_eq!(engine.space.pending_padding(PageType::Meta).unwrap(), []);
-    assert_eq!(observations::zero_work(), ZeroWork::default());
 }
 
 #[test]
 fn raw_fallback_partial_padding_keeps_the_outgoing_page_class() {
     let (_directory, mut engine) = engine(PAGE);
-    engine
-        .set_write_buffering(WriteBuffering::Unbuffered)
-        .unwrap();
     let start = engine.image.len();
     disk_log::fail_write_after(1, 7);
     let error = engine
@@ -229,6 +213,9 @@ fn engine(base: u64) -> (tempfile::TempDir, WriteEngine) {
     );
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
     engine.space =
         SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), ByteLength::new(1), page);
     engine
