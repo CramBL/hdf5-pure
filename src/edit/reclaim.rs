@@ -87,11 +87,6 @@ impl ExclusiveChunkOwners {
         }
         Ok(())
     }
-
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.headers.len()
-    }
 }
 
 impl WriteEngine {
@@ -113,8 +108,6 @@ impl WriteEngine {
     /// Returns [`Error::AppendUnsupported`] if analysis is incomplete. Propagates the metadata,
     /// geometry, and overlap errors of [`Self::checked_ownership`].
     pub(super) fn exclusive_chunk_owners(&self) -> Result<ExclusiveChunkOwners, Error> {
-        #[cfg(test)]
-        super::observations::record_chunk_ownership_analysis();
         let mut headers = BTreeSet::new();
         if !self.checked_ownership(Some(&mut headers))? {
             return Err(Error::AppendUnsupported(

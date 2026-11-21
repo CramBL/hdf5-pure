@@ -1,35 +1,23 @@
 //! Allocation and I/O bounds for complete creation operations and repeated edits.
 
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use hdf5_pure_core::__private::ByteLength;
 use rstest::rstest;
 use test_util::allocation;
+use test_util::disk_log::{self, IoEvent};
 use test_util_hdf5::file_space::chunk_holes;
 use test_util_hdf5::file_space::persisted::PersistedStrategy;
 
-use crate::File;
-use crate::FileBuilder;
-use crate::FileLocking;
-use crate::FileSpaceSettings;
-use crate::FileSpaceStrategy;
-use crate::MemoryStrategy;
-use crate::PersistedFreeSpacePolicy;
-use crate::SyncPolicy;
 use crate::dataspace::MaxExtent;
 use crate::edit::WriteEngine;
-use crate::edit::observations;
-use crate::edit::observations::CreationWork;
-use crate::free_space_manager::ManagerProjection;
-use crate::image::CountingImage;
-use crate::image::FileImage;
-use crate::image::HandleImage;
-use crate::image::WriteBuffering;
-use crate::object_path::ObjectPathBuf;
-use crate::source::MetadataCacheConfig;
-use crate::type_builders::DatasetBuilder;
+use crate::image::{CountingImage, FileImage, HandleImage, MirrorImage, WriteBuffering};
+use crate::{
+    ChunkIndex, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceSettings,
+    FileSpaceStrategy, MemoryStrategy, MetadataCacheConfig, PersistedFreeSpacePolicy, SyncPolicy,
+};
 
 #[rstest]
 #[case::small_unbuffered(128, 0)]
@@ -38,7 +26,7 @@ use crate::type_builders::DatasetBuilder;
 #[case::large_gathered(512, 8_192)]
 #[case::small_default(128, crate::edit::WRITE_GATHER_BYTES)]
 #[case::large_default(512, crate::edit::WRITE_GATHER_BYTES)]
-fn fragmented_creation_bounds_complete_operation_storage_and_work(
+fn fragmented_creation_bounds_complete_operation_storage_and_io(
     #[case] count: usize,
     #[case] budget: usize,
     #[values(false, true)] paged: bool,
@@ -46,6 +34,7 @@ fn fragmented_creation_bounds_complete_operation_storage_and_work(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("resources.h5");
+    let trace_path = directory.path().join("trace.h5");
     let payload = count * 16_384;
     let hole_size = payload / 8;
     let mut builder = FileBuilder::new();
@@ -66,171 +55,107 @@ fn fragmented_creation_bounds_complete_operation_storage_and_work(
             .with_u8_data(&[31; 4_096]);
     }
     builder.write(&path).unwrap();
-    let read_bytes = Arc::new(AtomicU64::new(0));
-    let read_calls = Arc::new(AtomicU64::new(0));
-    let syncs = Arc::new(AtomicU64::new(0));
-    let mut engine = WriteEngine::open_prepared(
-        &path,
-        Some(FileLocking::Enabled),
-        PersistedFreeSpacePolicy::Tolerant,
-        |handle, length| {
-            let image: Box<dyn FileImage> = if backing == MemoryStrategy::Mirrored {
-                Box::new(WriteEngine::read_mirror(handle)?)
-            } else {
-                Box::new(HandleImage::new(
-                    handle,
-                    length,
-                    MetadataCacheConfig::disabled(),
-                ))
-            };
-            Ok(Box::new(
-                CountingImage::new(image, read_bytes.clone(), syncs.clone())
-                    .with_read_calls(read_calls.clone()),
-            ))
-        },
-    )
-    .unwrap()
-    .into_engine();
-    engine.batched_appends = true;
-    engine.bounded = backing == MemoryStrategy::Bounded;
-    engine.sync_policy = SyncPolicy::OnClose;
+    let file = File::open_rw(&path).unwrap();
     for index in 0..16 {
-        engine
-            .delete(&ObjectPathBuf::parse(&format!("scratch{index}")))
-            .unwrap();
+        file.root().delete(&format!("scratch{index}")).unwrap();
     }
-    engine.commit().unwrap();
-    engine
-        .set_write_buffering(if budget == 0 {
-            WriteBuffering::Unbuffered
-        } else {
-            WriteBuffering::Operation {
-                page_size: 4_096,
-                max_bytes: budget,
-            }
-        })
-        .unwrap();
-    let available = engine
-        .space
-        .reusable_sections()
-        .map(|extent| (extent.start().get(), extent.len().get()))
-        .collect::<Vec<_>>();
-    assert!(available.iter().all(|&(_, length)| length < payload as u64));
-    assert!(available.iter().map(|&(_, length)| length).sum::<u64>() >= payload as u64);
-    let initial_size = engine.image.len();
-    let before = engine.image.buffering_work();
-    read_bytes.store(0, Ordering::Relaxed);
-    read_calls.store(0, Ordering::Relaxed);
-    syncs.store(0, Ordering::Relaxed);
+    file.commit().unwrap();
+    file.close().unwrap();
+    std::fs::copy(&path, &trace_path).unwrap();
+
     let expected = (0..payload)
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
-    observations::reset_creation();
-    let ((), measured) = allocation::measure(
-        &format!("fragmented_operation_{count}_{budget}_{paged}_{backing:?}"),
-        || {
-            let mut dataset = DatasetBuilder::new("replacement");
-            dataset
-                .with_u8_data(&expected)
-                .with_chunks(&[16_384])
-                .with_maxshape(&[MaxExtent::Unlimited]);
-            engine
-                .stage_created_dataset(&ObjectPathBuf::parse("replacement"), dataset)
-                .unwrap();
-            engine.commit().unwrap();
-            engine.image.ordering_barrier().unwrap();
-        },
-    );
-    let observed = observations::creation_work();
-    let after = engine.image.buffering_work();
-    let CreationWork {
-        chunks,
-        filtered_chunks,
-        prepared_bytes,
-        prepared_capacity,
-        index_encodings,
-        index_bytes,
-        index_capacity,
-        preferred_probes,
-        raw_capacity_scans,
-        scalar_requests,
-        requests,
-    } = observed;
-    assert_eq!(chunks, count as u64);
-    assert_eq!(filtered_chunks, 0);
-    assert_eq!(prepared_bytes, payload as u64);
-    assert_eq!(prepared_capacity, payload as u64);
-    assert_eq!(index_encodings, 1);
-    assert!(index_bytes > count as u64 * 8);
-    assert!(index_capacity >= index_bytes);
-    assert_eq!(preferred_probes, 1);
-    assert_eq!(raw_capacity_scans, u64::from(paged));
-    eprintln!("complete operation {observed:?}");
-    assert!(requests <= count as u64 + 32);
-    assert!(scalar_requests <= 16);
-    let metadata_budget =
-        (count * 1_024 + available.len() * 2_048 + 262_144) as u64 + index_capacity * 4;
-    let read_bytes = read_bytes.load(Ordering::Relaxed);
-    let read_calls = read_calls.load(Ordering::Relaxed);
-    let syncs = syncs.load(Ordering::Relaxed);
-    assert!(read_bytes <= metadata_budget);
-    assert!(read_calls <= available.len() as u64 * 16 + 128);
-    assert!(syncs <= 2);
-    let mirror_growth = after.mirror_capacity.saturating_sub(before.mirror_capacity);
-    let bound =
-        payload as u64 + prepared_capacity + metadata_budget + (2 * budget) as u64 + mirror_growth;
+    let (file, reads) = open_counted(&path, budget, backing);
+    let available = file.reusable_free_sections().unwrap();
     assert!(
-        measured.peak_bytes <= bound,
-        "{measured}; bound={bound}, {observed:?}"
+        available
+            .sections()
+            .iter()
+            .all(|section| section.length().get() < payload as u64)
     );
-    let (control, assembled) = allocation::measure(
-        &format!("fragmented_assembly_control_{count}_{budget}_{paged}_{backing:?}"),
-        || expected.clone(),
+    assert!(available.free_bytes() >= payload as u64);
+    let initial_size = file.file_size();
+    let available_sections = available.section_count() as u64;
+    let metadata_budget = count as u64 * 1_088 + available_sections * 2_048 + 262_144;
+    reads.bytes.store(0, Ordering::Relaxed);
+    reads.calls.store(0, Ordering::Relaxed);
+    let region = format!("fragmented_operation_{count}_{budget}_{paged}_{backing:?}");
+    let ((), measured) = allocation::measure(&region, || create_replacement(&file, &expected));
+    let read_bytes = reads.bytes.load(Ordering::Relaxed);
+    let read_calls = reads.calls.load(Ordering::Relaxed);
+    assert!((1..=metadata_budget).contains(&read_bytes), "{read_bytes}");
+    assert!(
+        (1..=available_sections * 16 + 128).contains(&read_calls),
+        "{read_calls}"
     );
+
+    let bound = payload as u64 * 2 + metadata_budget + (2 * budget) as u64;
+    assert!(measured.peak_bytes <= bound, "{measured}; bound={bound}");
+    let (control, assembled) =
+        allocation::measure(&format!("{region}_assembly_control"), || expected.clone());
     assert_eq!(control, expected);
     assert_eq!(assembled.live_bytes, payload as u64);
     if budget <= 8_192 || payload >= 8 * 1_024 * 1_024 {
-        assert!(metadata_budget + (2 * budget) as u64 + mirror_growth < assembled.live_bytes / 2);
+        assert!(metadata_budget + ((2 * budget) as u64) < assembled.live_bytes / 2);
     }
-    assert_eq!(after.pending_bytes, 0);
-    assert!(after.flush_peak_capacity <= (budget * 2 + 65_536) as u64);
-    assert!(after.copied_bytes - before.copied_bytes <= payload as u64 * 3 + metadata_budget);
-    let writes = &engine.image.issued_write_order()[before.write_calls as usize..];
+
+    let growth = file.file_size().saturating_sub(initial_size);
+    assert!(growth < metadata_budget + 65_536);
+    file.close().unwrap();
+
+    // Recording keeps copies of the writes. Use the same fixture in a separate run, outside
+    // the allocation interval.
+    let (file, _) = open_counted(&trace_path, budget, backing);
+    assert_eq!(available, file.reusable_free_sections().unwrap());
+    disk_log::start();
+    create_replacement(&file, &expected);
+    let recording = disk_log::finish();
+    let writes = completed_writes(&recording.events);
     assert_eq!(writes.iter().filter(|&&(start, _)| start == 0).count(), 1);
-    assert!(writes.len() <= count + 64);
+    assert!((2..=count + 64).contains(&writes.len()), "{}", writes.len());
     if budget >= 16_384 {
-        assert!(writes.len() <= payload.div_ceil(budget.min(hole_size)) + 32);
-        assert!(after.copied_bytes - before.copied_bytes >= payload as u64);
+        assert!(
+            writes.len() <= payload.div_ceil(budget.min(hole_size)) + 32,
+            "{}",
+            writes.len()
+        );
     } else {
         assert!(writes.len() >= count);
-        if budget == 0 {
-            assert_eq!(after.copied_bytes, before.copied_bytes);
-        }
     }
-    assert!(writes.len() > 1);
-    let manager = ManagerProjection::new(engine.space.admitted_snapshot(), engine.widths())
-        .unwrap()
-        .work();
-    assert!(manager.sections <= available.len() as u64 + 64);
-    assert!(manager.section_capacity <= (available.len() as u64 + 64) * 4);
-    assert!(engine.image.len().saturating_sub(initial_size) < metadata_budget + 65_536);
-    eprintln!(
-        "count={count} budget={budget} paged={paged} backend={backing:?} raw_input={payload} image_read_bytes={read_bytes} image_read_calls={read_calls} syncs={syncs} initial_mirror={before:?} final_mirror_and_io={after:?} observation={observed:?} manager={manager:?} growth={} heap={measured} positive_control={assembled}",
-        engine.image.len().saturating_sub(initial_size)
+    let written = writes.iter().map(|&(_, length)| length).sum::<u64>();
+    assert!(
+        (payload as u64..=payload as u64 + metadata_budget).contains(&written),
+        "{written}"
     );
-    drop(engine);
+    assert!(
+        recording
+            .events
+            .iter()
+            .filter(|event| matches!(event, IoEvent::Synchronize { .. }))
+            .count()
+            <= 2
+    );
+    file.close().unwrap();
+
     let file = File::open(&path).unwrap();
+    let persisted = file.persisted_free_sections().unwrap().unwrap();
+    assert!(persisted.free_sections().section_count() as u64 <= available_sections + 64);
+    assert!(persisted.manager_metadata_bytes() <= 4_096 + (available_sections + 64) * 128);
     let created = file.dataset("replacement").unwrap();
     assert_eq!(created.read_u8().unwrap(), expected);
+    assert_eq!(
+        created.chunk_index().unwrap(),
+        Some(ChunkIndex::ExtensibleArray)
+    );
     let chunks = created.chunks().unwrap();
     assert_eq!(chunks.len(), count);
     for chunk in chunks {
-        assert!(
-            available
-                .iter()
-                .any(|&(start, length)| start <= chunk.address
-                    && chunk.address + chunk.storage_size <= start + length)
-        );
+        assert_eq!(chunk.storage_size, 16_384);
+        assert!(available.sections().iter().any(|section| {
+            section.address().get() <= chunk.address
+                && chunk.address + chunk.storage_size <= section.end_address().get()
+        }));
     }
     for index in 0..16 {
         assert_eq!(
@@ -245,12 +170,98 @@ fn fragmented_creation_bounds_complete_operation_storage_and_work(
     file.close().unwrap();
 }
 
+fn create_replacement(file: &File, contents: &[u8]) {
+    file.root()
+        .create_dataset("replacement", |dataset| {
+            dataset
+                .with_u8_data(contents)
+                .with_chunks(&[16_384])
+                .with_maxshape(&[MaxExtent::Unlimited]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.sync().unwrap();
+}
+
+fn completed_writes(events: &[IoEvent]) -> Vec<(u64, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            IoEvent::Write {
+                offset, written, ..
+            } if *written != 0 => Some((*offset, u64::try_from(*written).unwrap())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct Reads {
+    bytes: Arc<AtomicU64>,
+    calls: Arc<AtomicU64>,
+}
+
+fn open_counted(path: &Path, budget: usize, backing: MemoryStrategy) -> (File, Reads) {
+    let reads = Reads::default();
+    let mut engine = WriteEngine::open_prepared(
+        path,
+        Some(FileLocking::Enabled),
+        PersistedFreeSpacePolicy::Tolerant,
+        |mut handle, length| {
+            let image: Box<dyn FileImage> = if backing == MemoryStrategy::Mirrored {
+                use std::io::{Seek, SeekFrom};
+
+                handle.seek(SeekFrom::Start(0)).map_err(crate::Error::Io)?;
+                // Supply mirror capacity at setup so the allocation interval measures creation
+                // and buffering, independent of the mirror's growth policy.
+                let mut data = Vec::with_capacity(usize::try_from(length).unwrap() + 1_048_576);
+                handle.read_to_end(&mut data).map_err(crate::Error::Io)?;
+                Box::new(MirrorImage::new(handle, data))
+            } else {
+                Box::new(HandleImage::new(
+                    handle,
+                    length,
+                    MetadataCacheConfig::disabled(),
+                ))
+            };
+            Ok(Box::new(
+                CountingImage::new(image, reads.bytes.clone(), Arc::default())
+                    .with_read_calls(reads.calls.clone()),
+            ))
+        },
+    )
+    .unwrap()
+    .into_engine();
+    engine.batched_appends = true;
+    engine.bounded = backing == MemoryStrategy::Bounded;
+    engine.sync_policy = SyncPolicy::OnClose;
+    engine
+        .set_write_buffering(if budget == 0 {
+            WriteBuffering::Unbuffered
+        } else {
+            WriteBuffering::Operation {
+                page_size: 4_096,
+                max_bytes: budget,
+            }
+        })
+        .unwrap();
+    let file = File::from_test_edit_session(
+        engine,
+        FileAccessProperties::new()
+            .with_locking(FileLocking::Enabled)
+            .with_memory_strategy(backing)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    (file, reads)
+}
+
 #[rstest]
 #[case::empty(0, true)]
 #[case::single(1, true)]
 #[case::contiguous(8, true)]
 #[case::append_only(8, false)]
-fn creation_uses_scalar_reservations_for_small_and_contiguous_storage(
+fn small_creation_bounds_allocation_and_places_complete_chunks(
     #[case] count: usize,
     #[case] reuse: bool,
 ) {
@@ -270,132 +281,124 @@ fn creation_uses_scalar_reservations_for_small_and_contiguous_storage(
         .with_u8_data(&vec![13; 65_536]);
     builder.create_dataset("kept").with_u8_data(&[31; 1_024]);
     builder.write(&path).unwrap();
-    let mut engine = super::edit_test_util::open_engine(&path);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
+    )
+    .unwrap();
     if reuse {
-        engine.delete(&ObjectPathBuf::parse("scratch")).unwrap();
-        engine.commit().unwrap();
+        file.root().delete("scratch").unwrap();
+        file.commit().unwrap();
     }
+    let free = file.reusable_free_sections().unwrap();
+    let original_end = file.file_size();
     let expected = vec![17; count * 1_024];
-    observations::reset_creation();
-    let ((), measured) = allocation::measure(&format!("cheap_creation_{count}_{reuse}"), || {
-        let mut dataset = DatasetBuilder::new("d");
-        dataset.with_u8_data(&expected).with_chunks(&[1_024]);
-        engine
-            .stage_created_dataset(&ObjectPathBuf::parse("d"), dataset)
+    let region = format!("cheap_creation_{count}_{reuse}");
+    let ((), measured) = allocation::measure(&region, || {
+        file.root()
+            .create_dataset("d", |dataset| {
+                dataset.with_u8_data(&expected).with_chunks(&[1_024]);
+            })
             .unwrap();
-        engine.commit().unwrap();
+        file.commit().unwrap();
     });
-    let work = observations::creation_work();
-    let CreationWork {
-        chunks,
-        filtered_chunks: _,
-        prepared_bytes,
-        prepared_capacity,
-        index_encodings,
-        index_bytes: _,
-        index_capacity: _,
-        preferred_probes,
-        raw_capacity_scans,
-        scalar_requests: _,
-        requests: _,
-    } = work;
-    assert_eq!(chunks, count as u64);
-    assert_eq!(prepared_bytes, expected.len() as u64);
-    assert_eq!(prepared_capacity, expected.len() as u64);
-    assert_eq!(index_encodings, u64::from(count > 1));
-    assert_eq!(preferred_probes, u64::from(reuse && count > 1));
-    assert_eq!(raw_capacity_scans, 0);
-    eprintln!("count={count} reuse={reuse} operation={work:?} heap={measured}");
-    drop(engine);
-    let reopened = File::open(&path).unwrap();
-    assert_eq!(reopened.dataset("d").unwrap().read_u8().unwrap(), expected);
+    assert!(
+        (1..=32_768 + expected.len() as u64 * 2).contains(&measured.peak_bytes),
+        "{measured}"
+    );
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.read_u8().unwrap(), expected);
     assert_eq!(
-        reopened.dataset("kept").unwrap().read_u8().unwrap(),
+        dataset.chunk_index().unwrap(),
+        Some(if count != 1 {
+            ChunkIndex::FixedArray
+        } else {
+            ChunkIndex::SingleChunk
+        })
+    );
+    let chunks = dataset.chunks().unwrap();
+    assert_eq!(chunks.len(), count);
+    if reuse {
+        for adjacent in chunks.windows(2) {
+            assert_eq!(
+                adjacent[0].address + adjacent[0].storage_size,
+                adjacent[1].address
+            );
+        }
+    }
+    for chunk in chunks {
+        assert_eq!(chunk.storage_size, 1_024);
+        if reuse {
+            assert!(free.sections().iter().any(|section| {
+                section.address().get() <= chunk.address
+                    && chunk.address + chunk.storage_size <= section.end_address().get()
+            }));
+        } else {
+            assert!(chunk.address >= original_end);
+        }
+    }
+    assert_eq!(
+        file.dataset("kept").unwrap().read_u8().unwrap(),
         [31; 1_024]
     );
-    reopened.close().unwrap();
+    drop(dataset);
+    file.close().unwrap();
 }
 
 #[rstest]
-fn fragmented_creation_cycles_bound_work_and_publish_once_per_commit(
+fn fragmented_creation_cycles_bound_growth_and_publish_once_per_commit(
     #[values(PersistedStrategy::FsmAggr, PersistedStrategy::Page)] strategy: PersistedStrategy,
 ) {
-    use crate::AppendBuilder;
-    use crate::edit::test_util;
-
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cycles.h5");
     let (file, _) = chunk_holes::prepare(&path, strategy);
     file.close().unwrap();
     let mut expected = (0..64).collect::<Vec<i32>>();
     for cycle in 0..3 {
-        let mut engine = test_util::open_engine(&path);
-        let initial_size = engine.image.len();
-        let before = engine.image.buffering_work();
-        let mut created = DatasetBuilder::new("replacement");
+        let file = File::open_rw(&path).unwrap();
+        let initial_size = file.file_size();
         let values = (0..1_024)
             .map(|value| value + cycle * 2_048)
             .collect::<Vec<i32>>();
-        created.with_i32_data(&values).with_chunks(&[64]);
-        let mut append = AppendBuilder::new();
         let added = vec![cycle + 17; 64];
-        append.append_i32(&added);
-        observations::reset_creation();
-        engine
-            .stage_created_dataset(&ObjectPathBuf::parse("replacement"), created)
+        file.root()
+            .create_dataset("replacement", |created| {
+                created.with_i32_data(&values).with_chunks(&[64]);
+            })
             .unwrap();
-        engine
-            .stage_dataset_append_pending(&ObjectPathBuf::parse("d"), append)
+        file.dataset("d")
+            .unwrap()
+            .append_staged(|append| {
+                append.append_i32(&added);
+            })
             .unwrap();
-        engine.commit().unwrap();
-        let work = observations::creation_work();
-        assert_eq!(work.chunks, 17);
-        assert_eq!(work.index_encodings, 2);
+
+        disk_log::start();
+        file.commit().unwrap();
+        let writes = completed_writes(&disk_log::finish().events);
+        assert_eq!(writes.iter().filter(|&&(start, _)| start == 0).count(), 1);
+        assert!(file.file_size().saturating_sub(initial_size) <= 32_768);
         assert_eq!(
-            engine.image.issued_write_order()[before.write_calls as usize..]
-                .iter()
-                .filter(|&&(start, _)| start == 0)
-                .count(),
-            1
+            file.reusable_space_stats().unwrap().reusable_free_bytes(),
+            file.reusable_free_sections().unwrap().free_bytes(),
         );
-        assert!(engine.image.len().saturating_sub(initial_size) <= 32_768);
-        assert_eq!(
-            engine.space.reusable_bytes().unwrap(),
-            ByteLength::new(
-                engine
-                    .space
-                    .reusable_sections()
-                    .map(|extent| extent.len().get())
-                    .sum::<u64>()
-            )
-        );
-        eprintln!(
-            "cycle={cycle} {strategy:?} work={work:?} buffering={:?} reusable={} growth={}",
-            engine.image.buffering_work(),
-            engine.space.reusable_bytes().unwrap().get(),
-            engine.image.len().saturating_sub(initial_size)
-        );
-        let observed = File::from_bytes(engine.image.disk_bytes().unwrap()).unwrap();
-        assert_eq!(
-            observed.dataset("replacement").unwrap().read_i32().unwrap(),
-            values
-        );
-        let mut grown = expected.clone();
-        grown.extend_from_slice(&added);
-        assert_eq!(observed.dataset("d").unwrap().read_i32().unwrap(), grown);
-        observed.close().unwrap();
-        engine.delete(&ObjectPathBuf::parse("replacement")).unwrap();
-        let before_delete = engine.image.issued_write_order().len();
-        engine.commit().unwrap();
-        assert_eq!(
-            engine.image.issued_write_order()[before_delete..]
-                .iter()
-                .filter(|&&(start, _)| start == 0)
-                .count(),
-            1
-        );
-        drop(engine);
+        let dataset = file.dataset("replacement").unwrap();
+        assert_eq!(dataset.read_i32().unwrap(), values);
+        assert_eq!(dataset.chunks().unwrap().len(), 16);
+        drop(dataset);
         expected.extend_from_slice(&added);
+        assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), expected);
+
+        file.root().delete("replacement").unwrap();
+        disk_log::start();
+        file.commit().unwrap();
+        let writes = completed_writes(&disk_log::finish().events);
+        assert_eq!(writes.iter().filter(|&&(start, _)| start == 0).count(), 1);
+        file.close().unwrap();
+
         let reopened = File::open(&path).unwrap();
         assert_eq!(reopened.dataset("d").unwrap().read_i32().unwrap(), expected);
         assert!(

@@ -291,7 +291,6 @@ fn creation_preserves_sparse_slots_variable_filters_and_reuse_policy(
         })
         .collect::<Vec<_>>();
     let initial_size = pure.file_size();
-    crate::edit::observations::reset_creation();
     let created = pure
         .root()
         .create_dataset("d", |builder| {
@@ -320,12 +319,6 @@ fn creation_preserves_sparse_slots_variable_filters_and_reuse_policy(
     let chunks = created.chunks().unwrap();
     assert_eq!(chunks.len(), 32);
     let payload = chunks.iter().map(|chunk| chunk.storage_size).sum::<u64>();
-    let work = crate::edit::observations::creation_work();
-    assert_eq!(work.chunks, 32);
-    assert_eq!(work.filtered_chunks, if rotated { 30 } else { 31 });
-    assert_eq!(work.prepared_bytes, payload);
-    assert_eq!(work.index_encodings, 1);
-    assert_eq!(work.preferred_probes, u64::from(!transient));
     assert!(
         available
             .iter()
