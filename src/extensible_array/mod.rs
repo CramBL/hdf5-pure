@@ -249,6 +249,9 @@ fn visit_pages(
     pages.try_for_each(|page| visit_elements(page?.parse(region)?))
 }
 
+#[cfg(all(test, feature = "std"))]
+pub(crate) mod test_allocations;
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;
