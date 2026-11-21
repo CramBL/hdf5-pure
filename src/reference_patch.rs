@@ -153,28 +153,6 @@ impl Plan {
         }
         Ok(())
     }
-
-    /// How many stored references the plan repoints. Reported by the session's
-    /// own tests rather than by any public API.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.data_writes.len() + self.header_writes.values().map(Vec::len).sum::<usize>()
-    }
-
-    /// The addresses this plan rewrites, for tests that pin *where* it acts.
-    #[cfg(test)]
-    pub(crate) fn sites(&self) -> Vec<PhysicalAddress> {
-        let headers = self.header_writes.iter().flat_map(|(&range, edits)| {
-            edits
-                .iter()
-                .map(move |&(o, _)| range.start().checked_add(o.get().to_u64()).unwrap())
-        });
-        self.data_writes
-            .iter()
-            .map(|&(at, _)| at)
-            .chain(headers)
-            .collect()
-    }
 }
 
 /// A byte displacement from the start of an object-header chunk.
@@ -1009,20 +987,6 @@ mod tests {
         (BytesSource::new(bytes.clone()), bytes)
     }
 
-    /// Apply a plan to an in-memory image, so a test can read back what it wrote.
-    struct Bytes(Vec<u8>);
-    impl PatchTarget for Bytes {
-        fn read(&self, at: PhysicalAddress, len: usize) -> Result<Vec<u8>, Error> {
-            let at = at.get().to_usize()?;
-            Ok(self.0[at..at + len].to_vec())
-        }
-        fn write(&mut self, at: PhysicalAddress, bytes: &[u8]) -> Result<(), Error> {
-            let at = at.get().to_usize()?;
-            self.0[at..at + bytes.len()].copy_from_slice(bytes);
-            Ok(())
-        }
-    }
-
     /// An Attribute Info (0x0015) message body: version, flags, then the fractal
     /// heap and name-index addresses, `None` encoding as the undefined address.
     /// Mirrors `file_writer::serialize_attribute_info`, whose compact form
@@ -1032,20 +996,68 @@ mod tests {
         attribute::info(fractal_heap, None, Widths::EIGHT)
     }
 
-    /// A [`PatchTarget`] that records where each write started and how long it
-    /// was, for the tests that are about the write *shape* rather than the bytes.
+    /// An in-memory image that records the start and length of each write.
     struct Recording {
-        bytes: Bytes,
+        bytes: Vec<u8>,
         writes: Vec<(PhysicalAddress, usize)>,
     }
+
+    impl Recording {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                writes: Vec::new(),
+            }
+        }
+    }
+
     impl PatchTarget for Recording {
         fn read(&self, at: PhysicalAddress, len: usize) -> Result<Vec<u8>, Error> {
-            self.bytes.read(at, len)
+            let at = at.get().to_usize()?;
+            Ok(self.bytes[at..at + len].to_vec())
         }
+
         fn write(&mut self, at: PhysicalAddress, bytes: &[u8]) -> Result<(), Error> {
             self.writes.push((at, bytes.len()));
-            self.bytes.write(at, bytes)
+            let at = at.get().to_usize()?;
+            self.bytes[at..at + bytes.len()].copy_from_slice(bytes);
+            Ok(())
         }
+    }
+
+    fn assert_unchanged(plan: &Plan, original: Vec<u8>) {
+        let mut target = Recording::new(original.clone());
+        plan.apply(&mut target).unwrap();
+        assert!(target.writes.is_empty());
+        assert_eq!(target.bytes, original);
+    }
+
+    fn assert_header_reference_write(plan: &Plan, original: Vec<u8>, region_offset: usize) {
+        // Each fixture uses the plain OHDR prefix and a one-byte chunk-size field.
+        let header_start = HEADER_AT as usize;
+        assert_eq!(&original[header_start..header_start + 6], b"OHDR\x02\x00");
+        let messages_start = header_start + 7;
+        let site = messages_start + region_offset;
+        let end = original.len();
+        assert_eq!(
+            end,
+            messages_start
+                + usize::from(original[header_start + 6])
+                + test_util::checksum::CHECKSUM
+        );
+        assert_eq!(&original[site..site + 8], &300_u64.to_le_bytes());
+
+        let mut expected = original.clone();
+        expected[site..site + 8].copy_from_slice(&900_u64.to_le_bytes());
+        test_util::checksum::restamp(&mut expected, header_start, end - header_start);
+
+        let mut target = Recording::new(original);
+        plan.apply(&mut target).unwrap();
+        assert_eq!(
+            target.writes,
+            [(PhysicalAddress::new(site as u64), end - site)]
+        );
+        assert_eq!(target.bytes, expected);
     }
 
     fn scan(src: &BytesSource<Vec<u8>>, relocations: &[(u64, u64)]) -> (Plan, Scanned) {
@@ -1107,10 +1119,7 @@ mod tests {
     #[case::overflowing_displacement(usize::MAX)]
     fn header_patches_outside_message_bytes_leave_the_target_unchanged(#[case] offset: usize) {
         let original = vec![0; 48];
-        let mut target = Recording {
-            bytes: Bytes(original.clone()),
-            writes: Vec::new(),
-        };
+        let mut target = Recording::new(original.clone());
         let mut plan = Plan::default();
         plan.header_writes.insert(
             FileRange::new(PhysicalAddress::new(32), 16).unwrap(),
@@ -1125,7 +1134,7 @@ mod tests {
             "a stored reference sits outside the object header chunk holding it"
         );
         assert!(target.writes.is_empty());
-        assert_eq!(target.bytes.0, original);
+        assert_eq!(target.bytes, original);
     }
 
     #[rstest]
@@ -1173,7 +1182,7 @@ mod tests {
         bytes.extend_from_slice(&header);
         bytes.resize(usize::try_from(continuation_at).unwrap(), 0);
         bytes.extend_from_slice(&continuation);
-        let source = BytesSource::new(bytes);
+        let source = BytesSource::new(bytes.as_slice());
         let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
         let mut plan = Plan::default();
         let scanned = scan_object(
@@ -1191,9 +1200,7 @@ mod tests {
         assert!(scanned.header_located);
         assert!(!scanned.holds_a_reference);
         assert!(!scanned.descend);
-        assert_eq!(plan.len(), 0);
-        assert!(plan.data_writes.is_empty());
-        assert!(plan.header_writes.is_empty());
+        assert_unchanged(&plan, bytes);
     }
 
     #[rstest]
@@ -1280,48 +1287,7 @@ mod tests {
 
         assert!(scanned.holds_a_reference);
         assert!(scanned.fully_read);
-        assert_eq!(plan.len(), 1);
-        // The edit is filed against the header chunk, not written on its own:
-        // the checksum covering it has to move with it.
-        assert!(plan.data_writes.is_empty());
-        assert_eq!(plan.header_writes.len(), 1);
-        // The address arithmetic is checked against the file rather than
-        // restated: the eight bytes the plan is about to overwrite must be the
-        // ones that hold the old address today. An offset taken from the wrong
-        // origin — the message body, the chunk, the region — lands somewhere
-        // that does not.
-        let site = plan.sites()[0].get().to_usize().unwrap();
-        assert_eq!(
-            u64::from_le_bytes(bytes[site..site + 8].try_into().unwrap()),
-            300,
-            "the plan must aim at the bytes that hold the address it read"
-        );
-
-        let mut target = Bytes(bytes.clone());
-        plan.apply(&mut target).unwrap();
-        // The whole chunk was rewritten, so the file is longer than the header
-        // only where it was before.
-        assert_eq!(target.0.len(), bytes.len());
-        // The stored address now names the new header, and the chunk's checksum
-        // agrees with its own bytes: re-scanning finds nothing left to do.
-        let rescanned = BytesSource::new(target.0.clone());
-        let (again, _) = scan(&rescanned, &[(300, 900)]);
-        assert!(again.is_empty(), "the address should already be 900");
-        let (moved_again, _) = scan(&rescanned, &[(900, 1500)]);
-        assert_eq!(moved_again.len(), 1, "and it should now read as 900");
-        assert_checksum_holds(&target.0);
-    }
-
-    /// The trailing four bytes of the header chunk are the Jenkins checksum of
-    /// everything before them.
-    fn assert_checksum_holds(bytes: &[u8]) {
-        let chunk = &bytes[HEADER_AT as usize..];
-        let body = &chunk[..chunk.len() - 4];
-        assert_eq!(
-            u32::from_le_bytes(chunk[chunk.len() - 4..].try_into().unwrap()),
-            checksum::jenkins_lookup3(body),
-            "the header chunk must be resealed after its bytes change"
-        );
+        assert_header_reference_write(&plan, bytes, region.len() - 8);
     }
 
     #[test]
@@ -1344,14 +1310,7 @@ mod tests {
         let (src, bytes) = image_with_header(&region);
         let (plan, scanned) = scan(&src, &[(300, 900)]);
         assert!(scanned.holds_a_reference);
-        assert_eq!(plan.len(), 1);
-        assert!(plan.data_writes.is_empty(), "compact data is in the header");
-
-        let mut target = Bytes(bytes);
-        plan.apply(&mut target).unwrap();
-        assert_checksum_holds(&target.0);
-        let (again, _) = scan(&BytesSource::new(target.0.clone()), &[(900, 1500)]);
-        assert_eq!(again.len(), 1);
+        assert_header_reference_write(&plan, bytes, region.len() - 8);
     }
 
     #[test]
@@ -1369,12 +1328,9 @@ mod tests {
                     )
                     .unwrap(),
             );
-            let (src, _) = image_with_header(&region);
+            let (src, bytes) = image_with_header(&region);
             let (plan, scanned) = scan(&src, &[(sentinel, 900), (0, 900)]);
-            assert!(
-                plan.is_empty(),
-                "the sentinel {sentinel:#x} names no object and must be left alone"
-            );
+            assert_unchanged(&plan, bytes);
             assert!(
                 scanned.holds_a_reference,
                 "it is still a reference datatype"
@@ -1468,12 +1424,8 @@ mod tests {
 
     #[test]
     fn a_header_chunk_is_written_from_the_byte_that_changed() {
-        // The read covers the whole chunk, because the checksum does; the write
-        // must not, or repointing one attribute near the end of a wide header
-        // rewrites the header. Borrowed wholesale from `publish_checksummed`,
-        // and worth its own assertion for the same reason that one has: the
-        // write *count* is identical either way, so nothing else notices.
-        let region = message_record(
+        let mut region = message_record(MessageType::NIL, &[0; 64]);
+        region.extend_from_slice(&message_record(
             MessageType::ATTRIBUTE,
             &reference_attr("target", 300)
                 .serialize_v3(
@@ -1481,25 +1433,13 @@ mod tests {
                     crate::file_writer::LENGTH_SIZE,
                 )
                 .unwrap(),
-        );
+        ));
+        let site = region.len() - 8;
+        region.extend_from_slice(&message_record(MessageType::NIL, &[0; 32]));
         let (src, bytes) = image_with_header(&region);
         let (plan, _) = scan(&src, &[(300, 900)]);
-        let site = plan.sites()[0];
 
-        let mut target = Recording {
-            bytes: Bytes(bytes),
-            writes: Vec::new(),
-        };
-        plan.apply(&mut target).unwrap();
-        assert_eq!(
-            target.writes.len(),
-            1,
-            "one chunk, one write — value and checksum together"
-        );
-        assert_eq!(
-            target.writes[0].0, site,
-            "the write starts at the repointed address, not at the chunk"
-        );
+        assert_header_reference_write(&plan, bytes, site);
     }
 
     #[test]
@@ -1534,6 +1474,7 @@ mod tests {
             layout.extend_from_slice(&8u16.to_le_bytes());
             layout.extend_from_slice(&(300u64).to_le_bytes());
             shared.extend_from_slice(&message_record(MessageType::DATA_LAYOUT, &layout));
+            let site = shared.len() - 8;
             let dataset =
                 edit::object_header::build_v2_object_header(&plain_region(shared)).unwrap();
 
@@ -1548,7 +1489,7 @@ mod tests {
                 ObjectId::new(PhysicalAddress::new(900 + base.effective_base().get())),
             )]);
             let scanned = scan_object(
-                &OpenedSource::for_test(&BytesSource::new(bytes), base),
+                &OpenedSource::for_test(&BytesSource::new(bytes.as_slice()), base),
                 ObjectId::new(PhysicalAddress::new(HEADER_AT)),
                 crate::file_writer::WIDTHS,
                 &map,
@@ -1560,11 +1501,7 @@ mod tests {
                 "base {base:?}: the committed type must be followed far enough to \
                  see it names a reference"
             );
-            assert_eq!(
-                plan.len(),
-                1,
-                "base {base:?}: the element must be repointed"
-            );
+            assert_header_reference_write(&plan, bytes, site);
         }
     }
 
@@ -1594,13 +1531,19 @@ mod tests {
             .get();
         // What `refs` stores, which is `d`'s header address. The file has no
         // userblock, so the stored base-relative address is the absolute one.
-        let stored = u64::from_le_bytes(
-            file.dataset("refs").unwrap().read_raw().unwrap()[..8]
-                .try_into()
-                .unwrap(),
-        );
+        let references = file.dataset("refs").unwrap();
+        let crate::Layout::Contiguous {
+            address: Some(address),
+            size: 8,
+        } = references.layout().unwrap()
+        else {
+            panic!("expected a single contiguous reference");
+        };
+        let stored = u64::from_le_bytes(references.read_raw().unwrap().try_into().unwrap());
+        drop(references);
         drop(file);
-        let source = crate::source::BytesSource::new(std::fs::read(&path).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        let source = BytesSource::new(original.as_slice());
 
         // The control: `d` has moved, the root has not, so the walk descends
         // through the root and repoints the one element in `refs`.
@@ -1623,7 +1566,13 @@ mod tests {
             1 << 20,
         )
         .unwrap();
-        assert_eq!(reached.len(), 1, "the walk must reach `refs` at all");
+        let mut target = Recording::new(original.clone());
+        reached.apply(&mut target).unwrap();
+        assert_eq!(target.writes, [(PhysicalAddress::new(address), 8)]);
+        let mut expected = original.clone();
+        let site = usize::try_from(address).unwrap();
+        expected[site..site + 8].copy_from_slice(&(stored + 4096).to_le_bytes());
+        assert_eq!(target.bytes, expected);
 
         // The same file and the same target, with the root itself vacated. The
         // root is the only way in, so the guard makes the whole file
@@ -1645,10 +1594,7 @@ mod tests {
             1 << 20,
         )
         .unwrap();
-        assert!(
-            skipped.is_empty(),
-            "a vacated header must not be scanned, nor descended through"
-        );
+        assert_unchanged(&skipped, original);
         assert!(
             !skipped.proved_free_of_references(),
             "and skipping it leaves the file unproven rather than proven clean"

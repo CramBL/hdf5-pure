@@ -613,22 +613,6 @@ impl WriteEngine {
         chunk_index_inplace::initialize_ea_index(&mut self.store(), oh_addr, index, initialization)
     }
 
-    /// Appends `i32` values to a named dataset.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`append_inplace_gathered`](Self::append_inplace_gathered).
-    #[cfg(test)]
-    pub(super) fn append_inplace_i32(
-        &mut self,
-        dataset: &str,
-        values: &[i32],
-    ) -> Result<(), Error> {
-        let mut b = AppendBuilder::new();
-        b.append_i32(values);
-        self.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse(dataset)), &b)
-    }
-
     /// Resolves an eligible append target and caches its metadata.
     ///
     /// The cache key is the object-header address, shared by every hard link to the dataset.
