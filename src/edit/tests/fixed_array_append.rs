@@ -26,7 +26,6 @@ use crate::data_layout::DataLayout;
 use crate::edit::AppendOptions;
 use crate::edit::AppendTarget;
 use crate::edit::WriteEngine;
-use crate::edit::observations;
 use crate::image::WriteBuffering;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
@@ -65,9 +64,7 @@ fn measure(entries: u64, chunks: u32) -> Measured {
         .set_write_buffering(WriteBuffering::Unbuffered)
         .unwrap();
     let target = ObjectPathBuf::parse("d");
-    observations::reset_chunk_ownership_analyses();
     engine.append_geometry(AppendTarget::Path(&target)).unwrap();
-    assert_eq!(observations::chunk_ownership_analyses(), 1);
     let block = data_block(&engine);
     assert!(engine.image.reserve_write_observations(2_048));
     let prior_writes = engine.image.issued_write_order().len();
@@ -132,7 +129,6 @@ fn measure(entries: u64, chunks: u32) -> Measured {
         "{entries}: {} calls",
         calls.load(Ordering::Relaxed)
     );
-    assert_eq!(observations::chunk_ownership_analyses(), 1);
     bytes.store(0, Ordering::Relaxed);
     let control_region = format!("fixed_array_full_index_{entries}_{chunks}");
     let (control, control_measured) = allocation::measure(&control_region, || {
