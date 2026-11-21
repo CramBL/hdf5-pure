@@ -152,26 +152,6 @@ Select the obligations that establish the changed behavior.
 | Child processes | Use explicit fixture binaries. Bound execution/readiness and clean up children. Infrastructure failures fail the parent. Preserve runner support. | [Fixture target][child], [target declaration][targets] |
 | Doctests or API contracts | Prefer self-contained executable examples. Allow `no_run` for unavailable external inputs/services or an inappropriate execution environment, with a reason beside the example. Keep external API and diagnostic checks. | [Documentation style][docstyle], [API checks][api] |
 
-### Resource expectations
-
-State the workload, the operation measured, and where the measurement is taken. Distinguish requests
-to a source from operating-system I/O. For allocations, specify whether the assertion concerns
-allocation count, cumulative bytes allocated, peak bytes, or retained bytes. Use a count or cumulative
-byte bound when a regression can repeatedly allocate and free memory without changing the peak.
-
-Compare equivalent work when changing a baseline or budget. Account for fixture size, backing,
-cache state, and the measurement interval. Include publication and close when they are part of the
-guarantee. Record the old and new observations and explain what changed, including any change to the
-workload or measurement. If the same workload intentionally uses more resources, explain the tradeoff
-and bound the new cost.
-
-### Replacing coverage
-
-Preserve correctness, failure, format, and resource guarantees when replacing tests.
-Retire assertions about obsolete reports or exact internal operation counts when they establish no
-project guarantee. Identify any consequential coverage reduction in the review. Judge a replacement
-by the behavior it checks and the evidence it uses.
-
 ## Running tests
 
 Run recipes from the repository root.
