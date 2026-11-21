@@ -569,8 +569,6 @@ struct BufferState {
     pending: AppendBuilder,
     lifecycle: Lifecycle,
     claim: u64,
-    #[cfg(test)]
-    failure: Option<tests::WriteFailure>,
 }
 
 impl BufferState {
@@ -613,8 +611,6 @@ impl BufferState {
             pending,
             lifecycle: Lifecycle::Active,
             claim,
-            #[cfg(test)]
-            failure: None,
         })
     }
 
@@ -761,13 +757,7 @@ impl BufferState {
     fn write_prefix(&mut self, dataset: &mut Dataset, take_elems: u64) -> Result<(), Error> {
         let before = dataset.append_geometry()?.current_dim;
         let head = self.pending.head(self.byte_len(take_elems)?);
-        #[cfg(not(test))]
         let result = dataset.append_prebuilt(&head);
-        #[cfg(test)]
-        let result = match &self.failure {
-            Some(failure) => failure.append(dataset, &head, self.element_size),
-            None => dataset.append_prebuilt(&head),
-        };
         let landed = if result.is_ok() {
             take_elems
         } else {
@@ -820,17 +810,18 @@ enum FlushMode {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroUsize;
-    use std::cell::Cell;
-    use std::io::{Error as IoError, ErrorKind};
-    use std::rc::Rc;
+    use std::fs;
+    use std::io::ErrorKind;
+    use std::path::{Path, PathBuf};
 
     use rstest::rstest;
-    use test_util::disk_log;
-    use test_util_hdf5::dataset::{self, Unlimited};
+    use test_util::disk_log::{self, DiskOp, IoEvent, IoOutcome, Recording};
+    use test_util_hdf5::dataset;
 
-    use crate::edit::AppendBuilder;
-    use crate::{Dataset, Error, File, FileAccessProperties, FileBuilder, MaxExtent, SyncPolicy};
+    use crate::{
+        Dataset, Error, File, FileAccessProperties, FileBuilder, FileSpaceSettings,
+        FileSpaceStrategy, MaxExtent, MemoryStrategy, SyncPolicy,
+    };
 
     #[rstest]
     #[case::borrowed_empty(false, false)]
@@ -911,7 +902,10 @@ mod tests {
     fn fail_other_append(file: &File) {
         let mut other = file.dataset("other").unwrap();
         disk_log::fail_write_after(0, 0);
-        let error = other.append(&[4i32, 5, 6, 7]).unwrap_err();
+        assert_write_error(other.append(&[4i32, 5, 6, 7]).unwrap_err());
+    }
+
+    fn assert_write_error(error: Error) {
         let Error::Io(error) = error else {
             panic!("expected injected append failure, got {error:?}");
         };
@@ -927,155 +921,285 @@ mod tests {
     }
 
     #[rstest]
-    #[case::before_any_elements(0)]
-    #[case::after_a_complete_chunk(4)]
-    fn write_failure_retains_exact_remaining_bytes_and_prevents_retries(#[case] landed: usize) {
-        let path = test_util::temp::temp_path("failure.h5");
-        Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
-        let file = File::open_rw(&path).unwrap();
+    #[case::first_batch(0)]
+    #[case::second_batch(1)]
+    fn borrowed_appender_rejects_appends_and_finish_after_write_failure(
+        #[case] completed_batches: usize,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let failure = AutomaticWriteFailure::new(directory.path(), completed_batches);
+        let before = fs::read(&failure.path).unwrap();
+        let file = File::open_rw_with_options(&failure.path, failure.options).unwrap();
         let mut dataset = file.dataset("d").unwrap();
+        failure.inject();
         let mut appender = dataset.buffered_appender().unwrap();
-        let attempts = Rc::new(Cell::new(0));
-        appender.state.failure = Some(WriteFailure {
-            landed,
-            attempts: attempts.clone(),
-        });
-        let bytes: Vec<_> = (0..10i32).flat_map(i32::to_le_bytes).collect();
-        appender.append_raw(&bytes[..5]).unwrap();
-        let error = appender.append_raw(&bytes[5..]).unwrap_err();
-        let Error::Io(error) = error else {
-            panic!("expected injected write error, got {error:?}");
-        };
-        assert_eq!(error.kind(), ErrorKind::Other);
-        assert_eq!(error.to_string(), "injected appender write failure");
-        assert_eq!(attempts.get(), 1);
-        assert_eq!(appender.unwritten(), &bytes[landed * 4..]);
-        assert_eq!(appender.buffered_elements(), (10 - landed) as u64);
-        assert_eq!(
-            file.dataset("d").unwrap().read_i32().unwrap(),
-            (0..landed as i32).collect::<Vec<_>>()
-        );
-        assert_poisoned(appender.append(&[10i32]).unwrap_err());
+        appender.append_raw(&failure.bytes[..5]).unwrap();
+        assert_write_error(appender.append_raw(&failure.bytes[5..]).unwrap_err());
+        assert_eq!(appender.unwritten(), failure.pending());
+        assert_eq!(appender.buffered_elements(), failure.pending_elements());
+        assert_poisoned(appender.append(&[19i32]).unwrap_err());
         assert_poisoned(appender.append_raw(&[0]).unwrap_err());
         assert_poisoned(appender.flush().unwrap_err());
-        assert_eq!(appender.unwritten(), &bytes[landed * 4..]);
+        assert_eq!(appender.unwritten(), failure.pending());
         assert_poisoned(appender.finish().unwrap_err());
-        assert_eq!(attempts.get(), 1);
-        let mut replacement = file.dataset("d").unwrap();
-        replacement.buffered_appender().unwrap().finish().unwrap();
-        drop(replacement);
+
+        let expected = failure.assert_publication(&file, &dataset, before);
+        dataset.buffered_appender().unwrap().finish().unwrap();
         drop(dataset);
-        drop(file);
-        assert_eq!(
-            dataset::read_pure::<i32>(&path, "d"),
-            (0..landed as i32).collect::<Vec<_>>()
-        );
+        file.close().unwrap();
+        assert_eq!(dataset::read_pure::<i32>(&failure.path, "d"), expected);
+    }
+
+    #[rstest]
+    #[case::first_batch(0)]
+    #[case::second_batch(1)]
+    fn owned_appender_discards_the_unpublished_suffix_after_write_failure(
+        #[case] completed_batches: usize,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let failure = AutomaticWriteFailure::new(directory.path(), completed_batches);
+        let before = fs::read(&failure.path).unwrap();
+        let file = File::open_rw_with_options(&failure.path, failure.options).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        failure.inject();
+        let mut appender = dataset.clone().into_buffered_appender().unwrap();
+        appender.append_raw(&failure.bytes[..5]).unwrap();
+        assert_write_error(appender.append_raw(&failure.bytes[5..]).unwrap_err());
+        assert_eq!(appender.unwritten(), failure.pending());
+        assert_eq!(appender.buffered_elements(), failure.pending_elements());
+        assert_poisoned(appender.flush().unwrap_err());
+        assert_eq!(appender.discard(), failure.pending());
+
+        let expected = failure.assert_publication(&file, &dataset, before);
+        dataset
+            .clone()
+            .into_buffered_appender()
+            .unwrap()
+            .finish()
+            .unwrap();
+        drop(dataset);
+        file.close().unwrap();
+        assert_eq!(dataset::read_pure::<i32>(&failure.path, "d"), expected);
+    }
+
+    struct AutomaticWriteFailure {
+        path: PathBuf,
+        options: FileAccessProperties,
+        base: Vec<i32>,
+        values: Vec<i32>,
+        bytes: Vec<u8>,
+        published: usize,
+        trace: Recording,
+        fault: usize,
+    }
+
+    impl AutomaticWriteFailure {
+        fn new(directory: &Path, completed_batches: usize) -> Self {
+            // Use 1 MiB chunks so each bounded batch has one chunk. The second payload
+            // write starts after the first batch publishes its extent.
+            const CHUNK: usize = (1 << 20) / size_of::<i32>();
+            let path = directory.join("append.h5");
+            let control = directory.join("control.h5");
+            let base = vec![3i32; CHUNK];
+            create_persistent(&path, &base, CHUNK as u64);
+            fs::copy(&path, &control).unwrap();
+            let mut values = vec![7i32; CHUNK];
+            values.extend(std::iter::repeat_n(11, CHUNK));
+            values.extend([13, 17]);
+            let bytes = values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>();
+
+            let options = FileAccessProperties::new()
+                .with_memory_strategy(MemoryStrategy::Bounded)
+                .with_sync_policy(SyncPolicy::Always);
+            let file = File::open_rw_with_options(&control, options).unwrap();
+            let mut dataset = file.dataset("d").unwrap();
+            let mut appender = dataset.buffered_appender().unwrap();
+            appender.append_raw(&bytes[..5]).unwrap();
+            disk_log::start();
+            appender.append_raw(&bytes[5..]).unwrap();
+            let trace = disk_log::finish();
+            assert_eq!(appender.unwritten(), &bytes[2 * CHUNK * size_of::<i32>()..]);
+            appender.discard();
+            drop(dataset);
+            file.close().unwrap();
+
+            let published = completed_batches * CHUNK;
+            let payload_start = published * size_of::<i32>();
+            let payload_end = payload_start + CHUNK * size_of::<i32>();
+            let fault = trace
+                .events
+                .iter()
+                .position(|event| {
+                    event.operation().is_some_and(|operation| {
+                        matches!(
+                            &trace.operations[operation],
+                            DiskOp::Write { bytes: payload, .. }
+                                if payload == &bytes[payload_start..payload_end]
+                        )
+                    })
+                })
+                .unwrap();
+            Self {
+                path,
+                options,
+                base,
+                values,
+                bytes,
+                published,
+                trace,
+                fault,
+            }
+        }
+
+        fn pending(&self) -> &[u8] {
+            &self.bytes[self.published * size_of::<i32>()..]
+        }
+
+        fn pending_elements(&self) -> u64 {
+            (self.values.len() - self.published) as u64
+        }
+
+        fn inject(&self) {
+            let preceding_writes = self.trace.events[..self.fault]
+                .iter()
+                .filter(|event| matches!(event, IoEvent::Write { .. }))
+                .count();
+            disk_log::start();
+            disk_log::fail_write_after(preceding_writes, 0);
+        }
+
+        fn assert_publication(
+            &self,
+            file: &File,
+            dataset: &Dataset,
+            mut expected_image: Vec<u8>,
+        ) -> Vec<i32> {
+            let recording = disk_log::finish();
+            let IoEvent::Write {
+                offset, requested, ..
+            } = self.trace.events[self.fault]
+            else {
+                panic!("expected the control payload write");
+            };
+            assert_eq!(
+                &recording.events[..self.fault],
+                &self.trace.events[..self.fault]
+            );
+            assert_eq!(
+                &recording.events[self.fault..],
+                &[IoEvent::Write {
+                    offset,
+                    requested,
+                    written: 0,
+                    outcome: IoOutcome::Failed(ErrorKind::Other),
+                    operation: None,
+                }]
+            );
+            assert_eq!(
+                recording.operations,
+                self.trace.operations[..recording.operations.len()]
+            );
+            for operation in &recording.operations {
+                operation.apply(&mut expected_image);
+            }
+            assert_eq!(file.disk_bytes().unwrap(), expected_image);
+            let expected = [self.base.as_slice(), &self.values[..self.published]].concat();
+            assert_eq!(dataset.read_i32().unwrap(), expected);
+            expected
+        }
     }
 
     #[rstest]
     #[case::discard(true)]
     #[case::drop(false)]
     fn failed_flush_never_retries_during_teardown(#[case] discard: bool) {
-        let path = test_util::temp::temp_path("flush.h5");
-        Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flush.h5");
+        let initial = [0, 1, 2, 3];
+        create_persistent(&path, &initial, 4);
+        let before = fs::read(&path).unwrap();
         let file = File::open_rw(&path).unwrap();
         let mut dataset = file.dataset("d").unwrap();
         let mut appender = dataset.buffered_appender().unwrap();
-        let attempts = Rc::new(Cell::new(0));
-        appender.state.failure = Some(WriteFailure {
-            landed: 0,
-            attempts: attempts.clone(),
-        });
         let bytes = 7i32.to_le_bytes();
         appender.append_raw(&bytes).unwrap();
-        let error = appender.flush().unwrap_err();
-        let Error::Io(error) = error else {
-            panic!("expected injected write error, got {error:?}");
-        };
-        assert_eq!(error.kind(), ErrorKind::Other);
-        assert_eq!(error.to_string(), "injected appender write failure");
+
+        disk_log::start();
+        disk_log::fail_write_after(0, 0);
+        assert_write_error(appender.flush().unwrap_err());
         assert_eq!(appender.unwritten(), bytes);
         if discard {
             assert_eq!(appender.discard(), bytes);
         } else {
             drop(appender);
         }
-        assert_eq!(attempts.get(), 1);
+        assert_only_failed_write();
         dataset.buffered_appender().unwrap().finish().unwrap();
         drop(dataset);
-        drop(file);
-        assert_eq!(dataset::read_pure::<i32>(&path, "d"), Vec::<i32>::new());
+        file.close().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(dataset::read_pure::<i32>(&path, "d"), initial);
     }
 
     #[rstest]
     #[case::finish(true)]
     #[case::drop(false)]
     fn terminal_write_failure_releases_the_claim_without_retrying(#[case] finish: bool) {
-        let path = test_util::temp::temp_path("terminal.h5");
-        Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("terminal.h5");
+        let initial = [0, 1, 2, 3];
+        create_persistent(&path, &initial, 4);
+        let before = fs::read(&path).unwrap();
         let file = File::open_rw(&path).unwrap();
         let mut dataset = file.dataset("d").unwrap();
         let mut appender = dataset.buffered_appender().unwrap();
-        let attempts = Rc::new(Cell::new(0));
-        appender.state.failure = Some(WriteFailure {
-            landed: 1,
-            attempts: attempts.clone(),
-        });
         appender.append(&[7i32, 8]).unwrap();
+
+        disk_log::start();
+        disk_log::fail_write_after(0, 0);
         if finish {
-            let error = appender.finish().unwrap_err();
-            let Error::Io(error) = error else {
-                panic!("expected injected write error, got {error:?}");
-            };
-            assert_eq!(error.kind(), ErrorKind::Other);
-            assert_eq!(error.to_string(), "injected appender write failure");
+            assert_write_error(appender.finish().unwrap_err());
         } else {
             drop(appender);
         }
-        assert_eq!(attempts.get(), 1);
-        assert_eq!(dataset.read_i32().unwrap(), [7]);
+        assert_only_failed_write();
+        assert_eq!(dataset.read_i32().unwrap(), initial);
         dataset.buffered_appender().unwrap().finish().unwrap();
         drop(dataset);
-        drop(file);
-        assert_eq!(dataset::read_pure::<i32>(&path, "d"), [7]);
+        file.close().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(dataset::read_pure::<i32>(&path, "d"), initial);
     }
 
-    #[rstest]
-    #[case::before_any_elements(0)]
-    #[case::after_a_complete_chunk(4)]
-    fn owned_write_failure_preserves_the_unwritten_tail_without_retrying(#[case] landed: usize) {
-        let path = test_util::temp::temp_path("owned_failure.h5");
-        Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
-        let file = File::open_rw(&path).unwrap();
-        let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
-        let attempts = Rc::new(Cell::new(0));
-        appender.state.failure = Some(WriteFailure {
-            landed,
-            attempts: attempts.clone(),
-        });
-        let bytes: Vec<_> = (0..10i32).flat_map(i32::to_le_bytes).collect();
-        appender.append_raw(&bytes[..5]).unwrap();
-        let error = appender.append_raw(&bytes[5..]).unwrap_err();
-        let Error::Io(error) = error else {
-            panic!("expected injected write error, got {error:?}");
-        };
-        assert_eq!(error.kind(), ErrorKind::Other);
-        assert_eq!(error.to_string(), "injected appender write failure");
-        assert_eq!(appender.unwritten(), &bytes[landed * 4..]);
-        assert_poisoned(appender.flush().unwrap_err());
-        assert_eq!(appender.discard(), &bytes[landed * 4..]);
-        assert_eq!(attempts.get(), 1);
-        file.dataset("d")
-            .unwrap()
-            .into_buffered_appender()
-            .unwrap()
-            .finish()
-            .unwrap();
-        drop(file);
-        assert_eq!(
-            dataset::read_pure::<i32>(&path, "d"),
-            (0..landed as i32).collect::<Vec<_>>()
+    fn create_persistent(path: &Path, values: &[i32], chunk: u64) {
+        // Persistence lets the writer restore allocator state after a failed content write.
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
         );
+        builder
+            .create_dataset("d")
+            .with_i32_data(values)
+            .with_chunks(&[chunk])
+            .with_maxshape(&[MaxExtent::Unlimited]);
+        builder.write(path).unwrap();
+    }
+
+    fn assert_only_failed_write() {
+        let trace = disk_log::finish();
+        assert!(trace.operations.is_empty());
+        assert!(matches!(
+            trace.events.as_slice(),
+            [IoEvent::Write {
+                written: 0,
+                outcome: IoOutcome::Failed(ErrorKind::Other),
+                operation: None,
+                ..
+            }]
+        ));
     }
 
     fn assert_poisoned(error: Error) {
@@ -1087,25 +1211,5 @@ mod tests {
             "this buffered appender failed a write and holds unwritten elements; read them \
                      back with BufferedAppender::unwritten and start a new appender"
         );
-    }
-
-    pub(super) struct WriteFailure {
-        landed: usize,
-        attempts: Rc<Cell<usize>>,
-    }
-
-    impl WriteFailure {
-        pub(super) fn append(
-            &self,
-            dataset: &mut Dataset,
-            head: &AppendBuilder,
-            element_size: NonZeroUsize,
-        ) -> Result<(), Error> {
-            self.attempts.set(self.attempts.get() + 1);
-            if self.landed != 0 {
-                dataset.append_prebuilt(&head.head(self.landed * element_size.get()))?;
-            }
-            Err(IoError::other("injected appender write failure").into())
-        }
     }
 }
