@@ -270,8 +270,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
         StorageAllocation::Allocated,
     )
     .unwrap();
-    assert!(engine.image.reserve_write_observations(count + 1));
-    let before_writes = engine.image.issued_write_order().len();
+    disk_log::start_write_ranges(count + 1);
     let (header, measured) =
         allocation::measure(&format!("contiguous_creation_{count}_{budget}"), || {
             let header = engine.write_contiguous_chunk_set(&set).unwrap();
@@ -299,8 +298,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
         engine.image().read_exact_at(physical, raw.len()).unwrap(),
         raw
     );
-    let issued = engine.image.issued_write_order();
-    let writes: Vec<_> = issued[before_writes..]
+    let writes: Vec<_> = disk_log::take_write_ranges()
         .iter()
         .map(|&(offset, length)| (offset, usize::try_from(length).unwrap()))
         .collect();
@@ -356,6 +354,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
     )
     .unwrap();
     legacy.set_write_buffering(buffering).unwrap();
+    disk_log::start_write_ranges(1);
     let (old_header, old) = allocation::measure(
         &format!("contiguous_creation_legacy_{count}_{budget}"),
         || {
@@ -380,7 +379,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
     );
     assert_eq!(old_header, (layout_message, pipeline_message));
     assert!(old.peak_bytes >= u64::try_from(raw.len()).unwrap(), "{old}");
-    assert_eq!(legacy.image.issued_write_order().len(), 1);
+    assert_eq!(disk_log::take_write_ranges().len(), 1);
     assert_eq!(
         legacy
             .image()

@@ -1768,13 +1768,14 @@ fn a_publish_writes_from_the_byte_it_changed() {
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.set_sync_policy(SyncPolicy::OnClose);
-    let written = |s: &WriteEngine| -> u64 { s.issued_write_order().iter().map(|&(_, n)| n).sum() };
-    let mut cost = Vec::new();
-    for i in 0..2 {
-        let before = written(&s);
+    let cost = [0, 1].map(|i| {
+        disk_log::start_write_ranges(0);
         append(&mut s, WARMUP + i * ROUND, ROUND);
-        cost.push(written(&s) - before);
-    }
+        disk_log::take_write_ranges()
+            .iter()
+            .map(|&(_, bytes)| bytes)
+            .sum::<u64>()
+    });
     drop(s);
     assert!(
         cost[1] < cost[0],

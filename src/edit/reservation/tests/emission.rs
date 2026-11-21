@@ -432,8 +432,7 @@ fn streamed_fixed_arrays_use_bounded_heap(
     assert!(positive.peak_bytes >= length, "{positive}");
     drop(control);
     let write_bound = usize::try_from(length.div_ceil(4_096) + 4).unwrap();
-    assert!(engine.image.reserve_write_observations(write_bound));
-    let prior_writes = engine.image.issued_writes();
+    disk_log::start_write_ranges(write_bound);
     let (allocation, measured) = allocation::measure(region, || {
         engine
             .store()
@@ -450,7 +449,7 @@ fn streamed_fixed_arrays_use_bounded_heap(
             )
             .unwrap()
     });
-    assert!(engine.image.issued_writes() - prior_writes <= u64::try_from(write_bound).unwrap());
+    assert!(disk_log::take_write_ranges().len() <= write_bound);
     assert!(measured.peak_bytes < 4_096, "{measured}");
     assert!(measured.bytes < 4_096, "{measured}");
     assert!(measured.live_bytes < 4_096, "{measured}");

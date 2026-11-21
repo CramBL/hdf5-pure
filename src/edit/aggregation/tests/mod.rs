@@ -5,6 +5,7 @@ use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::{Extent, SessionSpace};
 use rstest::rstest;
+use test_util::disk_log;
 
 use crate::FileLocking;
 use crate::FileSpaceSettings;
@@ -210,6 +211,7 @@ fn aggregate_tail_release_preserves_committed_data(#[case] backing: MemoryStrate
         .unused()
         .find(|extent| extent.end() == StoredAddress::new(before))
         .unwrap();
+    disk_log::start_write_ranges(1);
     engine.finalize_persist().unwrap();
     assert_eq!(
         engine.image.len(),
@@ -220,7 +222,7 @@ fn aggregate_tail_release_preserves_committed_data(#[case] backing: MemoryStrate
         engine.addresses().resolve(tail.start()).unwrap().get()
     );
     assert!(engine.aggregation.unwrap().unused().next().is_none());
-    let order = engine.image.issued_write_order();
+    let order = disk_log::take_write_ranges();
     assert_eq!(order.last().unwrap().0, engine.context.signature().get());
     drop(engine);
     let file = File::open(&path).unwrap();
@@ -556,10 +558,6 @@ impl FileImage for TransientPublicationImage {
 
     fn discard_pending_writes(&mut self) {
         self.inner.discard_pending_writes();
-    }
-
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.inner.issued_write_order()
     }
 
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {

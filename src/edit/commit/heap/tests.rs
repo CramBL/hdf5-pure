@@ -242,6 +242,7 @@ fn streamed_source_and_undo_reads_have_separate_byte_costs() {
         .sum::<u64>();
     let header = u64::try_from(plan.free_space().unwrap().bytes().len()).unwrap();
     reads.store(0, Ordering::Relaxed);
+    disk_log::start_write_ranges(0);
     rootless(&mut engine, &[plan]).unwrap();
     assert_eq!(reads.load(Ordering::Relaxed), moved * 2 + header);
     assert_eq!(
@@ -254,7 +255,11 @@ fn streamed_source_and_undo_reads_have_separate_byte_costs() {
     );
     assert!(moved > COPY_BYTES as u64);
     assert!(moved + header < original.len() as u64);
-    assert_eq!(engine.image.issued_write_bytes(), moved + header);
+    let written = disk_log::take_write_ranges()
+        .iter()
+        .map(|&(_, bytes)| bytes)
+        .sum::<u64>();
+    assert_eq!(written, moved + header);
 }
 
 #[test]
@@ -267,13 +272,14 @@ fn source_read_failure_precedes_any_destination_write() {
         .unwrap()
         .set_len(start.get() + 40)
         .unwrap();
+    disk_log::start_write_ranges(0);
     let error = rootless(&mut engine, &[plan]).unwrap_err();
     assert!(
         matches!(error, Error::Format(FormatError::Source(_))),
         "{error:?}"
     );
     assert!(engine.inplace_undo.is_empty());
-    assert_eq!(engine.image.issued_writes(), 0);
+    assert!(disk_log::take_write_ranges().is_empty());
 }
 
 #[test]
