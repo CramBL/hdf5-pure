@@ -19,7 +19,6 @@ use crate::address::{
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::FileImage;
-use crate::image::ImageWork;
 use crate::image::MirrorImage;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
@@ -493,10 +492,6 @@ struct TransientPublicationImage {
 }
 
 impl FileImage for TransientPublicationImage {
-    fn buffering_work(&self) -> ImageWork {
-        self.inner.buffering_work()
-    }
-
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.inner.disk_bytes()
     }

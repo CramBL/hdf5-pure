@@ -90,8 +90,6 @@ pub(crate) mod zeros;
 
 #[cfg(test)]
 mod observations;
-#[cfg(test)]
-pub(crate) use observations::ImageWork;
 
 /// How long a write may sit in memory before it must reach the operating system.
 ///
@@ -195,10 +193,6 @@ pub(crate) trait FileImage: Source + Send + Sync {
     /// length exceeds [`usize::MAX`].
     #[cfg(test)]
     fn disk_bytes(&self) -> Result<Vec<u8>, Error>;
-
-    /// Returns current payload storage and recorded buffering operations.
-    #[cfg(test)]
-    fn buffering_work(&self) -> ImageWork;
 
     /// Append `bytes` at end-of-file, returning the absolute address they were
     /// written at — which is the pre-call [`Source::len`]. Extends `len` by
@@ -412,8 +406,6 @@ pub(crate) struct BufferedWrites {
     /// so the integration tests that measure allocation never compile this.
     #[cfg(test)]
     issued_order: Vec<(u64, u64)>,
-    #[cfg(test)]
-    work: ImageWork,
 }
 
 impl BufferedWrites {
@@ -428,8 +420,6 @@ impl BufferedWrites {
             on_disk_len,
             #[cfg(test)]
             issued_order: Vec::new(),
-            #[cfg(test)]
-            work: ImageWork::default(),
         }
     }
 
@@ -605,8 +595,6 @@ impl BufferedWrites {
     /// the containment path — the only test in the suite that fails when that
     /// one is disabled.
     fn absorb(&mut self, offset: u64, bytes: &[u8]) {
-        #[cfg(test)]
-        self.record_copy(bytes.len());
         let mut lo = offset;
         let mut hi = offset + bytes.len() as u64;
         // A write wholly inside a run already held — an index element patched
@@ -669,8 +657,6 @@ impl BufferedWrites {
                 reason = "every absorbed run starts within [lo, hi), which `merged` spans,                           so this indexes `merged`"
             )]
             let at = (k - lo) as usize;
-            #[cfg(test)]
-            self.record_copy(old.len());
             merged[at..at + old.len()].copy_from_slice(&old);
         }
         #[expect(
@@ -800,8 +786,6 @@ impl BufferedWrites {
         let page_size = self.mode.budget().map_or(1, |(p, _)| p).max(1);
         while let Some((start, mut bytes)) = self.runs.pop_first() {
             self.pending_bytes -= bytes.len();
-            #[cfg(test)]
-            self.observe_flush(&bytes, 0, 0);
             // Join every following run sharing a page with this one's last byte,
             // reading back the clean bytes between them so the join is one write
             // rather than a lie.
@@ -826,8 +810,6 @@ impl BufferedWrites {
                         }
                     };
                     bytes.resize(filled + gap, 0);
-                    #[cfg(test)]
-                    self.observe_flush(&bytes, 0, 0);
                     if let Err(e) =
                         read_at_handle(&self.handle, self.on_disk_len, gap_at, &mut bytes[filled..])
                     {
@@ -837,23 +819,10 @@ impl BufferedWrites {
                         self.restore(start, bytes);
                         return Err(Error::Format(e));
                     }
-                    #[cfg(test)]
-                    {
-                        self.work.clean_gap_calls = self.work.clean_gap_calls.saturating_add(1);
-                        self.work.clean_gap_bytes =
-                            self.work.clean_gap_bytes.saturating_add(gap as u64);
-                    }
                 }
                 let (_, tail) = self.runs.pop_first().expect("just peeked");
                 self.pending_bytes -= tail.len();
-                #[cfg(test)]
-                {
-                    self.record_copy(tail.len());
-                    self.observe_flush(&bytes, tail.len(), tail.capacity());
-                }
                 bytes.extend_from_slice(&tail);
-                #[cfg(test)]
-                self.observe_flush(&bytes, tail.len(), tail.capacity());
             }
             if let Err(e) = self.issue(start, &bytes) {
                 self.restore(start, bytes);
@@ -1025,14 +994,6 @@ impl Source for MirrorImage {
 }
 
 impl FileImage for MirrorImage {
-    #[cfg(test)]
-    fn buffering_work(&self) -> ImageWork {
-        let mut work = self.writes.observation();
-        work.mirror_bytes = self.data.len() as u64;
-        work.mirror_capacity = self.data.capacity() as u64;
-        work
-    }
-
     #[cfg(test)]
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.writes.disk_bytes()
@@ -1445,11 +1406,6 @@ impl Source for HandleImage {
 
 impl FileImage for HandleImage {
     #[cfg(test)]
-    fn buffering_work(&self) -> ImageWork {
-        self.writes.observation()
-    }
-
-    #[cfg(test)]
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.writes.disk_bytes()
     }
@@ -1681,10 +1637,6 @@ impl Source for CountingImage {
 
 #[cfg(test)]
 impl FileImage for CountingImage {
-    fn buffering_work(&self) -> ImageWork {
-        self.inner.buffering_work()
-    }
-
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.inner.disk_bytes()
     }
@@ -1803,10 +1755,6 @@ impl Source for TornWriteImage {
 
 #[cfg(test)]
 impl FileImage for TornWriteImage {
-    fn buffering_work(&self) -> ImageWork {
-        self.inner.buffering_work()
-    }
-
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.inner.disk_bytes()
     }
@@ -1895,10 +1843,6 @@ impl Source for SourceOnlyImage {
 
 #[cfg(test)]
 impl FileImage for SourceOnlyImage {
-    fn buffering_work(&self) -> ImageWork {
-        self.0.buffering_work()
-    }
-
     fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
         self.0.disk_bytes()
     }
