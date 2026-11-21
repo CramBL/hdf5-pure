@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use hdf5_pure_core::__private::ByteLength;
 
 use super::FreeList;
-use crate::admission::AdmissionWork;
 use crate::admission::OrderedReturns;
 use crate::admission::Release;
 use crate::admission::TrackedSpace;
@@ -31,7 +30,6 @@ impl FreeList {
         &mut self,
         threshold: ByteLength,
         extents: impl IntoIterator<Item = (Extent, ())>,
-        work: &mut AdmissionWork,
     ) -> Vec<(Extent, ())> {
         let mut extents = extents.into_iter();
         let Some(first) = extents.next() else {
@@ -47,14 +45,13 @@ impl FreeList {
         let mut returned = vec![first, second];
         returned.extend(extents);
         // Returned allocations are disjoint. Callers retain their original boundaries.
-        let mut returned = OrderedReturns::new(returned, work)
+        let mut returned = OrderedReturns::new(returned)
             .expect("returned allocations do not overlap")
             .into_iter()
             .peekable();
         let mut tracked = self.extents().iter().copied().peekable();
         let mut admission = FlatAdmission::default();
         while tracked.peek().is_some() || returned.peek().is_some() {
-            work.visit_extent();
             if let Some(&extent) = tracked.peek()
                 && returned
                     .peek()
@@ -75,8 +72,7 @@ impl FreeList {
             pending_start: _,
         } = admission;
         // Distinct components have a gap, and each admitted component is one nonempty extent.
-        *self = Self::from_sorted(admitted.into_iter().inspect(|_| work.integrate_extent()))
-            .expect("admitted runs are sorted and disjoint");
+        *self = Self::from_sorted(admitted).expect("admitted runs are sorted and disjoint");
         dropped
     }
 }

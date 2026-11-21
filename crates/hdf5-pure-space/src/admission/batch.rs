@@ -1,4 +1,4 @@
-//! Ordering of original returned allocations and observations of admission work.
+//! Ordering of original returned allocations.
 
 use alloc::vec::Vec;
 
@@ -21,21 +21,14 @@ impl<C> OrderedReturns<C> {
     /// # Errors
     ///
     /// Returns [`FreeListError::Overlap`] if two allocations overlap in address order.
-    pub(crate) fn new(
-        mut entries: Vec<(Extent, C)>,
-        work: &mut AdmissionWork,
-    ) -> Result<Self, FreeListError> {
-        if !entries.windows(2).all(|pair| {
-            work.visit_order();
-            pair[0].0.start() <= pair[1].0.start()
-        }) {
-            entries.sort_unstable_by(|left, right| {
-                work.compare();
-                left.0.start().cmp(&right.0.start())
-            });
+    pub(crate) fn new(mut entries: Vec<(Extent, C)>) -> Result<Self, FreeListError> {
+        if !entries
+            .windows(2)
+            .all(|pair| pair[0].0.start() <= pair[1].0.start())
+        {
+            entries.sort_unstable_by_key(|(extent, _)| extent.start());
         }
         for pair in entries.windows(2) {
-            work.visit_order();
             if pair[0].0.end() > pair[1].0.start() {
                 return Err(FreeListError::Overlap {
                     previous: pair[0].0,
@@ -56,105 +49,6 @@ impl<C> IntoIterator for OrderedReturns<C> {
     }
 }
 
-/// Observations of ordering, traversal, and canonical construction during admission.
-///
-/// Counter fields are present only when compiling tests.
-#[derive(Default)]
-pub(crate) struct AdmissionWork {
-    /// Adjacent-pair checks before sorting and during overlap checking.
-    #[cfg(test)]
-    pub(crate) ordered_visits: usize,
-    /// Address comparisons performed by sorting unordered input.
-    #[cfg(test)]
-    pub(crate) sort_comparisons: usize,
-    /// Input extents visited during admission, padding normalization, and observed list merges.
-    #[cfg(test)]
-    pub(crate) extent_visits: usize,
-    /// Admitted runs passed to canonical free-list construction.
-    #[cfg(test)]
-    pub(crate) integrated_extents: usize,
-    /// Existing tracked extents copied into PAGE class indexes.
-    #[cfg(test)]
-    pub(crate) indexed_extents: usize,
-    /// Entries removed from the PAGE admission queue, including repeated visits.
-    #[cfg(test)]
-    pub(crate) queue_visits: usize,
-    /// Explicit neighbor and endpoint searches, excluding their internal comparisons.
-    #[cfg(test)]
-    pub(crate) lookups: usize,
-    /// Class-index insertions, including the initial tracked extents.
-    #[cfg(test)]
-    pub(crate) inserted_extents: usize,
-    /// Class-index removals while coalescing neighboring extents.
-    #[cfg(test)]
-    pub(crate) removed_extents: usize,
-}
-
-impl AdmissionWork {
-    pub(crate) fn index_extent(&mut self) {
-        #[cfg(test)]
-        {
-            self.indexed_extents += 1;
-        }
-    }
-
-    pub(crate) fn visit_queue(&mut self) {
-        #[cfg(test)]
-        {
-            self.queue_visits += 1;
-        }
-    }
-
-    pub(crate) fn lookup(&mut self) {
-        #[cfg(test)]
-        {
-            self.lookups += 1;
-        }
-    }
-
-    pub(crate) fn insert_extent(&mut self) {
-        #[cfg(test)]
-        {
-            self.inserted_extents += 1;
-        }
-    }
-
-    pub(crate) fn remove_extent(&mut self) {
-        #[cfg(test)]
-        {
-            self.removed_extents += 1;
-        }
-    }
-
-    fn visit_order(&mut self) {
-        #[cfg(test)]
-        {
-            self.ordered_visits += 1;
-        }
-    }
-
-    fn compare(&mut self) {
-        #[cfg(test)]
-        {
-            self.sort_comparisons += 1;
-        }
-    }
-
-    pub(crate) fn visit_extent(&mut self) {
-        #[cfg(test)]
-        {
-            self.extent_visits += 1;
-        }
-    }
-
-    pub(crate) fn integrate_extent(&mut self) {
-        #[cfg(test)]
-        {
-            self.integrated_extents += 1;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use alloc::vec;
@@ -164,7 +58,6 @@ mod tests {
     use hdf5_pure_core::StoredAddress;
     use rstest::rstest;
 
-    use super::AdmissionWork;
     use super::OrderedReturns;
     use crate::extent::Extent;
     use crate::list::FreeListError;
@@ -179,7 +72,7 @@ mod tests {
         if reverse {
             entries.reverse();
         }
-        let ordered = OrderedReturns::new(entries, &mut AdmissionWork::default()).unwrap();
+        let ordered = OrderedReturns::new(entries).unwrap();
         assert_eq!(
             ordered.into_iter().collect::<alloc::vec::Vec<_>>(),
             [(first, 1), (second, 2)]
@@ -196,7 +89,7 @@ mod tests {
         if reverse {
             entries.reverse();
         }
-        let error = match OrderedReturns::new(entries, &mut AdmissionWork::default()) {
+        let error = match OrderedReturns::new(entries) {
             Ok(_) => panic!("overlapping returned allocations were accepted"),
             Err(error) => error,
         };
