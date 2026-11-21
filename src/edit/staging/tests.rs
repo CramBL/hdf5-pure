@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rstest::rstest;
 
-use super::StagedKind;
+use super::{StagedEdits, StagedKind};
 use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, WriteEngine};
 use crate::error::{Error, FormatError};
@@ -12,6 +12,13 @@ use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
 use crate::type_builders::{AttrValue, DatasetBuilder};
 use crate::writer::FileBuilder;
+
+impl StagedEdits {
+    /// Returns the operation counts for equality checks in editor tests.
+    pub(in crate::edit) fn snapshot(&self) -> impl Eq + use<> {
+        self.mark()
+    }
+}
 
 #[test]
 fn failed_batch_restores_every_staged_operation() {

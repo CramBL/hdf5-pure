@@ -8,16 +8,12 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
-#[cfg(test)]
-use hdf5_pure_format::__private::ObjectHeaderAllocation;
 use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
 use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::RecordSplice;
 use hdf5_pure_space::__private::AllocationClass;
-#[cfg(test)]
-use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::ReservationRequest;
 
 use crate::address::AddressContext;
@@ -824,26 +820,6 @@ impl OhRegion {
         self.widths
     }
 
-    /// Returns a copy containing complete non-NIL records and the same prefix properties.
-    ///
-    /// Omits any trailing gap after the last complete record.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a record extends past the region.
-    #[cfg(test)]
-    pub(crate) fn without_nil(&self) -> Result<Self, Error> {
-        let mut bytes = Vec::new();
-        let mut start = 0;
-        while let Some((kind, _, end)) = self.next_message(start)? {
-            if kind != MessageType::NIL {
-                bytes.extend_from_slice(&self[start..end]);
-            }
-            start = end;
-        }
-        Ok(self.with_bytes(bytes))
-    }
-
     /// Returns the layout used to parse and serialize this region.
     pub(crate) fn layout(&self) -> MessageRecordLayout {
         self.props.layout
@@ -972,33 +948,6 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
     Ok(build_v2_object_header_verbatim(&normalized_header(region)?))
 }
 
-/// Builds a normalized version 2 header that fills `allocation`.
-///
-/// The allocation uses stored, base-relative coordinates and includes all chunk framing and
-/// padding. Uses [`ObjectHeaderAllocation`] to encode its checksummed chunks at the region's
-/// file widths. Preserves optional prefix fields and updates existing modification and change
-/// times when the system clock is available.
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] if compact attribute metadata cannot be normalized, or
-/// [`Error::Format`] for an allocation-planning error from [`ObjectHeaderAllocation::new`].
-#[cfg(test)]
-pub(crate) fn build_v2_object_header_allocation(
-    region: &OhRegion,
-    allocation: Extent,
-) -> Result<Vec<u8>, Error> {
-    let owned = normalized_header(region)?;
-    Ok(ObjectHeaderAllocation::new(
-        stamped_prefix(&owned),
-        owned.widths(),
-        allocation.start(),
-        allocation.len().get(),
-        &owned,
-    )?
-    .encode())
-}
-
 /// Returns a copy with compact Attribute Info metadata present where required.
 ///
 /// Preserves existing Attribute Info messages, including those naming dense storage.
@@ -1067,6 +1016,7 @@ mod tests {
     use hdf5_pure_core::__private::ByteLength;
     use hdf5_pure_format::__private::AttributePhaseChange;
     use hdf5_pure_format::__private::ObjectTimes;
+    use hdf5_pure_space::__private::Extent;
     use rstest::rstest;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use test_util::allocation;
@@ -1083,6 +1033,7 @@ mod tests {
 
     use super::*;
 
+    mod fixture;
     mod reconstruction;
 
     #[rstest]
@@ -1160,7 +1111,13 @@ mod tests {
         assert_eq!(&rewritten[..], &region_bytes(&body));
 
         let allocation = Extent::new(StoredAddress::new(1_024), ByteLength::new(131_123)).unwrap();
-        let encoded = build_v2_object_header_allocation(&rewritten, allocation).unwrap();
+        let prepared = PreparedHeader::new(&rewritten).unwrap();
+        let encoded = prepared
+            .geometry()
+            .unwrap()
+            .into_allocation(allocation.start(), allocation.len().get())
+            .unwrap()
+            .encode();
         let addresses = AddressContext::from_effective_base(BaseAddress::new(4_096));
         let physical = addresses.resolve(allocation.start()).unwrap();
         let mut image = vec![0; usize::try_from(physical.get()).unwrap()];
@@ -1224,11 +1181,13 @@ mod tests {
             crate::file_writer::WIDTHS,
         )
         .unwrap();
-        let bytes = build_v2_object_header_allocation(
-            &region,
-            Extent::new(StoredAddress::ZERO, ByteLength::new(8_192)).unwrap(),
-        )
-        .unwrap();
+        let prepared = PreparedHeader::new(&region).unwrap();
+        let bytes = prepared
+            .geometry()
+            .unwrap()
+            .into_allocation(StoredAddress::ZERO, 8_192)
+            .unwrap()
+            .encode();
         let actual = WriteEngine::gather_oh_messages(
             &BytesSource::new(bytes),
             PhysicalAddress::new(0),

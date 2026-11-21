@@ -38,6 +38,12 @@ use crate::edit::block::{BlockRequest, EncodingDependency};
 mod emission;
 mod preferred;
 
+impl ReservationPlan<'_> {
+    pub(in crate::edit) fn end(&self) -> PhysicalAddress {
+        self.end
+    }
+}
+
 #[rstest]
 #[case::two(OffsetWidth::Two, 65_535)]
 #[case::four(OffsetWidth::Four, 4_294_967_295)]
