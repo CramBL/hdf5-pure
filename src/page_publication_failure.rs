@@ -215,10 +215,6 @@ impl FileImage for PublicationFailureImage {
         self.inner.discard_pending_writes();
     }
 
-    fn issued_write_order(&self) -> Vec<(u64, u64)> {
-        self.inner.issued_write_order()
-    }
-
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.inner.set_write_buffering(mode)
     }

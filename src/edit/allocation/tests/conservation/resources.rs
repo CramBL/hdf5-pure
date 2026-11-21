@@ -247,7 +247,7 @@ fn run(
     let sections = engine.reusable_free_sections().unwrap().section_count();
     assert!(sections <= 16, "sections before appends: {sections}");
     let sequence = engine.context.allocations.sequence;
-    let writes = engine.image.issued_writes();
+    disk_log::start_write_ranges(0);
     let mut reads = Reads {
         bytes: 0,
         maximum: 0,
@@ -277,7 +277,7 @@ fn run(
         assert_session_state(&engine);
     }
     assert!(engine.context.allocations.sequence >= sequence + appends as u64);
-    assert!(engine.image.issued_writes() >= writes + appends as u64);
+    assert!(disk_log::take_write_ranges().len() >= appends);
     assert!(
         engine.reusable_free_sections().unwrap().section_count() <= 16,
         "sections: {sections} -> {}",

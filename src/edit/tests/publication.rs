@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 
 use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
+use test_util::disk_log;
 use test_util::identity::Fixture as IdentityFixture;
 use test_util_hdf5::assertion::StatusOpen;
 use test_util_hdf5::identity;
@@ -49,7 +50,7 @@ fn failed_chunk_reservations_preserve_the_published_tree_and_reusable_space(
     #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
 ) {
     use crate::{FileAccessProperties, OffsetWidth};
-    use test_util::disk_log::{self, IoEvent};
+    use test_util::disk_log::IoEvent;
 
     let path = test_util::temp::temp_path("chunk-reservation-limit.h5");
     let mut builder = FileBuilder::new();
@@ -1137,9 +1138,9 @@ fn a_page_buffered_session_flushes_when_it_exceeds_its_budget() {
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.set_sync_policy(SyncPolicy::OnClose);
     s.set_page_buffer_size(WRITE_GATHER_BYTES).unwrap();
-    let before = s.image.issued_writes();
+    disk_log::start_write_ranges(0);
     s.append_inplace_i32("t0", &vec![7i32; 1 << 20]).unwrap();
-    let during = s.image.issued_writes() - before;
+    let during = disk_log::take_write_ranges().len();
     s.force_sync().unwrap();
     s.release_status_flags().unwrap();
     drop(s);
@@ -1191,11 +1192,11 @@ fn page_buffer_budget_controls_writes_within_publication_batches(
         let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
         s.set_sync_policy(SyncPolicy::OnClose);
         s.set_page_buffer_size(budget).unwrap();
-        let before = s.image.issued_writes();
+        disk_log::start_write_ranges(0);
         workload(&mut s);
         s.force_sync().unwrap();
         s.release_status_flags().unwrap();
-        let issued = s.image.issued_writes() - before;
+        let issued = disk_log::take_write_ranges().len();
         drop(s);
         issued
     };
@@ -1449,10 +1450,10 @@ fn a_barrier_orders_the_publish_point_last_under_every_policy() {
         db.with_f64_data(&[2.5f64; 64]).with_shape(&[64]);
         s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
             .unwrap();
-        let before = s.image.issued_write_order().len();
+        disk_log::start_write_ranges(0);
         s.commit().unwrap();
 
-        let order = s.image.issued_write_order()[before..].to_vec();
+        let order = disk_log::take_write_ranges();
         let superblock = order
             .iter()
             .position(|&(at, _)| at == s.context.signature().get())
@@ -1467,9 +1468,9 @@ fn a_barrier_orders_the_publish_point_last_under_every_policy() {
              {order:?}, ahead of content at {content} — a failure in that window \
              leaves a root pointing at bytes that are not in the file"
         );
-        let before = s.image.issued_write_order().len();
+        disk_log::start_write_ranges(0);
         s.append_inplace_i32("t0", &[7; 64]).unwrap();
-        let order = s.image.issued_write_order()[before..].to_vec();
+        let order = disk_log::take_write_ranges();
         let highest = order
             .iter()
             .map(|&(at, _)| at)
@@ -1540,18 +1541,16 @@ fn a_finished_operation_has_nothing_left_to_write() {
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.set_sync_policy(SyncPolicy::OnClose);
 
-    let before_append = s.image.issued_writes();
+    disk_log::start_write_ranges(0);
     s.append_inplace_i32("t0", &[7; 64]).unwrap();
-    let after_append = s.image.issued_writes();
     assert!(
-        after_append > before_append,
-        "the append issued nothing at all, so the equality below holds for a \
-         session that did no work"
+        !disk_log::take_write_ranges().is_empty(),
+        "the append issued nothing"
     );
+    disk_log::start_write_ranges(0);
     s.force_sync().unwrap();
-    assert_eq!(
-        s.image.issued_writes(),
-        after_append,
+    assert!(
+        disk_log::take_write_ranges().is_empty(),
         "a finished append left writes in this process's memory"
     );
 
@@ -1559,16 +1558,16 @@ fn a_finished_operation_has_nothing_left_to_write() {
     db.with_f64_data(&[1.5f64; 8]).with_shape(&[8]);
     s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
         .unwrap();
+    disk_log::start_write_ranges(0);
     s.commit().unwrap();
-    let after_commit = s.image.issued_writes();
     assert!(
-        after_commit > after_append,
-        "the commit issued nothing at all"
+        !disk_log::take_write_ranges().is_empty(),
+        "the commit issued nothing"
     );
+    disk_log::start_write_ranges(0);
     s.force_sync().unwrap();
-    assert_eq!(
-        s.image.issued_writes(),
-        after_commit,
+    assert!(
+        disk_log::take_write_ranges().is_empty(),
         "a finished commit left writes in this process's memory"
     );
     drop(s);
@@ -1602,11 +1601,10 @@ fn finalize_persist_has_nothing_left_to_write() {
     s.append_inplace_i32("t0", &[7; 64]).unwrap();
 
     s.finalize_persist().unwrap();
-    let after = s.image.issued_writes();
+    disk_log::start_write_ranges(0);
     s.force_sync().unwrap();
-    assert_eq!(
-        s.image.issued_writes(),
-        after,
+    assert!(
+        disk_log::take_write_ranges().is_empty(),
         "finalize_persist returned with writes still gathered"
     );
 }
@@ -1614,7 +1612,7 @@ fn finalize_persist_has_nothing_left_to_write() {
 #[test]
 fn swmr_issues_payload_before_the_eof_that_covers_it() {
     use std::fs;
-    use test_util::disk_log::{self, DiskOp, IoEvent, IoOutcome};
+    use test_util::disk_log::{DiskOp, IoEvent, IoOutcome};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("swmr.h5");
@@ -1861,11 +1859,10 @@ fn sync_policy_governs_the_persisting_and_flag_barriers() {
         s.set_consistency_flags(SuperblockStatusFlags::new())
             .unwrap();
         let after_flags = syncs.load(Ordering::Relaxed);
-        let issued = s.image.issued_writes();
+        disk_log::start_write_ranges(0);
         s.force_sync().unwrap();
-        assert_eq!(
-            s.image.issued_writes(),
-            issued,
+        assert!(
+            disk_log::take_write_ranges().is_empty(),
             "{policy:?}: the consistency-flag write was left gathered"
         );
         s.append_inplace_i32("d", &[8, 9, 10, 11]).unwrap();
@@ -2179,10 +2176,9 @@ fn a_bounded_commit_reads_the_value_it_is_replacing() {
     );
 }
 
-/// Writes dataset `d` with one element per chunk and initial values `0..n`.
 /// Runs immediate appends and a staged commit, returning their separate write counts.
-fn gather_workload(session: &mut WriteEngine) -> (u64, u64) {
-    let before = session.image.issued_writes();
+fn gather_workload(session: &mut WriteEngine) -> (usize, usize) {
+    disk_log::start_write_ranges(0);
     for round in 0..4 {
         for t in 0..4 {
             session
@@ -2197,12 +2193,10 @@ fn gather_workload(session: &mut WriteEngine) -> (u64, u64) {
             .stage_created_dataset(&ObjectPathBuf::parse(&std::format!("/n{t}")), db)
             .unwrap();
     }
-    let after_appends = session.image.issued_writes();
+    let appends = disk_log::take_write_ranges().len();
+    disk_log::start_write_ranges(0);
     session.commit().unwrap();
-    (
-        after_appends - before,
-        session.image.issued_writes() - after_appends,
-    )
+    (appends, disk_log::take_write_ranges().len())
 }
 
 /// Asserts the injected device-write error's kind and complete message.

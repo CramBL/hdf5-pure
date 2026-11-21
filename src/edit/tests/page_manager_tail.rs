@@ -768,6 +768,7 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
         })
         .unwrap();
     disk_log::start();
+    disk_log::start_read_ranges();
     let initial_len = engine.image.len();
     let root = engine
         .context
@@ -781,6 +782,11 @@ fn page_manager_emission_orders_large_lists_before_later_continuations(
     disk_log::start();
     engine.image.flush().unwrap();
     let after_flush = disk_log::take();
+    let reads = disk_log::take_read_ranges();
+    assert!(
+        reads.iter().all(|&(at, length)| at + length <= initial_len),
+        "{reads:?}"
+    );
     let flush_bytes = |operations: &[DiskOp]| {
         operations
             .iter()

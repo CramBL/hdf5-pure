@@ -160,6 +160,56 @@ pub fn finish() -> Recording {
     LOG.with(|log| log.borrow_mut().take()).unwrap_or_default()
 }
 
+/// Records successful write ranges on this thread without copying their payloads.
+///
+/// Reserves room for `capacity` writes before the measured operation starts.
+/// Byte replay, fault injection, and read recording remain independent.
+pub fn start_write_ranges(capacity: usize) {
+    WRITE_RANGES.with(|ranges| *ranges.borrow_mut() = Some(Vec::with_capacity(capacity)));
+}
+
+/// Stops range recording and returns successful writes as `(offset, length)`.
+///
+/// # Panics
+///
+/// Panics if write range recording has not started on this thread.
+pub fn take_write_ranges() -> Vec<(u64, u64)> {
+    WRITE_RANGES.with(|ranges| {
+        ranges
+            .borrow_mut()
+            .take()
+            .expect("write ranges are recording")
+    })
+}
+
+/// Records read requests on this thread.
+pub fn start_read_ranges() {
+    READ_RANGES.with(|ranges| *ranges.borrow_mut() = Some(Vec::new()));
+}
+
+/// Records the range of an issued read request when read recording is active.
+pub fn record_read_request(offset: u64, length: usize) {
+    READ_RANGES.with(|ranges| {
+        if let Some(ranges) = ranges.borrow_mut().as_mut() {
+            ranges.push((offset, length as u64));
+        }
+    });
+}
+
+/// Stops read recording and returns requested ranges as `(offset, length)`.
+///
+/// # Panics
+///
+/// Panics if read recording has not started on this thread.
+pub fn take_read_ranges() -> Vec<(u64, u64)> {
+    READ_RANGES.with(|ranges| {
+        ranges
+            .borrow_mut()
+            .take()
+            .expect("read ranges are recording")
+    })
+}
+
 /// Returns whether the current recording includes bytes written at `offset`.
 pub fn has_written_at(offset: u64) -> bool {
     LOG.with(|log| {
@@ -449,6 +499,13 @@ fn outcome(result: &io::Result<()>) -> IoOutcome {
 }
 
 fn record_write_outcome(offset: u64, requested: usize, bytes: &[u8], outcome: IoOutcome) {
+    if outcome == IoOutcome::Succeeded {
+        WRITE_RANGES.with(|ranges| {
+            if let Some(ranges) = ranges.borrow_mut().as_mut() {
+                ranges.push((offset, bytes.len() as u64));
+            }
+        });
+    }
     LOG.with(|log| {
         if let Some(log) = log.borrow_mut().as_mut() {
             let operation = if bytes.is_empty() {
@@ -477,6 +534,8 @@ thread_local! {
     static WRITE_FAILURE: RefCell<Option<(usize, usize)>> = const { RefCell::new(None) };
     static SYNC_FAILURE: RefCell<Option<(usize, FailurePoint)>> = const { RefCell::new(None) };
     static LOG: RefCell<Option<Recording>> = const { RefCell::new(None) };
+    static READ_RANGES: RefCell<Option<Vec<(u64, u64)>>> = const { RefCell::new(None) };
+    static WRITE_RANGES: RefCell<Option<Vec<(u64, u64)>>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -492,6 +551,25 @@ mod tests {
     use super::IoEvent;
     use super::IoOutcome;
     use super::Synchronization;
+
+    #[test]
+    fn range_recording_keeps_successful_writes_and_byte_replay_keeps_failed_prefixes() {
+        let mut output = Vec::new();
+        super::start();
+        super::start_write_ranges(2);
+        super::write_all(&mut output, 0, b"abc").unwrap();
+        super::fail_write_after(0, 1);
+        let error = super::write_all(&mut output, 3, b"de").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Other);
+        super::write_all(&mut output, 4, b"fg").unwrap();
+        assert_eq!(super::take_write_ranges(), [(0, 3), (4, 2)]);
+        let mut replay = Vec::new();
+        for operation in super::take() {
+            operation.apply(&mut replay);
+        }
+        assert_eq!(output, b"abcdfg");
+        assert_eq!(replay, output);
+    }
 
     #[rstest]
     #[case::before(FailurePoint::Before, 0)]
