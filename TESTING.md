@@ -66,6 +66,15 @@ elaborate setup.
 
 Assert specific error variants and fields using the [exact-error rules][errors].
 
+### Test examples
+
+- [Complex datatypes][complex-tests] tests one invariant at a time and uses named
+  `rstest` cases for component sizes and byte orders.
+- [Object header continuations][continuation-tests] builds malformed bytes at
+  runtime and checks the error through two read paths.
+- [Dense attributes][dense-attribute-tests] checks files written by libhdf5 and
+  uses libhdf5 to read independently constructed fixtures.
+
 ## Extended tests
 
 Use the extended suite for tests that would significantly increase ordinary suite
@@ -86,8 +95,8 @@ Follow each requirement when the change calls for that testing method.
 | Allocation testing | Assert resource bounds and verify allocation measurements. Justify and bound resource increases using comparable workloads and measurement intervals. | [Allocation measurements][allocation], [baseline recipes][soundness] |
 | Property testing | Use bounded, shrinkable cases with explicit persistence paths. Preserve seeds and minimized regressions. | [Property tests][properties] |
 | Differential fuzzing | Compare equivalent operations, including errors. Document permitted differences and bound traversal and resources. | [Differential target][differential] |
-| Snapshots | Normalize irrelevant variation and inspect changes. Keep resource-bound assertions when updating snapshots. | [Native snapshots][snapshots] |
-| Child processes | Bound fixture startup and execution. Clean up children and fail the parent on infrastructure errors. | [Fixture binary][child], [target declaration][targets] |
+| Snapshots | Normalize irrelevant variation and inspect changes. Keep resource-bound assertions when updating snapshots. | [Free-space snapshots][snapshots] |
+| Child processes | Bound fixture startup and execution. Clean up children and fail the parent on infrastructure errors. | [Fixture binary][child], [target declaration][targets], [interrupted writer test][child-example] |
 | Doctests | Prefer executable examples. Justify `no_run` beside the example. Preserve public API and diagnostic checks. | [Documentation style][docstyle], [API checks][api] |
 
 Selected native cases fail on missing prerequisites or protocol errors. Preserve
@@ -115,16 +124,20 @@ The `-full` recipes enable the full public feature profile. Use
 [seals]: tests/main/seals.rs
 [fixtures]: tests/data/NOTICE.md
 [errors]: CODE_STYLE.md#assert-the-exact-error
+[complex-tests]: crates/hdf5-pure-core/tests/main/complex.rs
+[continuation-tests]: tests/main/object_header_continuation.rs
+[dense-attribute-tests]: crates/crosscheck/tests/main/dense_attributes.rs
 [nextest]: .config/nextest.toml
 [interop]: scripts/interop.just
 [locking]: crates/test-util-hdf5/src/lock.rs
 [soundness]: scripts/soundness.just
 [portability]: scripts/portability.just
 [allocation]: crates/test-util/src/allocation.rs
-[properties]: tests/main/roundtrip_properties.rs
-[differential]: fuzz/fuzz_targets/streaming_differential.rs
+[properties]: crates/hdf5-pure-filter/src/scaleoffset/tests/properties.rs
+[differential]: fuzz/streaming_differential.rs
 [snapshots]: crates/crosscheck/tests/main/file_space_oracle.rs
 [child]: crates/crosscheck/tests/fixtures/interrupted_writer.rs
+[child-example]: crates/crosscheck/tests/main/owned_swmr.rs
 [targets]: crates/crosscheck/Cargo.toml
 [docstyle]: DOC_STYLE.md
 [api]: scripts/api.just
