@@ -13,10 +13,11 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
-    AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
-    FileSpaceStrategy, Group, Object, ReferenceType,
+    AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileAccessProperties,
+    FileBuilder, FileSpaceStrategy, Group, MemoryStrategy, Object, ReferenceType,
 };
 
+use rstest::rstest;
 use test_util_hdf5::{dataset::Unlimited, fixtures};
 
 /// The names of the datasets the file's first stored reference resolves to,
@@ -79,29 +80,62 @@ fn a_reference_to_a_group_follows_it_when_the_group_gains_a_child() {
     );
 }
 
-#[test]
-fn a_reference_to_a_dataset_follows_its_relocating_attribute_edit() {
+#[rstest]
+#[case::without_heap_candidate(false)]
+#[case::with_heap_candidate(true)]
+fn a_reference_to_a_dataset_follows_its_relocating_attribute_edit(
+    #[case] heap_candidate: bool,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] backing: MemoryStrategy,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dataset_target.h5");
 
     let mut b = FileBuilder::new();
     b.create_dataset("target").with_i32_data(&[1, 2, 3]);
     b.create_dataset("refs").with_path_references(&["target"]);
+    if heap_candidate {
+        b.create_dataset("heap").with_vlen_strings(&["obsolete"]);
+    }
     b.write(&path).unwrap();
 
     // An attribute edit rewrites the dataset's header elsewhere.
-    let session = File::open_rw(&path).unwrap();
+    let session = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(backing),
+    )
+    .unwrap();
+    let original = session.dataset("refs").unwrap().read_raw().unwrap();
     session
         .dataset("target")
         .unwrap()
         .set_attr("units", AttrValue::I32(1))
         .unwrap();
+    if heap_candidate {
+        assert_eq!(
+            session.dataset("heap").unwrap().read_string().unwrap(),
+            ["obsolete"]
+        );
+        session.root().delete("heap").unwrap();
+    }
     session.commit().unwrap();
     drop(session);
     fixtures::churn_commits(&path, 10);
 
     let file = File::open(&path).unwrap();
-    let objects = file.dataset("refs").unwrap().dereference().unwrap();
+    if heap_candidate {
+        assert!(
+            !file
+                .root()
+                .datasets()
+                .unwrap()
+                .iter()
+                .any(|name| name == "heap")
+        );
+    }
+    let references = file.dataset("refs").unwrap();
+    assert_ne!(references.read_raw().unwrap(), original);
+    let objects = references.dereference().unwrap();
+    assert_eq!(objects.len(), 1);
     match &objects[0] {
         Object::Dataset(d) => {
             assert_eq!(d.read_i32().unwrap(), vec![1, 2, 3]);

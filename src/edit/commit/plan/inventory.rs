@@ -17,9 +17,10 @@ use crate::edit::analysis::heap::qualification::OriginalCollections;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::{
     AnalysisPhase, CountHandoffError, NetCountError, OriginalOwnerFacts, OriginalOwnerInventory,
-    PreservedReferences, ReconstructionSource,
+    PreservedReferences, ProtectedCounts, ReconstructionSource,
 };
 use crate::edit::commit::publish::AppliedTree;
+use crate::edit::retirement::RootRetirement;
 use crate::edit::staging::StagedEdits;
 use crate::error::{Error, FormatError};
 use crate::object_graph::ObjectId;
@@ -139,7 +140,12 @@ impl PreparedEditInventory {
                 FormatError::Internal("a prepared edit inventory has no tree".into()).into(),
             );
         };
-        let tree = engine.apply_tree_recording(
+        let AppliedTree {
+            counts,
+            retirement,
+            freed,
+            relocations,
+        } = engine.apply_tree_recording(
             &mut overwrites,
             tree,
             staged,
@@ -150,9 +156,11 @@ impl PreparedEditInventory {
                 Err(error) => return Err(error),
             }),
         )?;
-        let dispositions = dispositions.finish(&tree);
+        let dispositions = dispositions.finish(retirement.root(), relocations);
         Ok(AppliedEditInventory {
-            tree,
+            counts,
+            retirement,
+            freed,
             original,
             dispositions,
             storage,
@@ -182,7 +190,9 @@ pub(in crate::edit::commit) enum InventoryPreparation {
 /// storage reuse, and publication require separate permission. Original storage exclusions
 /// remain paired with the placed tree.
 pub(in crate::edit::commit) struct AppliedEditInventory {
-    tree: AppliedTree,
+    counts: Option<ProtectedCounts>,
+    retirement: RootRetirement,
+    freed: Vec<(FileRange, FreeClass)>,
     original: OriginalEdits,
     dispositions: AppliedDispositions,
     storage: storage::OriginalStorage,
