@@ -1621,42 +1621,121 @@ fn finalize_persist_has_nothing_left_to_write() {
 }
 
 #[test]
-fn an_unbuffered_append_costs_a_small_constant_number_of_writes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("swmr_cost.h5");
-    common::gather_fixture(&path, 1, false);
+fn swmr_issues_payload_before_the_eof_that_covers_it() {
+    use std::fs;
+    use test_util::disk_log::{self, DiskOp, IoEvent, IoOutcome};
 
-    let mut s = WriteEngine::open_swmr_writer(&path, SyncPolicy::OnClose).unwrap();
-    let before = s.image.issued_writes();
-    s.append_inplace_i32_phased("t0", &[7; 64], 4).unwrap();
-    let cost = s.image.issued_writes() - before;
-
-    assert!(
-        cost > 0,
-        "the append issued nothing, so the ceiling below proves nothing"
-    );
-    assert!(
-        cost <= 10,
-        "an unbuffered append costs {cost} writes; the array header's six \
-         statistics belong in one write, not six, and each checksum belongs in \
-         the write that changed what it covers (measured at 8)"
-    );
-}
-
-#[test]
-fn the_swmr_writer_holds_no_write_back() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("swmr.h5");
     common::gather_fixture(&path, 1, false);
-
-    let mut s = WriteEngine::open_swmr_writer(&path, SyncPolicy::OnClose).unwrap();
-    let before = std::fs::read(&path).unwrap().len();
-    s.append_inplace_i32_phased("t0", &[7; 64], 1).unwrap();
-
+    let fixture = fs::read(&path).unwrap();
+    let open = || {
+        File::open_swmr_writer_with_options(
+            &path,
+            crate::FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap()
+    };
+    let writer = open();
+    let base = fs::read(&path).unwrap();
+    let values = [7_i32; 64];
+    let payload = values
+        .into_iter()
+        .flat_map(i32::to_le_bytes)
+        .collect::<Vec<_>>();
+    disk_log::start();
+    writer.dataset("t0").unwrap().append(&values).unwrap();
+    let trace = disk_log::finish();
+    let writes = trace
+        .events
+        .iter()
+        .filter(|event| matches!(event, IoEvent::Write { .. }))
+        .count();
     assert!(
-        std::fs::read(&path).unwrap().len() > before,
-        "a SWMR reader must see the phase-1 chunk bytes as soon as they are written"
+        (1..=10).contains(&writes),
+        "SWMR append issued {writes} writes"
     );
+    let reader = File::open_swmr(&path).unwrap();
+    let dataset = reader.dataset("t0").unwrap();
+    let expected: Vec<i32> = (0..256).chain(values).collect();
+    assert_eq!(dataset.read_i32().unwrap(), expected);
+    let chunks = dataset.chunks().unwrap();
+    let appended = chunks.last().unwrap();
+    assert_eq!(appended.offset, [256]);
+    assert_eq!(appended.storage_size, payload.len() as u64);
+    let raw_at = usize::try_from(appended.address).unwrap();
+    assert!(raw_at >= base.len());
+    drop(dataset);
+    reader.close().unwrap();
+    writer.close().unwrap();
+
+    let eof_operation = trace
+        .operations
+        .iter()
+        .position(|operation| matches!(operation, DiskOp::Write { offset: 0, .. }))
+        .unwrap();
+    assert!(
+        trace.operations[..eof_operation]
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                DiskOp::Write { offset, bytes } if *offset == appended.address && bytes == &payload
+            ))
+    );
+    let eof_event = trace
+        .events
+        .iter()
+        .position(|event| event.operation() == Some(eof_operation))
+        .unwrap();
+    let preceding_writes = trace.events[..eof_event]
+        .iter()
+        .filter(|event| matches!(event, IoEvent::Write { .. }))
+        .count();
+    let mut interrupted = base.clone();
+    for operation in &trace.operations[..eof_operation] {
+        operation.apply(&mut interrupted);
+    }
+
+    fs::write(&path, &fixture).unwrap();
+    let writer = open();
+    assert_eq!(fs::read(&path).unwrap(), base);
+    disk_log::start();
+    disk_log::fail_write_after(preceding_writes, 0);
+    let error = writer.dataset("t0").unwrap().append(&values).unwrap_err();
+    let trace = disk_log::finish();
+    disk_log::clear_failures();
+    let Error::Io(error) = error else {
+        panic!("expected an EOF write error, got {error:?}")
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected disk write failure");
+    assert!(matches!(
+        trace.events.last(),
+        Some(IoEvent::Write {
+            offset: 0,
+            outcome: IoOutcome::Failed(ErrorKind::Other),
+            written: 0,
+            ..
+        })
+    ));
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(bytes, interrupted);
+    assert_eq!(&bytes[raw_at..raw_at + payload.len()], &payload);
+
+    let reader = File::open_swmr(&path).unwrap();
+    assert_eq!(
+        reader.dataset("t0").unwrap().read_i32().unwrap(),
+        (0..256).collect::<Vec<i32>>()
+    );
+    reader.close().unwrap();
+    drop(writer);
+    File::clear_status_flags(&path).unwrap();
+    let reader = File::open(&path).unwrap();
+    assert_eq!(
+        reader.dataset("t0").unwrap().read_i32().unwrap(),
+        (0..256).collect::<Vec<i32>>()
+    );
+    reader.close().unwrap();
 }
 
 #[test]
