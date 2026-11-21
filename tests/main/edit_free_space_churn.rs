@@ -8,7 +8,7 @@ use rstest::rstest;
 use test_util_hdf5::free_space_churn::{self, Base, Lifecycle, Strategy};
 
 #[rstest]
-fn free_space_churn_continuous_open(
+fn extended_free_space_churn_continuous_open(
     #[values(Strategy::FsmAggr, Strategy::Page)] strategy: Strategy,
     #[values(Base::Zero, Base::Userblock)] base: Base,
 ) {
@@ -20,7 +20,7 @@ fn free_space_churn_continuous_open(
 }
 
 #[rstest]
-fn free_space_churn_reopen_before_final_check(
+fn extended_free_space_churn_reopen_before_final_check(
     #[values(Strategy::FsmAggr, Strategy::Page)] strategy: Strategy,
     #[values(Base::Zero, Base::Userblock)] base: Base,
 ) {
@@ -32,7 +32,7 @@ fn free_space_churn_reopen_before_final_check(
 }
 
 #[rstest]
-fn free_space_churn_reopen_frequently(#[values(Base::Zero, Base::Userblock)] base: Base) {
+fn extended_free_space_churn_reopen_frequently(#[values(Base::Zero, Base::Userblock)] base: Base) {
     let report = free_space_churn::run_churn(Lifecycle::ReopenFrequently, Strategy::FsmAggr, base);
     insta::assert_snapshot!("free_space_churn_reopen_frequently", report.render());
 }
