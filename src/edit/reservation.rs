@@ -220,11 +220,6 @@ impl<'a> ReservationPlan<'a> {
         self.engine.context.addresses()
     }
 
-    #[cfg(test)]
-    pub(super) fn end(&self) -> PhysicalAddress {
-        self.end
-    }
-
     /// Borrows the next reservation after checking publication and write state.
     ///
     /// # Errors
