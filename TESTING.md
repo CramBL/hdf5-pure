@@ -1,108 +1,119 @@
 # Testing
 
-Choose tests that establish the promised behavior. Overlapping coverage categories do not require
-duplicate tests.
+## Choosing tests
 
-## Where tests and helpers belong
+Prefer integration tests through the owning crate's public API. Use unit tests for
+internal algorithms and invariants that are difficult to exercise through that API.
 
-Keep tests with the code or API they exercise.
+Cover new or changed public behavior with tests.
 
-| Test or helper | Home |
-|---|---|
-| Private unit tests | Owner's `#[cfg(test)] mod tests`, inline when small, otherwise `tests.rs` or `tests/mod.rs` with domain children |
-| Public API tests | Owning package's `tests/`, bundling related suites with facade/crosscheck entry points at `tests/main/main.rs` |
-| Private native crosschecks | Owner-local `native_crosschecks`, gated through the helper capability macro |
-| Independent bytes, malformed inputs, paths, allocation measurement | `crates/test-util` |
-| Facade fixtures and reference-library helpers | `crates/test-util-hdf5`, with optional native dependencies |
-| Private-access support | Owner-local test-only support |
+## Test organization
 
-Keep `test-util` independent of implementation crates. [ARCHITECTURE.md][architecture] explains the
-dependency boundary. Share setup with the same contract. Keep small domain helpers local.
+| Test | Location |
+| --- | --- |
+| Ordinary integration tests | One target per crate. Declare modules in `tests/main/main.rs`, for example `tests/main/append.rs` and `tests/main/edit_reference_counts.rs`. |
+| Private unit tests | The owning module's `#[cfg(test)] mod tests`, inline or in a separate file. |
+| Native crosschecks | `crates/crosscheck/tests/main/` for external tests, or an owner-local `native_crosschecks` module with the existing [capability gate][architecture]. |
 
-Keep separate targets for process-wide allocators, WASM harnesses, explicit fixture binaries, fuzzing,
-benchmarks, and [API-profile checks][profiles]. `format_reexports` stays separate because the semver
-helper selects it explicitly, including without `std`.
+Keep separate targets for process-wide allocators, fixture binaries, WASM,
+fuzzing, benchmarks, and [API-profile checks][profiles]. The API check selects
+`format_reexports` by target name, including without `std`. Keep the
+[`#[non_exhaustive]` checks][seals] outside the defining crate.
 
-Preserve selectors, gates, imports, formatting paths, snapshots, seeds, and documentation when moving
-tests. Preserve the external public API boundary and diagnostic-specific seal guards. When adding or
-moving native crosschecks, ensure the [interop default filter][nextest] and applicable CI selectors
-include them. Verify that the intended tests execute.
+Keep test helper types that need private access in the owning test module.
+Follow the [helper crate dependency rules][architecture].
 
-## Writing a test
+### Test support in the library implementation
 
-Name the behavior the test proves.
+Keep test-only fields, reports, counters, and partial-execution modes out of
+library algorithms. Keep allocation-ownership checks and resource accounting
+that the operation requires. Inject faults at the I/O boundary so the library
+handles read, write, resize, and synchronization errors through its usual path.
 
-An addition to the public API has at least one test through that API in the owning package’s `tests/`.
+## Format conformance and fixtures
 
-Use `snake_case` names and named `rstest` cases that identify the distinguishing input. Cover meaningful
-boundaries and failure cases. A registered test must be independently executable: never call it as a
-helper or use it for child dispatch. Reuse ordinary functions and explicit fixture binaries instead.
+Generate ordinary regression fixtures at test runtime in Rust.
 
-Unwrap successes and check complete promised values and state. Assert discriminating error variants
-and fields using [the exact-error rules][errors]. An unrelated failure must not satisfy a test.
+- Use `libhdf5` (the `hdf5-metno` package) to generate reference files. Put shared
+  libhdf5 helpers in `test-util-hdf5`.
+- Use `test-util` to construct raw HDF5 structures, unusual layouts, and
+  malformed inputs.
+- Use hdf5-pure to generate files when testing its writing behavior.
 
-Keep evidence independent of the implementation under test. A roundtrip can share a reader/writer
-defect. Use independent bytes or reference observations to establish conformance. For layout claims,
-assert the structural premise as well as decoded values.
+Describe valid fixtures with checked types. Follow parse, don't validate. Use
+raw bytes or explicit mutations for deliberate corruption.
 
-Use parse, don't validate in Rust helpers: convert inputs once into existing domain types or small
-enums/newtypes that cannot express unsupported combinations. Model deliberately malformed cases
-separately from valid fixture descriptions. Reuse `ReadBackend` and typed dataset/filter cases where
-their contracts fit.
+Establish format conformance with independently constructed bytes or observations
+from libhdf5. A roundtrip through hdf5-pure can pass when its
+reader and writer share a defect.
 
-## Fixtures and temporary files
+Do not add C generators, Python or h5py scripts, or committed HDF5 binaries for
+ordinary regressions. Retain historical or externally produced fixtures when
+their original bytes are needed to establish compatibility or reproduce a defect.
+Record where each file came from and what it tests in the [fixture notices][fixtures]. Use
+`test_util::data` or `copy_data` for runtime paths to committed fixtures.
 
-Prefer fresh construction when historical or external evidence is unnecessary.
+## Writing tests
 
-Use independent byte builders for layout inputs and native generators for reference files. Retain
-committed evidence with its consumer, invariant, producer/version, license where applicable, and
-regeneration or retention rationale in the [fixture notices][fixtures]. Producer references are
-regenerated through their producer. For minimized or derived regressions, document known origin,
-transformation, invariant, and unknown source details. Ordinary tests never overwrite committed
-fixtures.
+Keep each test focused on one behavior or invariant. Use all the assertions
+needed to establish it. Split tests that cover unrelated scenarios.
 
-Use `test_util::data`/`copy_data` for runtime paths. Keep intentional `include_bytes!`. Own single-file
-temporary paths or a `TempDir` for several files. Release handles before destructive cleanup or
-completed-file handoffs, allowing intentionally concurrent SWMR/locking handles.
+Use named `rstest` cases when inputs vary and the behavior and assertions stay
+the same. Write separate tests when combining cases requires branches or
+elaborate setup.
 
-## Additional coverage
+Assert specific error variants and fields using the [exact-error rules][errors].
 
-Select the obligations that establish the changed behavior.
+## Specialized testing
 
-| Trigger | Essential obligation | Owner or configuration |
-|---|---|---|
-| Native interoperability | Fresh independent native observations of promised values and metadata. Selected tests fail on missing prerequisites or protocol errors. Preserve operation/helper synchronization. Helpers must not reacquire an explicit whole-test guard. | [Interop recipes][interop], [locking helper][locking] |
-| Unsafe code or platform assumptions | Execute selected Miri paths and boundaries. Check affected feature/target combinations and preserve moved-test selection. | [Soundness][soundness], [portability][portability] |
-| Allocation or performance | Assert functional results, bounds, and a positive control/floor. Follow region attribution and reject invalid measurements. Keep exact baselines, diagnostic profiles, and throughput benchmarks distinct. | [Allocation helper][allocation], [soundness recipes][soundness] |
-| Generated invariants | Use bounded, shrinkable properties with explicit persistence paths. Preserve seeds and retain minimized exact regressions. | [Property suite][properties] |
-| Differential fuzzing | Compare both success/failure outcomes at equivalent operations, with explicit permitted differences and bounded traversal/resources. | [Differential target][differential] |
-| Snapshots | Normalize irrelevant variation, inspect changed observations, and distinguish bundled-version exact output from cross-version semantics. | [Native snapshot suite][snapshots] |
-| Child processes | Use explicit fixture binaries. Bound execution/readiness and clean up children. Infrastructure failures fail the parent. Preserve runner support. | [Fixture target][child], [target declaration][targets] |
-| Doctests or API contracts | Prefer self-contained executable examples. Allow `no_run` for unavailable external inputs/services or an inappropriate execution environment, with a reason beside the example. Keep external API and diagnostic checks. | [Documentation style][docstyle], [API checks][api] |
+### Extended tests
+
+Use the extended suite for tests that would significantly increase ordinary suite
+runtime, such as endurance tests. Prefix their names with `extended_` and keep
+them alongside related tests.
+
+CI runs these cases separately using the [nextest profiles][nextest] `extended`
+and `extended-interop`.
+
+### Other test suites
+
+| Category | Requirement | Reference |
+| --- | --- | --- |
+| Native interoperability | Compare against independent observations from libhdf5 or libmatio. | [Interop recipes][interop], [native locking][locking] |
+| Unsafe code and portability | Exercise affected cases under Miri and in the target and feature configurations they depend on. | [Miri][soundness], [portability][portability] |
+| Allocation testing | Assert resource bounds and verify allocation measurements. Justify and bound resource increases using comparable workloads and measurement intervals. | [Allocation measurements][allocation], [baseline recipes][soundness] |
+| Property testing | Use bounded, shrinkable cases with explicit persistence paths. Preserve seeds and minimized regressions. | [Property tests][properties] |
+| Differential fuzzing | Compare equivalent operations, including errors. Document permitted differences and bound traversal and resources. | [Differential target][differential] |
+| Snapshots | Normalize irrelevant variation and inspect changes. Keep resource-bound assertions when updating snapshots. | [Native snapshots][snapshots] |
+| Child processes | Bound fixture startup and execution. Clean up children and fail the parent on infrastructure errors. | [Fixture binary][child], [target declaration][targets] |
+| Doctests | Prefer executable examples. Justify `no_run` beside the example. Preserve public API and diagnostic checks. | [Documentation style][docstyle], [API checks][api] |
+
+Selected native cases fail on missing prerequisites or protocol errors. Preserve
+the synchronization contract in the [native locking helpers][locking]. When
+adding or moving native cases, verify selection by the [interop profiles][nextest]
+and CI.
 
 ## Running tests
 
-Run recipes from the repository root.
+Run from the repository root. Verify that focused selections execute the intended cases.
 
-`just test` runs ordinary workspace tests with defaults. `just test-full` adds the facade's full public
-feature profile. Both exclude crosschecks. Run doctests separately with `just doctest-full`.
+| Suite | Recipes |
+| --- | --- |
+| Ordinary workspace | `just test`, `just test-full` |
+| Extended workspace | `just test-extended`, `just test-extended-full` |
+| Doctests | `just doctest`, `just doctest-full` |
+| Native interoperability | `just interop::test-bundled`, `just interop::test-hdf5 <version>` |
+| Extended native interoperability | `just interop::test-extended-bundled`, `just interop::test-extended-hdf5 <version>` |
 
-Use `just --list <module>` for specialized recipes linked above. [CONTRIBUTING.md][contributing]
-describes the PR workflow and broader gates. Focused selections must execute the intended tests.
-
-## Enforcement
-
-Use the existing standard gates.
-
-[Workspace Clippy settings][lints], [Clippy configuration][clippy], and [nextest configuration][nextest]
-provide lint and execution checks. Formatting, docs, and prose have separate gates. Placement, helper
-ownership, independent evidence, and test-entrypoint reuse remain review conventions, not completely
-automated checks.
+The `-full` recipes enable the full public feature profile. Use
+`just --list <module>` for recipes in the specialized suites.
 
 [architecture]: ARCHITECTURE.md#test-helpers
 [profiles]: scripts/api-profiles.toml
-[errors]: CODE_STYLE.md#assert-the-exact-error
+[seals]: tests/main/seals.rs
 [fixtures]: tests/data/NOTICE.md
+[errors]: CODE_STYLE.md#assert-the-exact-error
+[nextest]: .config/nextest.toml
 [interop]: scripts/interop.just
 [locking]: crates/test-util-hdf5/src/lock.rs
 [soundness]: scripts/soundness.just
@@ -115,7 +126,3 @@ automated checks.
 [targets]: crates/crosscheck/Cargo.toml
 [docstyle]: DOC_STYLE.md
 [api]: scripts/api.just
-[contributing]: CONTRIBUTING.md#submitting-pull-requests
-[lints]: Cargo.toml
-[clippy]: clippy.toml
-[nextest]: .config/nextest.toml
