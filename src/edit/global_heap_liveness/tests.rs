@@ -1,4 +1,7 @@
 use alloc::collections::BTreeSet;
+use std::sync::Arc;
+
+use hdf5_pure_core::__private::StoredAddressExt;
 
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
@@ -12,6 +15,7 @@ use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::global_heap_fixture;
 
+use super::HeapReferences;
 use crate::Datatype;
 use crate::UserblockSize;
 use crate::VariableLengthType;
@@ -20,8 +24,10 @@ use crate::dataspace::Dataspace;
 use crate::edit::WriteEngine;
 use crate::edit::test_util as edit_test_util;
 use crate::error::FormatError;
+use crate::image::{CountingImage, HandleImage};
 use crate::link_info::LinkInfoMessage;
 use crate::width::{LengthWidth, OffsetWidth};
+use crate::{FileLocking, MetadataCacheConfig, StoredAddress};
 
 #[rstest]
 #[case::strings(global_heap_fixture::vlen_string(), &[0])]
@@ -219,6 +225,62 @@ fn parsed_attributes_use_stored_reference_strides(
             assert_eq!(referenced, expected);
         }
     });
+}
+
+#[test]
+fn failed_partial_descriptor_batch_preserves_prior_references() {
+    let mut fixture = global_heap_fixture::Fixture::new();
+    let first = fixture.collection(&[global_heap::Object::new(1, b"one")]);
+    let second = fixture.collection(&[global_heap::Object::new(1, b"two")]);
+    let prefix = global_heap_fixture::reference(3, first, 1).repeat(4_096);
+    let tail = global_heap_fixture::reference(3, second, 1);
+    let start = fixture.image.append(&prefix);
+    let tail_start = fixture.image.append(&tail);
+    assert_eq!(tail_start, start + prefix.len());
+    let path = temp::temp_path("descriptor-read-error.h5");
+    fixture.write(&path);
+
+    let expected = FormatError::Source("injected descriptor read failure".into());
+    let fault = expected.clone();
+    let engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, len| {
+        Ok(Box::new(
+            CountingImage::new(
+                Box::new(HandleImage::new(
+                    handle,
+                    len,
+                    MetadataCacheConfig::disabled(),
+                )),
+                Arc::default(),
+                Arc::default(),
+            )
+            .with_read_fault(move |range| {
+                if range.start().get() == tail_start as u64 {
+                    assert_eq!(range.length(), 16);
+                    return Err(fault.clone());
+                }
+                Ok(())
+            }),
+        ))
+    })
+    .unwrap();
+    let HeapReferences::Located(slots) =
+        HeapReferences::of(&global_heap_fixture::vlen_string(), engine.widths().offsets).unwrap()
+    else {
+        panic!("the fixture datatype must have a descriptor");
+    };
+    let mut references = BTreeSet::new();
+    assert_eq!(
+        engine
+            .collect_contiguous_collections(
+                StoredAddress::new(start as u64),
+                (prefix.len() + tail.len()) as u64,
+                &slots,
+                &mut references,
+            )
+            .unwrap_err(),
+        expected,
+    );
+    assert_eq!(references, BTreeSet::from([first]));
 }
 
 fn parsed_attribute(datatype: Datatype, count: u64, raw_data: Vec<u8>) -> AttributeMessage {
