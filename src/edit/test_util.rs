@@ -37,6 +37,7 @@ use crate::address::StoredAddressExt;
 use crate::edit::MemoryStrategy;
 use crate::edit::SpaceOwnership;
 use crate::edit::WriteEngine;
+use crate::edit::append::{AppendBuilder, AppendTarget};
 use crate::edit::object_header;
 use crate::edit::reclaim;
 use crate::edit::reclaim::ObjectStorageKind;
@@ -465,6 +466,17 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
 }
 
 impl WriteEngine {
+    /// Appends test values to a named dataset through the in-place writer.
+    pub(super) fn append_inplace_i32(
+        &mut self,
+        dataset: &str,
+        values: &[i32],
+    ) -> Result<(), Error> {
+        let mut append = AppendBuilder::new();
+        append.append_i32(values);
+        self.append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse(dataset)), &append)
+    }
+
     /// Reads the complete file through the editing session's retained disk handle.
     ///
     /// Pending writes remain buffered, and the session lock remains held.
