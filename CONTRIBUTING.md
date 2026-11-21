@@ -77,7 +77,7 @@ The body, when there is one, follows a blank line and explains why. Issue refere
 
 ## Testing
 
-Follow [TESTING.md](TESTING.md#choosing-tests) for test selection, organization,
+Follow [TESTING.md](TESTING.md#test-design) for test selection, organization,
 and fixture requirements. See its [recipe table](TESTING.md#running-tests) for
 ordinary, extended, and native suites.
 
