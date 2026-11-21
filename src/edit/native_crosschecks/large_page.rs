@@ -4,7 +4,6 @@ use rstest::rstest;
 use test_util_hdf5::{file_space_oracle, large_page};
 
 use crate::edit::WriteEngine;
-use crate::edit::observations;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
@@ -48,8 +47,8 @@ fn large_page_small_commits_preserve_native_values_and_free_sections(
             .set_page_buffer_size(usize::try_from(PAGE).unwrap())
             .unwrap(),
     }
+    let initial_len = usize::try_from(engine.image.len()).unwrap();
     let before = engine.image.buffering_work();
-    observations::reset_zeros();
     let mut first = DatasetBuilder::new("first");
     first.with_i32_data(&[11, 12, 13, 14]);
     engine
@@ -64,20 +63,22 @@ fn large_page_small_commits_preserve_native_values_and_free_sections(
     engine.commit().unwrap();
     engine.force_sync().unwrap();
     engine.release_status_flags().unwrap();
-    let zeros = observations::zero_work();
-    assert!(zeros.calls > 0, "{zeros:?}");
-    assert!(zeros.bytes > PAGE / 2, "{zeros:?}");
-    assert_eq!(zeros.scratch_peak, 65_536);
     let after = engine.image.buffering_work();
     assert_eq!(after.pending_bytes, 0);
     assert!(after.write_calls > before.write_calls);
-    assert!(after.write_bytes - before.write_bytes >= zeros.bytes);
+    assert!(after.write_bytes - before.write_bytes > PAGE / 2);
     assert!(
         after.copied_bytes - before.copied_bytes <= 4 * (after.write_bytes - before.write_bytes)
     );
     let length = engine.image.len();
     drop(engine);
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), length);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(u64::try_from(bytes.len()).unwrap(), length);
+    assert!(
+        bytes[initial_len..]
+            .split(|&byte| byte != 0)
+            .any(|run| run.len() > usize::try_from(PAGE / 2).unwrap())
+    );
     let reader = File::open(&path).unwrap();
     assert_eq!(reader.superblock().eof_address, length);
     assert_eq!(

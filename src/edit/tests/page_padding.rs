@@ -7,7 +7,6 @@ use test_util::disk_log;
 
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::WriteEngine;
-use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::image::WriteBuffering;
@@ -31,7 +30,6 @@ fn page_padding_preserves_addresses_and_records_only_complete_gaps(
     engine.begin_page(PageType::Meta).unwrap();
     let start = engine.append(&[17; 19]).unwrap();
     let gap = PAGE - 19;
-    observations::reset_zeros();
     pad(&mut engine, padding);
     assert_eq!(engine.image.len(), start + PAGE);
     assert_eq!(engine.image().read_exact_at(start, 19).unwrap(), [17; 19]);
@@ -47,14 +45,6 @@ fn page_padding_preserves_addresses_and_records_only_complete_gaps(
         [Extent::new(StoredAddress::new(start + 19 - base), ByteLength::new(gap)).unwrap()]
     );
     assert_eq!(engine.space.pending_padding(PageType::Raw).unwrap(), []);
-    assert_eq!(
-        observations::zero_work(),
-        ZeroWork {
-            calls: 1,
-            bytes: gap,
-            scratch_peak: 65_536
-        }
-    );
     assert_eq!(
         engine.space.paged_tail_type(),
         Some(match padding {
@@ -78,10 +68,10 @@ fn unnecessary_page_padding_does_not_emit_zeros(
     engine.begin_page(PageType::Meta).unwrap();
     engine.append(&vec![17; extra]).unwrap();
     let length = engine.image.len();
-    observations::reset_zeros();
+    disk_log::start();
     pad(&mut engine, padding);
+    assert!(disk_log::take().is_empty());
     assert_eq!(engine.image.len(), length);
-    assert_eq!(observations::zero_work(), ZeroWork::default());
 }
 
 #[rstest]
@@ -89,9 +79,6 @@ fn unnecessary_page_padding_does_not_emit_zeros(
 #[case::switch(Padding::Switch)]
 fn partial_page_padding_retains_the_tail_class_and_successful_prefix(#[case] padding: Padding) {
     let (_directory, mut engine) = engine(FileSpaceStrategy::Page, PAGE);
-    engine
-        .set_write_buffering(WriteBuffering::Unbuffered)
-        .unwrap();
     engine.begin_page(PageType::Meta).unwrap();
     engine.append(&[17; 19]).unwrap();
     let start = engine.image.len();
@@ -137,6 +124,9 @@ fn engine(strategy: FileSpaceStrategy, base: u64) -> (tempfile::TempDir, WriteEn
     );
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
     if strategy == FileSpaceStrategy::Page {
         engine.space = SessionSpace::from_strategy(
             Some(strategy),

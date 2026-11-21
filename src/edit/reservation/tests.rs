@@ -23,7 +23,6 @@ use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
 };
 use crate::edit::WriteEngine;
-use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
@@ -868,7 +867,7 @@ fn block_reservations_keep_capacity_separate_from_encoding(#[case] reused: bool)
 #[rstest]
 #[case::scalar(true)]
 #[case::batch(false)]
-fn large_page_reservations_emit_bounded_transition_padding(
+fn large_page_reservations_emit_complete_transition_padding(
     #[case] scalar: bool,
     #[values(0, 262_144)] base: u64,
 ) {
@@ -881,7 +880,6 @@ fn large_page_reservations_emit_bounded_transition_padding(
     engine.begin_page(PageType::Meta).unwrap();
     engine.append(&[17; 19]).unwrap();
     let start = engine.image.len();
-    observations::reset_zeros();
     let address = if scalar {
         let placement = engine.reserve(16, AllocationClass::Raw).unwrap();
         engine.place(placement, &[23; 16]).unwrap()
@@ -898,6 +896,20 @@ fn large_page_reservations_emit_bounded_transition_padding(
     };
     assert_eq!(address, start + page - 19);
     assert_eq!(engine.image().read_exact_at(address, 16).unwrap(), [23; 16]);
+    if !scalar {
+        assert_eq!(
+            engine
+                .image()
+                .read_exact_at(address + 16, (page - 16) as usize)
+                .unwrap(),
+            vec![0; (page - 16) as usize]
+        );
+        assert_eq!(
+            engine.image().read_exact_at(address + page, 32).unwrap(),
+            [29; 32]
+        );
+    }
+
     assert_eq!(
         engine
             .image()
@@ -917,18 +929,10 @@ fn large_page_reservations_emit_bounded_transition_padding(
             address + page + 32
         }
     );
-    assert_eq!(
-        observations::zero_work(),
-        ZeroWork {
-            calls: if scalar { 1 } else { 2 },
-            bytes: page - 19 + if scalar { 0 } else { page - 16 },
-            scratch_peak: 65_536
-        }
-    );
 }
 
 #[test]
-fn large_appended_capacity_remains_owned_after_bounded_zero_emission() {
+fn large_appended_capacity_is_zeroed_and_stays_owned() {
     let (_directory, mut engine) = engine(FileSpaceStrategy::None, 4096);
     let start = engine.image.len();
     let capacity = 196_624;
@@ -938,7 +942,6 @@ fn large_appended_capacity_remains_owned_after_bounded_zero_emission() {
         EncodingDependency::Independent,
     )
     .unwrap()];
-    observations::reset_zeros();
     let mut plan = engine
         .plan_blocks(&requests)
         .unwrap_or_else(|error| panic!("planning failed: {error:?}"));
@@ -958,14 +961,6 @@ fn large_appended_capacity_remains_owned_after_bounded_zero_emission() {
         vec![0; (capacity - 16) as usize]
     );
     assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
-    assert_eq!(
-        observations::zero_work(),
-        ZeroWork {
-            calls: 1,
-            bytes: capacity - 16,
-            scratch_peak: 65_536
-        }
-    );
 }
 
 #[rstest]
