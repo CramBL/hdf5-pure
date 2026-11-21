@@ -1771,15 +1771,22 @@ fn both_read_paths_agree_with_a_userblock() {
 #[case::index_only(ChunkCacheConfig::disabled().with_index_cache(true))]
 #[case::payload_only(ChunkCacheConfig::new().with_index_cache(false))]
 #[case::all_retained(ChunkCacheConfig::new())]
-fn typed_sweeps_reuse_one_index_without_changing_retention(#[case] config: ChunkCacheConfig) {
-    use crate::parsed_chunk_index::test_util as chunk_index_test_util;
-
+fn typed_sweeps_load_the_index_once_and_respect_cache_retention(#[case] config: ChunkCacheConfig) {
     let n = 3 * 131_072 + 5;
     let edge = 128;
     let (bytes, expected) = chunked_f64_file(n, edge);
-    let file =
-        File::from_bytes_with_options(bytes, FileAccessProperties::new().with_chunk_cache(config))
-            .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let counts = ReadCounts {
+        requests: Some(Arc::clone(&requests)),
+        ..ReadCounts::default()
+    };
+    let file = counting_streaming_file(
+        bytes,
+        &counts,
+        FileAccessProperties::new()
+            .with_chunk_cache(config)
+            .with_metadata_cache(MetadataCacheConfig::disabled()),
+    );
     let dataset = file.dataset("d").unwrap();
     let layout = dataset.read_layout().unwrap();
     let dataspace = dataset.dataspace().unwrap();
@@ -1787,23 +1794,39 @@ fn typed_sweeps_reuse_one_index_without_changing_retention(#[case] config: Chunk
         .unwrap()
         .get();
     assert!(rows < n as u64);
-    let descriptors = n.div_ceil(edge as usize);
-    chunk_index_test_util::reset();
+    let DataLayout::Chunked {
+        index: ChunkIndexLayout::FixedArray {
+            address: Some(index),
+        },
+        ..
+    } = layout
+    else {
+        panic!("the fixture requires a stored fixed-array index");
+    };
+    let index = file.resolve_address(index).unwrap().get();
+    let index_reads = || {
+        let reads = std::mem::take(&mut *requests.lock().unwrap());
+        reads
+            .into_iter()
+            .filter(|&(address, len)| address <= index && index - address < len as u64)
+            .count()
+    };
+    assert_eq!(index_reads(), 0);
+    let chunks = n.div_ceil(edge as usize) as u64;
+
     assert_eq!(dataset.read_f64().unwrap(), expected);
-    assert_eq!(chunk_index_test_util::counts(), (1, descriptors));
+    assert_eq!(index_reads(), 1);
     let stats = dataset.chunk_cache_stats();
     assert_eq!(stats.index_loaded(), config.index_cache_enabled());
+    assert_eq!(stats.lookups(), chunks);
     assert_eq!(stats.cached_chunks() != 0, config.max_slots() != 0);
-    chunk_index_test_util::reset();
+
     assert_eq!(dataset.read_f64().unwrap(), expected);
-    assert_eq!(
-        chunk_index_test_util::counts(),
-        (usize::from(!config.index_cache_enabled()), descriptors)
-    );
-    assert_eq!(
-        dataset.chunk_cache_stats().index_loaded(),
-        config.index_cache_enabled()
-    );
+    assert_eq!(index_reads(), usize::from(!config.index_cache_enabled()));
+    let stats = dataset.chunk_cache_stats();
+    assert_eq!(stats.index_loaded(), config.index_cache_enabled());
+    assert_eq!(stats.lookups(), 2 * chunks);
+    assert_eq!(stats.cached_chunks() != 0, config.max_slots() != 0);
 }
 
 #[rstest]
@@ -2515,11 +2538,14 @@ fn attr_datatypes_covers_dense_attribute_storage() {
 // Coalesced chunk reads (see `crate::chunk_span`)
 // -----------------------------------------------------------------------
 
+type ReadRequests = Arc<Mutex<Vec<(u64, usize)>>>;
+
 /// A [`Source`] with counters for read calls and requested byte lengths.
 struct CountingSource {
     bytes: Vec<u8>,
     reads: Arc<AtomicUsize>,
     bytes_read: Arc<AtomicUsize>,
+    requests: Option<ReadRequests>,
 }
 
 impl Source for CountingSource {
@@ -2530,6 +2556,9 @@ impl Source for CountingSource {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.bytes_read.fetch_add(buf.len(), Ordering::Relaxed);
+        if let Some(requests) = &self.requests {
+            requests.lock().unwrap().push((offset, buf.len()));
+        }
         BytesSource::new(&self.bytes).read_at(offset, buf)
     }
 }
@@ -2539,6 +2568,7 @@ impl Source for CountingSource {
 struct ReadCounts {
     reads: Arc<AtomicUsize>,
     bytes: Arc<AtomicUsize>,
+    requests: Option<ReadRequests>,
 }
 
 impl ReadCounts {
@@ -2565,6 +2595,7 @@ fn counting_streaming_file(
             bytes,
             reads: Arc::clone(&counts.reads),
             bytes_read: Arc::clone(&counts.bytes),
+            requests: counts.requests.clone(),
         },
         access,
     )
@@ -2601,25 +2632,60 @@ fn a_streaming_read_coalesces_a_run_of_small_chunks() {
     );
 }
 
-#[test]
-fn a_windowed_streaming_read_fetches_only_its_own_window() {
-    let rows = 4096usize;
-    let (bytes, data) = chunked_f64_file(rows, 4);
+#[rstest]
+#[case::one_chunk(12_001, 1, 32)]
+#[case::crosses_chunks(12_003, 2, 64)]
+#[case::partial_edge(16_384, 2, 32)]
+fn a_warm_window_reads_only_its_overlapping_chunks(
+    #[case] start: usize,
+    #[case] rows: usize,
+    #[case] bytes_needed: usize,
+) {
+    let (bytes, data) = chunked_f64_file(16_384 + 2, 4);
     let counts = ReadCounts::default();
-    let file = counting_streaming_file(bytes, &counts, FileAccessProperties::new());
-    let ds = file.dataset("d").unwrap();
-
-    // The first window walks (and caches on this handle) the chunk index,
-    // so measure the second: what it reads is the window's own chunks.
-    assert_eq!(ds.read_f64_rows(0, 8).unwrap(), data[0..8]);
-    let (_, window_bytes) =
-        counts.measure(|| assert_eq!(ds.read_f64_rows(2048, 8).unwrap(), data[2048..2056]));
-
-    // Eight rows are two 32-byte chunks.
-    assert!(
-        window_bytes < 256,
-        "an 8-row window read {window_bytes} bytes; it needs 64"
+    let file = counting_streaming_file(
+        bytes,
+        &counts,
+        FileAccessProperties::new()
+            .with_chunk_cache(ChunkCacheConfig::disabled().with_index_cache(true))
+            .with_metadata_cache(MetadataCacheConfig::disabled()),
     );
+    let dataset = file.dataset("d").unwrap();
+    let read = || dataset.read_f64_rows(start as u64, rows as u64).unwrap();
+    let expected = &data[start..start + rows];
+    let bounds = || counts.measure(|| assert_eq!(read(), expected));
+
+    // Both reads return the same small window. The first fetches its index.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let ((cold_calls, cold_bytes), cold) =
+        test_util::allocation::measure(&format!("chunk_window_cold_{start}_{rows}"), bounds);
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let (cold_calls, cold_bytes) = bounds();
+    assert!(dataset.chunk_cache_stats().index_loaded());
+    assert_eq!(dataset.chunk_cache_stats().cached_chunks(), 0);
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let ((warm_calls, warm_bytes), warm) =
+        test_util::allocation::measure(&format!("chunk_window_warm_{start}_{rows}"), bounds);
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let (warm_calls, warm_bytes) = bounds();
+    assert!(cold_calls > warm_calls, "{cold_calls} vs {warm_calls}");
+    assert!(cold_bytes > 16 * 1024, "{cold_bytes}");
+    assert!((1..=2).contains(&warm_calls), "{warm_calls}");
+    assert_eq!(warm_bytes, bytes_needed);
+    eprintln!(
+        "{start}+{rows} rows: cold {cold_calls} requests for {cold_bytes} bytes, \
+         warm {warm_calls} requests for {warm_bytes} bytes"
+    );
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        assert!(cold.bytes > 128 * 1024, "{cold}");
+        assert!(warm.blocks <= 32, "{warm}");
+        assert!(warm.bytes <= 4 * 1024, "{warm}");
+        assert!(warm.peak_bytes <= 2 * 1024, "{warm}");
+        assert!(warm.live_bytes <= 1024, "{warm}");
+    }
 }
 
 /// The second read, through the retained index, fetches at most the dataset's bytes.

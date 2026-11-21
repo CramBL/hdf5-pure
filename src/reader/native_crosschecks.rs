@@ -29,7 +29,6 @@ use crate::address::StoredAddressExt;
 use crate::chunk_cache::ChunkCacheConfig;
 use crate::message_type::MessageType;
 use crate::page_publication_failure::PagePublicationFailure;
-use crate::parsed_chunk_index::test_util as chunk_index_test_util;
 use crate::reader::test_util as reader_test_util;
 
 #[rstest]
@@ -206,7 +205,6 @@ fn typed_sweeps_read_reference_chunks_without_retaining_indexes(
             .unwrap();
         fill.data = vec![u8::MAX];
     }
-    chunk_index_test_util::reset();
     if sparse && unknown {
         let error = dataset.read_i32().unwrap_err();
         assert!(
@@ -215,8 +213,10 @@ fn typed_sweeps_read_reference_chunks_without_retaining_indexes(
         );
     } else {
         assert_eq!(dataset.read_i32().unwrap(), expected);
+        let stats = dataset.chunk_cache_stats();
+        assert_eq!(stats.misses(), descriptors as u64);
+        assert_eq!(stats.hits(), 0);
     }
-    assert_eq!(chunk_index_test_util::counts(), (1, descriptors));
     assert!(!dataset.chunk_cache_stats().index_loaded());
     assert_eq!(dataset.chunk_cache_stats().cached_chunks(), 0);
     drop(dataset);
