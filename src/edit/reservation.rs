@@ -66,8 +66,6 @@ impl<'a> ReservationPlan<'a> {
         }
         if plan.engine.fresh_page_boundary.is_none() {
             let addresses = plan.engine.context.addresses();
-            #[cfg(test)]
-            super::observations::record_preferred_probe();
             let mut batch = plan.engine.space.reservation_batch(1);
             let reservation = batch.reserve(preferred.reservation());
             batch.finish();
@@ -277,8 +275,6 @@ impl<'a> ReservationPlan<'a> {
         mut requests: impl ExactSizeIterator<Item = BlockRequest>,
         mode: ReservationMode,
     ) -> Result<(), Error> {
-        #[cfg(test)]
-        let requests_len = requests.len();
         let Self {
             engine,
             reservations,
@@ -329,8 +325,6 @@ impl<'a> ReservationPlan<'a> {
             Ok(())
         });
         batch.finish();
-        #[cfg(test)]
-        super::observations::record_reservations(requests_len);
         if aggregate {
             engine.aggregation = aggregation;
         }

@@ -13,7 +13,6 @@ use crate::edit::observations::{self, ZeroWork};
 use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::image::WriteBuffering;
-use crate::object_path::ObjectPathBuf;
 use crate::source::Source;
 use crate::{
     File, FileBuilder, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy, MaxExtent,
@@ -23,48 +22,66 @@ use crate::{
 #[rstest]
 #[case::small(4)]
 #[case::large(64)]
-fn finite_chunk_ownership_analysis_is_reused_until_a_commit(
+fn finite_appends_reuse_the_ownership_proof_until_commit(
     #[case] groups: usize,
     #[values(FiniteChunkIndex::Fixed, FiniteChunkIndex::Single)] index: FiniteChunkIndex,
 ) {
+    use std::sync::{Arc, Mutex};
+
+    use hdf5_pure_core::__private::FileRange;
+
+    use crate::FileAccessProperties;
+
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owned.h5");
     let mut builder = FileBuilder::new();
-    builder
-        .create_dataset("d")
-        .with_i32_data(&[0])
-        .with_maxshape(&[MaxExtent::Fixed(index.maximum() * 4)])
-        .with_chunks(&[16]);
+    for name in ["d", "e"] {
+        builder
+            .create_dataset(name)
+            .with_i32_data(&[0])
+            .with_maxshape(&[MaxExtent::Fixed(index.maximum() * 4)])
+            .with_chunks(&[16]);
+    }
     for index in 0..groups {
         let group = builder.create_group(&format!("g{index}")).finish();
         builder.add_group(group);
     }
     builder.write(&path).unwrap();
-    let mut engine = edit_test_util::open_engine(&path);
-    observations::reset_chunk_ownership_analyses();
-    engine.append_inplace_i32("d", &[1]).unwrap();
-    assert_eq!(observations::chunk_ownership_analyses(), 1);
-    assert_eq!(engine.chunk_ownership.get().unwrap().len(), groups + 2);
-    engine.located.clear();
-    engine.append_inplace_i32("d", &[2]).unwrap();
-    assert_eq!(observations::chunk_ownership_analyses(), 1);
-    engine.chunk_ownership.take();
-    engine.located.clear();
-    engine.append_inplace_i32("d", &[3]).unwrap();
-    assert_eq!(observations::chunk_ownership_analyses(), 2);
-    engine.create_group(&ObjectPathBuf::parse("new")).unwrap();
-    engine.commit().unwrap();
-    assert!(engine.chunk_ownership.get().is_none());
-    assert!(engine.located.is_empty());
-    engine.append_inplace_i32("d", &[4]).unwrap();
-    assert_eq!(observations::chunk_ownership_analyses(), 3);
-    assert_eq!(engine.chunk_ownership.get().unwrap().len(), groups + 3);
-    drop(engine);
-    let file = File::open(&path).unwrap();
+
+    let reads = Arc::new(Mutex::new(Vec::<FileRange>::new()));
+    let file = File::from_test_edit_session(
+        edit_test_util::open_observed_engine(&path, Arc::clone(&reads)),
+        FileAccessProperties::new(),
+    )
+    .unwrap();
+    let witness = FileRange::new(
+        PhysicalAddress::new(file.group("g0").unwrap().header_address().unwrap()),
+        4,
+    )
+    .unwrap();
+    let append = |name, value| {
+        let mut dataset = file.dataset(name).unwrap();
+        reads.lock().unwrap().clear();
+        dataset.append(&[value]).unwrap();
+        let observed = std::mem::take(&mut *reads.lock().unwrap());
+        observed.iter().any(|read| read.overlaps(witness))
+    };
+    assert!(append("d", 1));
+    assert!(!append("e", 2));
+    file.root().create_group("new").unwrap();
+    file.commit().unwrap();
     assert_eq!(
-        file.dataset("d").unwrap().read_i32().unwrap(),
-        [0, 1, 2, 3, 4]
+        file.group("g0").unwrap().header_address().unwrap(),
+        witness.start().get()
     );
+    assert!(append("e", 3));
+    assert!(!append("d", 4));
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [0, 1, 4]);
+    assert_eq!(file.dataset("e").unwrap().read_i32().unwrap(), [0, 2, 3]);
+    assert_eq!(file.root().groups().unwrap().len(), groups + 1);
     file.close().unwrap();
 }
 
