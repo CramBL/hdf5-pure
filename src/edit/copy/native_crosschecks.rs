@@ -1,8 +1,7 @@
 use std::cell::RefCell;
+use std::fs;
 use std::path::Path;
 
-use hdf5_pure_core::__private::FileRange;
-use hdf5_pure_format::__private::DenseAttrPlan;
 use rstest::rstest;
 use test_util_hdf5::numeric::ByteOrder;
 use test_util_hdf5::object_copy::{self, ReferenceSite};
@@ -11,14 +10,7 @@ use test_util_hdf5::{attr, dataset, file};
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::chunked_write::{self, ChunkMeta, ChunkProvider};
-use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
-use crate::edit::context;
-use crate::edit::dataset::ChunkGeometry;
-use crate::edit::object_header;
 use crate::error::{Error, FormatError};
-use crate::file_emission::EmissionError;
-use crate::file_writer;
 use crate::group::v2 as group_v2;
 use crate::message_type::MessageType;
 use crate::object_graph::ObjectId;
@@ -29,11 +21,11 @@ use crate::source::{BytesSource, Source};
 use crate::superblock;
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 use crate::{
-    AttrValue, DeflateLevel, File, FileAccessProperties, FileBuilder, MaxExtent, MemoryStrategy,
-    PhysicalAddress, StoredAddress,
+    AttrValue, ChunkIndex, DeflateLevel, File, FileAccessProperties, FileBuilder, Layout,
+    MaxExtent, MemoryStrategy, PhysicalAddress,
 };
 
-use super::{CopyNode, CopyOutput, CopyTree, WriteEngine};
+use super::WriteEngine;
 
 #[derive(Clone, Copy, Debug)]
 enum Fixture {
@@ -62,30 +54,36 @@ fn copied_headers_and_payloads_preserve_independent_widths(
     let output_path = directory.path().join("copied.h5");
     let widths = FormatWidths { offsets, lengths };
     create_source(&source_path, widths, fixture);
-    let source_bytes = std::fs::read(&source_path).unwrap();
-    let located = superblock::read(&BytesSource::new(source_bytes.as_slice())).unwrap();
-    let addresses = AddressContext::from_effective_base(located.superblock.base_address);
-    let source = BytesSource::new(source_bytes.as_slice());
-    let opened = OpenedSource::for_test(&source, addresses);
-    let address = group_v2::resolve_path_any_from_source(
-        &opened,
-        AccessMode::ReadOnly,
-        &located.superblock,
-        widths,
-        &ObjectPathBuf::parse("tree").as_path(),
-    )
-    .unwrap();
-    let tree = WriteEngine::read_copy_subtree(
-        &opened,
-        AccessMode::ReadOnly,
-        ObjectId::new(PhysicalAddress::new(address)),
-        cross_file,
-        widths,
-    );
-    if cross_file && matches!(fixture, Fixture::DenseVariableLength) {
-        let Err(error) = tree else {
-            panic!("a foreign heap reference must be rejected");
-        };
+    let source_bytes = fs::read(&source_path).unwrap();
+    assert_copy_geometry(&source_path, "tree", widths, fixture);
+
+    if cross_file {
+        let native = file::libhdf5_create_v110_with_widths(&output_path, offsets, lengths, 0);
+        native
+            .new_dataset_builder()
+            .empty_as(ByteOrder::LittleEndian.u32_datatype())
+            .shape(1)
+            .create("retained")
+            .unwrap()
+            .write_raw(&[7_u32])
+            .unwrap();
+        native.close().unwrap();
+    } else {
+        fs::write(&output_path, &source_bytes).unwrap();
+    }
+    let before = fs::read(&output_path).unwrap();
+    let destination = File::open_rw(&output_path).unwrap();
+    let result = if cross_file {
+        let source = File::open(&source_path).unwrap();
+        let copied = destination.copy_from(&source, "tree", "copied");
+        source.close().unwrap();
+        copied
+    } else {
+        destination.copy("tree", "copied")
+    };
+    let rejected = cross_file && matches!(fixture, Fixture::DenseVariableLength);
+    if rejected {
+        let error = result.unwrap_err();
         assert!(
             matches!(
                 error,
@@ -95,96 +93,111 @@ fn copied_headers_and_payloads_preserve_independent_widths(
             ),
             "{error:?}"
         );
-        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
-        assert!(!output_path.exists());
-        directory.close().unwrap();
-        return;
-    }
-    let tree = tree.unwrap();
-    assert_copy_geometry(&tree, widths, fixture);
-    let (mut bytes, located) = if cross_file {
-        drop(file::libhdf5_create_v110_with_widths(
-            &output_path,
-            offsets,
-            lengths,
-            0,
-        ));
-        let bytes = std::fs::read(&output_path).unwrap();
-        let located = superblock::read(&BytesSource::new(bytes.as_slice())).unwrap();
-        (bytes, located)
     } else {
-        (source_bytes.clone(), located)
-    };
-    let addresses = AddressContext::from_effective_base(located.superblock.base_address);
-    let root = WriteEngine::gather_oh_messages(
-        &BytesSource::new(bytes.as_slice()),
-        addresses
-            .resolve(located.superblock.root_group_address)
-            .unwrap(),
-        addresses,
-        widths,
-    )
-    .unwrap();
-    let copied = write_tree(&mut bytes, addresses, widths, &tree);
-    let mut root = root;
-    root.push(
-        MessageType::LINK,
-        &file_writer::make_link("copied", copied)
-            .serialize(offsets)
-            .unwrap(),
-    );
-    let header = object_header::build_v2_object_header(&root).unwrap();
-    let mut block = located.superblock;
-    block.root_group_address = append_checked(&mut bytes, addresses, widths, &header);
-    block.eof_address = u64::try_from(bytes.len()).unwrap();
-    let encoded = hdf5_pure_format::__private::serialize_superblock(&block).unwrap();
-    bytes[..encoded.len()].copy_from_slice(&encoded);
-    assert_eq!(
-        superblock::read(&BytesSource::new(bytes.as_slice()))
-            .unwrap()
-            .widths,
-        widths
-    );
-    std::fs::write(&output_path, &bytes).unwrap();
-    assert_contents(&output_path, "copied", fixture, lengths);
-    assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+        result.unwrap();
+    }
+    assert_eq!(destination.has_staged_edits(), !rejected);
+    destination.commit().unwrap();
+    assert!(!destination.has_staged_edits());
+    destination.close().unwrap();
+
+    assert_eq!(fs::read(&source_path).unwrap(), source_bytes);
+    assert_contents(&source_path, "tree", fixture, lengths);
+    if rejected {
+        assert_eq!(fs::read(&output_path).unwrap(), before);
+    } else {
+        assert_copy_geometry(&output_path, "copied", widths, fixture);
+        assert_contents(&output_path, "copied", fixture, lengths);
+    }
+    if cross_file {
+        let native = file::libhdf5_open(&output_path);
+        let mut names = native.member_names().unwrap();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            if rejected {
+                &["retained"][..]
+            } else {
+                &["copied", "retained"]
+            }
+        );
+        assert_eq!(
+            native
+                .dataset("retained")
+                .unwrap()
+                .read_raw::<u32>()
+                .unwrap(),
+            [7]
+        );
+        native.close().unwrap();
+    } else {
+        assert_copy_geometry(&output_path, "tree", widths, fixture);
+        assert_contents(&output_path, "tree", fixture, lengths);
+    }
     directory.close().unwrap();
 }
 
-fn assert_copy_geometry(tree: &CopyTree, widths: FormatWidths, fixture: Fixture) {
-    assert_eq!(
-        tree.has_dense_attributes(),
-        matches!(fixture, Fixture::DenseVariableLength)
-    );
-    let mut fixed_arrays = 0;
-    let mut single_chunks = 0;
-    let mut unallocated = 0;
-    let mut extensible_arrays = 0;
-    for node in core::iter::once(&tree.root).chain(&tree.descendants) {
-        assert_eq!(node.region().widths(), widths);
-        match node {
-            CopyNode::DatasetChunked { region, .. } => {
-                let DataLayout::Chunked { index, .. } =
-                    super::parse_chunked_header(region, widths).unwrap().layout
-                else {
-                    panic!("the copied source must be chunked");
-                };
-                match index {
-                    ChunkIndexLayout::SingleChunk { .. } => single_chunks += 1,
-                    ChunkIndexLayout::FixedArray { .. } => fixed_arrays += 1,
-                    ChunkIndexLayout::ExtensibleArray { .. } => extensible_arrays += 1,
-                    other => panic!("unexpected source chunk index {other:?}"),
-                }
-            }
-            CopyNode::DatasetContiguous { data: None, .. } => unallocated += 1,
-            _ => {}
+fn assert_copy_geometry(path: &Path, group: &str, widths: FormatWidths, fixture: Fixture) {
+    let file = File::open(path).unwrap();
+    assert_eq!(file.superblock().offset_size, widths.offsets);
+    assert_eq!(file.superblock().length_size, widths.lengths);
+    for (name, index, chunk) in [
+        ("single", ChunkIndex::SingleChunk, 3),
+        ("chunked", ChunkIndex::FixedArray, 2),
+        ("extensible", ChunkIndex::ExtensibleArray, 2),
+    ] {
+        if name == "extensible" && widths.lengths != LengthWidth::Eight {
+            continue;
         }
+        let dataset = file.dataset(&format!("{group}/{name}")).unwrap();
+        assert_eq!(
+            dataset.layout().unwrap(),
+            Layout::Chunked {
+                index,
+                chunk_shape: vec![chunk]
+            }
+        );
     }
-    assert_eq!((fixed_arrays, single_chunks, unallocated), (1, 1, 1));
+    let dataset = file.dataset(&format!("{group}/unallocated")).unwrap();
+    assert_eq!(dataset.shape().unwrap(), [3]);
     assert_eq!(
-        extensible_arrays,
-        usize::from(widths.lengths == LengthWidth::Eight)
+        dataset.layout().unwrap(),
+        Layout::Contiguous {
+            address: None,
+            size: 12
+        }
     );
+    drop(dataset);
+    file.close().unwrap();
+
+    let bytes = fs::read(path).unwrap();
+    let source = BytesSource::new(&bytes);
+    let located = superblock::read(&source).unwrap();
+    let addresses = AddressContext::from_effective_base(located.superblock.base_address);
+    let address = group_v2::resolve_path_any_from_source(
+        &OpenedSource::for_test(&source, addresses),
+        AccessMode::ReadOnly,
+        &located.superblock,
+        widths,
+        &ObjectPathBuf::parse(group).as_path(),
+    )
+    .unwrap();
+    let header =
+        WriteEngine::gather_oh_messages(&source, PhysicalAddress::new(address), addresses, widths)
+            .unwrap();
+    let mut dense = false;
+    let mut position = 0;
+    while let Some((kind, body, end)) = header.next_message(position).unwrap() {
+        if kind == MessageType::ATTRIBUTE_INFO {
+            dense |=
+                AttributeInfoMessage::parse_with_offset_width(&header[body..end], widths.offsets)
+                    .unwrap()
+                    .fractal_heap_address
+                    .is_some();
+        }
+        position = end;
+    }
+    assert_eq!(dense, matches!(fixture, Fixture::DenseVariableLength));
 }
 
 fn create_source(path: &Path, widths: FormatWidths, fixture: Fixture) {
@@ -370,101 +383,6 @@ fn assert_contents(path: &Path, group_path: &str, fixture: Fixture, lengths: Len
         [1, 2, 3, 4, 5, 6]
     );
     reopened.close().unwrap();
-}
-
-fn write_tree(
-    bytes: &mut Vec<u8>,
-    addresses: AddressContext,
-    widths: FormatWidths,
-    tree: &CopyTree,
-) -> StoredAddress {
-    tree.emit(&mut CopyBuffer {
-        bytes,
-        addresses,
-        widths,
-    })
-    .unwrap()
-}
-
-struct CopyBuffer<'a> {
-    bytes: &'a mut Vec<u8>,
-    addresses: AddressContext,
-    widths: FormatWidths,
-}
-
-impl CopyOutput for CopyBuffer<'_> {
-    fn output_widths(&self) -> FormatWidths {
-        self.widths
-    }
-
-    fn place_data(&mut self, data: &[u8]) -> Result<StoredAddress, Error> {
-        Ok(append_checked(
-            self.bytes,
-            self.addresses,
-            self.widths,
-            data,
-        ))
-    }
-
-    fn place_chunks(
-        &mut self,
-        geometry: &ChunkGeometry,
-        flags: ChunkedLayoutFlags,
-        pipeline: Option<&[u8]>,
-        meta: &[ChunkMeta],
-        chunks: &dyn ChunkProvider,
-    ) -> Result<Vec<u8>, Error> {
-        let address = self.addresses.relative(PhysicalAddress::new(
-            u64::try_from(self.bytes.len()).unwrap(),
-        ))?;
-        let layout = geometry.plan_verbatim(self.widths, flags, pipeline, meta, address)?;
-        let mut blob = Vec::new();
-        chunked_write::emit_chunked_data_verbatim(&mut blob, &layout.plan, chunks)
-            .map_err(EmissionError::into_format)?;
-        if u64::try_from(blob.len()).unwrap() != layout.plan.total_len {
-            return Err(FormatError::Internal(
-                "a copied chunk region differs from its plan".into(),
-            )
-            .into());
-        }
-        append_checked(self.bytes, self.addresses, self.widths, &blob);
-        Ok(layout.layout_message)
-    }
-
-    fn place_attributes(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error> {
-        let address = self.addresses.relative(PhysicalAddress::new(
-            u64::try_from(self.bytes.len()).unwrap(),
-        ))?;
-        let blob = plan.build(address)?;
-        append_checked(self.bytes, self.addresses, self.widths, &blob.blob);
-        Ok(blob.attr_info_message)
-    }
-
-    fn place_header(&mut self, header: &[u8]) -> Result<StoredAddress, Error> {
-        Ok(append_checked(
-            self.bytes,
-            self.addresses,
-            self.widths,
-            header,
-        ))
-    }
-}
-
-fn append_checked(
-    bytes: &mut Vec<u8>,
-    addresses: AddressContext,
-    widths: FormatWidths,
-    body: &[u8],
-) -> StoredAddress {
-    let start = PhysicalAddress::new(u64::try_from(bytes.len()).unwrap());
-    context::require_range(
-        widths.offsets,
-        addresses,
-        FileRange::new(start, u64::try_from(body.len()).unwrap()).unwrap(),
-    )
-    .unwrap();
-    bytes.extend_from_slice(body);
-    addresses.relative(start).unwrap()
 }
 
 #[rstest]
