@@ -72,8 +72,8 @@ Before making a function longer, consider splitting part of it out into a functi
 
 If a function's semantics or implementation are strongly dependent on one of its arguments, and the argument is defined in a type within the current crate, prefer using a method on the type. Similarly, if a function is taking multiple arguments that originate from the same common type in all call sites it is a strong candidate for becoming a method on the type.
 
-Test helpers can be ordinary functions in the owning test module. Extend a production
-type when the operation belongs to that type in production.
+Test helpers can be ordinary functions in the owning test module. Add methods to
+library types when the operation belongs to the library implementation or API.
 
 ### Order arguments from most generic to most specific
 

@@ -2,14 +2,16 @@
 
 ## Prefer integration tests
 
-Put new behavior and regression tests in the owning crate's `tests/` suite.
-Use the interface its callers use.
+Prefer integration tests for behavior observable through a crate's public
+interface. Place these tests in the owning crate's `tests/` suite.
 
 - Exercise file operations through `File`, dataset, and group APIs. Use the
   owning crate's interface for format and allocation behavior.
 - Use the smallest input and operation sequence that demonstrates the behavior.
-- Check complete values, the stored bytes that establish the format claim, and
-  the specific error expected. Close and reopen the file to check persistence.
+- Assert the complete behavior under test. Check returned values, state changes,
+  and specific error variants where the behavior calls for them.
+- Verify stored bytes for format claims. Close and reopen files for persistence
+  claims.
 
 ## Organize integration tests by area
 
@@ -44,16 +46,17 @@ or a reference implementation. A roundtrip can share a reader and writer defect.
 Describe valid fixtures with checked types. Follow parse, don't validate.
 Represent deliberate corruption as raw bytes or explicit mutations.
 
-## Keep test support out of production algorithms
+## Keep test-only support out of the library implementation
 
-Exercise the real operation. Inject failures at the I/O boundary so production
-code handles read, write, resize, and synchronization errors. Keep test-only
-fields, reports, counters, and partial-execution modes out of the algorithms.
-Keep checked ownership evidence and counters that enforce resource limits.
+Inject read, write, resize, and synchronization failures at the I/O boundary so
+the library implementation handles them. Keep fields, reports, counters, and
+partial-execution modes used solely by tests out of library algorithms. Keep the
+allocation-ownership checks that protect live storage and the counters that
+enforce resource limits.
 
 Keep small helpers beside their callers. Share setup with the same purpose.
-Call existing production operations directly. Use an ordinary function or
-a test-owned type when it keeps setup or assertions clear.
+Call existing library operations directly. Use ordinary functions or define
+types in the test module to make setup and assertions easier to read.
 
 ## Extended tests
 
@@ -72,13 +75,15 @@ also runs extended cases because it does not read nextest profiles.
 
 ## Changes to coverage and resource budgets
 
-Preserve the behavior a test establishes when replacing it. Retire assertions
-about private structures outside the contract. Explain any loss of coverage.
+Preserve the behavior and correctness invariants that an existing test
+establishes. Retire assertions about incidental implementation details.
+Explain any reduction in coverage.
 
 Compare the same workload, backing, cache state, and measurement interval when
 changing a budget. Distinguish source requests from system I/O and allocation count
 from cumulative, peak, and retained bytes. Explain any increase and bound the new
-cost. A snapshot records the result of that decision.
+cost. Update affected snapshots to reflect accepted changes and keep assertions
+that enforce the resource bounds.
 
 ## Where tests and helpers belong
 
@@ -101,9 +106,10 @@ benchmarks, and [API-profile checks][profiles]. `format_reexports` stays separat
 helper selects it explicitly, including without `std`.
 
 Preserve selectors, gates, imports, formatting paths, snapshots, seeds, and documentation when moving
-tests. Preserve the external public API boundary and diagnostic-specific seal guards. When adding or
-moving native crosschecks, ensure the [interop default filter][nextest] and applicable CI selectors
-include them. Verify that the intended tests execute.
+tests. Keep public API tests outside the defining crate where they exercise caller access, including
+the [tests that enforce `#[non_exhaustive]`][seals]. When adding or moving native crosschecks, ensure
+the [interop default filter][nextest] and applicable CI selectors include them.
+Verify that the intended tests execute.
 
 ## Writing a test
 
@@ -145,7 +151,7 @@ Select the obligations that establish the changed behavior.
 |---|---|---|
 | Native interoperability | Fresh independent native observations of promised values and metadata. Selected tests fail on missing prerequisites or protocol errors. Preserve operation/helper synchronization. Helpers must not reacquire an explicit whole-test guard. | [Interop recipes][interop], [locking helper][locking] |
 | Unsafe code or platform assumptions | Execute selected Miri paths and boundaries. Check affected feature/target combinations and preserve moved-test selection. | [Soundness][soundness], [portability][portability] |
-| Allocation or performance | Assert functional results, bounds, and a positive control/floor. Follow region attribution and reject invalid measurements. Keep exact baselines, diagnostic profiles, and throughput benchmarks distinct. | [Allocation helper][allocation], [soundness recipes][soundness] |
+| Allocation or performance | Assert correct behavior and resource bounds. Use a known lower bound or a separate control to verify that the measurement records allocations. Follow the allocation helper's region attribution rules and reject invalid measurements. Keep exact baselines, diagnostic profiles, and throughput benchmarks distinct. | [Allocation helper][allocation], [soundness recipes][soundness] |
 | Generated invariants | Use bounded, shrinkable properties with explicit persistence paths. Preserve seeds and retain minimized exact regressions. | [Property suite][properties] |
 | Differential fuzzing | Compare both success/failure outcomes at equivalent operations, with explicit permitted differences and bounded traversal/resources. | [Differential target][differential] |
 | Snapshots | Normalize irrelevant variation, inspect changed observations, and distinguish bundled-version exact output from cross-version semantics. | [Native snapshot suite][snapshots] |
@@ -172,6 +178,7 @@ test boundary, helper ownership, independent evidence, and retained coverage.
 
 [architecture]: ARCHITECTURE.md#test-helpers
 [profiles]: scripts/api-profiles.toml
+[seals]: tests/main/seals.rs
 [errors]: CODE_STYLE.md#assert-the-exact-error
 [fixtures]: tests/data/NOTICE.md
 [interop]: scripts/interop.just
