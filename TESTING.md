@@ -3,7 +3,7 @@
 ## Choosing tests
 
 Prefer integration tests through the owning crate's public API. Use unit tests for
-internal algorithms and invariants that are difficult to exercise through that API.
+focused coverage of internal algorithms and invariants.
 
 Cover new or changed public behavior with tests.
 
@@ -27,8 +27,10 @@ Follow the [helper crate dependency rules][architecture].
 
 Keep test-only fields, reports, counters, and partial-execution modes out of
 library algorithms. Keep allocation-ownership checks and resource accounting
-that the operation requires. Inject faults at the I/O boundary so the library
-handles read, write, resize, and synchronization errors through its usual path.
+that the operation requires.
+
+When testing I/O failures, inject faults at the I/O boundary so the library
+handles them through its usual path.
 
 ## Format conformance and fixtures
 
@@ -43,9 +45,9 @@ Generate ordinary regression fixtures at test runtime in Rust.
 Describe valid fixtures with checked types. Follow parse, don't validate. Use
 raw bytes or explicit mutations for deliberate corruption.
 
-Establish format conformance with independently constructed bytes or observations
-from libhdf5. A roundtrip through hdf5-pure can pass when its
-reader and writer share a defect.
+When testing on-disk format conformance, compare against independently constructed
+bytes or observations from libhdf5. A roundtrip through hdf5-pure alone may miss
+shared reader/writer defects.
 
 Do not add C generators, Python or h5py scripts, or committed HDF5 binaries for
 ordinary regressions. Retain historical or externally produced fixtures when
@@ -64,9 +66,7 @@ elaborate setup.
 
 Assert specific error variants and fields using the [exact-error rules][errors].
 
-## Specialized testing
-
-### Extended tests
+## Extended tests
 
 Use the extended suite for tests that would significantly increase ordinary suite
 runtime, such as endurance tests. Prefix their names with `extended_` and keep
@@ -75,9 +75,11 @@ them alongside related tests.
 CI runs these cases separately using the [nextest profiles][nextest] `extended`
 and `extended-interop`.
 
-### Other test suites
+## Specialized testing
 
-| Category | Requirement | Reference |
+Follow each requirement when the change calls for that testing method.
+
+| Category | Guidance | Reference |
 | --- | --- | --- |
 | Native interoperability | Compare against independent observations from libhdf5 or libmatio. | [Interop recipes][interop], [native locking][locking] |
 | Unsafe code and portability | Exercise affected cases under Miri and in the target and feature configurations they depend on. | [Miri][soundness], [portability][portability] |
