@@ -355,8 +355,6 @@ mod tests {
     use core::cell::Cell;
     use core::mem;
 
-    use alloc::rc::Rc;
-
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
@@ -511,7 +509,7 @@ mod tests {
         hdf5_pure_format::__private::AttributeRecord::name_record_size(8)
     )]
     #[case::chunks(hdf5_pure_format::__private::BTREE_V2_CHUNK, u16::try_from(WIDTHS.offset + 2 * mem::size_of::<u64>()).unwrap())]
-    fn full_collections_copy_each_encoded_record_once(
+    fn full_collections_read_each_node_and_preserve_records(
         #[case] tree_type: u8,
         #[case] record_size: u16,
         #[values(1, 40_000)] count: usize,
@@ -564,10 +562,43 @@ mod tests {
                 data: data.to_vec(),
             })
             .collect();
-        assert_eq!(
-            collect_btree_v2_records(resident, &header, OFFSET_WIDTH).unwrap(),
-            expected
-        );
+        let widths = FormatWidths::from_sizes(OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let collect_records = || collect_btree_v2_records(resident, &header, OFFSET_WIDTH).unwrap();
+        let collect_storage =
+            || collect_btree_v2_storage_extents(&resident, StoredAddress::ZERO, widths).unwrap();
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let (records, extents) = if count > 1 {
+            use test_util::allocation;
+
+            let region = format!("btree_full_{tree_type}_{record_size}_{count}_{base}");
+            let (records, record_work) =
+                allocation::measure(&format!("{region}_records"), collect_records);
+            let (extents, storage_work) =
+                allocation::measure(&format!("{region}_storage"), collect_storage);
+            let payload = data.len() as u64;
+            assert!(record_work.live_bytes >= payload, "{record_work}");
+            assert!(
+                record_work.blocks <= (count + 4 * node_count + 64) as u64,
+                "{record_work}"
+            );
+            assert!(storage_work.bytes < payload / 2, "{storage_work}");
+            (records, extents)
+        } else {
+            (collect_records(), collect_storage())
+        };
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        let (records, extents) = (collect_records(), collect_storage());
+
+        assert_eq!(records, expected);
+        let header_bytes = HEADER_LENGTH.to_u64();
+        let node_bytes = u64::from(BTREE_V2_NODE_SIZE);
+        let mut expected_extents =
+            vec![Extent::new(StoredAddress::ZERO, ByteLength::new(header_bytes)).unwrap()];
+        expected_extents.extend((0..node_count).map(|index| {
+            let start = header_bytes + index.to_u64() * node_bytes;
+            Extent::new(StoredAddress::new(start), ByteLength::new(node_bytes)).unwrap()
+        }));
+        assert_eq!(extents, expected_extents);
         assert_eq!(
             collect_btree_v2_records_from_source(
                 &BTreeV2Source::new(&stored),
@@ -579,36 +610,15 @@ mod tests {
         );
         assert_eq!(source.reads.replace(0), node_count);
         assert_eq!(source.read_bytes.replace(0), image.nodes.len());
-        let layout = BTreeV2Layout::for_collection(&header, OFFSET_WIDTH).unwrap();
-        let copies = Rc::new(Cell::new(0));
-        let visits =
-            V2TreeVisitState::new(layout.root().unwrap(), OFFSET_WIDTH, V2WalkKind::Records)
-                .with_copy_counter(Rc::clone(&copies));
-        let records = visits
-            .walk(|node| stored.read_metadata(node.address(), node.encoded_len()?))
-            .unwrap();
-        assert_eq!(records, expected);
-        assert_eq!(source.reads.get(), node_count);
-        assert_eq!(copies.get(), data.len());
         assert_eq!(
-            records
-                .iter()
-                .map(|record| record.data.len())
-                .sum::<usize>(),
-            data.len()
+            collect_btree_v2_storage_extents(&stored, StoredAddress::ZERO, widths).unwrap(),
+            expected_extents
         );
-        assert!(copies.get() >= usize::from(record_size));
-        copies.set(0);
-        source.reads.set(0);
-        let visits =
-            V2TreeVisitState::new(layout.root().unwrap(), OFFSET_WIDTH, V2WalkKind::Storage)
-                .with_copy_counter(Rc::clone(&copies));
-        let records = visits
-            .walk(|node| stored.read_metadata(node.address(), node.encoded_len()?))
-            .unwrap();
-        assert_eq!(records, Vec::new());
-        assert_eq!(copies.get(), 0);
-        assert_eq!(source.reads.get(), node_count);
+        assert_eq!(source.reads.get(), node_count + 1);
+        assert_eq!(
+            source.read_bytes.get(),
+            image.header.len() + image.nodes.len()
+        );
     }
 
     #[rstest::rstest]
