@@ -10,7 +10,9 @@ use hdf5_pure_format::__private::GlobalHeapObject;
 
 use super::AnalysisPhase;
 use super::ObjectReferences;
+use super::PreservedReferences;
 use super::ReconstructionSource;
+use super::ownership::ObjectAllocation;
 use crate::edit::WriteEngine;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -23,6 +25,28 @@ pub(in crate::edit) mod associations;
 pub(in crate::edit) mod qualification;
 
 impl AnalysisPhase<'_> {
+    /// Takes complete reference summaries backed by complete, accepted original allocations.
+    ///
+    /// The caller must have finished the original phase's reference queries. The empty map
+    /// represents unavailable reuse, including a source mismatch.
+    pub(in crate::edit) fn take_preserved_references(
+        &mut self,
+        source: &ReconstructionSource,
+        mut preserves: impl FnMut(ObjectId, &[ObjectAllocation]) -> bool,
+    ) -> PreservedReferences {
+        if self.require_heap_phase(source).is_err() {
+            return PreservedReferences::default();
+        }
+        let mut references = std::mem::take(&mut self.references);
+        references.retain(|&object, facts| {
+            facts.complete
+                && self.ownership.get(&object).is_some_and(|ownership| {
+                    ownership.is_complete() && preserves(object, ownership.allocations())
+                })
+        });
+        PreservedReferences(references)
+    }
+
     /// Collects physical collection addresses and member identities reachable from `roots`.
     ///
     /// Reuses this phase's object and reference summaries. Retains decoded identities when

@@ -17,7 +17,7 @@ use crate::edit::analysis::heap::qualification::OriginalCollections;
 use crate::edit::analysis::physical::claims::domain::OwnerDomain;
 use crate::edit::analysis::{
     AnalysisPhase, CountHandoffError, NetCountError, OriginalOwnerFacts, OriginalOwnerInventory,
-    ReconstructionSource,
+    PreservedReferences, ReconstructionSource,
 };
 use crate::edit::commit::publish::AppliedTree;
 use crate::edit::staging::StagedEdits;
@@ -44,6 +44,7 @@ pub(in crate::edit::commit) struct PreparedEditInventory {
     dispositions: ReconstructionDispositions,
     storage: storage::OriginalStorage,
     collections: OriginalCollections,
+    references: PreservedReferences,
     reclamation: Result<Vec<(FileRange, FreeClass)>, Error>,
 }
 
@@ -78,6 +79,7 @@ impl PreparedEditInventory {
                         dispositions,
                         storage,
                         collections,
+                        references,
                         reclamation,
                     }) => InventoryPreparation::Tree(Self {
                         prepared,
@@ -85,6 +87,7 @@ impl PreparedEditInventory {
                         dispositions,
                         storage,
                         collections,
+                        references,
                         reclamation,
                         session: engine.context.allocations.session(),
                     }),
@@ -117,6 +120,7 @@ impl PreparedEditInventory {
             mut dispositions,
             storage,
             collections,
+            references,
             reclamation,
         } = self;
         if !session.same(&engine.context.allocations.session()) {
@@ -153,6 +157,7 @@ impl PreparedEditInventory {
             dispositions,
             storage,
             collections,
+            references,
         })
     }
 }
@@ -182,6 +187,7 @@ pub(in crate::edit::commit) struct AppliedEditInventory {
     dispositions: AppliedDispositions,
     storage: storage::OriginalStorage,
     collections: OriginalCollections,
+    references: PreservedReferences,
 }
 
 /// Original observations, storage exclusions, and reclamation spans for one tree plan.
@@ -190,6 +196,7 @@ pub(super) struct OriginalPreparation {
     dispositions: ReconstructionDispositions,
     storage: storage::OriginalStorage,
     collections: OriginalCollections,
+    references: PreservedReferences,
     reclamation: Result<Vec<(FileRange, FreeClass)>, Error>,
 }
 
@@ -255,11 +262,13 @@ impl OriginalPreparation {
             std::mem::take(&mut tree.collection_candidates),
         );
         dispositions.capture_session_parents(engine, phase, staged, &collections, &storage);
+        let references = storage.preserved_references(phase, &original, &dispositions, tree);
         Ok(Self {
             original,
             dispositions,
             storage,
             collections,
+            references,
             reclamation,
         })
     }

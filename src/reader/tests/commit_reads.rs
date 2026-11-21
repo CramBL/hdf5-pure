@@ -296,10 +296,10 @@ fn heap_bearing_commit_bounds_descriptor_reads_and_skips_numeric_payload(
     }
     assert_eq!(covered, descriptors.end(), "{scans:?}");
     let scan_bytes = scans.iter().map(|read| read.length()).sum::<u64>();
-    assert!(scan_bytes <= 2 * descriptors.length(), "{scan_bytes}");
+    assert_eq!(scan_bytes, descriptors.length(), "{scans:?}");
     let requested_bytes = requested.iter().map(|read| read.length()).sum::<u64>();
     assert!(
-        requested_bytes <= 2 * descriptors.length() + 2 * original.len() as u64 + 16 * 1024,
+        requested_bytes <= descriptors.length() + 2 * original.len() as u64 + 16 * 1024,
         "{requested_bytes}"
     );
     let largest_read = requested.iter().map(|read| read.length()).max().unwrap();
@@ -312,8 +312,8 @@ fn heap_bearing_commit_bounds_descriptor_reads_and_skips_numeric_payload(
             EditBacking::Mirrored => 2 * input_bytes,
         };
         let (cumulative_limit, peak_limit, block_limit) = match pattern {
-            DescriptorPattern::Repeated => (256 * 1024, 128 * 1024, 512),
-            DescriptorPattern::Distinct => (3_584 * 1024, 2 * 1024 * 1024, 12_000),
+            DescriptorPattern::Repeated => (160 * 1024, 96 * 1024, 448),
+            DescriptorPattern::Distinct => (2_816 * 1024, 1_664 * 1024, 8_000),
         };
         assert!(
             measured.bytes <= image_growth + cumulative_limit,
@@ -323,10 +323,7 @@ fn heap_bearing_commit_bounds_descriptor_reads_and_skips_numeric_payload(
             measured.peak_bytes <= image_growth + peak_limit,
             "{measured}"
         );
-        assert!(
-            measured.live_bytes <= image_growth + 16 * 1024,
-            "{measured}"
-        );
+        assert!(measured.live_bytes <= image_growth + 8 * 1024, "{measured}");
         assert!((1..=block_limit).contains(&measured.blocks), "{measured}");
     }
     eprintln!(
@@ -377,6 +374,118 @@ fn heap_bearing_commit_bounds_descriptor_reads_and_skips_numeric_payload(
             .iter()
             .any(|read| read.overlaps(numbers))
     );
+}
+
+#[derive(Clone, Copy)]
+enum DescriptorOverwrite {
+    InPlace,
+    Reconstructed,
+}
+
+#[rstest]
+#[case::in_place(DescriptorOverwrite::InPlace)]
+#[case::reconstructed(DescriptorOverwrite::Reconstructed)]
+fn descriptor_overwrite_observes_new_heap_members(
+    #[case] overwrite: DescriptorOverwrite,
+    #[values(EditBacking::Bounded, EditBacking::Mirrored)] backing: EditBacking,
+) {
+    let path = test_util::temp::temp_path("heap-bearing-overwrite.h5");
+    let mut fixture = Fixture::new();
+    let first = Object::new(91, b"original");
+    let next = Object::new(7, b"retained");
+    let parent = fixture.collection(&[first, next]);
+    let datatype = global_heap_fixture::vlen_string();
+    let (form, count) = match overwrite {
+        DescriptorOverwrite::InPlace => (Form::ContiguousDataset, 4_097),
+        DescriptorOverwrite::Reconstructed => (Form::CompactDataset, 1),
+    };
+    let before = global_heap_fixture::reference(8, parent, 91).repeat(count);
+    let after = global_heap_fixture::reference(8, parent, 7).repeat(count);
+    let messages = form.messages(&mut fixture, &datatype, &before);
+    fixture.object("labels", messages);
+    let mut messages = Form::CompactDataset.messages(&mut fixture, &crate::make_u8_type(), &[0x2a]);
+    messages.extend(Form::CompactAttribute.messages(
+        &mut fixture,
+        &datatype,
+        &global_heap_fixture::reference(8, parent, 7),
+    ));
+    fixture.object("keeper", messages);
+    fixture.write(&path);
+
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let file = open_observed_file_with_backing(&path, backing, &reads);
+    assert_eq!(file.edit_backing(), Some(backing));
+    let mut labels = file.dataset("labels").unwrap();
+    let header = labels.header_address().unwrap();
+    let layout = labels.layout().unwrap();
+    let old_range = match overwrite {
+        DescriptorOverwrite::InPlace => {
+            let range = extent(&file, "labels");
+            assert_eq!(range.length(), after.len() as u64);
+            Some(range)
+        }
+        DescriptorOverwrite::Reconstructed => None,
+    };
+    assert_eq!(labels.read_raw().unwrap(), before);
+    let mut keeper = file.dataset("keeper").unwrap();
+    keeper.remove_attr("a").unwrap();
+    labels
+        .write_staged(|builder| {
+            builder.with_raw_data(datatype.clone(), after.clone(), count as u64);
+        })
+        .unwrap();
+    reads.lock().unwrap().clear();
+    file.commit().unwrap();
+
+    assert!(!file.has_staged_edits());
+    let placed_header = labels.header_address().unwrap();
+    let placed_layout = labels.layout().unwrap();
+    if let Some(range) = old_range {
+        assert_eq!(placed_header, header);
+        assert_eq!(placed_layout, layout);
+        // The journal reads the entire range between the two batched scans.
+        let full = FileRange::new(range.start(), 64 * 1024).unwrap();
+        let tail = FileRange::new(full.end(), 16).unwrap();
+        let observed: Vec<_> = reads
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|read| read.overlaps(range))
+            .collect();
+        assert_eq!(observed, [full, tail, range, full, tail]);
+    } else {
+        assert_ne!(placed_header, header);
+        let witness = FileRange::new(PhysicalAddress::new(placed_header), 4).unwrap();
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|read| read.contains(witness))
+        );
+    }
+    assert!(keeper.attrs().unwrap().is_empty());
+    drop((labels, keeper));
+    file.close().unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    let parent = usize::try_from(parent).unwrap();
+    let original = global_heap::collection(&[first, next], Widths::EIGHT);
+    let compacted = global_heap::collection(&[next], Widths::EIGHT);
+    // One retained eight-byte record, followed by the free header.
+    let prefix = 16 + 24 + 16;
+    assert_eq!(bytes[parent..parent + prefix], compacted[..prefix]);
+    assert_ne!(bytes[parent..parent + prefix], original[..prefix]);
+    let file = File::open(&path).unwrap();
+    let labels = file.dataset("labels").unwrap();
+    assert_eq!(labels.header_address().unwrap(), placed_header);
+    assert_eq!(labels.layout().unwrap(), placed_layout);
+    assert_eq!(labels.read_raw().unwrap(), after);
+    assert_eq!(labels.read_string().unwrap(), vec!["retained"; count]);
+    let keeper = file.dataset("keeper").unwrap();
+    assert_eq!(keeper.read_u8().unwrap(), [0x2a]);
+    assert!(keeper.attrs().unwrap().is_empty());
 }
 
 #[test]
