@@ -1,17 +1,17 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Interoperability checks for staged and immediate appends to Extensible Array datasets.
 //!
 //! Independent libhdf5 observations cover values, chunk records, and persisted free-space totals.
 //! Reclamation checks include sparse tails across supported record locations.
 
-use hdf5::Extent;
-use hdf5::datatype::ByteOrder as NativeByteOrder;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::{FileSpaceStrategy as NativeStrategy, Sizeof, SizeofInfo};
 use hdf5_pure::FileBuilder;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{Chunk, Error, File, FileAccessProperties, MemoryStrategy, SyncPolicy};
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
+use libhdf5::Extent;
+use libhdf5::datatype::ByteOrder as NativeByteOrder;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::{FileSpaceStrategy as NativeStrategy, Sizeof, SizeofInfo};
 use rstest::rstest;
 
 use test_util_hdf5::__private::ownership_append;
@@ -63,12 +63,12 @@ fn immediate_ownership_publication_matches_native_free_sections(
 #[case::flat_borrowed_metadata(false, false, false, true)]
 #[case::flat_owned_filtered_metadata(false, true, true, true)]
 #[cfg_attr(
-    not(feature = "__hdf5-1.12"),
+    not(feature = "__libhdf5-1.12"),
     ignore = "HDF5 1.10 PAGE metadata creation produces an invalid free-section checksum"
 )]
 #[case::page_borrowed_metadata(true, false, false, true)]
 #[cfg_attr(
-    not(feature = "__hdf5-1.12"),
+    not(feature = "__libhdf5-1.12"),
     ignore = "HDF5 1.10 PAGE metadata creation produces an invalid free-section checksum"
 )]
 #[case::page_owned_filtered_metadata(true, true, true, true)]
@@ -82,7 +82,7 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("appender-lifecycle.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties.file_space_strategy(NativeStrategy::FreeSpaceManager {
@@ -169,7 +169,7 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
     file.close().unwrap();
     let completed = std::fs::read(&path).unwrap();
     test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let dataset = native.dataset("d").unwrap();
     assert_eq!(
         dataset.read_raw::<u8>().unwrap(),
@@ -181,7 +181,7 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
     drop(dataset);
     native.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), completed);
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let ceiling = native.dataset("ceiling").unwrap();
     ceiling.write_raw(&[73_u8; 8192]).unwrap();
     drop(ceiling);
@@ -346,7 +346,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
 ) {
     let path = test_util::temp::temp_path("native-retirement.h5");
     let len = slot * 4 + 1;
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
         })
@@ -420,7 +420,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
     drop(dataset);
     file.commit().unwrap();
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         expected
@@ -448,7 +448,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
 #[case::four(Sizeof::Bytes4)]
 fn narrow_native_tail_appends_preserve_values_and_ownership(#[case] width: Sizeof) {
     let path = test_util::temp::temp_path("narrow-tail.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties.sizes(SizeofInfo {
@@ -486,7 +486,7 @@ fn narrow_native_tail_appends_preserve_values_and_ownership(#[case] width: Sizeo
     drop(dataset);
     file.close().unwrap();
     assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [1, 2, 3, 4, 5]);
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let sizes = native.create_plist().unwrap().get_sizes().unwrap();
     assert_eq!(sizes.sizeof_addr, width);
     assert_eq!(sizes.sizeof_size, Sizeof::Bytes8);
@@ -495,7 +495,7 @@ fn narrow_native_tail_appends_preserve_values_and_ownership(#[case] width: Sizeo
 #[test]
 fn immediate_append_rejects_big_endian_storage_without_changing_the_file() {
     let path = test_util::temp::temp_path("big-endian.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .create(&path)
         .unwrap();

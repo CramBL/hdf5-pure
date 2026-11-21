@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! An empty (zero-element) chunked dataset, across both writers and both readers
 //! (issue #284). This is the shape an incremental writer declares its schema at —
 //! one resizable dataset per column, grown as batches arrive — so it has to be
@@ -12,10 +12,10 @@
 //! first chunk is written, so *its* empty dataset names no index at all. Both are
 //! valid, and reading either has to yield an empty buffer rather than an error.
 
-use hdf5::Extent;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent};
+use libhdf5::Extent;
+use libhdf5::file::LibraryVersion;
 
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
@@ -50,7 +50,7 @@ fn c_grows_an_empty_chunked_dataset_added_in_place() {
     edit_in_an_empty_chunked_dataset(&path, true);
 
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let ds = file.dataset("col").unwrap();
         assert_eq!(ds.shape(), vec![0]);
         assert!(ds.read_raw::<i64>().unwrap().is_empty());
@@ -82,7 +82,7 @@ fn c_reads_a_fixed_shape_empty_chunked_dataset_added_in_place() {
     let path = dir.path().join("edited_fixed.h5");
     edit_in_an_empty_chunked_dataset(&path, false);
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("col").unwrap();
     assert_eq!(ds.shape(), vec![0]);
     assert!(ds.read_raw::<i64>().unwrap().is_empty());
@@ -137,7 +137,7 @@ fn c_opens_the_chunk_index_of_every_empty_chunked_dataset_we_write() {
         }
         b.write(&path).unwrap();
 
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         let ds = file.dataset("col").unwrap();
         assert!(ds.is_chunked(), "[{label}] chunked storage");
         let expected_shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
@@ -204,7 +204,7 @@ fn an_empty_filtered_dataset_declares_the_width_its_first_chunk_needs() {
     // The consequence, end to end: the C library fills the dataset the edit
     // engine declared, and this crate reads back what it wrote.
     {
-        let file = hdf5::File::open_rw(&empty).unwrap();
+        let file = libhdf5::File::open_rw(&empty).unwrap();
         let ds = file.dataset("col").unwrap();
         ds.resize((chunk_elems,)).unwrap();
         ds.write(&data).unwrap();
@@ -245,7 +245,7 @@ fn an_empty_filtered_dataset_accepts_an_append_that_fills_its_chunk() {
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("col").unwrap().read_i32().unwrap(), data);
     drop(file);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         file.dataset("col").unwrap().read_raw::<i32>().unwrap(),
         data
@@ -274,7 +274,7 @@ fn c_reads_the_whole_file_writers_empty_chunked_datasets() {
         }
         b.write(&path).unwrap();
 
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         let ds = file.dataset("col").unwrap();
         assert_eq!(ds.shape(), vec![0], "unlimited={unlimited}");
         assert!(
@@ -296,7 +296,7 @@ fn pure_reads_unallocated_empty_chunked_datasets_the_c_library_wrote() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("c.h5");
             {
-                let mut opts = hdf5::File::with_options();
+                let mut opts = libhdf5::File::with_options();
                 if latest {
                     opts.with_fapl(|p| {
                         p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
@@ -357,7 +357,7 @@ fn pure_materializes_an_unallocated_dataset_that_owns_elements() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("unwritten.h5");
             {
-                let file = hdf5::File::create(&path).unwrap();
+                let file = libhdf5::File::create(&path).unwrap();
                 let mut builder = file.new_dataset::<i32>().shape((10,));
                 if chunked {
                     builder = builder.chunk((4,));
@@ -372,7 +372,7 @@ fn pure_materializes_an_unallocated_dataset_that_owns_elements() {
 
             // Ground truth: whatever the C library reads from this file.
             let expected = {
-                let file = hdf5::File::open(&path).unwrap();
+                let file = libhdf5::File::open(&path).unwrap();
                 file.dataset("col").unwrap().read_raw::<i32>().unwrap()
             };
             assert_eq!(
@@ -416,7 +416,7 @@ fn pure_fills_the_gaps_of_a_partially_written_chunked_dataset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("partial.h5");
         {
-            let file = hdf5::File::create(&path).unwrap();
+            let file = libhdf5::File::create(&path).unwrap();
             let mut builder = file.new_dataset::<i32>().shape((10,)).chunk((5,));
             if let Some(v) = fill {
                 builder = builder.fill_value(v);
@@ -429,7 +429,7 @@ fn pure_fills_the_gaps_of_a_partially_written_chunked_dataset() {
         }
 
         let expected = {
-            let file = hdf5::File::open(&path).unwrap();
+            let file = libhdf5::File::open(&path).unwrap();
             file.dataset("col").unwrap().read_raw::<i32>().unwrap()
         };
         let mut want = vec![1, 2, 3, 4, 5];
@@ -487,12 +487,12 @@ fn a_fill_value_the_file_says_is_never_written_reads_as_zeros() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("never.h5");
         {
-            let file = hdf5::File::create(&path).unwrap();
+            let file = libhdf5::File::create(&path).unwrap();
             let mut builder = file
                 .new_dataset::<i32>()
                 .shape((8,))
                 .fill_value(7i32)
-                .fill_time(hdf5::dataset::FillTime::Never);
+                .fill_time(libhdf5::dataset::FillTime::Never);
             if chunked {
                 builder = builder.chunk((4,));
             }
@@ -559,7 +559,7 @@ fn repack_preserves_a_never_written_dataset() {
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
     {
-        let file = hdf5::File::create(&src).unwrap();
+        let file = libhdf5::File::create(&src).unwrap();
         let ds = file
             .new_dataset::<i32>()
             .shape((N,))
@@ -605,7 +605,7 @@ fn repack_preserves_a_never_written_dataset() {
     );
 
     // The reference library reads its own convention back.
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_eq!(
         c.dataset("col").unwrap().read_raw::<i32>().unwrap(),
         vec![7i32; N],
@@ -637,7 +637,7 @@ fn a_swept_typed_read_of_lazily_allocated_storage_reads_holes_as_fill() {
     let partly = dir.path().join("partly.h5");
 
     for (path, write_some) in [(&never, false), (&partly, true)] {
-        let file = hdf5::File::create(path).unwrap();
+        let file = libhdf5::File::create(path).unwrap();
         let ds = file
             .new_dataset::<i32>()
             .shape((N,))

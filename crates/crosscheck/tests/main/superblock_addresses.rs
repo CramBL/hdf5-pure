@@ -1,8 +1,8 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::file::LibraryVersion;
 use hdf5_pure::File;
 use hdf5_pure::ReadSeekSource;
+use libhdf5::file::LibraryVersion;
 use rstest::rstest;
 use test_util::superblock;
 
@@ -18,7 +18,7 @@ fn libhdf5_superblock_retains_stored_addresses_across_open_and_edit(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("addresses.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|properties| properties.libver_bounds(low, LibraryVersion::V18))
             .with_fcpl(|properties| properties.userblock(512).istore_k(indexed_storage_k))
             .create(&path)
@@ -69,7 +69,7 @@ fn libhdf5_superblock_retains_stored_addresses_across_open_and_edit(
     assert_ne!(superblock::root_header_address(&edited, 512), root_before);
     assert_eq!(&edited[..512], &original[..512]);
     assert_reader(&File::open_streaming(&path).unwrap(), &edited);
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         file.dataset("added").unwrap().read_raw::<i32>().unwrap(),
         [7, 8, 9]

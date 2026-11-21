@@ -54,7 +54,7 @@ impl Writes {
     ///
     /// Panics if a selected range is reversed or extends past `len`, a generated element index
     /// does not fit in [`i32`], or libhdf5 cannot write a range.
-    pub fn write(self, dataset: &hdf5::Dataset) {
+    pub fn write(self, dataset: &libhdf5::Dataset) {
         for range in self.ranges() {
             dataset
                 .write_slice(&self.values()[range.clone()], range.clone())
@@ -107,9 +107,9 @@ impl Writes {
 ///
 /// Panics if the file or dataset cannot be opened, or chunk information cannot be read.
 pub fn libhdf5_chunks(path: &Path, userblock: u64) -> Vec<Chunk> {
-    #[cfg(feature = "__hdf5-1.14")]
+    #[cfg(feature = "__libhdf5-1.14")]
     let mut chunks = {
-        let file = hdf5::File::open(path).unwrap();
+        let file = libhdf5::File::open(path).unwrap();
         let dataset = file.dataset("d").unwrap();
         let mut chunks = Vec::new();
         dataset
@@ -125,9 +125,9 @@ pub fn libhdf5_chunks(path: &Path, userblock: u64) -> Vec<Chunk> {
             .unwrap();
         chunks
     };
-    #[cfg(not(feature = "__hdf5-1.14"))]
+    #[cfg(not(feature = "__libhdf5-1.14"))]
     let mut chunks = {
-        let file = hdf5::File::open(path).unwrap();
+        let file = libhdf5::File::open(path).unwrap();
         let count = file.dataset("d").unwrap().num_chunks().unwrap();
         let indices: Vec<usize> = (0..count).collect();
         libhdf5_chunks_at(path, userblock, &indices)
@@ -144,7 +144,7 @@ pub fn libhdf5_chunks(path: &Path, userblock: u64) -> Vec<Chunk> {
 ///
 /// Panics if the file or dataset cannot be opened, or an index has no chunk information.
 pub fn libhdf5_chunks_at(path: &Path, userblock: u64, indices: &[usize]) -> Vec<Chunk> {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let dataset = file.dataset("d").unwrap();
     indices
         .iter()
@@ -163,7 +163,7 @@ pub fn libhdf5_chunks_at(path: &Path, userblock: u64, indices: &[usize]) -> Vec<
 // `H5D__get_chunk_info` in `H5Dchunk.c` reports a base-relative chunk address in HDF5 1.10.11 and
 // 1.12.3, and adds the base address in 1.14.6 and 2.2.0.
 fn absolute(address: u64, userblock: u64) -> u64 {
-    if cfg!(feature = "__hdf5-1.14") {
+    if cfg!(feature = "__libhdf5-1.14") {
         address
     } else {
         address + userblock

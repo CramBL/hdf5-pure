@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! The reference HDF5 C library must be able to *modify* a file hdf5-pure wrote,
 //! not just read it. Inserting a link into a group makes the C library read the
 //! group's Group Info message (`H5G_obj_insert` -> `H5O_msg_read(H5O_GINFO_ID)`);
@@ -36,7 +36,7 @@ fn c_library_adds_objects_to_our_file() {
     // libhdf5 opens it read-write and inserts links into both the root
     // group and the hdf5-pure-created subgroup, then creates a fresh subgroup.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<i32>()
             .shape((3,))
             .create("added_to_root")
@@ -100,7 +100,7 @@ fn c_library_writes_after_an_in_place_edit() {
     // libhdf5 adds objects to both the rewritten root and the
     // open_rw-created subgroup.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<i32>()
             .shape((1,))
             .create("c_after_edit")
@@ -159,7 +159,7 @@ fn c_library_converts_our_large_group_to_dense() {
 
     // libhdf5 inserts links 9..16, crossing into dense storage.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         for i in 8..16 {
             f.new_dataset::<i32>()
                 .shape((1,))
@@ -195,14 +195,14 @@ fn c_library_converts_our_large_group_to_dense() {
 /// h5py files, and the direction the read-side variant mapping is claimed on.
 #[test]
 fn pure_reads_every_attribute_encoding_the_c_library_writes() {
-    use hdf5::types::{FixedAscii, FixedUnicode, VarLenAscii, VarLenUnicode};
     use hdf5_pure::AttrValue;
+    use libhdf5::types::{FixedAscii, FixedUnicode, VarLenAscii, VarLenUnicode};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_attrs.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         file.new_dataset::<f64>()
             .shape([1])
             .create("x")

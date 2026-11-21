@@ -1,11 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::Datatype as NativeDatatype;
-use hdf5::file::LibraryVersion;
-use hdf5::globals;
-use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::File;
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 use hdf5_pure_core::{ComplexType, MantissaNormalization};
 use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, FloatingPointType, MessageType, VariableLengthType,
@@ -15,8 +11,12 @@ use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeProperties, DatatypeVersion, FormatWidths, ObjectHeader,
     OffsetWidth,
 };
-use hdf5_sys::h5i::hid_t;
-use hdf5_sys::h5t;
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::file::LibraryVersion;
+use libhdf5::globals;
+use libhdf5::plist::file_create::{Sizeof, SizeofInfo};
+use libhdf5_sys::h5i::hid_t;
+use libhdf5_sys::h5t;
 use rstest::rstest;
 use test_util_hdf5::{lock, storage};
 
@@ -32,14 +32,14 @@ fn datatype_array_complex_codecs_preserve_native_arrays(
     let mut semantic = Datatype::FloatingPoint(component(big_endian));
     let parent = if sequence {
         semantic = Datatype::VariableLength(VariableLengthType::sequence(semantic));
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             // SAFETY: The floating-point parent is live and the call returns a new ID.
             owned(unsafe { h5t::H5Tvlen_create(parent.id()) })
         })
     } else {
         parent
     };
-    let datatype = hdf5::sync::sync(|| {
+    let datatype = libhdf5::sync::sync(|| {
         let dimensions = [2, 3];
         // SAFETY: The parent is live and the dimension array holds the declared two extents.
         owned(unsafe { h5t::H5Tarray_create2(parent.id(), 2, dimensions.as_ptr()) })
@@ -60,7 +60,7 @@ fn datatype_array_complex_codecs_preserve_native_arrays(
     );
 }
 
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 #[rstest]
 #[case::little(ComplexParent::Little)]
 #[case::big(ComplexParent::Big)]
@@ -69,7 +69,7 @@ fn datatype_array_complex_codecs_preserve_native_complex(#[case] parent: Complex
     let _guard = lock::libhdf5_guard();
     let component = parent.semantic();
     let parent = parent.native();
-    let datatype = hdf5::sync::sync(|| {
+    let datatype = libhdf5::sync::sync(|| {
         // SAFETY: The parent is a live floating-point type and the call returns a new ID.
         owned(unsafe { h5t::H5Tcomplex_create(parent.id()) })
     });
@@ -90,7 +90,7 @@ fn assert_native(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("datatype.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_bounds(version, version))
         .with_fcpl(|properties| {
             properties.sizes(SizeofInfo {
@@ -178,7 +178,7 @@ fn assert_native(
     drop(pure);
 }
 
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 #[derive(Clone, Copy, Debug)]
 enum ComplexParent {
     Big,
@@ -186,13 +186,13 @@ enum ComplexParent {
     Vax,
 }
 
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 impl ComplexParent {
     fn native(self) -> NativeDatatype {
         match self {
             Self::Big => native_float(true),
             Self::Little => native_float(false),
-            Self::Vax => hdf5::sync::sync(|| {
+            Self::Vax => libhdf5::sync::sync(|| {
                 // SAFETY: The predefined VAX datatype is live and the call returns a new ID.
                 owned(unsafe { h5t::H5Tcopy(*globals::H5T_VAX_F64) })
             }),
@@ -222,7 +222,7 @@ impl ComplexParent {
 }
 
 fn native_float(big_endian: bool) -> NativeDatatype {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         let source = if big_endian {
             *globals::H5T_IEEE_F64BE
         } else {
@@ -244,9 +244,9 @@ fn component(big_endian: bool) -> FloatingPointType {
 fn owned(id: hid_t) -> NativeDatatype {
     assert!(id >= 0);
     // SAFETY: Every caller transfers a newly created datatype ID exactly once.
-    unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
+    unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap()
 }
 
 /// The VAX exponent bias assigned by `H5T_INIT_TYPE_DOUBLEVAX_CORE` (`H5T.c`, HDF5 2.2.0).
-#[cfg(feature = "__hdf5-2")]
+#[cfg(feature = "__libhdf5-2")]
 const VAX_BIAS: u32 = 0x0401;

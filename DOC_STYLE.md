@@ -208,7 +208,7 @@ A document version describes every on-disk version of the structures it still co
 
 Each section anchor id contains the document version, as in `subsec_fmt4_boot_super` for the superblock section of version 4.0, and the source files above define the anchors. The sources are pinned to the `hdf5_2.1.0` tag, where all five documents sit under `doxygen/dox/`.
 
-The crosschecks under `crates/crosscheck/` link the libhdf5 that `hdf5-metno` bundles, release 2.2.0, under the `__hdf5-bundled` feature that `just interop::test-bundled` passes, and its source is at [tag `2.2.0`][libhdf5]. `just interop::hdf5-bundled-version` prints that release. `just interop::default` links 1.8.23, 1.10.11, 1.12.3, 1.14.6 and 2.2.0 in turn, which `scripts/interop.just` lists, and `just interop::test-external-hdf5` links the installation under `HDF5_DIR`.
+The crosschecks under `crates/crosscheck/` link the libhdf5 that `hdf5-metno` bundles, release 2.2.0, under the `__libhdf5-bundled` feature that `just interop::test-bundled` passes, and its source is at [tag `2.2.0`][libhdf5]. `just interop::hdf5-bundled-version` prints that release. `just interop::default` links 1.8.23, 1.10.11, 1.12.3, 1.14.6 and 2.2.0 in turn, which `scripts/interop.just` lists, and `just interop::test-external-hdf5` links the installation under `HDF5_DIR`.
 
 [1574-A]: https://rust-lang.github.io/rfcs/1574-more-api-documentation-conventions.html#appendix-a-full-conventions-text
 [fmt1]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t1.html

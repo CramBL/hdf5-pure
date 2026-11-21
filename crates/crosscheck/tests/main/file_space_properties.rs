@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! File-space strategy, append, and deletion properties checked against libhdf5.
 //!
 //! Tests compare strategy metadata, complete surviving values, and free-space totals with
@@ -6,12 +6,12 @@
 //! Proptest records and replays seeds in `tests/proptest-regressions/file_space_fuzz.txt`
 //! under the crosscheck package.
 
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::PhysicalAddress;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
@@ -114,7 +114,7 @@ proptest! {
         // This includes a fresh `persist = true` non-paged file, which must record a
         // defined `eoa_pre_fsm` (issue #178) or an assertion-enabled libhdf5 aborts
         // on open (H5Fsuper.c: `fs_persist => eoa_fsm_fsalloc != UNDEF`).
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         prop_assert_eq!(
             f.create_plist().unwrap().get_file_space_strategy().unwrap(),
             expected_c_strategy(strategy, persist, threshold)
@@ -193,7 +193,7 @@ proptest! {
 
         // libhdf5 recovers the paged strategy, reads every row, and its
         // free-space total equals the sum of the managers we rewrote at close.
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         prop_assert_eq!(
             f.create_plist().unwrap().get_file_space_strategy().unwrap(),
             CStrategy::FreeSpaceManager {
@@ -283,7 +283,7 @@ proptest! {
             }
         }
         drop(reader);
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         for (i, values) in data.iter().enumerate().filter(|&(i, _)| !deleted[i]) {
             let got = f.dataset(&format!("d{i}")).unwrap().read_raw::<i32>().unwrap();
             prop_assert_eq!(&got, values);

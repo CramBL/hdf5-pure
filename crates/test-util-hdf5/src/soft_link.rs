@@ -1,22 +1,22 @@
 //! Reference files with soft links in compact, dense, or symbol table groups.
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use std::ffi::CString;
 use std::path::Path;
 
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::LinkType;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::link_create::CharEncoding;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::link_create::LinkCreateBuilder;
-use hdf5::{Group, GroupStorageType};
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5_sys::h5l;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5_sys::h5p::H5P_DEFAULT;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::LinkType;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::link_create::CharEncoding;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::link_create::LinkCreateBuilder;
+use libhdf5::{Group, GroupStorageType};
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5_sys::h5l;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5_sys::h5p::H5P_DEFAULT;
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use crate::__private::c_object;
 use crate::file;
 
@@ -103,7 +103,7 @@ fn write_value(group: &Group, value: i32) {
 }
 
 /// A hard, soft, or external link, as libhdf5 reports it.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeLink {
     /// A hard link to the object header at `address`.
@@ -123,8 +123,8 @@ pub enum NativeLink {
 ///
 /// Panics if a libhdf5 call fails, or if the value of a soft or an external link is longer than
 /// 1022 bytes or has a path that is not UTF-8.
-#[cfg(feature = "__hdf5-1.10")]
-pub fn native_links(file: &hdf5::File, group: &str) -> Vec<(String, NativeLink)> {
+#[cfg(feature = "__libhdf5-1.10")]
+pub fn native_links(file: &libhdf5::File, group: &str) -> Vec<(String, NativeLink)> {
     let mut links = Vec::new();
     file.group(group)
         .unwrap()
@@ -156,7 +156,7 @@ pub fn native_links(file: &hdf5::File, group: &str) -> Vec<(String, NativeLink)>
 /// # Panics
 ///
 /// Panics if `target` or `link_name` contains a null byte, or if `H5Lcreate_soft` fails.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn link_soft_utf8(group: &Group, target: &str, link_name: &str) {
     let properties = LinkCreateBuilder::new()
         .char_encoding(CharEncoding::Utf8)
@@ -164,7 +164,7 @@ pub fn link_soft_utf8(group: &Group, target: &str, link_name: &str) {
         .unwrap();
     let target = CString::new(target).unwrap();
     let name = CString::new(link_name).unwrap();
-    let status = hdf5::sync::sync(|| {
+    let status = libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access, `group` and `properties` keep their
         // identifiers open, and both strings are NUL-terminated and outlive the call.
         unsafe {
@@ -180,7 +180,7 @@ pub fn link_soft_utf8(group: &Group, target: &str, link_name: &str) {
     assert!(status >= 0, "H5Lcreate_soft failed for {link_name:?}");
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 fn external_link(value: &[u8]) -> NativeLink {
     let (_version_and_flags, strings) = value.split_first().unwrap();
     let mut strings = strings
@@ -192,11 +192,11 @@ fn external_link(value: &[u8]) -> NativeLink {
     }
 }
 
-#[cfg(feature = "__hdf5-1.10")]
-fn link_value(file: &hdf5::File, path: &str) -> Vec<u8> {
+#[cfg(feature = "__libhdf5-1.10")]
+fn link_value(file: &libhdf5::File, path: &str) -> Vec<u8> {
     let name = CString::new(path).unwrap();
     let mut value = vec![0_u8; 1024];
-    let status = hdf5::sync::sync(|| {
+    let status = libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access, `file` keeps the file open, `name` is a
         // NUL-terminated string that outlives the call, and `value` is writable for the length
         // passed beside it.

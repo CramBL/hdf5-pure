@@ -4,7 +4,7 @@
 //! nested aliases, symbol-table links, and contiguous value datasets. Ordinary
 //! assertions inspect headers and storage in the supplied image bytes alongside
 //! the reader API.
-//! With the `hdf5` feature, native assertions read the graphs through libhdf5.
+//! The `libhdf5` feature enables assertions that read the graphs through libhdf5.
 //!
 //! # Examples
 //!
@@ -48,7 +48,7 @@ use hdf5_pure_format::__private::ObjectHeader;
 
 use crate::symbol_table;
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub mod native;
 
 /// Checks every structure, reference target, attribute, and value in the valid image.

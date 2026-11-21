@@ -1,12 +1,11 @@
 //! Native observations of opaque tags, element bytes, and datatype sharing.
 
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::path::Path;
 
-use hdf5::Datatype as NativeDatatype;
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
 use hdf5_pure::Error;
@@ -14,14 +13,15 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
 use hdf5_pure::LibVer;
 use hdf5_pure::RepackOptions;
-use hdf5_sys::h5;
-use hdf5_sys::h5a;
-use hdf5_sys::h5d;
-use hdf5_sys::h5i::hid_t;
-use hdf5_sys::h5p::H5P_DEFAULT;
-use hdf5_sys::h5s::H5S_ALL;
-use hdf5_sys::h5t;
-use hdf5_sys::h5t::H5T_class_t;
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5_sys::h5;
+use libhdf5_sys::h5a;
+use libhdf5_sys::h5d;
+use libhdf5_sys::h5i::hid_t;
+use libhdf5_sys::h5p::H5P_DEFAULT;
+use libhdf5_sys::h5s::H5S_ALL;
+use libhdf5_sys::h5t;
+use libhdf5_sys::h5t::H5T_class_t;
 use rstest::rstest;
 use test_util_hdf5::file;
 use test_util_hdf5::lock;
@@ -275,7 +275,7 @@ impl Shape {
 
     fn native_type(self, tag: &[u8]) -> NativeDatatype {
         let base = native_opaque(tag, 4);
-        hdf5::sync::sync(|| match self {
+        libhdf5::sync::sync(|| match self {
             Self::Array => {
                 // SAFETY: The live base type and one initialized dimension cover the call.
                 owned_type(unsafe { h5t::H5Tarray_create2(base.id(), 1, [2].as_ptr()) })
@@ -319,13 +319,13 @@ impl Shape {
     fn assert_native_type(self, datatype: &NativeDatatype, tag: &[u8]) {
         match self {
             Self::Opaque => assert_eq!(native_tag(datatype), tag),
-            Self::Array => hdf5::sync::sync(|| {
+            Self::Array => libhdf5::sync::sync(|| {
                 // SAFETY: The live datatype is an array, and the returned type receives ownership.
                 let base = owned_type(unsafe { h5t::H5Tget_super(datatype.id()) });
                 assert_eq!(base.size(), 4);
                 assert_eq!(native_tag(&base), tag);
             }),
-            Self::Compound => hdf5::sync::sync(|| {
+            Self::Compound => libhdf5::sync::sync(|| {
                 // SAFETY: The two member indexes exist in the live compound datatype.
                 let blob = owned_type(unsafe { h5t::H5Tget_member_type(datatype.id(), 0) });
                 // SAFETY: The second member exists and the returned handle receives ownership.
@@ -357,7 +357,7 @@ impl OversizedLocation {
             Producer::Native.write(path, Shape::Opaque, tag, matches!(self, Self::Committed));
         } else {
             Producer::Pure.write(path, Shape::Opaque, b"BLOB", false);
-            let file = hdf5::File::open_rw(path).unwrap();
+            let file = libhdf5::File::open_rw(path).unwrap();
             let dataset = file.dataset("values").unwrap();
             let datatype = native_opaque(tag, 4);
             let attribute = dataset
@@ -410,14 +410,14 @@ fn observe_pure(
 }
 
 fn observe_native(path: &Path, shape: Shape, tag: &[u8], committed: bool, attribute: bool) {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let dataset = file.dataset("values").unwrap();
     let datatype = dataset.dtype().unwrap();
     assert_eq!(datatype.is_committed(), committed);
     shape.assert_native_type(&datatype, tag);
     assert_eq!(dataset.shape(), [shape.count()]);
     let mut values = vec![0; datatype.size() * shape.count()];
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The output covers the complete dataset extent in its own pointer-free datatype.
             unsafe {
@@ -442,7 +442,7 @@ fn observe_native(path: &Path, shape: Shape, tag: &[u8], committed: bool, attrib
         shape.assert_native_type(&attribute_type, tag);
         assert_eq!(attribute.shape(), [shape.count()]);
         values.fill(0);
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             assert_eq!(
                 // SAFETY: The matching attribute extent and datatype cover all output bytes.
                 unsafe {
@@ -464,7 +464,7 @@ fn observe_native(path: &Path, shape: Shape, tag: &[u8], committed: bool, attrib
 
 fn native_opaque(tag: &[u8], size: usize) -> NativeDatatype {
     let tag = CString::new(tag).unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock covers creating a pointer-free opaque datatype.
         let datatype = owned_type(unsafe { h5t::H5Tcreate(H5T_class_t::H5T_OPAQUE, size) });
         // SAFETY: The datatype is live and `tag` is a terminated string for the synchronous call.
@@ -476,11 +476,11 @@ fn native_opaque(tag: &[u8], size: usize) -> NativeDatatype {
 fn owned_type(id: hid_t) -> NativeDatatype {
     assert!(id >= 0);
     // SAFETY: Callers transfer ownership of a newly returned datatype ID exactly once.
-    unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
+    unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap()
 }
 
 fn native_tag(datatype: &NativeDatatype) -> Vec<u8> {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The live opaque datatype and lock cover obtaining a terminated HDF5 allocation.
         let tag = unsafe { h5t::H5Tget_tag(datatype.id()) };
         assert!(!tag.is_null());
@@ -492,9 +492,9 @@ fn native_tag(datatype: &NativeDatatype) -> Vec<u8> {
     })
 }
 
-fn write_dataset(dataset: &hdf5::Dataset, datatype: &NativeDatatype, values: &[u8]) {
+fn write_dataset(dataset: &libhdf5::Dataset, datatype: &NativeDatatype, values: &[u8]) {
     assert_eq!(dataset.size() * datatype.size(), values.len());
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The initialized bytes cover the entire dataset in its pointer-free stored type.
             unsafe {
@@ -512,9 +512,9 @@ fn write_dataset(dataset: &hdf5::Dataset, datatype: &NativeDatatype, values: &[u
     });
 }
 
-fn write_attribute(attribute: &hdf5::Attribute, datatype: &NativeDatatype, values: &[u8]) {
+fn write_attribute(attribute: &libhdf5::Attribute, datatype: &NativeDatatype, values: &[u8]) {
     assert_eq!(attribute.size() * datatype.size(), values.len());
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The initialized bytes cover the entire attribute in its pointer-free stored type.
             unsafe { h5a::H5Awrite(attribute.id(), datatype.id(), values.as_ptr().cast()) },
@@ -524,7 +524,7 @@ fn write_attribute(attribute: &hdf5::Attribute, datatype: &NativeDatatype, value
 }
 
 fn encode_native(datatype: &NativeDatatype) -> Vec<u8> {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         let mut length = 0;
         assert_eq!(
             // SAFETY: The live datatype and null output pointer request only the encoded length.

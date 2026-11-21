@@ -1,15 +1,15 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::plist::file_access::LibraryVersion;
-use hdf5::types::CompoundField;
-use hdf5::types::CompoundType;
-use hdf5::types::IntSize;
-use hdf5::types::TypeDescriptor;
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use libhdf5::plist::file_access::LibraryVersion;
+use libhdf5::types::CompoundField;
+use libhdf5::types::CompoundType;
+use libhdf5::types::IntSize;
+use libhdf5::types::TypeDescriptor;
 
 use hdf5_pure::FixedPointType;
 use hdf5_pure::LibVer;
@@ -38,7 +38,7 @@ fn c_library_reads_compound_offset_widths(#[case] size: u32) {
         .with_shape(&[0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("compound").unwrap();
     assert_eq!(dataset.shape(), vec![0]);
     assert_eq!(
@@ -59,15 +59,16 @@ fn pure_reader_reads_c_compound_offset_widths(#[case] size: u32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_compound.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|properties| {
                 properties.libver_bounds(LibraryVersion::V18, LibraryVersion::V18)
             })
             .create(&path)
             .unwrap();
-        let datatype =
-            hdf5::Datatype::from_descriptor(&compound_descriptor(usize::try_from(size).unwrap()))
-                .unwrap();
+        let datatype = libhdf5::Datatype::from_descriptor(&compound_descriptor(
+            usize::try_from(size).unwrap(),
+        ))
+        .unwrap();
         file.new_dataset_builder()
             .empty_as(&datatype)
             .shape([0])

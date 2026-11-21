@@ -1,12 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::dataset::Layout as NativeLayout;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy as NativeSpace;
 use hdf5_pure::EditBacking;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
@@ -14,6 +11,9 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::PhysicalAddress;
+use libhdf5::dataset::Layout as NativeLayout;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeSpace;
 use rstest::rstest;
 use test_util_hdf5::__private::c_object;
 use test_util_hdf5::absence;
@@ -102,7 +102,7 @@ fn final_link_commits_reuse_the_original_contiguous_allocation_after_reopen(
     assert!(file.file_size() <= before + GROWTH_ALLOWANCE);
     assert!(file.file_size() <= original_size + GROWTH_ALLOWANCE);
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let dataset = native.dataset("replacement").unwrap();
     assert_eq!(dataset.layout(), NativeLayout::Contiguous);
     assert_eq!(dataset.storage_size(), extent.end - extent.start);
@@ -143,7 +143,7 @@ fn unused_named_datatype_unlinks_retain_storage_and_apply_other_count_updates(
     #[values(Session::BoundedFsm, Session::MirroredFsm)] session: Session,
 ) {
     let path = test_util::temp::temp_path("native-retained-unlink.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
         })
@@ -203,7 +203,7 @@ fn unused_named_datatype_unlinks_retain_storage_and_apply_other_count_updates(
         let end = usize::try_from(extent.end().get()).unwrap();
         assert_eq!(&after[start..end], &before[start..end]);
     }
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     if containing_group {
         absence::assert_libhdf5_absent(&native.group("links").unwrap_err(), "links");
     } else {
@@ -256,7 +256,7 @@ fn copied_aliases_reclaim_the_complete_independent_payload_after_reopen(
 ) {
     let path = test_util::temp::temp_path("native-copied-alias.h5");
     let values = (0..1_024).collect::<Vec<i32>>();
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
         })
@@ -302,7 +302,7 @@ fn copied_aliases_reclaim_the_complete_independent_payload_after_reopen(
     );
     file.commit().unwrap();
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let copied_path = if grouped { "copy/values" } else { "copy" };
     assert_eq!(native.loc_info_by_name("copy").unwrap().num_links, 1);
     let copied = native.dataset(copied_path).unwrap();
@@ -332,7 +332,7 @@ fn copied_aliases_reclaim_the_complete_independent_payload_after_reopen(
         [41; 1_024]
     );
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     if grouped {
         absence::assert_libhdf5_absent(&native.group("copy").unwrap_err(), "copy");
     } else {
@@ -363,7 +363,7 @@ fn copied_aliases_reclaim_the_complete_independent_payload_after_reopen(
     file.close().unwrap();
 }
 
-fn assert_copy_sources(native: &hdf5::File, grouped: bool, values: &[i32]) {
+fn assert_copy_sources(native: &libhdf5::File, grouped: bool, values: &[i32]) {
     assert_eq!(native.loc_info_by_name("a").unwrap().num_links, 2);
     assert_eq!(native.loc_info_by_name("b").unwrap().num_links, 2);
     let source_path = if grouped { "a/values" } else { "a" };
@@ -392,7 +392,7 @@ fn assert_copy_sources(native: &hdf5::File, grouped: bool, values: &[i32]) {
 }
 
 fn fixture(path: &Path, session: Session, removal: Removal) -> Range<u64> {
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
         })
@@ -474,7 +474,7 @@ fn assert_extent(file: &File, extent: &Range<u64>, reusable: bool) {
 }
 
 fn assert_native(path: &Path, removal: Removal, retained: Option<(&str, usize)>, replaced: bool) {
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     assert_eq!(
         native
             .dataset("survivor")

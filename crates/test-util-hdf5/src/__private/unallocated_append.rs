@@ -5,10 +5,6 @@ use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::MajorErrorCode;
-use hdf5::MinorErrorCode;
-use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5_pure::{File, MessageType};
 use hdf5_pure_core::__private::{BaseAddressExt, FileRegion};
 use hdf5_pure_core::BaseAddress;
@@ -17,6 +13,10 @@ use hdf5_pure_core::FileSpaceStrategy as PureFileSpaceStrategy;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::{AccessMode, ChunkIndexLayout, DataLayout, ObjectHeader};
 use hdf5_pure_format::__private::{ExtensibleArrayHeaderLocator, FormatWidths};
+use libhdf5::Extent;
+use libhdf5::MajorErrorCode;
+use libhdf5::MinorErrorCode;
+use libhdf5::plist::file_create::FileSpaceStrategy;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
 
@@ -217,7 +217,7 @@ pub fn paged_fixture(
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn write_values(path: &Path, values: &[i32]) {
-    let native = hdf5::File::open_rw(path).unwrap();
+    let native = libhdf5::File::open_rw(path).unwrap();
     let target = native.dataset("d").unwrap();
     target.resize([values.len()]).unwrap();
     target.write_raw(values).unwrap();
@@ -227,7 +227,7 @@ pub fn write_values(path: &Path, values: &[i32]) {
 
 /// Returns the major, minor, and patch version of the linked libhdf5.
 pub fn library_version() -> (u8, u8, u8) {
-    hdf5::library_version()
+    libhdf5::library_version()
 }
 
 /// The values or metadata checksum failure observed by [`read_values`].
@@ -312,7 +312,7 @@ pub fn read_values(
             assert_eq!(frame.minor_code(), MinorErrorCode::ReadError, "{error:?}");
             assert_eq!(
                 frame.func(),
-                if cfg!(feature = "__hdf5-1.12") {
+                if cfg!(feature = "__libhdf5-1.12") {
                     "H5C__load_entry"
                 } else {
                     "H5C_load_entry"
@@ -336,7 +336,7 @@ fn fixture_with_settings(
     parameters: ExtensibleArrayCreationParameters,
 ) -> usize {
     let parameters = parameters.encode();
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties.file_space_strategy(FileSpaceStrategy::FreeSpaceManager {

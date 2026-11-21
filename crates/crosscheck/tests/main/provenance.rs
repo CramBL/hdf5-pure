@@ -1,34 +1,34 @@
-#![cfg(all(feature = "hdf5", feature = "provenance"))]
+#![cfg(all(feature = "libhdf5", feature = "provenance"))]
 
 use std::str::FromStr;
 
-use hdf5::ObjectReference;
-use hdf5::ObjectReference1;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::ReferencedObject;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::types::FixedUnicode;
-use hdf5::types::VarLenUnicode;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::AttrValue;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileBuilder;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileSpaceSettings;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::Object;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::UserblockSize;
 use hdf5_pure::VerifyResult;
 use hdf5_pure::VlenStringReadOptions;
-#[cfg(feature = "__hdf5-1.10")]
+use libhdf5::ObjectReference;
+use libhdf5::ObjectReference1;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::ReferencedObject;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::types::FixedUnicode;
+use libhdf5::types::VarLenUnicode;
+#[cfg(feature = "__libhdf5-1.10")]
 use rstest::rstest;
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::chunked_strings(Data::ChunkedStrings)]
 #[case::contiguous_strings(Data::ContiguousStrings)]
@@ -72,7 +72,7 @@ fn c_reads_values_and_final_provenance(
             attrs["_provenance_sha256"]
         );
     };
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let dataset = c.dataset("data").unwrap();
     assert_eq!(
         dataset.loc_info().unwrap().num_attrs,
@@ -140,7 +140,7 @@ fn c_reads_values_and_final_provenance(
     c.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 fn builder(
     data: Data,
     page: bool,
@@ -190,7 +190,7 @@ fn builder(
     builder
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[derive(Clone, Copy, Debug)]
 enum Data {
     ChunkedStrings,
@@ -205,7 +205,7 @@ enum Data {
 fn c_created_strings_and_references_return_values_and_no_hash() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reference.h5");
-    let c = hdf5::File::create(&path).unwrap();
+    let c = libhdf5::File::create(&path).unwrap();
     c.new_dataset::<i32>()
         .shape([1])
         .create("target")
@@ -249,7 +249,7 @@ fn c_created_strings_and_references_return_values_and_no_hash() {
     assert_eq!(strings.verify_provenance().unwrap(), VerifyResult::NoHash);
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::contiguous(false)]
 #[case::chunked(true)]
@@ -309,7 +309,7 @@ fn staged_dense_attributes_finalize_provenance_after_appends(
             attrs["_provenance_sha256"]
         );
     };
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let dataset = c.dataset("data").unwrap();
     assert_eq!(dataset.attr_names().unwrap().len(), 12);
     assert_eq!(dataset.read_raw::<i32>().unwrap(), [1, 2, 3, 4]);

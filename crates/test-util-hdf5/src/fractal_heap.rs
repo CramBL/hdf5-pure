@@ -4,7 +4,7 @@ use core::ffi::{c_int, c_uint, c_void};
 use core::ptr;
 use std::path::Path;
 
-use hdf5::File;
+use libhdf5::File;
 
 /// Writes a Deflate-filtered huge object and its lookup datasets through libhdf5.
 ///
@@ -26,14 +26,14 @@ use hdf5::File;
 ///
 /// let path = temp::temp_path("heap.h5");
 /// fractal_heap::write_filtered_huge(&path, true);
-/// let file = hdf5::File::open(&path)?;
+/// let file = libhdf5::File::open(&path)?;
 /// assert_eq!(file.dataset("heap_id")?.shape(), [29]);
 /// assert_eq!(file.dataset("heap_address")?.shape(), []);
 /// file.close()?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn write_filtered_huge(path: &Path, direct: bool) {
-    assert_eq!(hdf5::library_version(), (2, 2, 0));
+    assert_eq!(libhdf5::library_version(), (2, 2, 0));
     let file = File::with_options()
         .with_fapl(|properties| properties.libver_latest())
         .create(path)

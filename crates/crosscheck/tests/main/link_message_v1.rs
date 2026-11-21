@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
@@ -16,7 +16,7 @@ use test_util_hdf5::{file, user_defined_link};
 #[case::version_2_empty(file::libhdf5_create_v18, b"")]
 #[case::version_2_binary(file::libhdf5_create_v18, b"\x00\xff\x80\x00")]
 fn wire_codec_preserves_libhdf5_user_defined_link_messages(
-    #[case] create: fn(&Path) -> hdf5::File,
+    #[case] create: fn(&Path) -> libhdf5::File,
     #[case] value: &[u8],
 ) {
     let dir = tempfile::tempdir().unwrap();

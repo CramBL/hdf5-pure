@@ -1,25 +1,25 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Crosschecks scale-offset fill parameters, decoded values, and encoded chunks against libhdf5.
 
 #[cfg(target_endian = "little")]
 use std::fmt::Debug;
 
 #[cfg(target_endian = "little")]
-use hdf5::Extent;
-#[cfg(target_endian = "little")]
-use hdf5::File as NativeFile;
-#[cfg(target_endian = "little")]
-use hdf5::H5Type;
-#[cfg(target_endian = "little")]
-use hdf5::dataset::FillTime as NativeFillTime;
-use hdf5::filters::Filter as NativeFilter;
-use hdf5::filters::ScaleOffset as NativeScaleOffset;
-use hdf5::{MajorErrorCode, MinorErrorCode};
-#[cfg(target_endian = "little")]
 use hdf5_pure::FillTime;
 use hdf5_pure::FilterId;
 use hdf5_pure::FilterParameters;
 use hdf5_pure::{H5Element, ScaleOffset};
+#[cfg(target_endian = "little")]
+use libhdf5::Extent;
+#[cfg(target_endian = "little")]
+use libhdf5::File as NativeFile;
+#[cfg(target_endian = "little")]
+use libhdf5::H5Type;
+#[cfg(target_endian = "little")]
+use libhdf5::dataset::FillTime as NativeFillTime;
+use libhdf5::filters::Filter as NativeFilter;
+use libhdf5::filters::ScaleOffset as NativeScaleOffset;
+use libhdf5::{MajorErrorCode, MinorErrorCode};
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 #[cfg(target_endian = "little")]
@@ -384,7 +384,7 @@ fn raw_chunks(path: &std::path::Path) -> Vec<Vec<u8>> {
 /// library. `fill` chooses only which *value* the filter records — not whether
 /// it records one, which the C library always does; see
 /// [`the_c_library_records_a_defined_fill_value_even_without_one`].
-fn c_create_typed<T: hdf5::H5Type + Copy>(
+fn c_create_typed<T: libhdf5::H5Type + Copy>(
     path: &std::path::Path,
     data: &[T],
     chunk: usize,
@@ -427,7 +427,7 @@ fn c_create_typed<T: hdf5::H5Type + Copy>(
 /// case twenty times.
 fn assert_one_byte_identical_chunk<T, A>(mode: ScaleOffset, values: &[T], append: A)
 where
-    T: hdf5::H5Type + Copy + PartialEq + std::fmt::Debug,
+    T: libhdf5::H5Type + Copy + PartialEq + std::fmt::Debug,
     A: Fn(&std::path::Path, &[T]),
 {
     let dir = tempfile::tempdir().unwrap();
@@ -463,7 +463,7 @@ fn assert_byte_identical_encoding<T, A>(
     values_for: impl Fn(u64) -> Vec<T>,
     append: A,
 ) where
-    T: hdf5::H5Type + Copy + PartialEq + std::fmt::Debug,
+    T: libhdf5::H5Type + Copy + PartialEq + std::fmt::Debug,
     A: Fn(&std::path::Path, &[T]),
 {
     for span in 1..=20u64 {
@@ -728,8 +728,8 @@ fn the_float_full_precision_fallback_header_matches_the_c_library() {
 ///
 /// Without this, the whole fill-undefined half of the encoder has no
 /// byte-level oracle at all.
-fn c_reencode_in_place<T: hdf5::H5Type + Copy>(path: &std::path::Path, data: &[T]) {
-    let f = hdf5::File::open_rw(path).unwrap();
+fn c_reencode_in_place<T: libhdf5::H5Type + Copy>(path: &std::path::Path, data: &[T]) {
+    let f = libhdf5::File::open_rw(path).unwrap();
     f.dataset("col").unwrap().write_raw(data).unwrap();
     f.close().unwrap();
 }
@@ -970,7 +970,7 @@ fn c_written_full_width_and_raw_scale_offset_chunks_decode(
         None,
     );
     {
-        let native = hdf5::File::open(&path).unwrap();
+        let native = libhdf5::File::open(&path).unwrap();
         let values = native.dataset("col").unwrap();
         assert_eq!(
             values.filters(),
@@ -990,9 +990,9 @@ fn c_written_full_width_and_raw_scale_offset_chunks_decode(
 
 // `H5Z__filter_scaleoffset` rejects full-precision raw payloads
 // (`H5Zscaleoffset.c`, HDF5 1.14.6).
-fn assert_native_scale_offset_read(values: &hdf5::Dataset, precision: u32, expected: &[u8]) {
+fn assert_native_scale_offset_read(values: &libhdf5::Dataset, precision: u32, expected: &[u8]) {
     let result = values.read_raw::<u8>();
-    if precision == 0 && hdf5::library_version() == (1, 14, 6) {
+    if precision == 0 && libhdf5::library_version() == (1, 14, 6) {
         let error = result.unwrap_err();
         let stack = error.stack().unwrap();
         let frame = stack.last().unwrap();

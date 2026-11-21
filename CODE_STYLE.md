@@ -249,7 +249,7 @@ An error from the C library follows the same rule: the test asserts the major an
 
 Use `test_util_hdf5::absence::assert_libhdf5_absent` to distinguish a missing object from corrupt metadata.
 
-`hdf5::Error::Internal` is a failure in the binding. A test does not accept it in place of an error from the library.
+`libhdf5::Error::Internal` is a failure in the binding. A test does not accept it in place of an error from the library.
 
 `assert!(r.is_ok())` is the same defect. A test unwraps the value and asserts on it, and asserts the whole value where that is feasible: `assert_eq!(names, vec!["a", "b"])` over `assert!(names.contains(&"a"))`.
 

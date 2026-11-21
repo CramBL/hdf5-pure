@@ -1,47 +1,47 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::path::Path;
 
-use hdf5::GroupStorageType;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::IndexType;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::IterationOrder;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::LinkType;
-use hdf5::plist::group_create::LinkCreationOrder;
-use hdf5::plist::group_create::LinkPhaseChange as NativeLinkPhaseChange;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileCreateProperties;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileSpaceSettings;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FileSpaceStrategy;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::FormatError;
 use hdf5_pure::GroupBuilder;
 use hdf5_pure::LibVer;
 use hdf5_pure::LinkPhaseChange;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::RepackOptions;
 use hdf5_pure::UserblockSize;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure_format::__private::AccessMode;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure_format::__private::GroupEstimates;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure_format::__private::GroupInfo;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure_format::__private::ObjectHeader;
+use libhdf5::GroupStorageType;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::IndexType;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::IterationOrder;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::LinkType;
+use libhdf5::plist::group_create::LinkCreationOrder;
+use libhdf5::plist::group_create::LinkPhaseChange as NativeLinkPhaseChange;
 use rstest::rstest;
 use test_util_hdf5::dense_links;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use test_util_hdf5::reader::ReadBackend;
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::default(8, 6, 9)]
 #[case::compact_nondefault(12, 8, 9)]
@@ -78,7 +78,7 @@ fn repack_retains_native_link_policy(
     );
     hdf5_pure::repack_to_path(&source, &destination, &options).unwrap();
     source.close().unwrap();
-    let native = hdf5::File::open(&destination).unwrap();
+    let native = libhdf5::File::open(&destination).unwrap();
     let group = native.group(target.path()).unwrap();
     assert_eq!(
         group.gcpl().unwrap().get_link_phase_change().unwrap(),
@@ -131,7 +131,7 @@ fn repack_retains_native_link_policy(
     directory.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::estimates_only((8, 6), (7, 20), 9)]
 #[case::default_estimates((12, 8), (4, 8), 12)]
@@ -162,7 +162,7 @@ fn repack_retains_native_group_entry_estimates(
     assert_eq!(original.estimates().unwrap_or(DEFAULT_ESTIMATES), expected);
     hdf5_pure::repack(&source, &destination, &RepackOptions::new()).unwrap();
     assert_eq!(read_group_info(&destination, "group"), original);
-    let native = hdf5::File::open(&destination).unwrap();
+    let native = libhdf5::File::open(&destination).unwrap();
     assert_eq!(
         native.group("group").unwrap().info().unwrap().nlinks,
         u64::try_from(count).unwrap()
@@ -171,7 +171,7 @@ fn repack_retains_native_group_entry_estimates(
     directory.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::default_empty(LinkPhaseChange::default(), 8, 6, 0)]
 #[case::default_equal(LinkPhaseChange::default(), 8, 6, 8)]
@@ -213,7 +213,7 @@ fn created_link_storage_matches_the_configured_native_policy(
         count,
         Some((max_compact, min_dense)),
     );
-    let reference = hdf5::File::open(&reference_path).unwrap();
+    let reference = libhdf5::File::open(&reference_path).unwrap();
     let reference_group = reference.group("group").unwrap();
     let expected_storage = reference_group.info().unwrap().storage_type;
     let expected_policy = reference_group
@@ -278,7 +278,7 @@ fn configured_policy_is_readable_under_v18_bounds(
     directory.close().unwrap();
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 #[case::thresholds(THRESHOLDS, GroupStorageType::Compact)]
 #[case::one_way(ONE_WAY, GroupStorageType::Dense)]
@@ -326,7 +326,7 @@ fn created_policy_survives_edit_boundaries_and_symbolic_links(
         }
     }
     std::fs::write(&path, builder.finish().unwrap()).unwrap();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let group = native.group(target.path()).unwrap();
     group.link_soft(&link_name(0), "soft").unwrap();
     group.link_external("外部.h5", "/目标", "external").unwrap();
@@ -421,7 +421,7 @@ fn check_created(
     expected_policy: NativeLinkPhaseChange,
     expected_storage: GroupStorageType,
 ) {
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let group = native.group(target.path()).unwrap();
     assert_eq!(
         group.gcpl().unwrap().get_link_phase_change().unwrap(),
@@ -539,7 +539,7 @@ fn link_name(index: usize) -> String {
     format!("entry_{index:02}_λ")
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 fn read_group_info(path: &Path, group_path: &str) -> GroupInfo {
     let bytes = std::fs::read(path).unwrap();
     let file = File::open(path).unwrap();
@@ -582,7 +582,7 @@ impl Target {
     }
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 fn check_edited(
     path: &Path,
     target: Target,
@@ -590,7 +590,7 @@ fn check_edited(
     hard_count: usize,
     expected_storage: GroupStorageType,
 ) {
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let group = native.group(target.path()).unwrap();
     assert_eq!(group.info().unwrap().storage_type, expected_storage);
     let properties = group.gcpl().unwrap().get_link_phase_change().unwrap();
@@ -687,7 +687,7 @@ const HIGH_BYTES: LinkPhaseChange = LinkPhaseChange::builder()
 
 // "The Group Info Message" in the format specification, version 4.0, defines these
 // estimates when the Group Info message omits its entry estimate fields.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 const DEFAULT_ESTIMATES: GroupEstimates = GroupEstimates {
     entries: 4,
     name_length: 8,

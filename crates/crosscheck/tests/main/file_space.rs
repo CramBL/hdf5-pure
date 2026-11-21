@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Cross-validation of the file-space strategy (`H5Pset_file_space_strategy`)
 //! against the reference HDF5 C library: a strategy hdf5-pure writes is read back
 //! by the C library, and a strategy the C library writes is read back by
@@ -8,12 +8,6 @@
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::dataset::Layout as CLayout;
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
-use hdf5::types::VarLenUnicode;
-use hdf5::types::{FixedUnicode, TypeDescriptor};
 use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
@@ -60,6 +54,12 @@ use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
+use libhdf5::dataset::Layout as CLayout;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
+use libhdf5::types::VarLenUnicode;
+use libhdf5::types::{FixedUnicode, TypeDescriptor};
 use rstest::rstest;
 
 use test_util::allocation_oracle::Coverage;
@@ -159,7 +159,7 @@ fn c_written_fixed_width_root_updates_reach_stable_physical_length(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("root-reclamation.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| fcpl.file_space_strategy(fsm_aggr(true, threshold)))
             .create(&path)
@@ -264,7 +264,7 @@ fn c_written_fixed_width_root_updates_reach_stable_physical_length(
         FreeSpaceOracleCheckpoint::observe(&path, "root-reclamation", "updated")
             .unwrap()
             .assert_equal();
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             file.attr("generation")
                 .unwrap()
@@ -339,7 +339,7 @@ fn created_page_tail_survives_reference_library_mutation(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creation_tail.h5");
     if c_created {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -421,7 +421,7 @@ fn created_page_tail_survives_reference_library_mutation(
     if !c_created {
         assert!(file_space::serialized_manager_padding(&path) < page);
     }
-    let mut options = hdf5::File::with_options();
+    let mut options = libhdf5::File::with_options();
     if buffered {
         options.with_fapl(|properties| {
             properties.page_buffer_size(usize::try_from(4 * page).unwrap(), 0, 0)
@@ -555,7 +555,7 @@ fn large_page_manager_lists_survive_reference_library_mutation(#[case] repacked:
     let file = File::open_rw(&path).unwrap();
     storage::assert_unavailable(&file, &extents);
     file.close().unwrap();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(native.free_space(), free);
     for index in 0..80 {
         assert_eq!(
@@ -610,7 +610,7 @@ fn paged_manager_capacity_survives_reference_library_mutation(
     let path = dir.path().join("manager_capacity.h5");
     let raw = vec![3u8; usize::try_from(2 * page).unwrap()];
     if c_created {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -696,7 +696,7 @@ fn paged_manager_capacity_survives_reference_library_mutation(
     assert_eq!(file_space::serialized_manager_padding(&path), 0);
     assert!(extension_padding_bytes(&path) > 0);
     let total = reusable.free_bytes();
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(file.free_space(), total);
     assert_eq!(
         file.dataset("keep").unwrap().read_raw::<u8>().unwrap(),
@@ -919,7 +919,7 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
         .free_sections()
         .free_bytes();
 
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(file.free_space(), persisted_bytes);
     assert_c_header_survivors(&file, action);
     file.new_dataset_builder()
@@ -948,7 +948,7 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
 }
 
 fn write_c_large_header(path: &Path, page: u64, action: HeaderReclamation) {
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
         .with_fcpl(|fcpl| {
             fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -966,7 +966,7 @@ fn write_c_large_header(path: &Path, page: u64, action: HeaderReclamation) {
             | HeaderReclamation::DeleteDenseGroup
             | HeaderReclamation::RebuildGroup
     );
-    let owner: hdf5::Location = if group {
+    let owner: libhdf5::Location = if group {
         file.create_group("group").unwrap().as_location().unwrap()
     } else {
         let dataset = file
@@ -1008,7 +1008,7 @@ fn write_c_large_header(path: &Path, page: u64, action: HeaderReclamation) {
     if matches!(action, HeaderReclamation::DeleteDenseGroup) {
         assert_eq!(
             file.group("group").unwrap().info().unwrap().storage_type,
-            hdf5::GroupStorageType::Dense
+            libhdf5::GroupStorageType::Dense
         );
     }
     if matches!(action, HeaderReclamation::UnlinkDataset) {
@@ -1133,7 +1133,7 @@ fn assert_rust_header_survivors(file: &File, action: HeaderReclamation, keep: i3
     }
 }
 
-fn assert_c_header_survivors(file: &hdf5::File, action: HeaderReclamation) {
+fn assert_c_header_survivors(file: &libhdf5::File, action: HeaderReclamation) {
     assert_eq!(
         file.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
         [7; 64]
@@ -1304,7 +1304,7 @@ fn add_pure_page_dataset(path: &Path) {
 
 /// Replaces `added` with `from_c` and creates hard and soft links through libhdf5.
 fn edit_page_with_libhdf5(path: &Path) {
-    let c_file = hdf5::File::open_rw(path).unwrap();
+    let c_file = libhdf5::File::open_rw(path).unwrap();
     assert_eq!(
         c_file.dataset("added").unwrap().read_raw::<u8>().unwrap(),
         [9; 64]
@@ -1412,7 +1412,7 @@ fn assert_pure_page_edit(
 
 /// Checks datasets, links, attributes, and file-space settings through libhdf5.
 fn assert_c_page_edit(path: &Path, page_size: u64) {
-    let c_file = hdf5::File::open(path).unwrap();
+    let c_file = libhdf5::File::open(path).unwrap();
     assert!(!c_file.link_exists("remove"));
     assert!(!c_file.link_exists("added"));
     assert_eq!(
@@ -1495,7 +1495,7 @@ fn recorded_settings_are_equivalent_for_rust_and_libhdf5_files(
             FileSpaceStrategy::Aggr => CStrategy::PageAggregation,
             FileSpaceStrategy::None => CStrategy::None,
         };
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|properties| properties.libver_v110())
             .with_fcpl(|properties| {
                 properties
@@ -1524,7 +1524,7 @@ fn recorded_settings_are_equivalent_for_rust_and_libhdf5_files(
         builder.with_userblock(UserblockSize::try_from(8192).unwrap());
         builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
         builder.write(&path).unwrap();
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         let properties = file.create_plist().unwrap();
         let c_strategy = match strategy {
             FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => CStrategy::FreeSpaceManager {
@@ -1602,7 +1602,7 @@ fn c_library_reads_our_strategy() {
 
         // libhdf5 opens our file, reads the data, and recovers the strategy
         // from the superblock-extension File Space Info message.
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
             vec![10, 20, 30]
@@ -1634,7 +1634,7 @@ fn libhdf5_reads_the_requested_page_size(
     b.with_file_space_settings(FileSpaceSettings::new(strategy).with_page_size(page_size));
     b.write(&path).unwrap();
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         (
             f.dataset("d").unwrap().read_raw::<i32>().unwrap(),
@@ -1656,7 +1656,7 @@ fn libhdf5_reads_the_requested_page_size(
 fn reads_the_page_size_libhdf5_writes(#[case] paged: bool, #[case] page_size: FileSpacePageSize) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bound.h5");
-    hdf5::FileBuilder::new()
+    libhdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
         .with_fcpl(|fcpl| {
             fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -1689,7 +1689,7 @@ fn we_read_c_library_persisted_free_space() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_fsm.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -1783,7 +1783,7 @@ fn c_library_reads_our_persisted_free_space() {
 
     // libhdf5 opens the same file: strategy and persist flag round-trip,
     // the survivors read byte-exact, and `H5Fget_freespace` parses our managers.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
     assert_eq!(
         strategy,
@@ -1820,7 +1820,7 @@ fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() 
     let raw_values = (0..40 * 40).collect::<Vec<i32>>();
     let filtered_values = vec![7i32; 40 * 40];
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -1832,14 +1832,20 @@ fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() 
             .create(&path)
             .unwrap();
         file.new_dataset::<i32>()
-            .shape((hdf5::Extent::resizable(40), hdf5::Extent::resizable(40)))
+            .shape((
+                libhdf5::Extent::resizable(40),
+                libhdf5::Extent::resizable(40),
+            ))
             .chunk((4, 4))
             .create("raw")
             .unwrap()
             .write_raw(&raw_values)
             .unwrap();
         file.new_dataset::<i32>()
-            .shape((hdf5::Extent::resizable(40), hdf5::Extent::resizable(40)))
+            .shape((
+                libhdf5::Extent::resizable(40),
+                libhdf5::Extent::resizable(40),
+            ))
             .chunk((4, 4))
             .deflate(6)
             .create("filtered")
@@ -1904,7 +1910,7 @@ fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() 
     );
     drop(ours);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.dataset("raw").unwrap_err(), "raw");
     absence::assert_libhdf5_absent(&c.dataset("filtered").unwrap_err(), "filtered");
     assert_eq!(
@@ -1922,9 +1928,12 @@ fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() 
     // crosscheck verifies that both libraries accept the resulting file.
     let reused = vec![11i32; 40 * 40];
     {
-        let c = hdf5::File::open_rw(&path).unwrap();
+        let c = libhdf5::File::open_rw(&path).unwrap();
         c.new_dataset::<i32>()
-            .shape((hdf5::Extent::resizable(40), hdf5::Extent::resizable(40)))
+            .shape((
+                libhdf5::Extent::resizable(40),
+                libhdf5::Extent::resizable(40),
+            ))
             .chunk((4, 4))
             .create("reused")
             .unwrap()
@@ -2024,7 +2033,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
     // libhdf5 reads the same file: survivors byte-exact, and its own
     // free-space total — which it can only get by parsing the managers we placed
     // mid-file — agrees with ours to the byte.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.dataset("a").unwrap().read_raw::<i32>().unwrap(),
         vec![1; 100]
@@ -2047,7 +2056,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
     // Reading proves the C library parses what we wrote; only this proves it acts
     // on it without losing the file.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<i32>()
             .shape((30,))
             .create("added")
@@ -2056,7 +2065,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
             .unwrap();
         f.close().unwrap();
     }
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.dataset("c").unwrap().read_raw::<i32>().unwrap(),
         vec![3; 100]
@@ -2134,7 +2143,7 @@ fn libhdf5_reads_and_edits_a_reused_manager_with_spare_allocation() {
         .free_bytes();
     drop(reader);
 
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(native.free_space(), persisted_free);
     assert_eq!(
         native.dataset("seed").unwrap().read_raw::<i32>().unwrap(),
@@ -2157,7 +2166,7 @@ fn libhdf5_reads_and_edits_a_reused_manager_with_spare_allocation() {
     native.close().unwrap();
 
     let added = (0..30).collect::<Vec<i32>>();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     native
         .new_dataset::<i32>()
         .shape((30,))
@@ -2168,7 +2177,7 @@ fn libhdf5_reads_and_edits_a_reused_manager_with_spare_allocation() {
     native.close().unwrap();
 
     let reader = File::open(&path).unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(reader.dataset("seed").unwrap().read_i32().unwrap(), seed);
     assert_eq!(
         native.dataset("seed").unwrap().read_raw::<i32>().unwrap(),
@@ -2216,7 +2225,7 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_widths.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.sizes(SizeofInfo {
@@ -2397,7 +2406,7 @@ fn strict_persisted_open_recovers_libhdf5_managers(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("strict.h5");
     let tolerant_path = directory.path().join("tolerant.h5");
-    let native = hdf5::FileBuilder::new()
+    let native = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties
@@ -2451,7 +2460,7 @@ fn strict_persisted_open_recovers_libhdf5_managers(
     strict.commit().unwrap();
     strict.close().unwrap();
     tolerant.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         [9; 300]
@@ -2470,7 +2479,7 @@ fn supported_free_sections_match_libhdf5(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("supported-free-sections.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|properties| properties.libver_v110())
             .with_fcpl(|properties| {
                 properties.userblock(userblock_size).file_space_strategy(
@@ -2498,7 +2507,7 @@ fn supported_free_sections_match_libhdf5(
         file.unlink("b").unwrap();
         file.close().unwrap();
     }
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let mut expected = file_space::libhdf5_free_sections(&native).unwrap();
     expected.sort_unstable();
     let free_bytes = native.free_space();
@@ -2538,7 +2547,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_sections.h5");
     let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size, 0);
-    let free_c = hdf5::File::open(&path).unwrap().free_space();
+    let free_c = libhdf5::File::open(&path).unwrap().free_space();
 
     let free = assert_supported_free_sections(&path);
     let reader = File::open(&path).unwrap();
@@ -2595,13 +2604,13 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
 }
 
 // libhdf5 writes one 197-byte section list with 9 unused bytes before its checksum.
-#[cfg(feature = "__hdf5-1.12")]
+#[cfg(feature = "__libhdf5-1.12")]
 #[test]
 fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_oversized_section_list.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -2630,7 +2639,7 @@ fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
         }
         file.close().unwrap();
     }
-    let free_c = hdf5::File::open(&path).unwrap().free_space();
+    let free_c = libhdf5::File::open(&path).unwrap().free_space();
 
     let file = File::open(&path).unwrap();
     let superblock = file.superblock();
@@ -2748,14 +2757,14 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
         "the deleted dataset's storage at {freed} is a free section, {sections:?}"
     );
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         file.free_space(),
         sections.iter().map(|section| section.size).sum::<u64>()
     );
     drop(file);
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         file.new_dataset::<i32>()
             .shape((30,))
             .create("added")
@@ -2765,7 +2774,7 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
         file.unlink("big").unwrap();
         file.close().unwrap();
     }
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     for (name, value) in [("a", 1), ("c", 3)] {
         assert_eq!(
             file.dataset(name).unwrap().read_raw::<i32>().unwrap(),
@@ -2808,7 +2817,7 @@ fn libhdf5_reads_a_section_list_whose_allocation_the_test_enlarges(#[case] userb
         file_space_oracle::assert_manager_metadata_bytes(&path),
         free.manager_metadata_bytes() + 16,
     );
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(file.free_space(), free.free_sections().free_bytes());
     assert_eq!(
         file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
@@ -2845,7 +2854,7 @@ fn an_editor_reclaims_the_complete_section_list_allocation_the_test_enlarges() {
             + range::covered_len(&[(file_len, u64::MAX - file_len)], &allocation),
         allocation.end - allocation.start
     );
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
         vec![1; 400]
@@ -3012,7 +3021,7 @@ fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_sectio
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_header_into_live_data.h5");
     write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
-    let live = hdf5::File::open(&path)
+    let live = libhdf5::File::open(&path)
         .unwrap()
         .dataset("a")
         .unwrap()
@@ -3066,7 +3075,7 @@ fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_sectio
         );
     }
     session.close().unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     for (name, value) in [("a", 1), ("c", 3)] {
         assert_eq!(
             file.dataset(name).unwrap().read_raw::<i32>().unwrap(),
@@ -3210,7 +3219,7 @@ fn write_c_persisted_with_a_hole(
     sizeof_size: Sizeof,
     userblock: u64,
 ) -> u64 {
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|fapl| match driver {
             Driver::Core => fapl.libver_v110().core_filebacked(true),
             Driver::Sec2 => fapl.libver_v110(),
@@ -3256,7 +3265,7 @@ fn we_read_c_library_strategy() {
     // library only writes a File Space Info message for non-default settings, so
     // these all differ from the default (FSM_AGGR, non-persistent).
     let write_c = |path: &std::path::Path, strategy: CStrategy| {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(move |fcpl| fcpl.file_space_strategy(strategy))
             .create(path)
@@ -3359,7 +3368,7 @@ fn a_version_0_strategy_reads_as_libhdf5_maps_it(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_version_0.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -3384,7 +3393,7 @@ fn a_version_0_strategy_reads_as_libhdf5_maps_it(
         &file_space_info::version_0(Widths::EIGHT, version_0_strategy, 64, &[]),
     );
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         c_strategy
@@ -3417,7 +3426,7 @@ fn a_version_0_message_s_persisted_free_space_reads_as_libhdf5_reads_it(
 // libhdf5 1.10.11 and 1.12.3 bound each address of a version 0 message by `H5_SIZEOF_HADDR_T`, so
 // they reject a message whose addresses are narrower (`H5O_fsinfo_decode` in `H5Ofsinfo.c`, HDF5
 // 1.10.11, and `H5O__fsinfo_decode`, HDF5 1.12.3).
-#[cfg(feature = "__hdf5-1.14")]
+#[cfg(feature = "__libhdf5-1.14")]
 #[rstest]
 fn a_version_0_message_s_persisted_free_space_reads_as_libhdf5_reads_it_at_a_narrow_address_width(
     #[values(Sizeof::Bytes2, Sizeof::Bytes4)] sizeof_addr: Sizeof,
@@ -3443,7 +3452,7 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
         undefined,
     );
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -3520,7 +3529,7 @@ fn libhdf5_reads_a_version_0_file_after_an_edit_reuses_its_persisted_free_space(
         .free_sections()
         .free_bytes();
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -3556,7 +3565,7 @@ fn libhdf5_reads_a_non_persisting_version_0_file_after_an_edit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_non_persisted_version_0_edited.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -3591,7 +3600,7 @@ fn libhdf5_reads_a_non_persisting_version_0_file_after_an_edit() {
         s.commit().unwrap();
     }
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -3666,7 +3675,7 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
         .unwrap()
         .unwrap();
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let d = f.dataset("d").unwrap();
     assert_eq!(
         file_space::libhdf5_contiguous_extent(&d),
@@ -3734,7 +3743,7 @@ fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
         .unwrap();
     assert!(ours.free_sections().section_count() > 0);
 
-    let f = hdf5::File::open_rw(&path).unwrap();
+    let f = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -3785,7 +3794,7 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_paged_persisted_edited.h5");
     write_c_paged(&path, userblock, 1, C_PAGED_DATASETS);
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     let freed = file.dataset("b").unwrap().offset().unwrap();
     file.unlink("b").unwrap();
     file.close().unwrap();
@@ -3803,7 +3812,7 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
             section.address().get() == last_page_of_big.0
                 && section.length().get() == last_page_of_big.1
         }),
-        hdf5::library_version() < (1, 12, 0),
+        libhdf5::library_version() < (1, 12, 0),
         "{persisted:?}"
     );
 
@@ -3838,7 +3847,7 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
         .unwrap()
         .unwrap();
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let d = f.dataset("d").unwrap();
     assert_eq!(
         file_space::libhdf5_contiguous_extent(&d),
@@ -3864,7 +3873,7 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
     drop(d);
     f.close().unwrap();
 
-    let f = hdf5::File::open_rw(&path).unwrap();
+    let f = libhdf5::File::open_rw(&path).unwrap();
     f.new_dataset::<i32>()
         .shape((50,))
         .create("e")
@@ -3927,7 +3936,7 @@ fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userbl
         .unwrap();
     assert!(ours.free_sections().section_count() > 0);
 
-    let f = hdf5::File::open_rw(&path).unwrap();
+    let f = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         page(1)
@@ -4070,7 +4079,7 @@ fn c_library_reads_our_fresh_persisting_file(#[case] threshold: u64, #[case] has
         .free_bytes();
     assert_eq!(total_ours != 0, has_sections);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4117,7 +4126,7 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     drop(ours);
 
     // libhdf5 recovers the paged strategy and reads every dataset.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
     assert_eq!(
         strategy,
@@ -4151,7 +4160,7 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     // libhdf5 reopens the paged file read-write and adds a dataset, then
     // reads everything back: the paged layout survives a C round-trip.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<i32>()
             .shape((30,))
             .create("added")
@@ -4160,7 +4169,7 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
             .unwrap();
         f.close().unwrap();
     }
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("a").unwrap().read_raw::<i32>().unwrap(), small_a);
     assert_eq!(f.dataset("big").unwrap().read_raw::<i32>().unwrap(), big);
     assert_eq!(
@@ -4191,7 +4200,7 @@ fn c_library_reads_our_paged_chunked_file() {
         .free_bytes();
     drop(ours);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4211,7 +4220,7 @@ fn c_library_reads_our_paged_chunked_file() {
 
     // C reopens read-write and appends a dataset without corrupting the file.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<f64>()
             .shape((4,))
             .create("extra")
@@ -4220,7 +4229,7 @@ fn c_library_reads_our_paged_chunked_file() {
             .unwrap();
         f.close().unwrap();
     }
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("big").unwrap().read_raw::<f64>().unwrap(), big);
     assert_eq!(
         f.dataset("extra").unwrap().read_raw::<f64>().unwrap(),
@@ -4261,7 +4270,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     drop(ours);
 
     // libhdf5 recovers the paged strategy and reads every row.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4284,14 +4293,14 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     // libhdf5 reopens the mutated paged file read-write and appends more
     // rows, then reads everything back: the paged layout survives a C round-trip.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         let ds = f.dataset("d").unwrap();
         ds.resize((5100,)).unwrap();
         ds.write_slice(&(5000..5100).collect::<Vec<i32>>(), 5000..5100)
             .unwrap();
         f.close().unwrap();
     }
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let after = f.dataset("d").unwrap().read_raw::<i32>().unwrap();
     assert_eq!(after.len(), 5100);
     assert_eq!(after[..5000], want[..]);
@@ -4345,7 +4354,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
     drop(ours);
 
     // libhdf5 recovers the paged strategy and reads both datasets.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4372,14 +4381,14 @@ fn c_library_reads_our_staged_mutated_paged_file() {
     // libhdf5 reopens the file read-write and appends: the paged layout the
     // staged commit produced survives a C round-trip.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         let ds = f.dataset("d").unwrap();
         ds.resize((2100,)).unwrap();
         ds.write_slice(&(2000..2100).collect::<Vec<i32>>(), 2000..2100)
             .unwrap();
         f.close().unwrap();
     }
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let after = f.dataset("d").unwrap().read_raw::<i32>().unwrap();
     assert_eq!(after.len(), 2100);
     assert_eq!(after[..2000], want[..]);
@@ -4449,7 +4458,7 @@ fn c_library_reads_our_paged_file_after_free_space_reuse() {
         .free_bytes();
     drop(ours);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4477,7 +4486,7 @@ fn c_library_reads_our_paged_file_after_free_space_reuse() {
 
     // And the file is still writable by the C library afterwards.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<i32>()
             .shape([4])
             .create("c_added")
@@ -4555,7 +4564,7 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
         .free_bytes();
     drop(ours);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4595,7 +4604,7 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
 
     // And the file is still writable by the C library afterwards.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<i32>()
             .shape([4])
             .create("c_added")
@@ -4623,7 +4632,7 @@ fn pure_bounded_mutates_c_created_paged_file() {
     let path = dir.path().join("c_paged_pure_mutated.h5");
 
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| {
                 fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
@@ -4638,7 +4647,7 @@ fn pure_bounded_mutates_c_created_paged_file() {
         let ds = file
             .new_dataset::<i32>()
             .chunk((64,))
-            .shape((hdf5::Extent::resizable(64),))
+            .shape((libhdf5::Extent::resizable(64),))
             .create("d")
             .unwrap();
         ds.write(&(0..64).collect::<Vec<i32>>()).unwrap();
@@ -4666,7 +4675,7 @@ fn pure_bounded_mutates_c_created_paged_file() {
     drop(ours);
 
     // libhdf5 reads it back and re-parses the managers.
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4757,7 +4766,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
     assert!(total_ours > 0, "the churn left free space to account for");
     drop(ours);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -4784,7 +4793,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
 
     // And the C library reopens the churned file read-write and writes into it.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<f64>()
             .shape((4,))
             .create("extra")
@@ -4793,7 +4802,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
             .unwrap();
         f.close().unwrap();
     }
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.dataset("extra").unwrap().read_raw::<f64>().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
@@ -4892,7 +4901,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
         let total_ours = free_ours.free_sections().free_bytes();
         drop(ours);
 
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             f.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
             vec![1, 2, 3, 4],
@@ -4907,7 +4916,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
 
         // And the C library writes into the shortened file, which hdf5-pure reads.
         {
-            let f = hdf5::File::open_rw(&path).unwrap();
+            let f = libhdf5::File::open_rw(&path).unwrap();
             f.new_dataset::<f64>()
                 .shape((4,))
                 .create("extra")
@@ -5044,7 +5053,7 @@ fn c_library_reads_our_file_after_an_append_reused_free_space(#[case] paged: boo
         .free_bytes();
     drop(ours);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
@@ -5076,7 +5085,7 @@ fn c_library_reads_our_file_after_an_append_reused_free_space(#[case] paged: boo
 
     // libhdf5 writes another dataset before hdf5-pure reads every survivor.
     {
-        let f = hdf5::File::open_rw(&path).unwrap();
+        let f = libhdf5::File::open_rw(&path).unwrap();
         f.new_dataset::<f64>()
             .shape((4096,))
             .create("c_added")
@@ -5219,7 +5228,7 @@ fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
         range::overlaps(&deleted, &file_space::contiguous_extent(&file, "d"))
     };
     let theirs_reuse = {
-        let file = hdf5::File::open_rw(&theirs).unwrap();
+        let file = libhdf5::File::open_rw(&theirs).unwrap();
         let deleted = file_space::libhdf5_contiguous_extent(&file.dataset("b").unwrap());
         file.unlink("b").unwrap();
         let replacement = file.new_dataset::<i32>().shape((300,)).create("d").unwrap();
@@ -5253,7 +5262,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| fcpl.file_space_strategy(fsm_aggr(persist, THRESHOLD)))
             .create(&ours)
@@ -5286,7 +5295,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
         (extent, tracked)
     };
     let theirs_session = {
-        let file = hdf5::File::open_rw(&theirs).unwrap();
+        let file = libhdf5::File::open_rw(&theirs).unwrap();
         let (last, earlier) = deletions.split_last().unwrap();
         for &path in earlier {
             file.unlink(path).unwrap();
@@ -5297,7 +5306,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
     };
     let (ours_reopened, ours_total) = {
         let file = File::open(&ours).unwrap();
-        let reference = hdf5::File::open(&ours).unwrap();
+        let reference = libhdf5::File::open(&ours).unwrap();
         for (path, value, len) in datasets {
             if deletions.contains(&path) {
                 continue;
@@ -5319,7 +5328,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
             None => (0, 0),
         }
     };
-    let c_total = hdf5::File::open(&ours).unwrap().free_space();
+    let c_total = libhdf5::File::open(&ours).unwrap().free_space();
 
     assert_eq!(
         (ours_session, theirs_session, ours_reopened, c_total),
@@ -5376,7 +5385,7 @@ fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for
         )
     };
     let len = std::fs::metadata(&path).unwrap().len();
-    let c_file = hdf5::File::open(&path).unwrap();
+    let c_file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         (
             eoa_pre_fsm,
@@ -5501,7 +5510,7 @@ fn a_dropped_extent_of_whole_pages_that_ends_the_file_is_given_back_for_libhdf5(
         file.commit().unwrap();
     }
 
-    let c_file = hdf5::File::open(&path).unwrap();
+    let c_file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         (
             File::open(&path).unwrap().superblock().eof_address,
@@ -5540,7 +5549,7 @@ fn a_dropped_extent_of_whole_pages_below_an_appended_tail_stays_tracked_for_libh
         file.commit().unwrap();
     }
 
-    let c_file = hdf5::File::open(&path).unwrap();
+    let c_file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         (
             covered_free_bytes(
@@ -5602,7 +5611,7 @@ fn a_paged_returned_extent_beside_free_space_across_a_page_boundary_is_dropped_a
 fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
     #[case] datasets: &[(&str, usize, CLayout)],
     #[case] ours_edit: fn(&File),
-    #[case] theirs_edit: fn(&hdf5::File),
+    #[case] theirs_edit: fn(&libhdf5::File),
     #[case] tail_after: &str,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -5633,7 +5642,7 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
         &ours_tail,
     );
     let theirs_tail = {
-        let file = hdf5::File::open_rw(&theirs).unwrap();
+        let file = libhdf5::File::open_rw(&theirs).unwrap();
         theirs_edit(&file);
         let tail = page_tail(&file_space::libhdf5_contiguous_extent(
             &file.dataset(tail_after).unwrap(),
@@ -5708,7 +5717,7 @@ fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocati
         )
     };
     let len = std::fs::metadata(&path).unwrap().len();
-    let c_file = hdf5::File::open(&path).unwrap();
+    let c_file = libhdf5::File::open(&path).unwrap();
     assert!(filled.is_some(), "no attribute fills the free space");
     assert_eq!(
         (
@@ -5751,7 +5760,7 @@ fn paged_tracked_after_deletions(
         )
     };
     {
-        let file = hdf5::File::open_rw(theirs).unwrap();
+        let file = libhdf5::File::open_rw(theirs).unwrap();
         for &object_path in deletions {
             file.unlink(object_path).unwrap();
         }
@@ -5772,7 +5781,7 @@ fn paged_tracked_after_deletions(
 }
 
 fn write_c_paged(path: &Path, userblock: u64, threshold: u64, datasets: &[(&str, usize, CLayout)]) {
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
         .with_fcpl(|fcpl| {
             fcpl.userblock(userblock)
@@ -5852,7 +5861,7 @@ fn delete_k(file: &File) {
     file.root().delete("k").unwrap();
 }
 
-fn unlink_k(file: &hdf5::File) {
+fn unlink_k(file: &libhdf5::File) {
     file.unlink("k").unwrap();
 }
 
@@ -5864,7 +5873,7 @@ fn create_n(file: &File) {
         .unwrap();
 }
 
-fn c_create_n(file: &hdf5::File) {
+fn c_create_n(file: &libhdf5::File) {
     file.new_dataset::<i32>()
         .shape((TAIL_ELEMENTS,))
         .create("n")

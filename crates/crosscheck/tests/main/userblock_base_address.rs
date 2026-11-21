@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Native files with userblocks and relocated superblocks.
 //!
 //! Exercises object-header continuations, dense storage, dataset layouts, and address
@@ -8,10 +8,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hdf5::MajorErrorCode;
-use hdf5::MinorErrorCode;
-use hdf5::dataset::Layout as CLayout;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
 use hdf5_pure::File;
@@ -23,6 +19,10 @@ use hdf5_pure::MetadataCacheConfig;
 use hdf5_pure::Source;
 use hdf5_pure::SuperblockVersion;
 use hdf5_pure::UserblockSize;
+use libhdf5::MajorErrorCode;
+use libhdf5::MinorErrorCode;
+use libhdf5::dataset::Layout as CLayout;
+use libhdf5::file::LibraryVersion;
 use rstest::rstest;
 
 use test_util::superblock;
@@ -48,7 +48,7 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
     let dir = tempfile::tempdir().unwrap();
     let original_path = dir.path().join("original.h5");
     let relocated_path = dir.path().join("relocated.h5");
-    let original = hdf5::File::with_options()
+    let original = libhdf5::File::with_options()
         .with_fcpl(|properties| properties.userblock(stored_base as u64))
         .with_fapl(|properties| {
             if latest_format {
@@ -89,7 +89,7 @@ fn relocated_c_image_preserves_encoded_superblock_and_reads_data(
     relocated_bytes.extend_from_slice(&original_bytes[stored_base..]);
     std::fs::write(&relocated_path, relocated_bytes).unwrap();
     {
-        let oracle = hdf5::File::open(&relocated_path).unwrap();
+        let oracle = libhdf5::File::open(&relocated_path).unwrap();
         assert_eq!(
             oracle.dataset("child").unwrap().read_raw::<i32>().unwrap(),
             [1, 2, 3]
@@ -142,11 +142,11 @@ fn group_lookup_and_listing_follow_relocated_native_images(
     let original_path = directory.path().join("original.h5");
     let relocated_path = directory.path().join("relocated.h5");
     let storage_type = if symbol_table {
-        hdf5::GroupStorageType::SymbolTable
+        libhdf5::GroupStorageType::SymbolTable
     } else {
-        hdf5::GroupStorageType::Dense
+        libhdf5::GroupStorageType::Dense
     };
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fcpl(|properties| properties.userblock(encoded_base as u64))
         .with_fapl(|properties| {
             if symbol_table {
@@ -182,7 +182,7 @@ fn group_lookup_and_listing_follow_relocated_native_images(
     relocated.extend_from_slice(&original[encoded_base..]);
     std::fs::write(&relocated_path, relocated).unwrap();
     {
-        let oracle = hdf5::File::open(&relocated_path).unwrap();
+        let oracle = libhdf5::File::open(&relocated_path).unwrap();
         let group = oracle.group("dense").unwrap();
         assert_eq!(group.info().unwrap().storage_type, storage_type);
         assert_eq!(
@@ -251,7 +251,7 @@ fn custom_sources_borrow_native_chunk_indexes_after_relocation(
     let fixed_values = [2, 3, 5, 7, 11, 13, 17, 19];
     let extensible_values = [23, 29, 31, 37, 41, 43, 47, 53];
     let btree_values = [59, 61, 67, 71, 73, 79, 83, 89];
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fcpl(|properties| properties.userblock(encoded_base as u64))
         .with_fapl(|properties| properties.libver_v110())
         .create(&path)
@@ -401,7 +401,7 @@ fn snapshot_open_requires_effective_eof(
     let actual_len = image.len() as u64;
     std::fs::write(&path, image).unwrap();
     if length_delta < 0 {
-        let error = hdf5::File::open(&path).unwrap_err();
+        let error = libhdf5::File::open(&path).unwrap_err();
         assert!(error.contains_major(MajorErrorCode::File), "{error}");
         assert!(error.contains_minor(MinorErrorCode::Truncated), "{error}");
         let error = backend.open(&path).unwrap_err();
@@ -421,7 +421,7 @@ fn snapshot_open_requires_effective_eof(
         }
         return;
     }
-    let oracle = hdf5::File::open(&path).unwrap();
+    let oracle = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         oracle.dataset("early").unwrap().read_raw::<i32>().unwrap(),
         [42]
@@ -479,7 +479,7 @@ fn initial_legacy_swmr_open_requires_effective_eof(
         File::open_swmr(&path)
     };
     if length_delta < 0 {
-        let error = hdf5::File::open_as(&path, hdf5::OpenMode::ReadSWMR).unwrap_err();
+        let error = libhdf5::File::open_as(&path, libhdf5::OpenMode::ReadSWMR).unwrap_err();
         assert!(error.contains_major(MajorErrorCode::File), "{error}");
         assert!(error.contains_minor(MinorErrorCode::Truncated), "{error}");
         let error = ours.unwrap_err();
@@ -496,7 +496,7 @@ fn initial_legacy_swmr_open_requires_effective_eof(
         return;
     }
     {
-        let oracle = hdf5::File::open_as(&path, hdf5::OpenMode::ReadSWMR).unwrap();
+        let oracle = libhdf5::File::open_as(&path, libhdf5::OpenMode::ReadSWMR).unwrap();
         assert_eq!(
             oracle.dataset("early").unwrap().read_raw::<i32>().unwrap(),
             [42]
@@ -534,7 +534,7 @@ fn swmr_open_and_refresh_accept_partially_extended_image(
     let original_path = dir.path().join("complete.h5");
     let path = dir.path().join("live.h5");
     completeness_fixture(&original_path, stored_base as u64, LibraryVersion::V110, 32);
-    let writer = hdf5::File::with_options()
+    let writer = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .open_rw(&original_path)
         .unwrap();
@@ -547,7 +547,7 @@ fn swmr_open_and_refresh_accept_partially_extended_image(
     image.pop().unwrap();
     std::fs::write(&path, &image).unwrap();
     {
-        let oracle = hdf5::File::open_as(&path, hdf5::OpenMode::ReadSWMR).unwrap();
+        let oracle = libhdf5::File::open_as(&path, libhdf5::OpenMode::ReadSWMR).unwrap();
         assert_eq!(
             oracle.dataset("early").unwrap().read_raw::<i32>().unwrap(),
             [42]
@@ -570,7 +570,7 @@ fn completeness_fixture(
     low: LibraryVersion,
     indexed_storage_k: u32,
 ) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fcpl(|properties| {
             properties
                 .userblock(stored_base)
@@ -661,8 +661,8 @@ fn assert_every_backend_sees(path: &std::path::Path, expected: &[&str]) {
 }
 
 /// Create a file with the C library, with or without a userblock.
-fn c_file(path: &std::path::Path, userblock: u64, build: impl FnOnce(&hdf5::File)) {
-    let file = hdf5::File::with_options()
+fn c_file(path: &std::path::Path, userblock: u64, build: impl FnOnce(&libhdf5::File)) {
+    let file = libhdf5::File::with_options()
         .with_fcpl(|p| {
             if userblock > 0 {
                 p.userblock(userblock);
@@ -674,13 +674,13 @@ fn c_file(path: &std::path::Path, userblock: u64, build: impl FnOnce(&hdf5::File
     build(&file);
     file.close().unwrap();
     assert_eq!(
-        hdf5::File::open(path).unwrap().userblock(),
+        libhdf5::File::open(path).unwrap().userblock(),
         userblock,
         "the C library did not produce the requested userblock"
     );
 }
 
-fn c_add_dataset(file: &hdf5::File, name: &str, value: i32) {
+fn c_add_dataset(file: &libhdf5::File, name: &str, value: i32) {
     file.new_dataset::<i32>()
         .shape([1])
         .create(name)
@@ -708,7 +708,7 @@ fn c_modified_file_with_a_userblock_reads_whole() {
         b.write(&path).unwrap();
 
         {
-            let f = hdf5::File::open_rw(&path).unwrap();
+            let f = libhdf5::File::open_rw(&path).unwrap();
             c_add_dataset(&f, "added", 4);
         }
 
@@ -745,7 +745,7 @@ fn c_added_attribute_in_a_userblock_file_reads_whole() {
         b.write(&path).unwrap();
 
         {
-            let f = hdf5::File::open_rw(&path).unwrap();
+            let f = libhdf5::File::open_rw(&path).unwrap();
             let d = f.dataset("values").unwrap();
             d.new_attr::<i32>()
                 .shape([1])
@@ -856,7 +856,7 @@ fn a_mat_file_repacked_by_the_c_library_still_reads() {
     let src = dir.path().join("in.mat");
     mat::to_file(&doc, &src).unwrap();
     assert_eq!(
-        hdf5::File::open(&src).unwrap().userblock(),
+        libhdf5::File::open(&src).unwrap().userblock(),
         UB,
         "a .mat file carries a userblock, which is what puts it on this path"
     );
@@ -865,8 +865,8 @@ fn a_mat_file_repacked_by_the_c_library_still_reads() {
     // file that keeps the userblock, which is the shape a repacked `.mat` has.
     let dst = dir.path().join("out.mat");
     {
-        let input = hdf5::File::open(&src).unwrap();
-        let output = hdf5::File::with_options()
+        let input = libhdf5::File::open(&src).unwrap();
+        let output = libhdf5::File::with_options()
             .with_fcpl(|p| {
                 p.userblock(UB);
                 p
@@ -954,11 +954,11 @@ fn every_c_written_shape_reads_under_a_userblock() {
         // global heap, which is reached by its own stored address.
         let path = dir.path().join(format!("vlen_{ub}.h5"));
         c_file(&path, ub, |f| {
-            let words: Vec<hdf5::types::VarLenUnicode> = ["alpha", "beta", "gamma"]
+            let words: Vec<libhdf5::types::VarLenUnicode> = ["alpha", "beta", "gamma"]
                 .iter()
                 .map(|s| s.parse().unwrap())
                 .collect();
-            f.new_dataset::<hdf5::types::VarLenUnicode>()
+            f.new_dataset::<libhdf5::types::VarLenUnicode>()
                 .shape([3])
                 .create("s")
                 .unwrap()

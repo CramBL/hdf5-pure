@@ -1,4 +1,4 @@
-#![cfg(all(feature = "serde", feature = "hdf5"))]
+#![cfg(all(feature = "serde", feature = "libhdf5"))]
 //! Cell-array serialization for sequences that don't fit a numeric matrix.
 //!
 //! `Vec<MyStruct>`, `Vec<Option<T>>` with `None` interspersed, and
@@ -7,9 +7,9 @@
 //! object references. `None` becomes `struct([])` (an empty struct array)
 //! so every cell slot has a well-defined MATLAB type.
 
-use hdf5::types::{FixedAscii, TypeDescriptor};
-use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::mat;
+use libhdf5::types::{FixedAscii, TypeDescriptor};
+use libhdf5::{ObjectReference1, ReferencedObject};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -37,7 +37,7 @@ fn vec_of_struct_writes_cell_array_with_refs_group() {
     };
     mat::to_file(&root, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // Parent dataset has MATLAB_class="cell" and shape [1, 3] (column-major
     // storage of the column vector [3, 1] MATLAB shape).
@@ -46,7 +46,7 @@ fn vec_of_struct_writes_cell_array_with_refs_group() {
     let cls = cell
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "cell");
 
@@ -63,7 +63,7 @@ fn vec_of_struct_writes_cell_array_with_refs_group() {
         let cls = g
             .attr("MATLAB_class")
             .unwrap()
-            .read_scalar::<hdf5::types::FixedAscii<32>>()
+            .read_scalar::<libhdf5::types::FixedAscii<32>>()
             .unwrap();
         assert_eq!(cls.as_str(), "struct");
         // Two fields, "x" and "y", both length-1 doubles.
@@ -96,14 +96,14 @@ fn vec_of_option_with_none_uses_empty_struct_marker() {
     };
     mat::to_file(&root, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     let cell = file.dataset("items").unwrap();
     assert_eq!(cell.shape(), vec![1, 3]);
     let cls = cell
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "cell");
 
@@ -120,7 +120,7 @@ fn vec_of_option_with_none_uses_empty_struct_marker() {
             let cls = g
                 .attr("MATLAB_class")
                 .unwrap()
-                .read_scalar::<hdf5::types::FixedAscii<32>>()
+                .read_scalar::<libhdf5::types::FixedAscii<32>>()
                 .unwrap();
             assert_eq!(cls.as_str(), "struct");
             observed.push(read_c_point(&g));
@@ -129,7 +129,7 @@ fn vec_of_option_with_none_uses_empty_struct_marker() {
             let cls = ds
                 .attr("MATLAB_class")
                 .unwrap()
-                .read_scalar::<hdf5::types::FixedAscii<32>>()
+                .read_scalar::<libhdf5::types::FixedAscii<32>>()
                 .unwrap();
             assert_eq!(cls.as_str(), "struct");
             let empty = ds
@@ -185,7 +185,7 @@ fn nested_vec_of_vec_produces_cell_of_cells() {
     };
     mat::to_file(&root, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     // Outer cell array: [1, 2] storage shape for a [2, 1] MATLAB column vector.
     let outer = file.dataset("rows").unwrap();
@@ -193,7 +193,7 @@ fn nested_vec_of_vec_produces_cell_of_cells() {
     let cls = outer
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "cell");
 
@@ -211,7 +211,7 @@ fn nested_vec_of_vec_produces_cell_of_cells() {
             assert_eq!(
                 g.attr("MATLAB_class")
                     .unwrap()
-                    .read_scalar::<hdf5::types::FixedAscii<32>>()
+                    .read_scalar::<libhdf5::types::FixedAscii<32>>()
                     .unwrap()
                     .as_str(),
                 "struct"
@@ -222,7 +222,7 @@ fn nested_vec_of_vec_produces_cell_of_cells() {
             let cls = ds
                 .attr("MATLAB_class")
                 .unwrap()
-                .read_scalar::<hdf5::types::FixedAscii<32>>()
+                .read_scalar::<libhdf5::types::FixedAscii<32>>()
                 .unwrap();
             match cls.as_str() {
                 "cell" => outer_cell_count += 1,
@@ -253,13 +253,13 @@ fn ragged_vec_of_vec_falls_back_to_cell() {
     };
     mat::to_file(&root, &path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
 
     let cell = file.dataset("rows").unwrap();
     let cls = cell
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "cell");
     assert_eq!(cell.shape(), vec![1, 2]);
@@ -282,12 +282,12 @@ fn empty_vec_of_struct_serializes_as_empty_double() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.mat");
     mat::to_file(&Root { items: Vec::new() }, &path).unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let ds = file.dataset("items").unwrap();
     let cls = ds
         .attr("MATLAB_class")
         .unwrap()
-        .read_scalar::<hdf5::types::FixedAscii<32>>()
+        .read_scalar::<libhdf5::types::FixedAscii<32>>()
         .unwrap();
     assert_eq!(cls.as_str(), "double");
 }
@@ -327,12 +327,12 @@ fn c_library_can_open_cell_array_file() {
     )
     .unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let cell = file.dataset("path").unwrap();
     assert_eq!(cell.shape(), [1, 2]);
     assert_eq!(
         cell.dtype().unwrap(),
-        hdf5::Datatype::from_type::<ObjectReference1>().unwrap()
+        libhdf5::Datatype::from_type::<ObjectReference1>().unwrap()
     );
     let refs = file.group("#refs#").unwrap();
     let names = refs.member_names().unwrap();
@@ -376,7 +376,7 @@ fn cell_references_resolve_in_element_order() {
     )
     .unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let cell = file.dataset("path").unwrap();
     let refs: Vec<ObjectReference1> = cell.read_raw().unwrap();
     assert_eq!(refs.len(), inputs.len());
@@ -397,7 +397,7 @@ fn cell_references_resolve_in_element_order() {
 ///
 /// Panics if `group` does not contain exactly `x` and `y`, either dataset's shape
 /// differs from `[1, 1]`, or a read fails.
-fn read_c_point(group: &hdf5::Group) -> Point {
+fn read_c_point(group: &libhdf5::Group) -> Point {
     let mut fields = group.member_names().unwrap();
     fields.sort();
     assert_eq!(fields, ["x", "y"]);

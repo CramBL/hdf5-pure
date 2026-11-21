@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reading dense (fractal-heap) group link storage that libhdf5
 //! writes, across group sizes that grow the heap's root indirect block past a
 //! single direct block.
@@ -39,7 +39,7 @@ use test_util_hdf5::reader::ReadBackend;
 /// Write a group of `n` single-i32 datasets `g/d{i}` with the latest format, so
 /// the C library stores the links densely in a fractal heap.
 fn write_dense_group(path: &std::path::Path, n: usize) {
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_latest())
         .create(path)
         .unwrap();
@@ -158,7 +158,7 @@ fn indexed_named_lookups_preserve_relocated_dense_groups(
     let (userblock, signature_offset) = placement;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("named.h5");
-    let reference = hdf5::FileBuilder::new()
+    let reference = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_latest())
         .with_fcpl(|properties| properties.userblock(userblock as u64))
         .create(&path)
@@ -179,7 +179,7 @@ fn indexed_named_lookups_preserve_relocated_dense_groups(
     let mut bytes = vec![0; signature_offset];
     bytes.extend_from_slice(&original[userblock..]);
     std::fs::write(&path, bytes).unwrap();
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     let reader = open_dense_reader(&path, streaming);
     let name = format!("g/d{}", count - 1);
     assert_eq!(
@@ -253,7 +253,7 @@ fn indexed_colliding_names_preserve_link_targets(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("collisions.h5");
     write_dense_group(&path, 150);
-    let reference = hdf5::File::open_rw(&path).unwrap();
+    let reference = libhdf5::File::open_rw(&path).unwrap();
     let group = reference.group("g").unwrap();
     for ((name, link_type), target) in names
         .into_iter()
@@ -268,7 +268,7 @@ fn indexed_colliding_names_preserve_link_targets(
     }
     drop(group);
     reference.close().unwrap();
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     let group = reference.group("g").unwrap();
     let reader = open_dense_reader(&path, streaming);
     for ((name, link_type), expected) in
@@ -408,7 +408,7 @@ fn dense_operations_reject_malformed_name_indexes(
     let path = dir.path().join("bad-index.h5");
     write_dense_group(&path, 16);
     {
-        let reference = hdf5::File::open(&path).unwrap();
+        let reference = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             reference
                 .dataset("g/d0")
@@ -589,7 +589,7 @@ fn dense_lookup_preserves_replacement_character_names(
         repair_direct_heap_checksum(&mut bytes);
         std::fs::write(&path, bytes).unwrap();
     } else {
-        let reference = hdf5::File::open_rw(&path).unwrap();
+        let reference = libhdf5::File::open_rw(&path).unwrap();
         reference
             .group("g")
             .unwrap()
@@ -597,7 +597,7 @@ fn dense_lookup_preserves_replacement_character_names(
             .unwrap();
         reference.close().unwrap();
     }
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     assert!(
         reference
             .group("g")
@@ -724,7 +724,7 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("blocks.h5");
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_latest())
         .with_fcpl(|properties| properties.userblock(userblock))
         .create(&path)
@@ -852,7 +852,7 @@ fn caller_supplied_regions_parse_c_written_heap_blocks(
             vec![i32::try_from(index).unwrap()]
         );
     }
-    let reopened = hdf5::File::open(&path).unwrap();
+    let reopened = libhdf5::File::open(&path).unwrap();
     let group = reopened.group("g").unwrap();
     assert_eq!(
         if attributes {
@@ -979,7 +979,7 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("managed-ids.h5");
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_latest())
         .create(&path)
         .unwrap();
@@ -1178,7 +1178,7 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
         rewritten[start..start + data.len()].copy_from_slice(&data);
     }
     std::fs::write(&path, rewritten).unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let group = file.group("g").unwrap();
     let expected: Vec<_> = (0..16)
         .map(|index| format!("entry_{index}{}", "x".repeat(name_padding)))

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! The write-back page buffer against libhdf5 (issue #308).
 //!
 //! Two claims are made for the crash mark a page-buffered session raises, and
@@ -10,10 +10,10 @@
 //! written *through* the buffer and closed cleanly is an ordinary file again:
 //! mark down, paged layout intact, data where the C library looks for it.
 
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 
 use test_util_hdf5::assertion;
 use test_util_hdf5::{dataset::Unlimited, session};
@@ -58,11 +58,11 @@ fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
     // Only what the C library can settle. That the byte is `0x01`, and that this
     // crate refuses it and recovers from it, are `superblock_status_flags`'
     // to assert — repeating them here costs a libhdf5 link to learn nothing.
-    let c_err = hdf5::File::open(&path).expect_err("the C library refuses a marked file");
+    let c_err = libhdf5::File::open(&path).expect_err("libhdf5 refuses a marked file");
     assertion::native_file_marked_in_use(&c_err);
 
     File::clear_status_flags(&path).unwrap();
-    hdf5::File::open(&path)
+    libhdf5::File::open(&path)
         .expect("clearing the mark recovers the file for the C library")
         .close()
         .unwrap();
@@ -109,7 +109,7 @@ fn the_c_library_reads_a_file_written_through_a_page_buffer() {
             file.close().unwrap();
         }
 
-        let f = hdf5::File::open(&path)
+        let f = libhdf5::File::open(&path)
             .unwrap_or_else(|e| panic!("{label}: a cleanly closed buffered file opens: {e}"));
         let d = f.dataset("d").unwrap().read_raw::<i32>().unwrap();
         let mut expected: Vec<i32> = (0..64).collect();

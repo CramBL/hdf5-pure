@@ -1,11 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::datatype::ByteOrder as CByteOrder;
-use hdf5::filters::Filter;
-use hdf5::plist::dataset_create::Layout;
 use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
@@ -16,6 +12,10 @@ use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::ObjectHeader;
+use libhdf5::Extent;
+use libhdf5::datatype::ByteOrder as CByteOrder;
+use libhdf5::filters::Filter;
+use libhdf5::plist::dataset_create::Layout;
 use rstest::rstest;
 use test_util::extensible_array;
 use test_util_hdf5::__private::c_object;
@@ -124,11 +124,11 @@ fn schemas_match_reference_unallocated_storage(
         assert_deferred_layout(&reference_path, "schema");
         assert_deferred_layout(&pure_path, "schema");
     }
-    let reference = hdf5::File::open(&reference_path)
+    let reference = libhdf5::File::open(&reference_path)
         .unwrap()
         .dataset("schema")
         .unwrap();
-    let dataset = hdf5::File::open(&pure_path)
+    let dataset = libhdf5::File::open(&pure_path)
         .unwrap()
         .dataset("schema")
         .unwrap();
@@ -207,7 +207,7 @@ fn schemas_match_reference_unallocated_storage(
 }
 
 pub(super) fn assert_deferred_layout(path: &Path, name: &str) {
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let address = usize::try_from(c_object::header_address(&native, name)).unwrap();
     native.close().unwrap();
     let bytes = std::fs::read(path).unwrap();
@@ -258,11 +258,11 @@ fn schemas_preserve_the_largest_version_four_chunk(
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_fill_value(42_u8);
     });
-    let reference = hdf5::File::open(&reference_path)
+    let reference = libhdf5::File::open(&reference_path)
         .unwrap()
         .dataset("schema")
         .unwrap();
-    let dataset = hdf5::File::open(&pure_path)
+    let dataset = libhdf5::File::open(&pure_path)
         .unwrap()
         .dataset("schema")
         .unwrap();

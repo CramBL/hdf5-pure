@@ -1,6 +1,6 @@
 //! Native reads and header-preservation checks for generic-large layouts.
 
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::DatatypeByteOrder;

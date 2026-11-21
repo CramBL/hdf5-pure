@@ -21,25 +21,25 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU16;
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 use std::path::Path;
 
-#[cfg(feature = "hdf5")]
-use hdf5::GroupStorageType;
-#[cfg(feature = "hdf5")]
-use hdf5::H5Type;
-#[cfg(feature = "hdf5")]
-use hdf5::Location;
-#[cfg(feature = "hdf5")]
-use hdf5::dataset::Layout as NativeLayout;
-#[cfg(feature = "hdf5")]
-use hdf5::datatype::ByteOrder;
-#[cfg(feature = "hdf5")]
-use hdf5::types::FixedAscii;
-#[cfg(feature = "hdf5")]
-use hdf5::types::TypeDescriptor;
-#[cfg(feature = "hdf5")]
-use hdf5::types::VarLenUnicode;
+#[cfg(feature = "libhdf5")]
+use libhdf5::GroupStorageType;
+#[cfg(feature = "libhdf5")]
+use libhdf5::H5Type;
+#[cfg(feature = "libhdf5")]
+use libhdf5::Location;
+#[cfg(feature = "libhdf5")]
+use libhdf5::dataset::Layout as NativeLayout;
+#[cfg(feature = "libhdf5")]
+use libhdf5::datatype::ByteOrder;
+#[cfg(feature = "libhdf5")]
+use libhdf5::types::FixedAscii;
+#[cfg(feature = "libhdf5")]
+use libhdf5::types::TypeDescriptor;
+#[cfg(feature = "libhdf5")]
+use libhdf5::types::VarLenUnicode;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::CharacterSet;
@@ -180,7 +180,7 @@ pub fn assert_storage(file: &File, image: &[u8], fixture: Fixture) {
     }
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Writes a native attribute fixture and closes the file.
 ///
 /// # Panics
@@ -218,7 +218,7 @@ pub fn write_libhdf5(path: &Path, fixture: Fixture) {
     file.close().unwrap();
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Checks native group storage, attribute metadata and values, and dataset contents.
 ///
 /// # Panics
@@ -285,7 +285,7 @@ pub fn assert_libhdf5_contents(path: &Path, fixture: Fixture, order: ByteOrder) 
     file.close().unwrap();
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 fn write_attributes(location: &Location, fixture: Fixture, path: &str) {
     for (name, value) in attributes(fixture, path) {
         match value {
@@ -329,7 +329,7 @@ fn write_attributes(location: &Location, fixture: Fixture, path: &str) {
     }
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 fn assert_native_attributes(location: &Location, fixture: Fixture, path: &str, order: ByteOrder) {
     let mut actual = location.attr_names().unwrap();
     actual.sort();

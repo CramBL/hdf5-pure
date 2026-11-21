@@ -1,9 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! External-storage metadata and rejection through the public API.
 
-use hdf5::plist::DatasetCreate;
-use hdf5::plist::dataset_create::ExternalFile;
 use hdf5_pure::{File, RepackOptions};
+use libhdf5::plist::DatasetCreate;
+use libhdf5::plist::dataset_create::ExternalFile;
 
 use test_util_hdf5::{assertion, file};
 
@@ -32,7 +32,7 @@ fn write_external_fixture(path: &std::path::Path, payload: &str) {
     drop(dataset);
     drop(properties);
     file.close().unwrap();
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.dcpl().unwrap().get_external().unwrap(), expected,);
     assert_eq!(
@@ -63,7 +63,7 @@ fn repack_refuses_external_data_storage() {
 
     // The native reader follows the external file for the element values.
     {
-        let c = hdf5::File::open(&src).unwrap();
+        let c = libhdf5::File::open(&src).unwrap();
         let d = c.dataset("d").unwrap();
         assert_eq!(
             d.read_raw::<i32>().unwrap(),
@@ -103,7 +103,7 @@ fn every_read_path_refuses_external_data_storage() {
 
     // The native reader follows the external file for the element values.
     {
-        let c = hdf5::File::open(&src).unwrap();
+        let c = libhdf5::File::open(&src).unwrap();
         assert_eq!(
             c.dataset("d").unwrap().read_raw::<i32>().unwrap(),
             (1..=N as i32).collect::<Vec<i32>>(),
@@ -212,7 +212,7 @@ fn no_write_reaches_an_external_dataset() {
             hdf5_pure::Layout::Contiguous { address: None, .. }
         ));
     }
-    let c = hdf5::File::open(&src).unwrap();
+    let c = libhdf5::File::open(&src).unwrap();
     assert_eq!(
         c.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         (1..=N as i32).collect::<Vec<i32>>(),

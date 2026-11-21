@@ -1,16 +1,16 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::collections::HashMap;
 use std::num::NonZeroU16;
 
-use hdf5::plist::file_create::Sizeof;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
 use hdf5_pure_format::__private::GlobalHeapObject;
 use hdf5_pure_format::__private::LengthWidth;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 use test_util::bytes;
 use test_util::global_heap;
@@ -97,7 +97,7 @@ fn a_libhdf5_attribute_remains_readable_before_an_implied_free_tail(
     image_bytes[start + 4088..start + 4096].copy_from_slice(&tail);
     std::fs::write(&path, &image_bytes).unwrap();
 
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         reference
             .attr("tail")

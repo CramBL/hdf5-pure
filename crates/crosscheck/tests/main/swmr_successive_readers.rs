@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Successive native reads while a pure SWMR writer remains open.
 //!
 //! Each append state is observed by a fresh reader process. After the writer

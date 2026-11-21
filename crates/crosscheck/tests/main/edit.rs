@@ -1,9 +1,6 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! In-place edits of libhdf5 files read through both libraries.
 
-use hdf5::dataset::Layout as CLayout;
-use hdf5::file::LibraryVersion;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
@@ -16,6 +13,9 @@ use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::ScaleOffset;
 use hdf5_pure::SuperblockVersion;
+use libhdf5::dataset::Layout as CLayout;
+use libhdf5::file::LibraryVersion;
+use libhdf5::types::VarLenUnicode;
 
 use rstest::rstest;
 use test_util_hdf5::numeric::ByteOrder;
@@ -110,7 +110,7 @@ fn mixed_overwrites_preserve_native_values_after_payload_transfer(#[case] layout
         pure.dataset("strings").unwrap().read_string().unwrap(),
         ["replacement", "", "mètre"]
     );
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native.dataset("fixed").unwrap().read_raw::<i32>().unwrap(),
         [11, 22, 33]
@@ -174,7 +174,7 @@ fn assert_edits_applied(path: &std::path::Path) {
     assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
 
     // Reference C library reader — the real interop proof.
-    let c = hdf5::File::open(path).unwrap();
+    let c = libhdf5::File::open(path).unwrap();
     assert_eq!(
         c.dataset("alpha_copy").unwrap().read_raw::<f64>().unwrap(),
         vec![1.0, 2.0, 3.0]
@@ -295,7 +295,7 @@ fn c_multichunk_group_header_is_collapsed_and_edited() {
 
     // The C-written root attributes survived the multi-chunk -> single-chunk
     // rewrite of the root header (verified by the C library).
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     for i in 0..6 {
         let v: i64 = c.attr(&format!("meta{i}")).unwrap().read_scalar().unwrap();
         assert_eq!(
@@ -372,7 +372,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
     assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
 
     // libhdf5 reads the edited version-0 file and agrees.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("alpha").unwrap().read_raw::<f64>().unwrap(),
         vec![1.0, 2.0, 3.0]
@@ -400,7 +400,7 @@ fn c_v0_root_attributes_survive_conversion() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_v0_attrs.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
             .create(&path)
             .unwrap();
@@ -434,7 +434,7 @@ fn c_v0_root_attributes_survive_conversion() {
         session.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let tag: i64 = c.attr("tag").unwrap().read_scalar().unwrap();
     assert_eq!(tag, 77, "root attribute lost converting the v0 group to v2");
     assert_eq!(
@@ -480,7 +480,7 @@ fn c_library_reads_group_attributes_edited_in_place() {
         session.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let grp = c.group("grp").unwrap();
     let count: i64 = grp.attr("count").unwrap().read_scalar().unwrap();
     let added: i64 = grp.attr("added").unwrap().read_scalar().unwrap();
@@ -542,7 +542,7 @@ fn free_space_reuse_and_truncation_stay_c_readable() {
     assertion::path_not_found(f.dataset("bulk").unwrap_err(), "bulk");
 
     // libhdf5 reads the shrunken file and the survivors intact.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.dataset("bulk").unwrap_err(), "bulk");
     assert_eq!(
         c.dataset("alpha").unwrap().read_raw::<f64>().unwrap(),
@@ -617,7 +617,7 @@ fn a_chunked_dataset_written_into_a_freed_hole_stays_c_readable() {
          (was {size_before}, now {size_after})"
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.dataset("victim").unwrap_err(), "victim");
     assert_eq!(
         c.dataset("replacement").unwrap().read_raw::<f64>().unwrap(),
@@ -733,7 +733,7 @@ fn chunked_and_filtered_datasets_added_in_place_are_c_readable() {
 
     // libhdf5 reads the filtered/chunked/extensible additions and
     // sees them as chunked storage.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("deflated").unwrap().read_raw::<f64>().unwrap(),
         f64_data
@@ -785,7 +785,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_delete.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::V18))
             .create(&path)
             .unwrap();
@@ -854,7 +854,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
     }
 
     // libhdf5 reads the reclaimed file too.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.dataset("c_chunked").unwrap_err(), "c_chunked");
     assert_eq!(
         c.dataset("keep").unwrap().read_raw::<f64>().unwrap(),
@@ -885,7 +885,7 @@ fn overwriting_chunked_datasets_in_place_stays_c_readable() {
     let path = dir.path().join("c_chunked_overwrite.h5");
     let btree: Vec<i32> = (0..2048).collect();
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::V18))
             .create(&path)
             .unwrap();
@@ -958,7 +958,7 @@ fn overwriting_chunked_datasets_in_place_stays_c_readable() {
         );
     }
     // libhdf5 reads both and still sees them as chunked.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("c_chunked").unwrap().read_raw::<i32>().unwrap(),
         btree_new
@@ -1043,7 +1043,7 @@ fn fits_with_slack_filtered_overwrite_stays_c_readable() {
     );
     // libhdf5 reads the in-place-rebuilt index + new values, and
     // still sees the dataset as chunked.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("d").unwrap().read_raw::<i32>().unwrap(), updated);
     assert!(
         c.dataset("d").unwrap().chunk().is_some(),
@@ -1061,7 +1061,7 @@ fn copying_chunked_datasets_in_place_stays_c_readable() {
     let path = dir.path().join("c_chunked_copy.h5");
     let btree: Vec<i32> = (0..2048).collect();
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::V18))
             .create(&path)
             .unwrap();
@@ -1112,7 +1112,7 @@ fn copying_chunked_datasets_in_place_stays_c_readable() {
         );
     }
     // libhdf5 reads the copies and sees them as chunked.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("c_chunked_copy")
             .unwrap()
@@ -1167,7 +1167,7 @@ fn overwriting_multiply_linked_chunked_that_relocates_is_refused() {
     }
     // C library adds a second hard link to it.
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         file.link_hard("d", "d_alias").unwrap();
         file.close().unwrap();
     }
@@ -1261,7 +1261,7 @@ fn deleting_one_of_several_hard_links_keeps_the_survivor() {
         vec![1.0, 2.0, 3.0, 4.0]
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.dataset("chunked_orig").unwrap_err(), "chunked_orig");
     assert_eq!(
         c.dataset("chunked_alias")
@@ -1318,7 +1318,7 @@ fn deleting_all_hard_links_to_an_object_in_one_commit_is_safe() {
         f.dataset("keep").unwrap().read_f64().unwrap(),
         vec![9.0, 8.0]
     );
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("keep").unwrap().read_raw::<f64>().unwrap(),
         vec![9.0, 8.0]
@@ -1381,7 +1381,7 @@ fn cross_file_copy_from_read_by_c_library() {
     );
 
     // Reference C library reader — the interop proof.
-    let c = hdf5::File::open(&dst_path).unwrap();
+    let c = libhdf5::File::open(&dst_path).unwrap();
     assert_eq!(
         c.dataset("calibration").unwrap().read_raw::<f64>().unwrap(),
         vec![0.99, 1.0, 1.01]
@@ -1457,7 +1457,7 @@ fn cross_file_copy_from_c_written_attributed_dataset() {
         session.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&dst_path).unwrap();
+    let c = libhdf5::File::open(&dst_path).unwrap();
     assert_eq!(
         c.dataset("calibration").unwrap().read_raw::<f64>().unwrap(),
         vec![0.99, 1.0, 1.01]
@@ -1505,7 +1505,7 @@ fn same_file_copy_of_c_written_attributed_object() {
         session.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("dup").unwrap().read_raw::<i32>().unwrap(),
         vec![10, 20]
@@ -1561,7 +1561,7 @@ fn cross_file_copy_from_reproduces_c_written_dense_attributes() {
         session.commit().unwrap();
     }
 
-    let c = hdf5::File::open(&dst_path).unwrap();
+    let c = libhdf5::File::open(&dst_path).unwrap();
     let ds = c.dataset("dup").unwrap();
     assert_eq!(ds.read_raw::<i32>().unwrap(), vec![1]);
     for i in 0..12 {
@@ -1585,7 +1585,7 @@ fn write_dataset_same_size_crosscheck() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.h5");
         {
-            let file = hdf5::File::with_options()
+            let file = libhdf5::File::with_options()
                 .with_fapl(|p| p.libver_bounds(low, high))
                 .create(&path)
                 .unwrap();
@@ -1615,7 +1615,7 @@ fn write_dataset_same_size_crosscheck() {
             pure.dataset("d").unwrap().read_f64().unwrap(),
             vec![9.0, 8.0, 7.0, 6.0]
         );
-        let c = hdf5::File::open(&path).unwrap();
+        let c = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             c.dataset("d").unwrap().read_raw::<f64>().unwrap(),
             vec![9.0, 8.0, 7.0, 6.0]
@@ -1671,7 +1671,7 @@ fn write_dataset_undefined_address_relocates_crosscheck() {
         pure.dataset("keep").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0]
     );
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("blank").unwrap().read_raw::<i32>().unwrap(),
         vec![5, 6, 7]
@@ -1725,7 +1725,7 @@ fn write_dataset_shared_hard_link_crosscheck() {
         pure.dataset("b").unwrap().read_i32().unwrap(),
         vec![40, 50, 60]
     );
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("a").unwrap().read_raw::<i32>().unwrap(),
         vec![40, 50, 60]
@@ -1832,7 +1832,7 @@ fn a_replaced_object_is_read_by_the_c_library() {
             session.commit().unwrap();
         } // drop the editor (release its exclusive lock) before reading back
 
-        let c = hdf5::File::open(&path).unwrap();
+        let c = libhdf5::File::open(&path).unwrap();
         assert_eq!(
             c.dataset("alpha").unwrap().read_raw::<i32>().unwrap(),
             vec![11, 22],
@@ -1867,7 +1867,7 @@ fn a_replaced_object_is_read_by_the_c_library() {
 /// `/alias`, plus an unrelated `/keep` so the refusals below can be shown to
 /// leave the rest of the file alone.
 fn write_hard_linked_group(path: &std::path::Path) {
-    let file = hdf5::File::create(path).unwrap();
+    let file = libhdf5::File::create(path).unwrap();
     let g = file.create_group("g").unwrap();
     g.new_dataset::<i32>()
         .shape((3,))
@@ -1921,7 +1921,7 @@ fn editing_a_hard_linked_group_is_refused() {
         "a refused commit must leave the file byte-identical"
     );
     // And both readers still see one object through both of its links.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     for name in ["g", "alias"] {
         assert_eq!(
             c.group(name).unwrap().member_names().unwrap(),
@@ -1938,7 +1938,7 @@ fn editing_below_a_hard_linked_group_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_deep.h5");
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let g = file.create_group("g").unwrap();
         g.create_group("child").unwrap();
         file.link_hard("/g", "/alias").unwrap();
@@ -1995,7 +1995,7 @@ fn the_hard_link_rule_does_not_refuse_an_ordinary_group() {
     session.commit().unwrap();
     drop(session);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("at_root").unwrap().read_raw::<i32>().unwrap(),
         [1]
@@ -2030,7 +2030,7 @@ fn deleting_a_link_to_a_hard_linked_group_still_works() {
     session.commit().unwrap();
     drop(session);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.group("alias").unwrap_err(), "alias");
     assert_eq!(
         c.group("g").unwrap().member_names().unwrap(),
@@ -2208,7 +2208,7 @@ fn a_never_written_dataset_is_copied_as_the_storage_it_never_had() {
     );
 
     // The reference library reads its own convention back out of the copy.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("d_copy").unwrap().read_raw::<i32>().unwrap(),
         vec![FILL; N],
@@ -2278,7 +2278,7 @@ fn a_never_written_dataset_is_copied_as_the_storage_it_never_had() {
 /// combination was unreachable: the copy was refused before any screen ran.
 #[test]
 fn a_never_written_reference_dataset_copies_beside_a_delete() {
-    use hdf5::types::{Reference, TypeDescriptor};
+    use libhdf5::types::{Reference, TypeDescriptor};
 
     for (label, desc) in [
         ("object", TypeDescriptor::Reference(Reference::Object)),
@@ -2365,7 +2365,7 @@ fn appending_into_a_staged_contiguous_dataset_stays_c_readable() {
         vec![1.0, 2.0, 3.0, 4.0, 5.0]
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let ds = c.dataset("col").unwrap();
     assert_eq!(ds.shape(), vec![5], "the C library reads the grown shape");
     assert_eq!(
@@ -2390,7 +2390,7 @@ fn copied_chunked_geometry_preserves_stored_bytes_and_maximum_dimensions(
         let file = file::libhdf5_create_v110(&path);
         file.new_dataset_builder()
             .empty_as(ByteOrder::LittleEndian.i32_datatype())
-            .shape([hdf5::Extent::new(8, maximum), hdf5::Extent::fixed(8)])
+            .shape([libhdf5::Extent::new(8, maximum), libhdf5::Extent::fixed(8)])
             .chunk([2, 4])
             .shuffle()
             .deflate(6)
@@ -2406,7 +2406,7 @@ fn copied_chunked_geometry_preserves_stored_bytes_and_maximum_dimensions(
         file.commit().unwrap();
     }
     {
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         let source = file.dataset("d").unwrap();
         let copy = file.dataset("copy").unwrap();
         assert_eq!(copy.shape(), [8, 8]);
@@ -2449,7 +2449,7 @@ fn copied_chunked_geometry_preserves_stored_bytes_and_maximum_dimensions(
             .unwrap();
         file.commit().unwrap();
     }
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let source = file.dataset("d").unwrap();
     let copy = file.dataset("copy").unwrap();
     assert_eq!(source.read_raw::<i32>().unwrap(), updated);
@@ -2536,7 +2536,7 @@ fn a_copied_tree_is_read_by_the_c_library(
             dst_path
         }
     };
-    let c = hdf5::File::open(&dst_path).unwrap();
+    let c = libhdf5::File::open(&dst_path).unwrap();
     graph.assert_read_by_c_library(&c.group("g_copy").unwrap());
 }
 

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Shared object header messages (SOHM), written by libhdf5 and
 //! read back by hdf5-pure (issue #417).
 //!
@@ -20,8 +20,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
 #[cfg(target_endian = "little")]
 use hdf5_pure::Error;
 #[cfg(target_endian = "little")]
@@ -32,6 +30,8 @@ use hdf5_pure::FormatError;
 #[cfg(target_endian = "little")]
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util::btree::v2 as btree_v2;
@@ -93,8 +93,8 @@ struct Fixture {
 /// `min_message_size` is set to 1 so that even a short attribute or dataspace is
 /// shared; the C library's own default (250) shares almost nothing in a small
 /// fixture.
-fn create_shared_file(path: &Path, max_list: u32, min_btree: u32) -> hdf5::File {
-    hdf5::File::with_options()
+fn create_shared_file(path: &Path, max_list: u32, min_btree: u32) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
         .with_fcpl(|p| {
             p.shared_mesg_phase_change(max_list, min_btree)
@@ -110,7 +110,7 @@ fn create_shared_file(path: &Path, max_list: u32, min_btree: u32) -> hdf5::File 
 /// Write `count` groups, each carrying the same attribute, plus `count` datasets
 /// of the same shape and type. Everything past the first user of each message is
 /// stored as a reference into the shared-message heap.
-fn write_shared_objects(file: &hdf5::File, count: usize) {
+fn write_shared_objects(file: &libhdf5::File, count: usize) {
     for i in 0..count {
         let group = file.create_group(&format!("g{i}")).expect("create group");
         group
@@ -260,7 +260,7 @@ fn a_btree_indexed_shared_message_file_reads_back_whole() {
     // The fixture is only a B-tree fixture if the file really carries the low
     // list maximum it was created with; the C library reports it back off the
     // reopened file's creation property list.
-    let phase = hdf5::File::open(&fixture.path)
+    let phase = libhdf5::File::open(&fixture.path)
         .unwrap()
         .fcpl()
         .unwrap()
@@ -383,7 +383,7 @@ fn repack_rewrites_a_shared_message_file_without_sharing() {
         .expect("repack a shared-message file");
 
     assert_reads_back(&dst, 4);
-    hdf5::File::open(&dst).expect("the C library opens the repacked file");
+    libhdf5::File::open(&dst).expect("libhdf5 opens the repacked file");
 }
 
 #[cfg(target_endian = "little")]
@@ -416,7 +416,7 @@ fn dense_shared_attribute_records_read_from_the_shared_heap(
     {
         let file = match sharing {
             DenseSharing::All => create_shared_file(&path, 50, 40),
-            DenseSharing::Mixed => hdf5::File::with_options()
+            DenseSharing::Mixed => libhdf5::File::with_options()
                 .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
                 .with_fcpl(|p| {
                     p.shared_mesg_phase_change(50, 40)
@@ -445,7 +445,7 @@ fn dense_shared_attribute_records_read_from_the_shared_heap(
         file.close().unwrap();
     }
     {
-        let file = hdf5::File::open(&path).unwrap();
+        let file = libhdf5::File::open(&path).unwrap();
         let group = file.group("g").unwrap();
         let observed: BTreeMap<_, _> = group
             .attr_names()
@@ -589,7 +589,7 @@ fn writable_shared_and_committed_messages_retain_the_opened_frame(
 
 #[cfg(target_endian = "little")]
 fn write_shared_committed_file(path: &Path, base: usize) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })
@@ -620,7 +620,7 @@ fn write_shared_committed_file(path: &Path, base: usize) {
         8
     );
     drop(group);
-    let datatype = hdf5::Datatype::from_type::<i32>().unwrap();
+    let datatype = libhdf5::Datatype::from_type::<i32>().unwrap();
     file.commit_datatype("integer_type", &datatype).unwrap();
     let dataset = file
         .new_dataset_builder()

@@ -1,6 +1,5 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::Datatype as CDatatype;
 use hdf5_pure::BitFieldType;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
@@ -10,8 +9,9 @@ use hdf5_pure::FixedPointType;
 use hdf5_pure::FloatingPointType;
 use hdf5_pure::LibVer;
 use hdf5_pure::VariableLengthType;
-use hdf5_sys::h5p::H5P_DEFAULT;
-use hdf5_sys::h5t;
+use libhdf5::Datatype as CDatatype;
+use libhdf5_sys::h5p::H5P_DEFAULT;
+use libhdf5_sys::h5t;
 use rstest::rstest;
 use test_util_hdf5::numeric;
 use test_util_hdf5::numeric::NumericClass;
@@ -33,15 +33,15 @@ fn preserves_c_padding_through_nested_types(
     let source = dir.path().join("source.h5");
     let destination = dir.path().join("destination.h5");
     let datatype = (0..depth).fold(class.datatype(), |element_type, _| {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             // SAFETY: The lock serializes access and `element_type` owns a live datatype.
             let id = unsafe { h5t::H5Tvlen_create(element_type.id()) };
             assert!(id >= 0);
             // SAFETY: The returned handle owns the newly created datatype ID.
-            unsafe { hdf5::from_id::<CDatatype>(id) }.unwrap()
+            unsafe { libhdf5::from_id::<CDatatype>(id) }.unwrap()
         })
     });
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock and live transient datatype cover the setters. The padding values
         // and byte order are defined for the numeric parent reached through its VL wrappers.
         unsafe {
@@ -66,7 +66,7 @@ fn preserves_c_padding_through_nested_types(
         }
     });
     {
-        let file = hdf5::File::create(&source).unwrap();
+        let file = libhdf5::File::create(&source).unwrap();
         file.new_dataset_builder()
             .empty_as(&datatype)
             .shape(0)
@@ -98,13 +98,13 @@ fn preserves_c_padding_through_nested_types(
     builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     builder.commit_datatype("padded", actual);
     builder.write(&destination).unwrap();
-    let file = hdf5::File::open(&destination).unwrap();
-    hdf5::sync::sync(|| {
+    let file = libhdf5::File::open(&destination).unwrap();
+    libhdf5::sync::sync(|| {
         // SAFETY: The file and lock cover the call, and the datatype name is NUL-terminated.
         let id = unsafe { h5t::H5Topen2(file.id(), c"padded".as_ptr(), H5P_DEFAULT) };
         assert!(id >= 0);
         // SAFETY: The returned handle owns the newly opened datatype ID.
-        let written = unsafe { hdf5::from_id::<CDatatype>(id) }.unwrap();
+        let written = unsafe { libhdf5::from_id::<CDatatype>(id) }.unwrap();
         // SAFETY: Both handles remain live and the lock serializes access.
         assert_eq!(unsafe { h5t::H5Tequal(datatype.id(), written.id()) }, 1);
     });

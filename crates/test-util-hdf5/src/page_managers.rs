@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use hdf5::File;
-use hdf5::plist::file_create::FileSpaceStrategy;
+use libhdf5::File;
+use libhdf5::plist::file_create::FileSpaceStrategy;
 
 use crate::file;
 

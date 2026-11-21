@@ -1,7 +1,7 @@
 //! Distinguish libhdf5's report that an object is absent from errors reading the
 //! file around it.
 
-use hdf5::MinorErrorCode;
+use libhdf5::MinorErrorCode;
 
 /// Assert that `err` is the C library reporting `what` **absent** from a file it
 /// could otherwise traverse — not merely failing for some unrelated reason.
@@ -29,7 +29,7 @@ use hdf5::MinorErrorCode;
 ///
 /// [#201]: https://github.com/CramBL/hdf5-pure/issues/201
 #[track_caller]
-pub fn assert_libhdf5_absent(err: &hdf5::Error, what: &str) {
+pub fn assert_libhdf5_absent(err: &libhdf5::Error, what: &str) {
     if let Some(reason) = not_absent_because(err) {
         let stack: Vec<String> = match err.stack() {
             Some(s) => s.minor_codes().map(|c| format!("{c:?}")).collect(),
@@ -44,12 +44,12 @@ pub fn assert_libhdf5_absent(err: &hdf5::Error, what: &str) {
 /// This and [`assert_libhdf5_absent`] must share one implementation, or the guard test in
 /// `crates/crosscheck/tests/main/c_absence_predicate.rs` would be measuring a copy of the
 /// predicate rather than the one the delete crosschecks actually rely on.
-pub fn libhdf5_reports_absent(err: &hdf5::Error) -> bool {
+pub fn libhdf5_reports_absent(err: &libhdf5::Error) -> bool {
     not_absent_because(err).is_none()
 }
 
 /// `None` when `err` is a genuine absence, otherwise why it is not.
-fn not_absent_because(err: &hdf5::Error) -> Option<String> {
+fn not_absent_because(err: &libhdf5::Error) -> Option<String> {
     if !err.contains_minor(MinorErrorCode::NotFound) {
         return Some(
             "was expected to be absent, but the C library did not report it \

@@ -2,7 +2,7 @@
 //! so the suite links once. `fail_if_unknown/` stays a directory module: its
 //! three files share one pair of `cfg` gates, stated once on the `mod` item.
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use test_util_hdf5::heap_allocations;
 
 mod append;
@@ -143,7 +143,7 @@ mod swmr_successive_readers;
 mod symbol_table_groups;
 mod symbol_table_message;
 mod symbol_table_soft_links;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 mod test_util;
 mod unallocated_datasets;
 mod user_defined_link_edit;

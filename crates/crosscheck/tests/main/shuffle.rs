@@ -1,7 +1,7 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::filters::Filter;
 use hdf5_pure::File;
+use libhdf5::filters::Filter;
 
 #[test]
 fn fletcher32_then_shuffle_reads_c_created_chunk_with_remainder() {
@@ -9,7 +9,7 @@ fn fletcher32_then_shuffle_reads_c_created_chunk_with_remainder() {
     let path = dir.path().join("fletcher32_shuffle.h5");
     let data: Vec<f64> = (0..64).map(|i| f64::from(i) + 0.25).collect();
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let dataset = file
             .new_dataset::<f64>()
             .shape([64])

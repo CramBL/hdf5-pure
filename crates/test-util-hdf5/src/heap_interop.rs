@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use hdf5::plist::file_create::{Sizeof, SizeofInfo};
-use hdf5::plist::link_create::CharEncoding;
 use hdf5_pure::File;
+use libhdf5::plist::file_create::{Sizeof, SizeofInfo};
+use libhdf5::plist::link_create::CharEncoding;
 
 /// Checks dataset values through buffered, streaming, and C-library reads.
 ///
@@ -16,7 +16,7 @@ use hdf5_pure::File;
 pub fn assert_links_resolve(path: &Path, names: &[String]) {
     let buffered = File::open(path).unwrap();
     let streaming = File::open_streaming(path).unwrap();
-    let reference = hdf5::File::open(path).unwrap();
+    let reference = libhdf5::File::open(path).unwrap();
     for (i, name) in names.iter().enumerate() {
         let p = format!("g/{name}");
         assert_eq!(
@@ -44,7 +44,7 @@ pub fn assert_links_resolve(path: &Path, names: &[String]) {
 ///
 /// Panics if a file operation fails or either dataset differs from its expected values.
 pub fn assert_edit_round_trip(path: &Path) {
-    let file = hdf5::File::open_rw(path).unwrap();
+    let file = libhdf5::File::open_rw(path).unwrap();
     assert_eq!(
         file.dataset("probe").unwrap().read_raw::<i32>().unwrap(),
         [19; 32]
@@ -72,7 +72,7 @@ pub fn write_tiny_link_group(path: &Path) -> Vec<String> {
     let expected: Vec<_> = (b'a'..=b'p')
         .map(|name| char::from(name).to_string())
         .collect();
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_latest())
         .with_fcpl(|properties| {
             properties.sizes(SizeofInfo {

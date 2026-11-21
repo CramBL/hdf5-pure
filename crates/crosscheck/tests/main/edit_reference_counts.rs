@@ -1,11 +1,11 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::LocationToken;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileAccessProperties, FileLocking, MemoryStrategy};
 use hdf5_pure_format::__private::{AccessMode, ObjectHeader, ObjectHeaderPrefix};
+use libhdf5::LocationToken;
+use libhdf5::file::LibraryVersion;
 use rstest::rstest;
 use test_util::bytes;
 use test_util::object_header::{Message, MessageType, v2};
@@ -201,7 +201,7 @@ impl Edit {
 }
 
 fn write_native(path: &Path, edit: Edit) {
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties
                 .libver_bounds(LibraryVersion::V18, LibraryVersion::latest())

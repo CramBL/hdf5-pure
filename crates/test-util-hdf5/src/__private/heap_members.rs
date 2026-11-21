@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
-use hdf5::Dataspace;
-use hdf5::File;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
-use hdf5::types::VarLenArray;
 use hdf5_pure::File as PureFile;
 use hdf5_pure_core::__private::FileRange;
-use hdf5_sys::h5r;
+use libhdf5::Dataspace;
+use libhdf5::File;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
+use libhdf5::types::VarLenArray;
+use libhdf5_sys::h5r;
 
 use crate::file;
 use crate::global_heap::attributes;
@@ -24,9 +24,9 @@ impl RegionToken {
     /// # Panics
     ///
     /// Panics if `H5Rcreate` fails.
-    fn create(native: &hdf5::File, selection: &Dataspace) -> Self {
+    fn create(native: &libhdf5::File, selection: &Dataspace) -> Self {
         let mut token = h5r::hdset_reg_ref_t::default();
-        let result = hdf5::sync::sync(|| {
+        let result = libhdf5::sync::sync(|| {
             // SAFETY: The lock serializes native access. The file and selection remain open,
             // the path is terminated, and token is a writable complete legacy reference buffer.
             unsafe {
@@ -54,8 +54,8 @@ impl RegionToken {
     ///
     /// Panics if the native call fails, the dataspace cannot be opened, or its shape or selection
     /// size differs.
-    fn assert_region(&self, native: &hdf5::File) {
-        let region = hdf5::sync::sync(|| {
+    fn assert_region(&self, native: &libhdf5::File) {
+        let region = libhdf5::sync::sync(|| {
             // SAFETY: The lock serializes native access, the file is open, and the token has
             // the complete legacy dataset-region reference representation returned by H5Rcreate.
             let id = unsafe {
@@ -63,7 +63,7 @@ impl RegionToken {
             };
             assert!(id >= 0, "H5Rget_region failed");
             // SAFETY: H5Rget_region returns a newly owned dataspace identifier on success.
-            unsafe { hdf5::from_id::<Dataspace>(id) }.unwrap()
+            unsafe { libhdf5::from_id::<Dataspace>(id) }.unwrap()
         });
         assert_eq!(region.shape(), [4]);
         assert_eq!(region.selection_size(), 2);
@@ -316,7 +316,7 @@ fn write_members(native: File, external_token: bool) -> Option<RegionToken> {
     token
 }
 
-fn assert_lifetime_values(native: &hdf5::File) {
+fn assert_lifetime_values(native: &libhdf5::File) {
     assert_eq!(
         native.dataset("data").unwrap().read_raw::<i32>().unwrap(),
         [7, 11, 13, 17]
@@ -327,7 +327,7 @@ fn assert_lifetime_values(native: &hdf5::File) {
     );
 }
 
-#[cfg(not(feature = "__hdf5-1.12"))]
+#[cfg(not(feature = "__libhdf5-1.12"))]
 const REGION_REFERENCE_TYPE: h5r::H5R_type_t = h5r::H5R_DATASET_REGION;
-#[cfg(feature = "__hdf5-1.12")]
+#[cfg(feature = "__libhdf5-1.12")]
 const REGION_REFERENCE_TYPE: h5r::H5R_type_t = h5r::H5R_DATASET_REGION1;

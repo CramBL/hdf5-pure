@@ -1,8 +1,8 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::path::Path;
 
-use hdf5::dataset::Layout;
+use libhdf5::dataset::Layout;
 use ndarray::IxDyn;
 use rstest::rstest;
 use test_util_hdf5::file;
@@ -25,7 +25,7 @@ fn numeric_regions_match_reference_selections(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("regions.h5");
     create(&path, layout, shape);
-    let reference_dataset = hdf5::File::open(&path).unwrap().dataset("data").unwrap();
+    let reference_dataset = libhdf5::File::open(&path).unwrap().dataset("data").unwrap();
     let expected_bytes = region::numeric_bytes(&reference_dataset.dtype().unwrap(), expected);
     let reference = reference_dataset
         .read_slice::<f64, _, IxDyn>(region::selection(start, count))
@@ -115,7 +115,7 @@ fn regions_read_fill_and_allocated_intersections(
     } else {
         vec![17; 18]
     };
-    let reference = hdf5::File::open(&path)
+    let reference = libhdf5::File::open(&path)
         .unwrap()
         .dataset("data")
         .unwrap()

@@ -1,6 +1,6 @@
 //! libhdf5 observations of independent MATLAB struct-array images.
 
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use test_util::mat_struct_array;
 use test_util::temp;

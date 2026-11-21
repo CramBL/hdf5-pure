@@ -17,17 +17,17 @@
 //! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 use std::path::Path;
 
-#[cfg(feature = "hdf5")]
-use hdf5::H5Type;
-#[cfg(feature = "hdf5")]
-use hdf5::dataset::Layout as NativeLayout;
-#[cfg(feature = "hdf5")]
-use hdf5::datatype::ByteOrder;
-#[cfg(feature = "hdf5")]
-use hdf5::filters::Filter as NativeFilter;
+#[cfg(feature = "libhdf5")]
+use libhdf5::H5Type;
+#[cfg(feature = "libhdf5")]
+use libhdf5::dataset::Layout as NativeLayout;
+#[cfg(feature = "libhdf5")]
+use libhdf5::datatype::ByteOrder;
+#[cfg(feature = "libhdf5")]
+use libhdf5::filters::Filter as NativeFilter;
 
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Datatype;
@@ -175,7 +175,7 @@ pub fn assert_repacked(file: &File, byte_order: DatatypeByteOrder) {
     assert_contents(file, byte_order);
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Writes a native legacy chunked fixture with deflate and closes the file.
 ///
 /// # Panics
@@ -192,7 +192,7 @@ pub fn write_libhdf5(path: &Path) {
     file.close().unwrap();
 }
 
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 /// Checks native dataset metadata, values, and the deflate pipeline.
 ///
 /// # Panics

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! The object header message flags that make a decoder reject an object whose message type it
 //! cannot name, against libhdf5: this crate reads the files `H5Fopen` reads and
 //! rejects the objects it rejects.

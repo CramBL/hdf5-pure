@@ -1,10 +1,9 @@
 //! Native read-write access to version 2 headers with owned padding.
 
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::fs;
 
-use hdf5::plist::group_create::AttrCreationOrder;
 use hdf5_pure::AttrValue;
 use hdf5_pure::File;
 use hdf5_pure_core::__private::StoredAddressExt;
@@ -14,6 +13,7 @@ use hdf5_pure_format::__private::{
     FormatWidths, MessageRecordLayout, ObjectHeaderAllocation, ObjectHeaderAllocationGeometry,
     ObjectHeaderPrefix,
 };
+use libhdf5::plist::group_create::AttrCreationOrder;
 use rstest::rstest;
 use test_util::object_header::v2::{self as header, HeaderFlags};
 use test_util::object_header::{Message, MessageType};
@@ -68,7 +68,7 @@ fn owned_padding_survives_native_read_write_flush(
         ROOT_ADDRESS + allocation
     );
     fs::write(&path, bytes).unwrap();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(native.member_names().unwrap(), Vec::<String>::new());
     assert_eq!(native.attr_names().unwrap(), Vec::<String>::new());
     native
@@ -80,7 +80,7 @@ fn owned_padding_survives_native_read_write_flush(
         .unwrap();
     native.flush().unwrap();
     native.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native
             .attr("audit_counter")
@@ -119,7 +119,7 @@ fn a_native_header_preserves_its_records_in_a_bounded_allocation(
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("native.h5");
     let output = directory.path().join("padded.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_latest())
         .with_fcpl(|properties| {
             if tracked {
@@ -212,7 +212,7 @@ fn a_native_header_preserves_its_records_in_a_bounded_allocation(
         bytes[start..start + chunk.len()].copy_from_slice(&chunk);
     }
     fs::write(&output, bytes).unwrap();
-    let native = hdf5::File::open_rw(&output).unwrap();
+    let native = libhdf5::File::open_rw(&output).unwrap();
     assert_eq!(
         native
             .attr("source_counter")
@@ -257,7 +257,7 @@ fn empty_extension_chunks_survive_native_read_write_flush(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("empty-extension.h5");
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_latest())
         .create(&path)
         .unwrap();
@@ -305,7 +305,7 @@ fn empty_extension_chunks_survive_native_read_write_flush(
     .build();
     bytes[..superblock.len()].copy_from_slice(&superblock);
     fs::write(&path, bytes).unwrap();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(
         native
             .attr("audit_counter")

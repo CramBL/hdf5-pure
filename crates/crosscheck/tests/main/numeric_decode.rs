@@ -1,14 +1,14 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::Datatype as CDatatype;
-use hdf5::globals;
 use hdf5_pure::{
     Datatype, DatatypeByteOrder, Error, File, FloatingPointLayout, FormatError, H5Element,
     MantissaNormalization,
 };
 use hdf5_pure::{EnumTypeBuilder, FileBuilder, LibVer};
 use hdf5_pure::{FixedPointType, FloatingPointType};
-use hdf5_sys::h5t::{self, H5T_norm_t, H5T_order_t};
+use libhdf5::Datatype as CDatatype;
+use libhdf5::globals;
+use libhdf5_sys::h5t::{self, H5T_norm_t, H5T_order_t};
 use rstest::rstest;
 use test_util::temp;
 use test_util_hdf5::numeric;
@@ -27,12 +27,12 @@ fn reads_c_scalar_fill(
     let path = temp::temp_path("scalar_fill.h5");
     {
         let datatype = CDatatype::from_type::<u16>().unwrap();
-        let status = hdf5::sync::sync(|| {
+        let status = libhdf5::sync::sync(|| {
             // SAFETY: The library lock and live transient integer datatype cover the call.
             unsafe { h5t::H5Tset_order(datatype.id(), numeric::byte_order(big_endian)) }
         });
         assert_eq!(status, 0);
-        let reference = hdf5::File::create(&path).unwrap();
+        let reference = libhdf5::File::create(&path).unwrap();
         let dataset = reference
             .new_dataset_builder()
             .empty_as(&datatype)
@@ -73,7 +73,7 @@ fn c_reads_i32_enum_extrema() {
         .create_dataset("values")
         .with_enum_i32_data(datatype, &values);
     builder.write(&path).unwrap();
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         reference
             .dataset("values")
@@ -106,7 +106,10 @@ fn reads_c_standard_i32(#[values(false, true)] big_endian: bool) {
         })
         .collect();
     numeric::write_stored(&path, &datatype, &raw, values.len());
-    let reference = hdf5::File::open(&path).unwrap().dataset("values").unwrap();
+    let reference = libhdf5::File::open(&path)
+        .unwrap()
+        .dataset("values")
+        .unwrap();
     assert_eq!(reference.read_raw::<i32>().unwrap(), values);
     drop(reference);
     let dataset = File::open(&path).unwrap().dataset("values").unwrap();
@@ -130,7 +133,7 @@ fn reads_c_offset_integers(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("offset.h5");
     let datatype = CDatatype::from_type::<u8>().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and `datatype` owns a live transient integer type.
         unsafe {
             assert_eq!(h5t::H5Tset_precision(datatype.id(), 4), 0);
@@ -142,12 +145,12 @@ fn reads_c_offset_integers(
         }
     });
     let datatype = if enumeration {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             // SAFETY: The lock serializes access and the live integer type is a valid enum base.
             let id = unsafe { h5t::H5Tenum_create(datatype.id()) };
             assert!(id >= 0);
             // SAFETY: `id` is the newly created datatype ID and ownership transfers to its handle.
-            let enumeration = unsafe { hdf5::from_id::<CDatatype>(id) }.unwrap();
+            let enumeration = unsafe { libhdf5::from_id::<CDatatype>(id) }.unwrap();
             // SAFETY: Both names are NUL-terminated and both values have the base type's one-byte
             // width. The live enum handle and lock cover both calls.
             unsafe {
@@ -174,7 +177,10 @@ fn reads_c_offset_integers(
         datatype
     };
     numeric::write_stored(&path, &datatype, &[0xB0, 0x30], 2);
-    let reference = hdf5::File::open(&path).unwrap().dataset("values").unwrap();
+    let reference = libhdf5::File::open(&path)
+        .unwrap()
+        .dataset("values")
+        .unwrap();
     assert_eq!(reference.read_raw::<u64>().unwrap(), vec![11, 3]);
     drop(reference);
     let dataset = File::open(&path).unwrap().dataset("values").unwrap();
@@ -209,7 +215,7 @@ fn reads_c_signed_bit_ranges(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("signed-range.h5");
     let datatype = CDatatype::from_type::<i64>().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and `datatype` owns a live transient integer type.
         unsafe {
             assert_eq!(h5t::H5Tset_precision(datatype.id(), precision.into()), 0);
@@ -234,7 +240,10 @@ fn reads_c_signed_bit_ranges(
         })
         .collect::<Vec<_>>();
     numeric::write_stored(&path, &datatype, &raw, 2);
-    let reference = hdf5::File::open(&path).unwrap().dataset("values").unwrap();
+    let reference = libhdf5::File::open(&path)
+        .unwrap()
+        .dataset("values")
+        .unwrap();
     assert_eq!(reference.read_raw::<i64>().unwrap(), vec![-5, 7]);
     drop(reference);
     let dataset = File::open(&path).unwrap().dataset("values").unwrap();
@@ -255,7 +264,7 @@ fn reads_c_signed_bit_ranges(
         .with_raw_data(stored, raw, 2)
         .with_shape(&[2]);
     builder.write(&pure_path).unwrap();
-    let reference = hdf5::File::open(&pure_path)
+    let reference = libhdf5::File::open(&pure_path)
         .unwrap()
         .dataset("values")
         .unwrap();
@@ -278,7 +287,7 @@ fn reads_only_supported_c_floats(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("float.h5");
     let datatype = if matches!(encoding, FloatLayout::Vax) {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             let predefined = if wide {
                 *globals::H5T_VAX_F64
             } else {
@@ -288,7 +297,7 @@ fn reads_only_supported_c_floats(
             let id = unsafe { h5t::H5Tcopy(predefined) };
             assert!(id >= 0);
             // SAFETY: The returned handle owns the newly copied datatype ID.
-            unsafe { hdf5::from_id::<CDatatype>(id) }.unwrap()
+            unsafe { libhdf5::from_id::<CDatatype>(id) }.unwrap()
         })
     } else if wide {
         CDatatype::from_type::<f64>().unwrap()
@@ -310,7 +319,7 @@ fn reads_only_supported_c_floats(
     } else {
         numeric::byte_order(big_endian)
     };
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock and live transient floating-point handle cover each setter. Each
         // field position and size fits within the type. The fields do not overlap.
         unsafe {
@@ -414,14 +423,17 @@ fn reads_only_supported_c_floats(
         .with_raw_data(stored, raw, 2)
         .with_shape(&[2]);
     builder.write(&pure_path).unwrap();
-    let reference = hdf5::File::open(&pure_path)
+    let reference = libhdf5::File::open(&pure_path)
         .unwrap()
         .dataset("values")
         .unwrap();
     assert_eq!(reference.dtype().unwrap(), datatype);
     drop(reference);
     if matches!(encoding, FloatLayout::Standard) {
-        let reference = hdf5::File::open(&path).unwrap().dataset("values").unwrap();
+        let reference = libhdf5::File::open(&path)
+            .unwrap()
+            .dataset("values")
+            .unwrap();
         assert_eq!(reference.read_raw::<f64>().unwrap(), vec![11.0, 3.0]);
         assert_eq!(dataset.read_f64().unwrap(), vec![11.0, 3.0]);
         assert_eq!(dataset.read_f32().unwrap(), vec![11.0, 3.0]);
@@ -449,7 +461,7 @@ fn reads_only_supported_c_floats(
 #[should_panic(expected = "fixture datatype must be fixed-point, floating-point, or enumeration")]
 fn rejects_pointer_bearing_fixture_type() {
     let dir = tempfile::tempdir().unwrap();
-    let datatype = CDatatype::from_type::<hdf5::types::VarLenArray<u8>>().unwrap();
+    let datatype = CDatatype::from_type::<libhdf5::types::VarLenArray<u8>>().unwrap();
     let bytes = vec![0; datatype.size()];
     numeric::write_stored(&dir.path().join("invalid.h5"), &datatype, &bytes, 1);
 }

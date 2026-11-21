@@ -1,22 +1,22 @@
 //! Native complex datatype and value interoperability with HDF5 2.x.
 
-#![cfg(feature = "__hdf5-2")]
+#![cfg(feature = "__libhdf5-2")]
 
 use std::path::Path;
 
-use hdf5::Datatype as NativeDatatype;
-use hdf5::file::LibraryVersion;
 use hdf5_pure::{
     AttrValue, ComplexType, CompoundTypeBuilder, DType, Datatype, DatatypeByteOrder, Error, File,
     FileAccessProperties, FileBuilder, FileLocking, FloatingPointType, FormatError, LibVer,
     RepackOptions, VariableLengthType,
 };
-use hdf5_sys::h5a;
-use hdf5_sys::h5d;
-use hdf5_sys::h5i::hid_t;
-use hdf5_sys::h5p::H5P_DEFAULT;
-use hdf5_sys::h5s::{self, H5S_ALL};
-use hdf5_sys::h5t::{self, H5T_class_t, hvl_t};
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::file::LibraryVersion;
+use libhdf5_sys::h5a;
+use libhdf5_sys::h5d;
+use libhdf5_sys::h5i::hid_t;
+use libhdf5_sys::h5p::H5P_DEFAULT;
+use libhdf5_sys::h5s::{self, H5S_ALL};
+use libhdf5_sys::h5t::{self, H5T_class_t, hvl_t};
 use rstest::rstest;
 
 use test_util::native_complex::Component;
@@ -89,7 +89,7 @@ fn native_complex_editing_applies_ceilings_to_native_datatypes(
         file.commit().unwrap();
     }
     file.close().unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let existing = file.dataset("existing").unwrap();
     assert_eq!(existing.dtype().unwrap(), stored);
     assert_eq!(existing.shape(), [1]);
@@ -165,7 +165,7 @@ fn native_complex_creation_applies_ceilings_to_native_datatypes(
         assert!(!destination.exists());
     } else {
         builder.write(&destination).unwrap();
-        let file = hdf5::File::open(&destination).unwrap();
+        let file = libhdf5::File::open(&destination).unwrap();
         let dataset = file.dataset("values").unwrap();
         assert_eq!(dataset.dtype().unwrap(), stored);
         assert_eq!(dataset.shape(), [1]);
@@ -219,7 +219,7 @@ fn native_complex_repack_applies_ceilings_to_native_datatypes(
         assert!(!destination.exists());
     } else {
         hdf5_pure::repack(&source, &destination, &options).unwrap();
-        let file = hdf5::File::open(&destination).unwrap();
+        let file = libhdf5::File::open(&destination).unwrap();
         let dataset = file.dataset("values").unwrap();
         assert_eq!(dataset.dtype().unwrap(), stored);
         assert_eq!(dataset.shape(), [1]);
@@ -265,7 +265,7 @@ fn native_complex_preserves_native_dataset_and_attribute_values(
             .shape(shape.count())
             .create("values")
             .unwrap();
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             // SAFETY: Live handles and the library lock cover both calls. The memory datatype and
             // each object's element count describe the four f64 components in `VALUES`, with no
             // pointer fields.
@@ -379,7 +379,7 @@ fn native_complex_preserves_native_sequence_values(
             len: 2,
             p: VALUES.as_ptr().cast_mut().cast(),
         };
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             assert_eq!(
                 // SAFETY: The live memory type describes one VL descriptor with two complex f64
                 // elements. Its pointer remains valid for the complete synchronous write.
@@ -403,7 +403,7 @@ fn native_complex_preserves_native_sequence_values(
                 .shape(1)
                 .create("values")
                 .unwrap();
-            hdf5::sync::sync(|| {
+            libhdf5::sync::sync(|| {
                 assert_eq!(
                     // SAFETY: The memory type describes one descriptor whose two complete values
                     // remain live, and the library lock covers the attribute write.
@@ -436,8 +436,8 @@ fn native_complex_preserves_native_sequence_values(
     builder.commit_datatype("complex", expected);
     builder.write(&type_file).unwrap();
     {
-        let file = hdf5::File::open(&type_file).unwrap();
-        hdf5::sync::sync(|| {
+        let file = libhdf5::File::open(&type_file).unwrap();
+        libhdf5::sync::sync(|| {
             // SAFETY: The file is live and the datatype name is NUL-terminated.
             let datatype =
                 owned_type(unsafe { h5t::H5Topen2(file.id(), c"complex".as_ptr(), H5P_DEFAULT) });
@@ -477,7 +477,7 @@ impl SequenceShape {
         } else {
             base
         };
-        let sequence = hdf5::sync::sync(|| {
+        let sequence = libhdf5::sync::sync(|| {
             // SAFETY: The base datatype remains live, and the library lock covers sequence creation.
             owned_type(unsafe { h5t::H5Tvlen_create(base.id()) })
         });
@@ -510,7 +510,7 @@ fn observe_sequence(
     memory: &NativeDatatype,
     attribute: bool,
 ) {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let dataset = file.dataset("values").unwrap();
     assert_eq!(dataset.dtype().unwrap(), *stored);
     let space = dataset.space().unwrap();
@@ -520,7 +520,7 @@ fn observe_sequence(
         len: 0,
         p: core::ptr::null_mut(),
     };
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The output holds one descriptor, matching the live memory type and dataset
             // extent. HDF5 allocates its two complete complex f64 elements.
@@ -626,7 +626,7 @@ impl FixedShape {
             Self::Compound => native_compound(&base),
             Self::MatlabCompound => {
                 let base = native_float(component);
-                hdf5::sync::sync(|| {
+                libhdf5::sync::sync(|| {
                     // SAFETY: The lock serializes access, and each member fits the new compound.
                     let id = unsafe { h5t::H5Tcreate(H5T_class_t::H5T_COMPOUND, 2 * base.size()) };
                     let datatype = owned_type(id);
@@ -674,7 +674,7 @@ fn observe_fixed(
     expected_data: [f64; 4],
     expected_attribute: [f64; 4],
 ) {
-    let file = hdf5::File::open(path).unwrap();
+    let file = libhdf5::File::open(path).unwrap();
     let dataset = file.dataset("values").unwrap();
     let attribute = dataset.attr("values").unwrap();
     assert_eq!(dataset.dtype().unwrap(), *expected_type);
@@ -693,7 +693,7 @@ fn observe_fixed(
             .unwrap(),
         core::mem::size_of_val(&attr)
     );
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The handles and lock cover both calls. Each output holds the four f64
         // components described by the memory datatype and the complete object extent.
         unsafe {
@@ -721,16 +721,16 @@ fn observe_fixed(
     file.close().unwrap();
 }
 
-fn element_count(space: &hdf5::Dataspace) -> usize {
-    hdf5::sync::sync(|| {
+fn element_count(space: &libhdf5::Dataspace) -> usize {
+    libhdf5::sync::sync(|| {
         // SAFETY: The dataspace remains live and the library lock covers the extent query.
         let count = unsafe { h5s::H5Sget_simple_extent_npoints(space.id()) };
         usize::try_from(count).unwrap()
     })
 }
 
-fn native_file(path: &Path) -> hdf5::File {
-    hdf5::File::with_options()
+fn native_file(path: &Path) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::latest(), LibraryVersion::latest())
         })
@@ -740,7 +740,7 @@ fn native_file(path: &Path) -> hdf5::File {
 
 fn native_complex(component: Component) -> NativeDatatype {
     let base = native_float(component);
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and `base` owns a live floating-point datatype.
         let id = unsafe { h5t::H5Tcomplex_create(base.id()) };
         let datatype = owned_type(id);
@@ -758,7 +758,7 @@ fn native_float(component: Component) -> NativeDatatype {
         Component::F32Be | Component::F32Le => NativeDatatype::from_type::<f32>().unwrap(),
         Component::F64Be | Component::F64Le => NativeDatatype::from_type::<f64>().unwrap(),
     };
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         let order = if component.big_endian() {
             h5t::H5T_order_t::H5T_ORDER_BE
         } else {
@@ -771,14 +771,14 @@ fn native_float(component: Component) -> NativeDatatype {
 }
 
 fn native_array(base: &NativeDatatype, count: u64) -> NativeDatatype {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The base handle is live, and `count` describes one positive dimension.
         owned_type(unsafe { h5t::H5Tarray_create2(base.id(), 1, &count) })
     })
 }
 
 fn native_compound(base: &NativeDatatype) -> NativeDatatype {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and the new compound has one complete base slot.
         let datatype =
             owned_type(unsafe { h5t::H5Tcreate(H5T_class_t::H5T_COMPOUND, base.size()) });
@@ -794,7 +794,7 @@ fn native_compound(base: &NativeDatatype) -> NativeDatatype {
 fn owned_type(id: hid_t) -> NativeDatatype {
     assert!(id >= 0, "libhdf5 failed to create a datatype");
     // SAFETY: Every caller transfers an owned datatype ID under the library lock.
-    unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
+    unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap()
 }
 
 fn pure_float(component: Component) -> FloatingPointType {

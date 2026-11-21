@@ -4,11 +4,11 @@ use core::num::NonZeroUsize;
 use std::fs;
 use std::path::Path;
 
-use hdf5::Extent;
-use hdf5::File;
-use hdf5::dataset::ChunkOpts;
-use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5_pure::DeflateLevel;
+use libhdf5::Extent;
+use libhdf5::File;
+use libhdf5::dataset::ChunkOpts;
+use libhdf5::plist::file_create::FileSpaceStrategy;
 
 use crate::file_space;
 use crate::numeric::ByteOrder;

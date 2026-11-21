@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Reference-C-library interop for the object header's *attribute count*.
 //!
 //! On a version 2 object header the C library does not count attribute messages
@@ -28,7 +28,7 @@ use hdf5_pure::{AttrValue, File, FileBuilder};
 /// libhdf5's declared attribute count for `obj`, and the names it finds by
 /// iterating. A file this crate writes correctly makes these agree; the defect
 /// this module guards is exactly their disagreement.
-fn declared_and_iterated(obj: &hdf5::Location) -> (usize, Vec<String>) {
+fn declared_and_iterated(obj: &libhdf5::Location) -> (usize, Vec<String>) {
     let declared = obj
         .loc_info()
         .expect("C library reads object info")
@@ -39,7 +39,7 @@ fn declared_and_iterated(obj: &hdf5::Location) -> (usize, Vec<String>) {
 }
 
 #[track_caller]
-fn assert_count_agrees(obj: &hdf5::Location, expected: &[&str]) {
+fn assert_count_agrees(obj: &libhdf5::Location, expected: &[&str]) {
     let (declared, iterated) = declared_and_iterated(obj);
     let mut expected: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
     expected.sort();
@@ -86,7 +86,7 @@ fn c_counts_a_single_compact_attribute_on_every_kind_of_object() {
     let path = dir.path().join("one.h5");
     write_compact_attrs(&path, 1);
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_count_agrees(&f, &["a0"]);
     assert_count_agrees(&f.dataset("values").unwrap(), &["a0"]);
     assert_count_agrees(&f.group("grp").unwrap(), &["a0"]);
@@ -105,7 +105,7 @@ fn c_counts_every_size_of_compact_attribute_set() {
         let names = attr_names(count);
         let expect: Vec<&str> = names.iter().map(String::as_str).collect();
 
-        let f = hdf5::File::open(&path).unwrap();
+        let f = libhdf5::File::open(&path).unwrap();
         assert_count_agrees(&f, &expect);
         assert_count_agrees(&f.dataset("values").unwrap(), &expect);
         assert_count_agrees(&f.group("grp").unwrap(), &expect);
@@ -124,7 +124,7 @@ fn c_counts_a_densely_stored_attribute_set() {
 
     let names = attr_names(count);
     let expect: Vec<&str> = names.iter().map(String::as_str).collect();
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_count_agrees(&f, &expect);
     assert_count_agrees(&f.dataset("values").unwrap(), &expect);
     assert_count_agrees(&f.group("grp").unwrap(), &expect);
@@ -155,7 +155,7 @@ fn c_counts_the_attributes_an_edit_session_added() {
         s.commit().unwrap();
     }
 
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     assert_count_agrees(&f, &["root_tag"]);
     assert_count_agrees(&f.dataset("d").unwrap(), &["MATLAB_class"]);
     assert_count_agrees(&f.group("g").unwrap(), &["tag"]);

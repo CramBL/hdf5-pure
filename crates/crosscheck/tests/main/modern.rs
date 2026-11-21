@@ -1,8 +1,8 @@
 //! Native conformance for compact and dense group fixtures.
 
-#![cfg(feature = "hdf5")]
-use hdf5::datatype::ByteOrder;
+#![cfg(feature = "libhdf5")]
 use hdf5_pure::DatatypeByteOrder;
+use libhdf5::datatype::ByteOrder;
 use rstest::rstest;
 use test_util::modern::Fixture;
 use test_util::temp;

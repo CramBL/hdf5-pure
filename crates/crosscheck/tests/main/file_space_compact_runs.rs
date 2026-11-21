@@ -1,13 +1,12 @@
 //! Native reuse of compact PAGE free runs after metadata edits.
 
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use core::slice;
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use hdf5_pure::AttrValue;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
@@ -18,6 +17,7 @@ use hdf5_pure::SyncPolicy;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{FormatWidths, FreeSpaceManagerHeader};
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use rstest::rstest;
 use test_util::snapshot::text::{Report, Value};
 use test_util_hdf5::file_space_oracle;
@@ -107,7 +107,7 @@ fn a_metadata_edit_preserves_native_multi_page_hole_reuse(#[case] memory: Memory
 }
 
 fn native_fixture(path: &Path) -> Range<u64> {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_latest())
         .with_fcpl(|properties| {
             properties
@@ -175,7 +175,7 @@ struct NativeAllocation {
 
 fn allocate_native(path: &Path, counter: i32) -> NativeAllocation {
     let initial_len = fs::metadata(path).unwrap().len();
-    let file = hdf5::File::open_rw(path).unwrap();
+    let file = libhdf5::File::open_rw(path).unwrap();
     assert!(file.free_space() >= REQUEST as u64);
     let dataset = file
         .new_dataset::<u8>()

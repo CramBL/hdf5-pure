@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! An attribute keeps the width it is stored at, in both directions across the
 //! reference C library (issues #350, #354 and #359).
 //!
@@ -21,8 +21,8 @@
 //! `H5Tset_size(N)` is the slot this crate had no way to write before issue
 //! #359, and the one it now has to read back without losing the N.
 
-use hdf5::types::{FixedAscii, FixedUnicode, FloatSize, IntSize, TypeDescriptor};
 use hdf5_pure::{AttrValue, File, FileBuilder};
+use libhdf5::types::{FixedAscii, FixedUnicode, FloatSize, IntSize, TypeDescriptor};
 use std::str::FromStr;
 
 /// One attribute per width: the name, the value this crate writes, and the type
@@ -159,7 +159,7 @@ fn c_reads_every_width_this_crate_writes() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     for (name, value, expected) in &cases {
         let attr = file.attr(name).unwrap();
         assert_eq!(
@@ -204,7 +204,7 @@ fn every_width_the_c_library_writes_reads_back_as_itself() {
     let path = dir.path().join("c_widths.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         macro_rules! c_attr {
             ($name:literal, $ty:ty, $scalar:expr, $array:expr) => {{
                 file.new_attr::<$ty>()
@@ -294,7 +294,7 @@ fn c_reads_the_string_width_this_crate_declared() {
     builder.create_dataset("x").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     for (name, expected) in [
         ("units", TypeDescriptor::FixedAscii(64)),
         ("plain", TypeDescriptor::FixedAscii(2)),
@@ -354,7 +354,7 @@ fn a_padded_slot_the_c_library_wrote_reads_back_carrying_its_width() {
     let path = dir.path().join("c_string_widths.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         file.new_attr::<FixedAscii<64>>()
             .shape(())
             .create("padded")

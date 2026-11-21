@@ -1,4 +1,4 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 //! Cross-checks malformed version 1 object-header message records.
 //!
 //! libhdf5 creates earliest-format files whose root groups use
@@ -13,10 +13,10 @@
 use std::fs;
 use std::path::Path;
 
-#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
-use hdf5::file::LibraryVersion;
-use hdf5::{File as NativeFile, MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, FormatError};
+#[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
+use libhdf5::file::LibraryVersion;
+use libhdf5::{File as NativeFile, MajorErrorCode, MinorErrorCode};
 use rstest::rstest;
 
 use test_util::bytes;
@@ -54,7 +54,7 @@ impl Malformation {
     fn assert_native_rejection(self, failure: NativeReadFailure) {
         let NativeReadFailure { stage, error } = failure;
         assert_eq!(stage, NativeReadStage::FileOpen, "{error:?}");
-        let version = hdf5::library_version();
+        let version = libhdf5::library_version();
         let (minor, description) = match self {
             Self::BodyOverrun { .. } if version >= (2, 2, 0) => {
                 (MinorErrorCode::BadValue, "message size exceeds buffer end")
@@ -120,7 +120,7 @@ impl Malformation {
 #[derive(Debug)]
 struct NativeReadFailure {
     stage: NativeReadStage,
-    error: hdf5::Error,
+    error: libhdf5::Error,
 }
 
 /// The operation that failed while reading the control dataset.
@@ -133,7 +133,7 @@ enum NativeReadStage {
 }
 
 /// The format-version bounds selected for a native read.
-#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+#[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
 #[derive(Clone, Copy, Debug)]
 enum Bounds {
     Default,
@@ -144,7 +144,7 @@ enum Bounds {
     V18,
 }
 
-#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+#[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
 impl Bounds {
     /// Reads the control dataset with the selected format-version bounds.
     ///
@@ -427,7 +427,7 @@ fn read_with_c(path: &Path) -> Result<Vec<i32>, NativeReadFailure> {
 /// # Errors
 ///
 /// Returns the failed operation's native error with its stage.
-#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+#[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
 fn read_with_c_libver(
     path: &Path,
     low: LibraryVersion,
@@ -481,7 +481,7 @@ fn read_with_pure(path: &Path, backend: ReadBackend) -> Result<Vec<i32>, Error> 
 #[case::buffered(ReadBackend::Buffered)]
 #[case::streaming(ReadBackend::Streaming)]
 fn a_v1_message_body_overrun_is_rejected_by_all_readers(#[case] backend: ReadBackend) {
-    hdf5::silence_errors(true);
+    libhdf5::silence_errors(true);
 
     let dir = tempfile::tempdir().unwrap();
     let valid_path = dir.path().join("valid.h5");
@@ -539,7 +539,7 @@ fn a_v1_message_body_overrun_is_rejected_by_all_readers(#[case] backend: ReadBac
 fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavior(
     #[case] backend: ReadBackend,
 ) {
-    hdf5::silence_errors(true);
+    libhdf5::silence_errors(true);
 
     let dir = tempfile::tempdir().unwrap();
     let valid_path = dir.path().join("valid.h5");
@@ -564,7 +564,7 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
     add_trailing_byte_to_root_continuation(&mut malformed);
     fs::write(&malformed_path, malformed).unwrap();
 
-    let version = hdf5::library_version();
+    let version = libhdf5::library_version();
     let c_result = read_with_c(&malformed_path);
 
     if version < (1, 14, 0) {
@@ -584,7 +584,7 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
         .assert_pure_rejection(read_with_pure(&malformed_path, backend).unwrap_err());
 }
 
-#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+#[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
 #[rstest]
 #[case::default(Bounds::Default)]
 #[case::v18(Bounds::V18)]
@@ -595,7 +595,7 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
 fn a_v1_continuation_partial_prefix_rejection_is_independent_of_libver_bounds(
     #[case] bounds: Bounds,
 ) {
-    hdf5::silence_errors(true);
+    libhdf5::silence_errors(true);
 
     let dir = tempfile::tempdir().unwrap();
     let valid_path = dir.path().join("valid.h5");
@@ -617,7 +617,7 @@ fn a_v1_continuation_partial_prefix_rejection_is_independent_of_libver_bounds(
 fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior(
     #[case] backend: ReadBackend,
 ) {
-    hdf5::silence_errors(true);
+    libhdf5::silence_errors(true);
 
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.h5");
@@ -668,7 +668,7 @@ fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior(
 
     fs::write(&malformed_path, &malformed).unwrap();
 
-    let version = hdf5::library_version();
+    let version = libhdf5::library_version();
     let c_result = read_with_c(&malformed_path);
 
     if version < (1, 10, 0) {
@@ -687,7 +687,7 @@ fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior(
         .assert_pure_rejection(read_with_pure(&malformed_path, backend).unwrap_err());
 }
 
-#[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
+#[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
 #[rstest]
 #[case::default(Bounds::Default)]
 #[case::v18(Bounds::V18)]
@@ -696,7 +696,7 @@ fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior(
 #[case::v114(Bounds::V114)]
 #[case::latest(Bounds::Latest)]
 fn a_v1_message_size_alignment_validation_is_independent_of_libver_bounds(#[case] bounds: Bounds) {
-    hdf5::silence_errors(true);
+    libhdf5::silence_errors(true);
 
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.h5");

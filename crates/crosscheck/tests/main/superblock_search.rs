@@ -1,9 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::file::LibraryVersion;
 use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::SuperblockVersion;
+use libhdf5::file::LibraryVersion;
 use rstest::rstest;
 
 use test_util::superblock;
@@ -31,7 +31,7 @@ fn every_reader_finds_the_superblock_after_a_userblock_libhdf5_wrote(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("userblock.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fcpl(|properties| properties.userblock(userblock).istore_k(indexed_storage_k))
             .with_fapl(|properties| properties.libver_bounds(low, high))
             .create(&path)

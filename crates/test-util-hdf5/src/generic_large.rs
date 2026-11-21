@@ -34,12 +34,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::H5Type;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::dataset::Layout as NativeLayout;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::datatype::ByteOrder as NativeByteOrder;
 use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
@@ -60,8 +54,14 @@ use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::AttributeMessage;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::H5Type;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::dataset::Layout as NativeLayout;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::datatype::ByteOrder as NativeByteOrder;
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use crate::numeric::ByteOrder as NumericOrder;
 use crate::storage;
 
@@ -239,7 +239,7 @@ pub fn assert_independent_spans(file: &File, image: &[u8]) {
 /// # Panics
 ///
 /// Panics if opening, reading, or close fails, or any observation differs from the edited fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_native_after_probe(path: &Path, order: NumericOrder) {
     let file = crate::file::libhdf5_open(path);
     assert_eq!(file.member_names().unwrap(), ["d"]);

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Interop tests for in-place appends through an owned handle: append to a
 //! filtered, unlimited,
 //! Extensible-Array-indexed dataset and confirm libhdf5

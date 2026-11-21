@@ -1,8 +1,8 @@
-#![cfg(feature = "hdf5")]
-use hdf5::dataset::Layout as CLayout;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::types::VarLenUnicode;
+#![cfg(feature = "libhdf5")]
 use hdf5_pure::AttrValue;
+use libhdf5::dataset::Layout as CLayout;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 use test_util_hdf5::global_heap as libhdf5_heap;
 use test_util_hdf5::global_heap::STRING_COUNT;
@@ -58,15 +58,15 @@ fn hdf5_pure_reads_the_strings_libhdf5_writes(
     );
 }
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[rstest]
 fn a_repack_preserves_the_sequences_libhdf5_writes(
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
     #[values(0, USERBLOCK)] userblock: u64,
 ) {
-    use hdf5::types::VarLenArray;
+    use libhdf5::types::VarLenArray;
 
-    #[derive(hdf5::H5Type, Clone, Debug, PartialEq)]
+    #[derive(libhdf5::H5Type, Clone, Debug, PartialEq)]
     #[repr(C)]
     struct Labelled {
         id: i32,
@@ -116,7 +116,7 @@ fn a_repack_preserves_the_sequences_libhdf5_writes(
 
     hdf5_pure::repack(&source, &repacked, &hdf5_pure::RepackOptions::new()).unwrap();
 
-    let file = hdf5::File::open(&repacked).unwrap();
+    let file = libhdf5::File::open(&repacked).unwrap();
     let read: Vec<Vec<i32>> = file
         .dataset("sequences")
         .unwrap()

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Creation-order preservation during in-place edits.
 //!
 //! Fixtures are created through libhdf5. Assertions compare creation indexes, counters, and
@@ -6,10 +6,10 @@
 
 use std::path::Path;
 
-use hdf5::file::LibraryVersion;
-use hdf5::{IndexType, IterationOrder, LinkInfo};
 use hdf5_pure::AttrValue;
 use hdf5_pure::File;
+use libhdf5::file::LibraryVersion;
+use libhdf5::{IndexType, IterationOrder, LinkInfo};
 
 use test_util_hdf5::creation_order::{self, Indexing};
 
@@ -17,7 +17,7 @@ use test_util_hdf5::creation_order::{self, Indexing};
 ///
 /// Creates one dataset per entry in `links`, in the supplied order.
 fn write_link_tracked(path: &Path, links: &[&str]) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
         .with_fcpl(|p| {
             p.attr_creation_order(Indexing::Yes.attr_order())
@@ -43,7 +43,7 @@ fn write_link_tracked(path: &Path, links: &[&str]) {
 /// The links of `group` in `path`, each with the info the C library reports for
 /// it, ordered by `index_type`.
 fn links_of(path: &Path, group: &str, index_type: IndexType) -> Vec<(String, LinkInfo)> {
-    let file = hdf5::File::open(path)
+    let file = libhdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
     file.group(group)
         .unwrap_or_else(|e| panic!("the C library opens /{group}: {e}"))
@@ -53,13 +53,13 @@ fn links_of(path: &Path, group: &str, index_type: IndexType) -> Vec<(String, Lin
 
 /// An open handle to `/g` or `/d`, whichever `path` names.
 struct Owner {
-    _file: hdf5::File,
-    location: hdf5::Location,
+    _file: libhdf5::File,
+    location: libhdf5::Location,
 }
 
 impl Owner {
     fn open(path: &Path, object: &str) -> Self {
-        let file = hdf5::File::open(path)
+        let file = libhdf5::File::open(path)
             .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
         let location = if object == "g" {
             (*file
@@ -135,7 +135,7 @@ fn links_in_creation_order_of(path: &Path, group: &str) -> (Vec<String>, i64) {
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    let file = hdf5::File::open(path)
+    let file = libhdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
     let info = file
         .group(group)
@@ -565,11 +565,11 @@ fn assert_tracked_group_addition(count: usize) {
             i64::try_from(index).unwrap()
         );
     }
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     let group = reference.group("g").unwrap();
     assert_eq!(
         group.info().unwrap().storage_type,
-        hdf5::GroupStorageType::Dense
+        libhdf5::GroupStorageType::Dense
     );
     assert_eq!(
         group.dataset("extra").unwrap().read_raw::<i32>().unwrap(),

@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Attributes in the standard variable-length string datatype (issue #383).
 //!
 //! `H5T_STRING` with `STRSIZE = H5T_VARIABLE` is what h5py, the reference C
@@ -13,11 +13,11 @@
 
 use std::collections::HashMap;
 
-use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5_pure::FixedPointType;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure::{AttrValue, File, FileBuilder};
+use libhdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 
 /// The four values under test, one per variant, keyed by the attribute name
 /// each is written under.
@@ -60,7 +60,7 @@ fn write_cases(path: &std::path::Path) {
 /// # Panics
 ///
 /// Panics if metadata or values cannot be read, or any observation differs from the expected cases.
-fn assert_c_reads_the_cases(object: &hdf5::Location, owner: &str) {
+fn assert_c_reads_the_cases(object: &libhdf5::Location, owner: &str) {
     let mut names = object.attr_names().unwrap();
     names.sort();
     assert_eq!(
@@ -151,7 +151,7 @@ fn the_c_library_reads_every_variant_as_a_variable_length_string() {
     let path = dir.path().join("vl.h5");
     write_cases(&path);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_c_reads_the_cases(&c, "root group");
     // A dataset's attributes travel a different sizing path than a group's, so
     // both are written and both are read.
@@ -180,7 +180,7 @@ fn libhdf5_reads_string_attributes_that_share_heap_collections() {
         4
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     for (owner, name, value) in &expected {
         let attr = match *owner {
             "/" => c.attr(name),
@@ -213,7 +213,7 @@ fn the_matlab_shape_keeps_its_own_datatype() {
     b.set_attr("standard", AttrValue::VarLenAsciiStringArray(words.clone()));
     b.write(&path).unwrap();
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.attr("standard")
             .unwrap()
@@ -279,7 +279,7 @@ fn an_empty_variable_length_string_round_trips() {
         ]))
     );
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.attr("empty")
             .unwrap()
@@ -320,7 +320,7 @@ fn an_edit_session_writes_the_standard_datatype() {
     );
     drop(f);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let d = c.dataset("d").unwrap();
     assert_eq!(
         d.attr("utf8_scalar")
@@ -377,7 +377,7 @@ fn a_dense_rebuild_keeps_the_standard_datatype() {
     );
     drop(f);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let d = c.dataset("d").unwrap();
     assert_eq!(
         d.attr("utf8_array")
@@ -423,7 +423,7 @@ fn repack_keeps_the_standard_datatype() {
     );
     drop(f);
 
-    let c = hdf5::File::open(&dst).unwrap();
+    let c = libhdf5::File::open(&dst).unwrap();
     assert_c_reads_the_cases(&c, "repacked root");
 }
 
@@ -503,7 +503,7 @@ fn a_committed_datatype_attribute_stages_its_heap() {
     );
     drop(f);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         c.attr("units")
             .unwrap()

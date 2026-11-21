@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! libhdf5 must agree about an enumeration this crate wrote over
 //! a base type other than `i32`/`u8` (issue #208).
 //!
@@ -12,12 +12,12 @@
 //! Every call here goes through the safe `hdf5-metno` API, which serializes its
 //! own C calls through an internal lock, so these tests need no extra guard.
 
-use hdf5::types::TypeDescriptor;
 use hdf5_pure::{EnumTypeBuilder, FileBuilder};
+use libhdf5::types::TypeDescriptor;
 
 /// Read the enumeration descriptor the C library recovers for dataset `name`.
-fn c_enum_descriptor(path: &std::path::Path, name: &str) -> hdf5::types::EnumType {
-    let file = hdf5::File::open(path).expect("the C library should open the file");
+fn c_enum_descriptor(path: &std::path::Path, name: &str) -> libhdf5::types::EnumType {
+    let file = libhdf5::File::open(path).expect("libhdf5 should open the file");
     let ds = file.dataset(name).expect("dataset should exist");
     match ds.dtype().unwrap().to_descriptor().unwrap() {
         TypeDescriptor::Enum(e) => e,
@@ -47,7 +47,7 @@ fn c_library_agrees_on_an_unsigned_16_bit_enum() {
     b.write(&path).unwrap();
 
     let e = c_enum_descriptor(&path, "e");
-    assert_eq!(e.size, hdf5::types::IntSize::U2, "H5Tget_super width");
+    assert_eq!(e.size, libhdf5::types::IntSize::U2, "H5Tget_super width");
     assert!(!e.signed, "an unsigned base must not read back as signed");
     let members: Vec<(String, u64)> = e
         .members
@@ -83,7 +83,7 @@ fn c_library_agrees_on_a_signed_16_bit_enum() {
     b.write(&path).unwrap();
 
     let e = c_enum_descriptor(&path, "e");
-    assert_eq!(e.size, hdf5::types::IntSize::U2);
+    assert_eq!(e.size, libhdf5::types::IntSize::U2);
     assert!(e.signed, "a signed base must read back as signed");
     // `EnumMember::value` is a `u64` holding the raw bit pattern, so a signed
     // member must be reinterpreted at the base type's width to compare.
@@ -118,7 +118,7 @@ fn c_library_agrees_on_a_64_bit_enum_built_from_raw_bytes() {
     b.write(&path).unwrap();
 
     let e = c_enum_descriptor(&path, "e");
-    assert_eq!(e.size, hdf5::types::IntSize::U8);
+    assert_eq!(e.size, libhdf5::types::IntSize::U8);
     assert!(!e.signed);
     assert_eq!(
         e.members.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),

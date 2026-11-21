@@ -1,7 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::Extent;
-use hdf5::dataset::ChunkOpts;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
@@ -10,6 +8,8 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::PartialEdgeFiltering;
+use libhdf5::Extent;
+use libhdf5::dataset::ChunkOpts;
 use rstest::rstest;
 use test_util_hdf5::file;
 
@@ -118,7 +118,7 @@ fn filtered_creation_matches_c_written_chunks_and_streaming_output(
         assert_eq!(dataset.read_raw::<i32>().unwrap(), values);
     }
     {
-        let c_file = hdf5::File::open(&pure_path).unwrap();
+        let c_file = libhdf5::File::open(&pure_path).unwrap();
         let dataset = c_file.dataset("d").unwrap();
         assert_eq!(dataset.shape(), dimensions);
         assert_eq!(dataset.chunk(), Some(chunks));

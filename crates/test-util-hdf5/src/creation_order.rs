@@ -1,21 +1,21 @@
 //! libhdf5 fixtures that track creation order.
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use std::ffi::CString;
 use std::path::Path;
 
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::GroupStorageType;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::IndexType;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::IterationOrder;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy;
-use hdf5::plist::group_create::{
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::GroupStorageType;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::IndexType;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::IterationOrder;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy;
+use libhdf5::plist::group_create::{
     AttrCreationOrder, GroupCreate, GroupCreateBuilder, LinkCreationOrder,
 };
-use hdf5::{File, Location};
+use libhdf5::{File, Location};
 
 /// Controls whether tracked creation order is also indexed.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -133,7 +133,7 @@ pub fn names(count: usize) -> Vec<String> {
 ///
 /// Panics if `path` is not valid UTF-8 or contains a null byte, an index does not fit in [`i32`],
 /// or libhdf5 cannot configure, create, write, or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_link_fixture(
     path: &Path,
     group_path: &str,
@@ -156,24 +156,28 @@ pub fn write_link_fixture(
             })
     });
     let properties = builder.fcpl().finish().unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         assert_eq!(
             // SAFETY: The library lock serializes access, and `properties` owns the live list.
             unsafe {
-                hdf5_sys::h5p::H5Pset_link_phase_change(properties.id(), thresholds.0, thresholds.1)
+                libhdf5_sys::h5p::H5Pset_link_phase_change(
+                    properties.id(),
+                    thresholds.0,
+                    thresholds.1,
+                )
             },
             0
         );
     });
     let access = builder.fapl().finish().unwrap();
     let filename = CString::new(path.to_str().unwrap()).unwrap();
-    let file = hdf5::sync::sync(|| {
+    let file = libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access, all input handles remain live, and `from_id`
         // takes ownership of the new file handle.
         unsafe {
-            hdf5::from_id::<File>(hdf5_sys::h5f::H5Fcreate(
+            libhdf5::from_id::<File>(libhdf5_sys::h5f::H5Fcreate(
                 filename.as_ptr(),
-                hdf5_sys::h5f::H5F_ACC_TRUNC,
+                libhdf5_sys::h5f::H5F_ACC_TRUNC,
                 properties.id(),
                 access.id(),
             ))
@@ -187,11 +191,11 @@ pub fn write_link_fixture(
             .link_creation_order(indexing.link_order())
             .finish()
             .unwrap();
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             assert_eq!(
                 // SAFETY: The lock serializes access, and `properties` owns the live list.
                 unsafe {
-                    hdf5_sys::h5p::H5Pset_link_phase_change(
+                    libhdf5_sys::h5p::H5Pset_link_phase_change(
                         properties.id(),
                         thresholds.0,
                         thresholds.1,
@@ -220,7 +224,7 @@ pub fn write_link_fixture(
 ///
 /// Panics in the cases documented by [`write_link_fixture`], or if libhdf5 cannot reopen the
 /// fixture, add its links, or close the file.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_link_relocation_fixture(path: &Path, group_path: &str, count: usize) {
     write_link_fixture(path, group_path, count, Indexing::Yes, (8, 6));
     let file = File::open_rw(path).unwrap();
@@ -243,7 +247,7 @@ pub fn write_link_relocation_fixture(path: &Path, group_path: &str, count: usize
 ///
 /// Panics if libhdf5 cannot read or close the fixture, an index does not fit in [`i32`], or a
 /// dataset value differs from the expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_link_dataset_values(path: &Path, group_path: &str, removed: usize, count: usize) {
     let reference = File::open(path).unwrap();
     let group = reference.group(group_path).unwrap();
@@ -266,7 +270,7 @@ pub fn assert_link_dataset_values(path: &Path, group_path: &str, removed: usize,
 /// # Panics
 ///
 /// Panics if libhdf5 cannot open the file, create the group, or close the file.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn add_reference_group(path: &Path, group_path: &str) {
     let reference = File::open_rw(path).unwrap();
     reference.create_group(group_path).unwrap();
@@ -281,7 +285,7 @@ pub fn add_reference_group(path: &Path, group_path: &str) {
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or a dataset value differs from the
 /// expected value.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_link_replacements(path: &Path) {
     let reference = File::open(path).unwrap();
     assert_eq!(
@@ -311,7 +315,7 @@ pub fn assert_link_replacements(path: &Path) {
 ///
 /// Panics if `path` is not valid UTF-8 or contains a null byte, or libhdf5 cannot create, write,
 /// or close the fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_link_ancestor_fixture(path: &Path, indexing: Indexing) {
     write_link_fixture(path, "/", 12, indexing, (8, 6));
     {
@@ -334,7 +338,7 @@ pub fn write_link_ancestor_fixture(path: &Path, indexing: Indexing) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot read or close the fixture, or an expected value differs.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_link_ancestor_dataset(path: &Path) {
     let reference = File::open(path).unwrap();
     let dataset = reference.dataset("child/link_0003").unwrap();
@@ -357,7 +361,7 @@ pub fn assert_link_ancestor_dataset(path: &Path) {
 ///
 /// Panics if libhdf5 cannot read or close the fixture, a creation index does not fit in its
 /// integer type, or the metadata differs from the expected metadata.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_link_group(
     path: &Path,
     group_path: &str,

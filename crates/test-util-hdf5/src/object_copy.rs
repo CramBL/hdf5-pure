@@ -3,18 +3,18 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-#[cfg(feature = "hdf5")]
-use hdf5::File as NativeFile;
-#[cfg(feature = "hdf5")]
-use hdf5::ObjectReference;
-#[cfg(feature = "hdf5")]
-use hdf5::ObjectReference1;
-#[cfg(feature = "hdf5")]
-use hdf5::ReferencedObject;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::OffsetWidth;
+#[cfg(feature = "libhdf5")]
+use libhdf5::File as NativeFile;
+#[cfg(feature = "libhdf5")]
+use libhdf5::ObjectReference;
+#[cfg(feature = "libhdf5")]
+use libhdf5::ObjectReference1;
+#[cfg(feature = "libhdf5")]
+use libhdf5::ReferencedObject;
 
 crate::hdf5_1_10_series_tests! {
     /// Returns eight bytes for legacy object-reference storage in HDF5 1.10 fixtures.
@@ -85,7 +85,7 @@ impl Origin {
 }
 
 /// The storage location of a native legacy object-reference fixture.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceSite {
     /// A root-group attribute named `reference`.
@@ -105,7 +105,7 @@ pub enum ReferenceSite {
 ///
 /// Panics if libhdf5 cannot create the reference, its dataset or attribute, or the extra
 /// attributes.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn write_legacy_reference(file: &NativeFile, site: ReferenceSite) {
     let reference = ObjectReference1::create(file, "target").unwrap();
     match site {
@@ -143,7 +143,7 @@ pub fn write_legacy_reference(file: &NativeFile, site: ReferenceSite) {
 ///
 /// Panics if a native read or reference resolution fails, the fixture holds a different number
 /// of references, the target is not a dataset, or its complete values differ from `[expected]`.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn assert_legacy_reference(path: &Path, site: ReferenceSite, expected: u32) {
     let file = crate::file::libhdf5_open(path);
     let references = match site {

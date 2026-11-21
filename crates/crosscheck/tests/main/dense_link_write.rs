@@ -1,13 +1,7 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::IndexType;
-use hdf5::IterationOrder;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
-use hdf5::plist::group_create::LinkCreationOrder;
 use hdf5_pure::CharacterSet;
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
@@ -38,6 +32,12 @@ use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::ObjectHeaderWriter;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
+use libhdf5::IndexType;
+use libhdf5::IterationOrder;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
+use libhdf5::plist::group_create::LinkCreationOrder;
 use rstest::rstest;
 
 #[rstest]
@@ -67,7 +67,7 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("planned.h5");
     let external = dir.path().join("external.h5");
-    let reference = hdf5::File::create(&external).unwrap();
+    let reference = libhdf5::File::create(&external).unwrap();
     reference
         .new_dataset::<i32>()
         .shape(1)
@@ -163,7 +163,7 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
     let at = usize::try_from(userblock).unwrap();
     bytes[at..at + encoded.len()].copy_from_slice(&encoded);
     std::fs::write(&path, bytes).unwrap();
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     let mut actual = reference.member_names().unwrap();
     let mut names = expected
         .iter()
@@ -421,7 +421,7 @@ fn libhdf5_reads_independently_placed_btree_nodes(
     let start = usize::try_from(userblock).unwrap();
     bytes[start..start + encoded.len()].copy_from_slice(&encoded);
     std::fs::write(&path, bytes).unwrap();
-    let reference = hdf5::File::open(&path).unwrap();
+    let reference = libhdf5::File::open(&path).unwrap();
     let mut expected = names;
     expected.push("payload".into());
     expected.sort();
@@ -468,8 +468,8 @@ fn fixture(
     addresses: Sizeof,
     lengths: Sizeof,
     userblock: u64,
-) -> hdf5::File {
-    hdf5::File::with_options()
+) -> libhdf5::File {
+    libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
         })

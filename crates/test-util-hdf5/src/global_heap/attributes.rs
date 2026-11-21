@@ -2,17 +2,17 @@
 
 use std::path::Path;
 
-use hdf5::Attribute;
-use hdf5::Location;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::file::LibraryVersion;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
-use hdf5::types::VarLenAscii;
+use libhdf5::Attribute;
+use libhdf5::Location;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::file::LibraryVersion;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
+use libhdf5::types::VarLenAscii;
 
 use crate::absence;
 use crate::file;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use crate::file_space::persisted::PersistedStrategy;
 
 /// Reads variable-length ASCII attribute elements into owned strings.
@@ -66,9 +66,9 @@ pub fn write(path: &Path, owner: Owner, storage: Storage) {
 /// # Panics
 ///
 /// Panics if a file operation fails.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_persisted(path: &Path, owner: Owner, storage: Storage, strategy: PersistedStrategy) {
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V110, LibraryVersion::latest()))
         .with_fcpl(|p| {
             p.file_space_strategy(NativeStrategy::FreeSpaceManager {
@@ -181,7 +181,7 @@ impl Owner {
         }
     }
 
-    fn location(self, file: &hdf5::File) -> Location {
+    fn location(self, file: &libhdf5::File) -> Location {
         match self {
             Self::Dataset => (**file.dataset("d").unwrap()).clone(),
             Self::Group => (*file.group("g").unwrap()).clone(),
@@ -235,7 +235,7 @@ pub enum Label<'a> {
 /// # Panics
 ///
 /// Panics if a file operation fails.
-fn write_contents(native: hdf5::File, owner: Owner, storage: Storage) {
+fn write_contents(native: libhdf5::File, owner: Owner, storage: Storage) {
     match owner {
         Owner::Dataset => {
             native

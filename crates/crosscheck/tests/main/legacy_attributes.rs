@@ -1,9 +1,9 @@
 //! Native conformance for legacy attribute and string fixtures.
 
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::datatype::ByteOrder;
 use hdf5_pure::DatatypeByteOrder;
+use libhdf5::datatype::ByteOrder;
 use rstest::rstest;
 use test_util::legacy_attributes::Fixture;
 use test_util::temp;

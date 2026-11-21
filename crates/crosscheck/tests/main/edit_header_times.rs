@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Native checks of version 2 timestamps and attribute thresholds across edits and repacking.
 //!
 //! Fixtures are created and inspected through libhdf5.
@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hdf5::plist::group_create::{AttrPhaseChange, GroupCreate, GroupCreateBuilder};
 use hdf5_pure::{AttrValue, File};
+use libhdf5::plist::group_create::{AttrPhaseChange, GroupCreate, GroupCreateBuilder};
 
 use test_util_hdf5::file;
 
@@ -45,7 +45,7 @@ fn write_fixture(path: &Path) {
         .shape([4])
         .create("d")
         .expect("create dataset");
-    let owners: [&hdf5::Location; 2] = [&group, &dataset];
+    let owners: [&libhdf5::Location; 2] = [&group, &dataset];
     for owner in owners {
         owner
             .new_attr::<i32>()
@@ -61,8 +61,8 @@ fn write_fixture(path: &Path) {
 }
 
 /// The object info the C library reports for `object` in `path`.
-fn object_info(path: &Path, object: &str) -> hdf5::LocationInfo {
-    hdf5::File::open(path)
+fn object_info(path: &Path, object: &str) -> libhdf5::LocationInfo {
+    libhdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()))
         .loc_info_by_name(object)
         .unwrap_or_else(|e| panic!("the C library reads info for {object}: {e}"))
@@ -71,7 +71,7 @@ fn object_info(path: &Path, object: &str) -> hdf5::LocationInfo {
 /// The attribute phase-change thresholds the C library reports for `object`'s
 /// creation property list.
 fn phase_change(path: &Path, object: &str) -> AttrPhaseChange {
-    let file = hdf5::File::open(path)
+    let file = libhdf5::File::open(path)
         .unwrap_or_else(|e| panic!("the C library opens {}: {e}", path.display()));
     if object == "/g" {
         file.group(object)
@@ -107,7 +107,7 @@ fn an_in_place_edit_keeps_a_headers_times_and_phase_change_thresholds() {
     let p = dir.path().join("t.h5");
     write_fixture(&p);
 
-    let before: Vec<hdf5::LocationInfo> = OBJECTS.iter().map(|o| object_info(&p, o)).collect();
+    let before: Vec<libhdf5::LocationInfo> = OBJECTS.iter().map(|o| object_info(&p, o)).collect();
     for (object, info) in OBJECTS.iter().zip(&before) {
         assert!(
             info.btime > 0,
@@ -229,7 +229,7 @@ fn attribute_lifecycles_preserve_timestamps_through_repack() {
         }
         {
             let pure = File::open(&destination).unwrap();
-            let native = hdf5::File::open(&destination).unwrap();
+            let native = libhdf5::File::open(&destination).unwrap();
             for object in OBJECTS {
                 let attributes = if object == "/g" {
                     pure.group(object).unwrap().attrs().unwrap()
@@ -245,7 +245,7 @@ fn attribute_lifecycles_preserve_timestamps_through_repack() {
                     }))
                     .collect();
                 assert_eq!(attributes, expected);
-                let location: hdf5::Location = if object == "/g" {
+                let location: libhdf5::Location = if object == "/g" {
                     native.group(object).unwrap().as_location().unwrap()
                 } else {
                     native.dataset(object).unwrap().as_location().unwrap()

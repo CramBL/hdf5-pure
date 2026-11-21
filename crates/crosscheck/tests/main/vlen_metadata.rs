@@ -1,13 +1,5 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::Datatype as CDatatype;
-use hdf5::file::LibraryVersion;
-use hdf5::types::FloatSize;
-use hdf5::types::IntSize;
-use hdf5::types::Reference;
-use hdf5::types::TypeDescriptor;
-use hdf5::types::VarLenAscii;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::CharacterSet;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
@@ -20,12 +12,20 @@ use hdf5_pure::LibVer;
 use hdf5_pure::StringPadding;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
-use hdf5_sys::h5p::H5P_DEFAULT;
-use hdf5_sys::h5t;
-use hdf5_sys::h5t::H5T_class_t;
-use hdf5_sys::h5t::H5T_order_t;
-use hdf5_sys::h5t::H5T_sign_t;
-use hdf5_sys::h5t::H5T_str_t;
+use libhdf5::Datatype as CDatatype;
+use libhdf5::file::LibraryVersion;
+use libhdf5::types::FloatSize;
+use libhdf5::types::IntSize;
+use libhdf5::types::Reference;
+use libhdf5::types::TypeDescriptor;
+use libhdf5::types::VarLenAscii;
+use libhdf5::types::VarLenUnicode;
+use libhdf5_sys::h5p::H5P_DEFAULT;
+use libhdf5_sys::h5t;
+use libhdf5_sys::h5t::H5T_class_t;
+use libhdf5_sys::h5t::H5T_order_t;
+use libhdf5_sys::h5t::H5T_sign_t;
+use libhdf5_sys::h5t::H5T_str_t;
 use rstest::rstest;
 use test_util_hdf5::numeric;
 
@@ -54,7 +54,7 @@ fn reads_c_variable_length_string_metadata(
     } else {
         H5T_order_t::H5T_ORDER_LE
     };
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock serializes access and `datatype` owns a live transient string type.
         // Both padding and byte order are defined values accepted by these setters.
         unsafe {
@@ -71,7 +71,7 @@ fn reads_c_variable_length_string_metadata(
         }
     });
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let dataset = file
             .new_dataset_builder()
             .empty_as(&datatype)
@@ -148,7 +148,7 @@ fn reports_variable_length_metadata_errors_through_the_public_api(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.h5");
     {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
             .create(&path)
             .unwrap();
@@ -187,7 +187,7 @@ fn reads_c_nested_variable_length_sequence_datatype() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         file.new_dataset_builder()
             .empty_as(TypeDescriptor::VarLenArray(Box::new(
                 TypeDescriptor::VarLenArray(Box::new(TypeDescriptor::Unsigned(IntSize::U4))),
@@ -232,12 +232,12 @@ fn reads_c_nested_variable_length_sequence_datatype() {
 fn preserves_c_variable_length_string_bases(#[case] descriptor: Option<TypeDescriptor>) {
     let base = match descriptor {
         Some(descriptor) => CDatatype::from_descriptor(&descriptor).unwrap(),
-        None => hdf5::sync::sync(|| {
+        None => libhdf5::sync::sync(|| {
             // SAFETY: The lock serializes access, and three bytes is a positive opaque size.
             let id = unsafe { h5t::H5Tcreate(H5T_class_t::H5T_OPAQUE, 3) };
             assert!(id >= 0);
             // SAFETY: The returned handle owns the newly created datatype ID.
-            unsafe { hdf5::from_id::<CDatatype>(id) }.unwrap()
+            unsafe { libhdf5::from_id::<CDatatype>(id) }.unwrap()
         }),
     };
     let datatype = numeric::variable_length_string(&base);
@@ -245,7 +245,7 @@ fn preserves_c_variable_length_string_bases(#[case] descriptor: Option<TypeDescr
     let source = dir.path().join("source.h5");
     let destination = dir.path().join("destination.h5");
     {
-        let file = hdf5::File::create(&source).unwrap();
+        let file = libhdf5::File::create(&source).unwrap();
         file.new_dataset_builder()
             .empty_as(&base)
             .shape(0)
@@ -272,13 +272,13 @@ fn preserves_c_variable_length_string_bases(#[case] descriptor: Option<TypeDescr
     builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     builder.commit_datatype("strings", actual);
     builder.write(&destination).unwrap();
-    let file = hdf5::File::open(&destination).unwrap();
-    hdf5::sync::sync(|| {
+    let file = libhdf5::File::open(&destination).unwrap();
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock and live file cover the call. The name is NUL-terminated.
         let id = unsafe { h5t::H5Topen2(file.id(), c"strings".as_ptr(), H5P_DEFAULT) };
         assert!(id >= 0);
         // SAFETY: The returned handle owns the newly opened datatype ID.
-        let written = unsafe { hdf5::from_id::<CDatatype>(id) }.unwrap();
+        let written = unsafe { libhdf5::from_id::<CDatatype>(id) }.unwrap();
         // SAFETY: Both handles remain live and the lock serializes access.
         assert_eq!(unsafe { h5t::H5Tequal(written.id(), datatype.id()) }, 1);
     });
@@ -300,7 +300,7 @@ fn preserves_c_variable_length_integer_string_bases(
     #[values(false, true)] big_endian: bool,
 ) {
     let datatype = CDatatype::from_descriptor(&TypeDescriptor::VarLenAscii).unwrap();
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The lock and live datatype cover the setters, whose values describe a valid integer parent.
         unsafe {
             assert_eq!(
@@ -336,7 +336,7 @@ fn preserves_c_variable_length_integer_string_bases(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strings.h5");
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         let dataset = file
             .new_dataset_builder()
             .empty_as(&datatype)

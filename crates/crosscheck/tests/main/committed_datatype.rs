@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Committed (`H5Tcommit`) datatypes, written by libhdf5 and read
 //! back by hdf5-pure (issue #254).
 //!
@@ -18,14 +18,6 @@
 
 use std::path::Path;
 
-#[cfg(target_endian = "little")]
-use hdf5::File as NativeFile;
-use hdf5::Location;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::attribute_create::CharEncoding;
-use hdf5::types::TypeDescriptor;
-use hdf5::types::VarLenUnicode;
-use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::CharacterSet;
 #[cfg(target_endian = "little")]
 use hdf5_pure::CompoundTypeBuilder;
@@ -38,6 +30,14 @@ use hdf5_pure::UserblockSize;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure::{AttrValue, Datatype, Error, File, FormatError, RepackOptions};
+#[cfg(target_endian = "little")]
+use libhdf5::File as NativeFile;
+use libhdf5::Location;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::attribute_create::CharEncoding;
+use libhdf5::types::TypeDescriptor;
+use libhdf5::types::VarLenUnicode;
+use libhdf5::{ObjectReference1, ReferencedObject};
 use rstest::rstest;
 
 use test_util_hdf5::assertion;
@@ -62,7 +62,7 @@ fn committed_i32() -> Datatype {
 
 /// Commit `dtype` in `loc` under `name`. Afterwards `dtype` itself is the
 /// committed type.
-fn commit_type(loc: &hdf5::Group, name: &str, dtype: &hdf5::Datatype) {
+fn commit_type(loc: &libhdf5::Group, name: &str, dtype: &libhdf5::Datatype) {
     loc.commit_datatype(name, dtype)
         .unwrap_or_else(|e| panic!("commit {name:?}: {e}"));
 }
@@ -70,9 +70,9 @@ fn commit_type(loc: &hdf5::Group, name: &str, dtype: &hdf5::Datatype) {
 /// Create `name` in `loc` with element type `dtype`, holding `values`. `chunk`
 /// makes it chunked and resizable. `None` is contiguous storage.
 fn write_i32_dataset(
-    loc: &hdf5::Group,
+    loc: &libhdf5::Group,
     name: &str,
-    dtype: &hdf5::Datatype,
+    dtype: &libhdf5::Datatype,
     chunk: Option<usize>,
     values: &[i32],
 ) {
@@ -80,7 +80,7 @@ fn write_i32_dataset(
     let dataset = match chunk {
         Some(size) => builder
             .chunk([size])
-            .shape(hdf5::SimpleExtents::resizable([values.len()]))
+            .shape(libhdf5::SimpleExtents::resizable([values.len()]))
             .create(name),
         None => builder.shape([values.len()]).create(name),
     }
@@ -125,8 +125,8 @@ fn write_committed_fixture(path: &Path, fixture: Fixture) {
 }
 
 /// The objects of [`write_committed_fixture`], in a file already created.
-fn fill_committed_fixture(file: &hdf5::File, fixture: Fixture) {
-    let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
+fn fill_committed_fixture(file: &libhdf5::File, fixture: Fixture) {
+    let dtype = libhdf5::Datatype::from_type::<i32>().expect("transient i32 type");
     commit_type(file, "mytype", &dtype);
 
     // An ordinary dataset to hang attributes on.
@@ -161,7 +161,12 @@ fn fill_committed_fixture(file: &hdf5::File, fixture: Fixture) {
 /// Create a one-element i32 attribute on `owner`. `committed` names the
 /// committed type when the attribute is to reference one. `None` uses a fresh
 /// transient copy, whose encoding the C library stores inline in the message.
-fn write_attr(owner: &hdf5::Location, name: &str, committed: Option<&hdf5::Datatype>, value: i32) {
+fn write_attr(
+    owner: &libhdf5::Location,
+    name: &str,
+    committed: Option<&libhdf5::Datatype>,
+    value: i32,
+) {
     let builder = match committed {
         // ASCII, because the wrapper's attribute builder defaults to UTF-8.
         // `H5A__set_version` in `H5Aint.c` of HDF5 2.2.0 encodes version 3
@@ -365,7 +370,7 @@ fn an_edit_passes_over_a_committed_attribute_it_does_not_touch() {
     // proves nothing on its own: one bad attribute makes libhdf5 abandon an
     // object's whole attribute list, which is exactly the damage a rewrite of a
     // committed reference does and exactly what a pure-Rust round trip cannot see.
-    let c_file = hdf5::File::open(&path).expect("C library must open the edited file");
+    let c_file = libhdf5::File::open(&path).expect("C library must open the edited file");
     let mut names = c_file.attr_names().expect("C library must list attributes");
     names.sort();
     assert_eq!(
@@ -445,7 +450,7 @@ fn an_in_place_append_refuses_a_committed_element_type() {
 /// this crate's in-place append engine maintains.
 fn write_appendable_committed_fixture(path: &Path) {
     let file = file::libhdf5_create_v18(path);
-    let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
+    let dtype = libhdf5::Datatype::from_type::<i32>().expect("transient i32 type");
     commit_type(&file, "mytype", &dtype);
     write_i32_dataset(&file, "typed", &dtype, Some(4), &DATASET_VALUES);
 }
@@ -482,7 +487,7 @@ fn the_streaming_backend_resolves_a_committed_datatype_too() {
 /// reference proves only that it agrees with itself, while the C library saying
 /// "committed" means the file really carries the shared-message encoding a named
 /// type is made of.
-fn dataset_type_is_committed(file: &hdf5::File, path: &str) -> bool {
+fn dataset_type_is_committed(file: &libhdf5::File, path: &str) -> bool {
     file.dataset(path)
         .unwrap_or_else(|e| panic!("open {path}: {e}"))
         .dtype()
@@ -493,8 +498,8 @@ fn dataset_type_is_committed(file: &hdf5::File, path: &str) -> bool {
 /// The same question for an attribute, which stores its reference in the
 /// attribute message rather than in a header message record — a separate encoding
 /// with a separate flag.
-fn attr_type_is_committed(file: &hdf5::File, owner: &str, attr: &str) -> bool {
-    let owner: hdf5::Location = if owner.is_empty() {
+fn attr_type_is_committed(file: &libhdf5::File, owner: &str, attr: &str) -> bool {
+    let owner: libhdf5::Location = if owner.is_empty() {
         (*file.group("/").expect("open root group")).clone()
     } else {
         (**file.dataset(owner).expect("open attribute owner")).clone()
@@ -529,7 +534,7 @@ fn repack_reproduces_a_committed_datatype() {
     // libhdf5's verdict on the output, taken before this crate's, because
     // it is the one that cannot be satisfied by agreeing with the writer.
     {
-        let file = hdf5::File::open(&dst).expect("C library opens the repacked file");
+        let file = libhdf5::File::open(&dst).expect("C library opens the repacked file");
         assert!(
             dataset_type_is_committed(&file, "typed"),
             "the repacked dataset must still name a committed type, not carry an inline copy"
@@ -577,7 +582,7 @@ fn repack_reproduces_a_committed_datatype_in_a_file_with_a_userblock() {
     let src = dir.path().join("committed.h5");
     let dst = dir.path().join("repacked.h5");
     fill_committed_fixture(
-        &hdf5::File::with_options()
+        &libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
             .with_fcpl(|p| p.userblock(USERBLOCK_SIZE))
             .create(&src)
@@ -587,7 +592,7 @@ fn repack_reproduces_a_committed_datatype_in_a_file_with_a_userblock() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let file = hdf5::File::open(&dst).unwrap();
+    let file = libhdf5::File::open(&dst).unwrap();
     assert!(dataset_type_is_committed(&file, "typed"));
     assert!(attr_type_is_committed(&file, "", "shared_attr"));
     assert!(attr_type_is_committed(&file, "data", "shared_attr"));
@@ -608,12 +613,16 @@ fn repack_keeps_committed_type_identity_when_names_decode_identically() {
     let source = directory.path().join("source.h5");
     let destination = directory.path().join("repacked.h5");
     write_committed_fixture(&source, EVERYTHING);
-    let native = hdf5::File::open_rw(&source).unwrap();
-    commit_type(&native, "x�", &hdf5::Datatype::from_type::<i32>().unwrap());
+    let native = libhdf5::File::open_rw(&source).unwrap();
+    commit_type(
+        &native,
+        "x�",
+        &libhdf5::Datatype::from_type::<i32>().unwrap(),
+    );
     test_util_hdf5::dense_links::rename_link_bytes(&native, b"mytype", b"x\xff");
     native.close().unwrap();
     hdf5_pure::repack(&source, &destination, &RepackOptions::new()).unwrap();
-    let native = hdf5::File::open(&destination).unwrap();
+    let native = libhdf5::File::open(&destination).unwrap();
     let dataset = native.dataset("typed").unwrap();
     let datatype = dataset.dtype().unwrap();
     assert!(datatype.is_committed());
@@ -678,7 +687,7 @@ fn users_of_one_committed_type_still_share_one_object() {
     // With one committed object in the file and the C library calling both users'
     // types committed, the two name that object: a committed type has nowhere
     // else to live.
-    let file = hdf5::File::open(&dst).unwrap();
+    let file = libhdf5::File::open(&dst).unwrap();
     assert!(dataset_type_is_committed(&file, "typed"));
     assert!(attr_type_is_committed(&file, "data", "shared_attr"));
     assert_eq!(
@@ -695,14 +704,14 @@ fn a_committed_string_attribute_stays_committed_across_a_repack(#[case] write: f
     let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
     write(&src);
     assert!(attr_type_is_committed(
-        &hdf5::File::open(&src).unwrap(),
+        &libhdf5::File::open(&src).unwrap(),
         "",
         "label"
     ));
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
-    let file = hdf5::File::open(&dst).unwrap();
+    let file = libhdf5::File::open(&dst).unwrap();
     assert!(attr_type_is_committed(&file, "", "label"));
     assert_eq!(
         file.attr("label")
@@ -744,7 +753,7 @@ fn a_committed_char_sequence_attribute_on_a_dataset_stays_committed_across_a_rep
         );
     builder.write(&src).unwrap();
     assert!(attr_type_is_committed(
-        &hdf5::File::open(&src).unwrap(),
+        &libhdf5::File::open(&src).unwrap(),
         "data",
         "names"
     ));
@@ -752,7 +761,7 @@ fn a_committed_char_sequence_attribute_on_a_dataset_stays_committed_across_a_rep
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     assert!(attr_type_is_committed(
-        &hdf5::File::open(&dst).unwrap(),
+        &libhdf5::File::open(&dst).unwrap(),
         "data",
         "names"
     ));
@@ -773,8 +782,8 @@ fn a_committed_char_sequence_attribute_on_a_dataset_stays_committed_across_a_rep
 /// Writes, through the C library, a root attribute `label` that holds "m/s" and whose datatype is
 /// the variable-length UTF-8 string type committed at `/strtype`.
 fn write_c_committed_string_fixture(path: &Path) {
-    let file = hdf5::File::create(path).unwrap();
-    let dtype = hdf5::Datatype::from_descriptor(&TypeDescriptor::VarLenUnicode).unwrap();
+    let file = libhdf5::File::create(path).unwrap();
+    let dtype = libhdf5::Datatype::from_descriptor(&TypeDescriptor::VarLenUnicode).unwrap();
     file.commit_datatype("strtype", &dtype).unwrap();
     let value: VarLenUnicode = "m/s".parse().unwrap();
     file.new_attr_builder()
@@ -834,7 +843,7 @@ fn repack_refuses_dropping_a_committed_type_still_in_use(
             assert!(out.root().named_datatypes().unwrap().is_empty());
             assert_eq!(out.dataset("data").unwrap().read_f64().unwrap(), [1.0]);
             out.close().unwrap();
-            let native = hdf5::File::open(&dst).unwrap();
+            let native = libhdf5::File::open(&dst).unwrap();
             assert_eq!(
                 native.dataset("data").unwrap().read_raw::<f64>().unwrap(),
                 [1.0]
@@ -870,7 +879,7 @@ fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
         .set_attr_committed("shared_attr", AttrValue::I32(ATTR_VALUE), "mytype");
     builder.write(&path).expect("write a committed datatype");
 
-    let file = hdf5::File::open(&path).expect("C library opens the file");
+    let file = libhdf5::File::open(&path).expect("C library opens the file");
     assert!(
         dataset_type_is_committed(&file, "typed"),
         "the dataset's element type must be a named type, not an inline copy"
@@ -906,14 +915,14 @@ fn a_committed_datatype_this_crate_writes_reads_back_as_committed() {
 fn a_version_1_header_reports_the_reference_count_the_c_library_wrote() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed_v1.h5");
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
         .create(&path)
         .expect("create a file with version 1 object headers");
     fill_committed_fixture(&file, EVERYTHING);
     file.close().unwrap();
 
-    let c_count = hdf5::File::open(&path)
+    let c_count = libhdf5::File::open(&path)
         .unwrap()
         .loc_info_by_name("mytype")
         .unwrap()
@@ -1052,7 +1061,7 @@ fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
 
     {
         let file = file::libhdf5_create_v18(&src);
-        let dtype = hdf5::Datatype::from_type::<i32>().expect("transient i32 type");
+        let dtype = libhdf5::Datatype::from_type::<i32>().expect("transient i32 type");
         let group = file.create_group("types").expect("create /types");
         commit_type(&group, "mytype", &dtype);
         write_i32_dataset(&file, "typed", &dtype, None, &DATASET_VALUES);
@@ -1082,7 +1091,7 @@ fn an_object_reference_to_a_committed_type_survives_a_repack() {
 
     // Add a reference dataset pointing at `/mytype`, through the safe API.
     {
-        let file = hdf5::File::open_rw(&src).expect("reopen fixture");
+        let file = libhdf5::File::open_rw(&src).expect("reopen fixture");
         let reference: ObjectReference1 = file
             .reference("mytype")
             .expect("reference the committed type");
@@ -1096,7 +1105,7 @@ fn an_object_reference_to_a_committed_type_survives_a_repack() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).expect("repack a reference to a type");
 
-    let file = hdf5::File::open(&dst).expect("C library opens the output");
+    let file = libhdf5::File::open(&dst).expect("C library opens the output");
     let refs = file
         .dataset("refs")
         .unwrap()
@@ -1179,11 +1188,11 @@ fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
     // A group as well, so all three of the C library's object classes are
     // present: a check written as "is not a dataset" would let this one through.
     {
-        let file = hdf5::File::open_rw(&path).expect("reopen fixture");
+        let file = libhdf5::File::open_rw(&path).expect("reopen fixture");
         file.create_group("g").expect("create /g");
     }
 
-    let c_file = hdf5::File::open(&path).expect("the C library opens the fixture");
+    let c_file = libhdf5::File::open(&path).expect("libhdf5 opens the fixture");
     let names = c_file.member_names().expect("root members");
     let ours = File::open(&path).expect("hdf5-pure opens the fixture");
     let root = ours.root();
@@ -1193,7 +1202,7 @@ fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
         let c_says = c_file.loc_type_by_name(name).expect("C library classifies");
         kinds.push(c_says);
         let got = root.named_datatype(name);
-        if c_says == hdf5::LocationType::NamedDatatype {
+        if c_says == libhdf5::LocationType::NamedDatatype {
             named.push(name.clone());
             assert_eq!(
                 got.expect("a committed type must read"),
@@ -1218,9 +1227,9 @@ fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
     // distinguishes: a check written as "is not a dataset" passes a file with no
     // group in it. And the listing has to agree with the per-name answers above.
     for kind in [
-        hdf5::LocationType::Dataset,
-        hdf5::LocationType::Group,
-        hdf5::LocationType::NamedDatatype,
+        libhdf5::LocationType::Dataset,
+        libhdf5::LocationType::Group,
+        libhdf5::LocationType::NamedDatatype,
     ] {
         assert!(kinds.contains(&kind), "the fixture holds no {kind:?}");
     }
@@ -1303,7 +1312,7 @@ fn dense_attributes_resolve_committed_and_global_heap_references_through_relocat
         }
     }
     {
-        let c = hdf5::File::open(&path).unwrap();
+        let c = libhdf5::File::open(&path).unwrap();
         let group = c.group("g").unwrap();
         let dataset = c.dataset("d").unwrap();
         let locations: [&Location; 3] = [&c, &group, &dataset];
@@ -1340,7 +1349,7 @@ fn dense_attributes_resolve_committed_and_global_heap_references_through_relocat
         session.copy("g", "copied").unwrap();
         session.commit().unwrap();
     }
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let group = c.group("g").unwrap();
     let copied = c.group("copied").unwrap();
     let dataset = c.dataset("d").unwrap();
@@ -1393,7 +1402,7 @@ fn nested_committed_datatypes_preserve_metadata_through_repack(
     let expected_data: Vec<_> = (1i32..=10).flat_map(i32::to_le_bytes).collect();
     if native_writer {
         let native = file::libhdf5_create_v18(&source_path);
-        let dtype = hdf5::Datatype::from_type::<NestedRecord>().unwrap();
+        let dtype = libhdf5::Datatype::from_type::<NestedRecord>().unwrap();
         native.commit_datatype("record", &dtype).unwrap();
         native
             .new_dataset_builder()
@@ -1461,8 +1470,8 @@ fn nested_committed_datatypes_preserve_metadata_through_repack(
     }
     output.close().unwrap();
     for path in [&source_path, &output_path] {
-        let native = hdf5::File::open(path).unwrap();
-        let expected_type = hdf5::Datatype::from_type::<NestedRecord>()
+        let native = libhdf5::File::open(path).unwrap();
+        let expected_type = libhdf5::Datatype::from_type::<NestedRecord>()
             .unwrap()
             .to_descriptor()
             .unwrap();
@@ -1512,7 +1521,7 @@ fn nested_committed_datatype_mismatch_reports_the_dataset() {
     );
 }
 
-#[derive(hdf5::H5Type, Clone, Copy, Debug, PartialEq)]
+#[derive(libhdf5::H5Type, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[cfg(target_endian = "little")]
 struct NestedRecord {

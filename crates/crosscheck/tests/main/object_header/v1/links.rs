@@ -1,18 +1,18 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! A group that tracks link creation order, as libhdf5 writes it with the earliest library version
 //! as the low bound: a version 1 object header with the group's Link Info and Group Info messages,
 //! and its Link messages where the links are compact.
 
 use std::path::Path;
 
-use hdf5::GroupStorageType;
-use hdf5::IndexType;
-use hdf5::IterationOrder;
-use hdf5::plist::group_create::LinkCreationOrder;
 use hdf5_pure::AttrValue;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
+use libhdf5::GroupStorageType;
+use libhdf5::IndexType;
+use libhdf5::IterationOrder;
+use libhdf5::plist::group_create::LinkCreationOrder;
 use rstest::rstest;
 use test_util::object_header::MessageType;
 use test_util::object_header::v1;
@@ -189,7 +189,7 @@ fn a_sibling_edit_preserves_the_link_messages_of_a_version_1_header(
     );
 }
 
-fn creation_orders(group: &hdf5::Group) -> Vec<(String, i64)> {
+fn creation_orders(group: &libhdf5::Group) -> Vec<(String, i64)> {
     group
         .links(IndexType::CreationOrder, IterationOrder::Increasing)
         .unwrap()

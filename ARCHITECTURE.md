@@ -77,8 +77,8 @@ inputs for parser and layout tests.
 
 `test-util-hdf5` depends on `test-util` and the implementation crates. It holds fixtures built through
 the facade and helpers for comparing the facade with reference libraries. The native dependencies
-are optional: `hdf5` enables libhdf5 support, and `__matio` enables libmatio support. Release capability
-features gate helpers that need newer HDF5 APIs.
+are optional. The `libhdf5` and `__matio` features enable their respective helpers.
+Release capability features gate helpers that need newer libhdf5 APIs.
 
 The facade's tests and `crates/crosscheck` both use these helper packages. Cargo feature unification
 can enable native helpers for facade unit tests in an interoperability run. The crosscheck package

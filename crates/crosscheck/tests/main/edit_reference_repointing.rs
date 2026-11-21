@@ -1,4 +1,4 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! libhdf5's view of a file whose stored object references this
 //! crate repointed across a commit (issue #324).
 //!
@@ -13,7 +13,7 @@ use hdf5_pure::File;
 
 use test_util_hdf5::{file, fixtures};
 
-fn assert_resolves_to_the_moved_group(group: &hdf5::Group) {
+fn assert_resolves_to_the_moved_group(group: &libhdf5::Group) {
     let mut names = group.member_names().unwrap();
     names.sort();
     assert_eq!(
@@ -25,7 +25,7 @@ fn assert_resolves_to_the_moved_group(group: &hdf5::Group) {
 
 #[test]
 fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attr_ref.h5");
@@ -55,7 +55,7 @@ fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
     // the object header's checksum: the repointed bytes live inside that header,
     // so a fixup that changed them without resealing fails here rather than in
     // the value.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let values = c
         .dataset("holder")
         .unwrap()
@@ -71,13 +71,13 @@ fn a_c_written_reference_attribute_is_repointed_and_the_header_resealed() {
 
 #[test]
 fn a_c_written_reference_dataset_is_repointed() {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ds_ref.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         fixtures::populate_libhdf5_reference_target(&file);
         file.new_dataset::<ObjectReference1>()
             .shape((1,))
@@ -90,7 +90,7 @@ fn a_c_written_reference_dataset_is_repointed() {
 
     fixtures::move_reference_target_and_churn(&path, 10);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let values = c
         .dataset("refs")
         .unwrap()
@@ -119,13 +119,13 @@ fn a_c_written_reference_dataset_is_repointed() {
 /// moved, which is to say on nothing at all.
 #[test]
 fn a_chunked_reference_dataset_is_left_unrepointed() {
-    use hdf5::{ObjectReference, ObjectReference1};
+    use libhdf5::{ObjectReference, ObjectReference1};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunked_ref.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         fixtures::populate_libhdf5_reference_target(&file);
         let reference = ObjectReference1::create(&file, "g").unwrap();
         file.new_dataset::<ObjectReference1>()
@@ -172,7 +172,7 @@ fn a_chunked_reference_dataset_is_left_unrepointed() {
          they must be left exactly as they were"
     );
     // And the file the commits produced is still one the C library will open.
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("chunked").unwrap().shape(), vec![4]);
 }
 
@@ -186,13 +186,13 @@ fn a_chunked_reference_dataset_is_left_unrepointed() {
 /// vacated address. Only a walk over the *committed* tree fixes the right one.
 #[test]
 fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_published() {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("root_attr_ref.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         fixtures::populate_libhdf5_reference_target(&file);
         file.new_attr::<ObjectReference1>()
             .shape((1,))
@@ -205,7 +205,7 @@ fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_publish
 
     fixtures::move_reference_target_and_churn(&path, 10);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let values = c
         .attr("target")
         .unwrap()
@@ -229,18 +229,18 @@ fn a_reference_on_a_rebuilt_header_is_repointed_in_the_header_the_commit_publish
 ///
 #[test]
 fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed_ref.h5");
 
     {
-        let file = hdf5::File::create(&path).unwrap();
+        let file = libhdf5::File::create(&path).unwrap();
         fixtures::populate_libhdf5_reference_target(&file);
         let reference = ObjectReference1::create(&file, "g").unwrap();
 
         // `H5T_STD_REF_OBJ` is one of the library's immutable predefined types,
         // which cannot be committed. The copy `from_type` hands back can.
-        let reftype = hdf5::Datatype::from_type::<ObjectReference1>().unwrap();
+        let reftype = libhdf5::Datatype::from_type::<ObjectReference1>().unwrap();
         file.commit_datatype("reftype", &reftype).unwrap();
         file.new_dataset_builder()
             .empty_as(&reftype)
@@ -254,7 +254,7 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
 
     fixtures::move_reference_target_and_churn(&path, 10);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let values = c
         .dataset("refs")
         .unwrap()
@@ -281,7 +281,7 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
 /// still left alone.
 #[test]
 fn an_earliest_format_reference_dataset_is_repointed() {
-    use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
+    use libhdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("earliest.h5");
@@ -309,7 +309,7 @@ fn an_earliest_format_reference_dataset_is_repointed() {
 
     fixtures::move_reference_target_and_churn(&path, 10);
 
-    let c = hdf5::File::open(&path).unwrap();
+    let c = libhdf5::File::open(&path).unwrap();
     let values = c
         .dataset("refs")
         .unwrap()

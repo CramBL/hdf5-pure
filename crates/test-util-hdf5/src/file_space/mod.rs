@@ -1,39 +1,39 @@
 //! Provides file-space fixture builders shared across edit and interoperability tests.
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use core::ffi::c_int;
 use std::ops::Range;
 use std::path::Path;
 
-#[cfg(feature = "hdf5")]
-use hdf5::Dataset as Hdf5Dataset;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::File as Hdf5File;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::FileBuilder as Hdf5FileBuilder;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::SyncPolicy;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+#[cfg(feature = "libhdf5")]
+use libhdf5::Dataset as Hdf5Dataset;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::File as Hdf5File;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::FileBuilder as Hdf5FileBuilder;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
 
 use crate::dataset::Unlimited;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use crate::file_space_oracle::OracleError;
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use self::persisted::PersistedStrategy;
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub mod admission;
 pub mod chunk_holes;
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub mod fragmentation;
 pub mod persisted;
 pub mod publication;
@@ -168,7 +168,7 @@ pub fn write_strategy_triplet(
 }
 
 /// Writes the same `a`, `b`, `c` strategy-reuse fixture with the C library.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn libhdf5_write_strategy_triplet(path: &Path, strategy: Hdf5FileSpaceStrategy) {
     let file = Hdf5FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
@@ -245,7 +245,7 @@ pub fn contiguous_extent(file: &File, path: &str) -> Range<u64> {
 }
 
 /// Returns the allocated byte range of a contiguous dataset opened by the C library.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn libhdf5_contiguous_extent(dataset: &Hdf5Dataset) -> Range<u64> {
     let address = dataset.offset().unwrap();
     address..address + dataset.storage_size()
@@ -262,9 +262,9 @@ pub fn libhdf5_contiguous_extent(dataset: &Hdf5Dataset) -> Range<u64> {
 /// Returns [`OracleError::C`] if a C call fails, [`OracleError::Allocation`] if the section
 /// buffer cannot be allocated, or [`OracleError::Enumeration`] if the two calls report different
 /// section counts.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn libhdf5_free_sections(file: &Hdf5File) -> Result<Vec<(u64, u64)>, OracleError> {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access and `file` keeps the file open. With a null
         // buffer and a count of zero the call writes nothing and returns the number of sections.
         let count =
@@ -301,7 +301,7 @@ pub fn libhdf5_free_sections(file: &Hdf5File) -> Result<Vec<(u64, u64)>, OracleE
 ///
 /// Panics if creating, writing, inspecting, or closing the file fails, the section list is empty,
 /// or its byte total differs from the native free-space total.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn write_native_persisted_sections(
     path: &Path,
     strategy: PersistedStrategy,
@@ -396,7 +396,7 @@ pub fn write_persisting_unlimited_i32(path: &Path, len: i32, chunk: u64, thresho
 
 // `H5F_sect_info_t` in `H5Fpublic.h`, HDF5 1.14.6: a `haddr_t` address and an `hsize_t` size,
 // both 64-bit.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct SectionInfo {
@@ -406,12 +406,12 @@ struct SectionInfo {
 
 // `H5FD_MEM_DEFAULT` of the `H5F_mem_t` enumeration in `H5Fpublic.h`, HDF5 1.14.6, which selects
 // the sections of every allocation type.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 const H5FD_MEM_DEFAULT: c_int = 0;
 
 // `H5Fget_free_sections` in `H5F.c`, HDF5 1.14.6, takes a 64-bit file ID, an `H5F_mem_t`
 // enumeration, a `size_t` count and a section buffer, and returns an `ssize_t`.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 unsafe extern "C" {
     fn H5Fget_free_sections(
         file_id: i64,

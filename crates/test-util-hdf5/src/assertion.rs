@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-#[cfg(feature = "hdf5")]
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, FormatError, SuperblockStatusFlag, SuperblockStatusFlags};
+#[cfg(feature = "libhdf5")]
+use libhdf5::{MajorErrorCode, MinorErrorCode};
 
 /// Asserts [`FormatError::PathNotFound`] with the complete expected path.
 ///
@@ -98,9 +98,9 @@ pub fn swmr_append_unsupported(error: Error, reason: &str) {
 ///
 /// Panics if `error` has no native error frame or its innermost frame differs from the
 /// expected error categories, function, or diagnostic.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 #[track_caller]
-pub fn native_file_marked_in_use(error: &hdf5::Error) {
+pub fn native_file_marked_in_use(error: &libhdf5::Error) {
     let Some(stack) = error.stack() else {
         panic!("expected a native HDF5 error stack, got {error:?}");
     };

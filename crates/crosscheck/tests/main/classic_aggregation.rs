@@ -1,11 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::ops::Range;
 use std::panic;
 use std::path::Path;
 
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AddressRange;
 use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
@@ -21,6 +19,8 @@ use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PhysicalAddress;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::types::VarLenUnicode;
 use rstest::rstest;
 
 use test_util_hdf5::aggregation;
@@ -56,7 +56,7 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
     assert_eq!(sections.free_sections().section_count() > 0, has_sections);
     drop(file);
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         let mut expected = file_space::libhdf5_free_sections(&file).unwrap();
         expected.sort_unstable();
         assert_eq!(sections.free_sections().section_count(), expected.len());
@@ -133,7 +133,7 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
         .collect::<Vec<_>>();
     storage::assert_unavailable(&file, &raw);
     file.close().unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         file.dataset("third").unwrap().read_raw::<i32>().unwrap(),
         [29; 16]
@@ -185,7 +185,7 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
         .with_maxshape(&[MaxExtent::Unlimited]);
     builder.write(&path).unwrap();
     {
-        let file = hdf5::File::open_rw(&path).unwrap();
+        let file = libhdf5::File::open_rw(&path).unwrap();
         assert_eq!(
             file.create_plist()
                 .unwrap()
@@ -230,7 +230,7 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
         assert_eq!(
             file.attr("huge")
                 .unwrap()
-                .read_scalar::<hdf5::types::FixedAscii<70_000>>()
+                .read_scalar::<libhdf5::types::FixedAscii<70_000>>()
                 .unwrap()
                 .as_str(),
             "h".repeat(70_000)
@@ -326,7 +326,7 @@ fn libhdf5_persists_no_free_space_manager_under_aggr() {
         (FileSpaceStrategy::Aggr, false, [].as_slice())
     );
     assert_eq!(file.persisted_free_sections().unwrap(), None);
-    let reopened = hdf5::File::open(&path).unwrap();
+    let reopened = libhdf5::File::open(&path).unwrap();
     assert_eq!(reopened.free_space(), 0);
     assert_eq!(file_space::libhdf5_free_sections(&reopened).unwrap(), []);
 }
@@ -354,7 +354,7 @@ fn libhdf5_reads_the_workload_hdf5_pure_writes(
     let path = dir.path().join("workload.h5");
     workload.write(&path, strategy, true);
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let mut members = file.member_names().unwrap();
     members.sort_unstable();
     let mut expected = workload
@@ -401,7 +401,7 @@ fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("staged.h5");
-    let seed = hdf5::FileBuilder::new()
+    let seed = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties
@@ -434,7 +434,7 @@ fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
         }
     }
     file.close().unwrap();
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(
         file.dataset("keep").unwrap().read_raw::<u8>().unwrap(),
         [17]
@@ -488,7 +488,7 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("immediate.h5");
-    let seed = hdf5::FileBuilder::new()
+    let seed = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| properties.file_space_strategy(strategy))
         .create(&path)
@@ -575,7 +575,7 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
         .append_raw(&[97, 98])
         .unwrap();
     file.close().unwrap();
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(
         file.dataset("first").unwrap().read_raw::<u8>().unwrap(),
         [17; 16]
@@ -614,7 +614,7 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("fsm_reuse.h5");
-    let seed = hdf5::FileBuilder::new()
+    let seed = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| properties.file_space_strategy(strategy))
         .create(&path)
@@ -732,7 +732,7 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
         .collect::<Vec<_>>();
     storage::assert_unavailable(&file, &raw);
     file.close().unwrap();
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     assert_eq!(
         file.dataset("replacement")
             .unwrap()
@@ -840,7 +840,7 @@ impl Placements<Vec<u64>> {
     /// Runs `workload` through the C library on a new file at `path` under `strategy`, with 1.10 as
     /// the low bound on the library version.
     fn observe(path: &Path, workload: Workload, strategy: CStrategy) -> Self {
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|fapl| fapl.libver_v110())
             .with_fcpl(|fcpl| fcpl.file_space_strategy(strategy))
             .create(path)
@@ -896,7 +896,7 @@ impl Placements<Vec<u64>> {
 }
 
 /// Creates `object` in the root group of `file`, and returns the dataset if `object` is one.
-fn create(file: &hdf5::File, object: Object) -> Option<hdf5::Dataset> {
+fn create(file: &libhdf5::File, object: Object) -> Option<libhdf5::Dataset> {
     match object {
         Object::Dataset(name, len) => {
             let dataset = file.new_dataset::<i32>().shape(len).create(name).unwrap();
@@ -929,7 +929,7 @@ fn create(file: &hdf5::File, object: Object) -> Option<hdf5::Dataset> {
 ///
 /// `H5Fget_freespace` counts these bytes together with the sections the free-space managers track
 /// (`H5MF_get_freespace` in `H5MF.c`, HDF5 2.2.0).
-fn aggregator_bytes(file: &hdf5::File) -> u64 {
+fn aggregator_bytes(file: &libhdf5::File) -> u64 {
     let tracked: u64 = file_space::libhdf5_free_sections(file)
         .unwrap()
         .iter()

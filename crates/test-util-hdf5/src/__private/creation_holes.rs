@@ -3,8 +3,8 @@
 use std::ops::Range;
 use std::path::Path;
 
-use hdf5::File as NativeFile;
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
+use libhdf5::File as NativeFile;
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 
 use crate::file;
 use crate::file_space;

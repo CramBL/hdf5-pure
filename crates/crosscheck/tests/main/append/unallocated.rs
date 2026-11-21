@@ -64,7 +64,7 @@ fn deferred_indexes_initialize_and_resume_through_both_libraries(
         (0..40).collect::<Vec<_>>()
     );
     pure.close().unwrap();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let target = native.dataset("d").unwrap();
     assert_eq!(
         target.read_raw::<i32>().unwrap(),
@@ -82,7 +82,7 @@ fn deferred_indexes_initialize_and_resume_through_both_libraries(
     target.append(&(44..47).collect::<Vec<i32>>()).unwrap();
     drop(target);
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let target = native.dataset("d").unwrap();
     assert_eq!(
         target.read_raw::<i32>().unwrap(),
@@ -199,7 +199,7 @@ fn deferred_indexes_preserve_storage_during_read_only_append_operations(
         sections
     );
     file_space_oracle::assert_persisted_sections(&path);
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let target = native.dataset("d").unwrap();
     assert_eq!(target.shape(), [0]);
     assert_eq!(target.num_chunks(), Some(0));
@@ -302,7 +302,7 @@ impl Fixture {
             ),
             Self::Pure(creation) => {
                 creation.write(path, filtered, paged, 1, true);
-                let native = hdf5::File::open(path).unwrap();
+                let native = libhdf5::File::open(path).unwrap();
                 let header = usize::try_from(c_object::header_address(&native, "d")).unwrap();
                 native.close().unwrap();
                 let bytes = fs::read(path).unwrap();
@@ -400,7 +400,7 @@ fn native_first_writes_initialize_pure_deferred_indexes(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native-first.h5");
     Fixture::Pure(creation).write(&path, filtered, paged);
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let target = native.dataset("d").unwrap();
     assert_eq!(target.shape(), [0]);
     assert_eq!(target.num_chunks(), Some(0));
@@ -416,7 +416,7 @@ fn native_first_writes_initialize_pure_deferred_indexes(
     target.append(&[3_i32, 4, 5]).unwrap();
     drop(target);
     file.close().unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let target = native.dataset("d").unwrap();
     assert_eq!(target.read_raw::<i32>().unwrap(), [0, 1, 2, 3, 4, 5]);
     drop(target);
@@ -457,7 +457,7 @@ fn unused_columns_have_no_index_allocations(
         eager.len(),
         original.len()
     );
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(native.member_names().unwrap().len(), count);
     for column in 0..count {
         let name = column_name(column);
@@ -482,7 +482,7 @@ fn unused_columns_have_no_index_allocations(
         test_util::bytes::signature_offsets(&initialized, extensible_array::INDEX_SIGNATURE).len(),
         1
     );
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     assert_eq!(
         native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
         [17, 19]

@@ -1,9 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5::Extents;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::File;
 use hdf5_pure_core::LengthWidth;
 use hdf5_pure_core::MaxExtent;
@@ -14,6 +10,10 @@ use hdf5_pure_format::__private::Dataspace;
 use hdf5_pure_format::__private::DataspaceType;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
+use libhdf5::Extents;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
 use rstest::rstest;
 use test_util::dataspace;
 use test_util_hdf5::__private::c_object;
@@ -33,7 +33,7 @@ fn dataspace_dimension_arrays_preserve_native_values_and_ranges(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("dimensions.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             if latest {
                 properties.libver_bounds(LibraryVersion::latest(), LibraryVersion::latest())

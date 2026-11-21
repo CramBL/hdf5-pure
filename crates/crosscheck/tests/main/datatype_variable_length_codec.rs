@@ -1,9 +1,5 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::Datatype as NativeDatatype;
-use hdf5::file::LibraryVersion;
-use hdf5::globals;
-use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::File;
 use hdf5_pure_core::{
     CharacterSet, Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType,
@@ -14,8 +10,12 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader, OffsetWidth,
 };
-use hdf5_sys::h5t;
-use hdf5_sys::h5t::{H5T_cset_t, H5T_str_t};
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::file::LibraryVersion;
+use libhdf5::globals;
+use libhdf5::plist::file_create::{Sizeof, SizeofInfo};
+use libhdf5_sys::h5t;
+use libhdf5_sys::h5t::{H5T_cset_t, H5T_str_t};
 use rstest::rstest;
 use test_util_hdf5::{lock, storage};
 
@@ -34,7 +34,7 @@ fn datatype_variable_length_codecs_preserve_native_file_metadata(
     let _guard = lock::libhdf5_guard();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("variable-length.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             let version = if latest {
                 LibraryVersion::latest()
@@ -130,7 +130,7 @@ enum Kind {
 
 impl Kind {
     fn native(self) -> NativeDatatype {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             let source = match self {
                 Self::Ascii | Self::Utf8 => *globals::H5T_C_S1,
                 Self::Float => *globals::H5T_IEEE_F64BE,
@@ -145,7 +145,7 @@ impl Kind {
             };
             assert!(id >= 0);
             // SAFETY: The creation call transfers a newly created datatype ID exactly once.
-            let datatype = unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap();
+            let datatype = unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap();
             match self {
                 Self::Ascii | Self::Utf8 => {
                     assert_eq!(
@@ -174,7 +174,7 @@ impl Kind {
                     let id = unsafe { h5t::H5Tvlen_create(datatype.id()) };
                     assert!(id >= 0);
                     // SAFETY: The creation call transfers a newly created datatype ID once.
-                    unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
+                    unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap()
                 }
                 _ => datatype,
             }

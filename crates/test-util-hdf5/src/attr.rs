@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-#[cfg(feature = "hdf5")]
-use hdf5::Location;
-#[cfg(feature = "hdf5")]
-use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
+#[cfg(feature = "libhdf5")]
+use libhdf5::Location;
+#[cfg(feature = "libhdf5")]
+use libhdf5::types::VarLenUnicode;
 
 /// Returns the strings in an array-of-strings attribute.
 ///
@@ -27,7 +27,7 @@ pub fn string_array(attrs: &HashMap<String, AttrValue>, name: &str) -> Vec<Strin
 /// # Panics
 ///
 /// Panics if a value contains a NUL byte or libhdf5 cannot create or write the attribute.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn write_unicode_array(location: &Location, name: &str, values: &[&str]) {
     let strings = values
         .iter()
@@ -47,7 +47,7 @@ pub fn write_unicode_array(location: &Location, name: &str, values: &[&str]) {
 /// # Panics
 ///
 /// Panics if libhdf5 cannot open or read the attribute as variable-length Unicode strings.
-#[cfg(feature = "hdf5")]
+#[cfg(feature = "libhdf5")]
 pub fn unicode_array(location: &Location, name: &str) -> Vec<String> {
     location
         .attr(name)

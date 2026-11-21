@@ -1,12 +1,12 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! SWMR append-writer tests: hdf5-pure appends in place to an unlimited
 //! Extensible-Array dataset, and the result is read back by hdf5-pure and by the
 //! reference C library. Appends cross the inline -> direct-block -> super-block
 //! boundaries so the in-place index growth is exercised.
 
-use hdf5::file::LibraryVersion;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder};
+use libhdf5::file::LibraryVersion;
 
 use test_util::bytes;
 use test_util::superblock;
@@ -162,7 +162,7 @@ fn rejects_and_preserves_non_latest_format_file() {
     let path = dir.path().join("legacy.h5");
     // Force the earliest format so the file gets a v0/v1 superblock.
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_fapl(|p| p.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
             .create(&path)
             .unwrap();
@@ -211,7 +211,7 @@ fn append_f64_pure_file() {
         let more: Vec<f64> = (5..400).map(|i| i as f64).collect();
         w.dataset("d").unwrap().append(&more).unwrap();
     }
-    let f = hdf5::File::open(&path).unwrap();
+    let f = libhdf5::File::open(&path).unwrap();
     let v = f.dataset("d").unwrap().read_raw::<f64>().unwrap();
     let expected: Vec<f64> = (0..400).map(|i| i as f64).collect();
     assert_eq!(v, expected);

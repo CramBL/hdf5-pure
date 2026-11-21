@@ -1,14 +1,7 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
 use std::ffi::CString;
 
-use hdf5::Datatype as NativeDatatype;
-use hdf5::file::LibraryVersion;
-use hdf5::globals;
-use hdf5::types::CompoundField;
-use hdf5::types::CompoundType;
-use hdf5::types::FloatSize;
-use hdf5::types::TypeDescriptor;
 use hdf5_pure::File;
 use hdf5_pure_core::__private;
 use hdf5_pure_core::Datatype;
@@ -18,9 +11,16 @@ use hdf5_pure_core::{
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{DatatypeMessage, DatatypeProperties, OffsetWidth};
-use hdf5_sys::h5i::hid_t;
-use hdf5_sys::h5t;
-use hdf5_sys::h5t::{H5T_class_t, H5T_cset_t, H5T_str_t};
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::file::LibraryVersion;
+use libhdf5::globals;
+use libhdf5::types::CompoundField;
+use libhdf5::types::CompoundType;
+use libhdf5::types::FloatSize;
+use libhdf5::types::TypeDescriptor;
+use libhdf5_sys::h5i::hid_t;
+use libhdf5_sys::h5t;
+use libhdf5_sys::h5t::{H5T_class_t, H5T_cset_t, H5T_str_t};
 use rstest::rstest;
 use test_util::datatype::leaf::Version;
 use test_util::datatype::{self, Class};
@@ -43,7 +43,7 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     let _guard = lock::libhdf5_guard();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("datatype.h5");
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             let version = if latest {
                 LibraryVersion::latest()
@@ -65,7 +65,7 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     drop(datatype);
     file.close().unwrap();
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     let datatype = dataset.dtype().unwrap();
     let encoded = encode(&datatype);
@@ -104,7 +104,7 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
         assert_eq!(canonical, expected);
         let mut wrapped = encoded[..NATIVE_PREFIX_LEN].to_vec();
         wrapped.extend(canonical);
-        let reference = hdf5::sync::sync(|| {
+        let reference = libhdf5::sync::sync(|| {
             // SAFETY: The asserted opaque frame has a complete header and terminated property.
             let id = unsafe { h5t::H5Tdecode1(wrapped.as_ptr().cast()) };
             owned(id)
@@ -116,7 +116,7 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     assert_eq!(&body[consumed..], vec![0; body.len() - consumed]);
     let mut wrapped = encoded[..NATIVE_PREFIX_LEN].to_vec();
     wrapped.extend(semantic_encoded);
-    let reference = hdf5::sync::sync(|| {
+    let reference = libhdf5::sync::sync(|| {
         // SAFETY: The frame matches the complete native description at its canonical version,
         // with a terminated property for opaque tags.
         owned(unsafe { h5t::H5Tdecode1(wrapped.as_ptr().cast()) })
@@ -159,7 +159,7 @@ fn ordinary_float_parser_reads_native_legacy_containers(
         })
     };
     let datatype = NativeDatatype::from_descriptor(&descriptor).unwrap();
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18)
         })
@@ -174,7 +174,7 @@ fn ordinary_float_parser_reads_native_legacy_containers(
     drop(dataset);
     drop(datatype);
     file.close().unwrap();
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     let datatype = dataset.dtype().unwrap();
     let encoded = encode(&datatype);
@@ -235,7 +235,7 @@ enum Leaf {
 
 impl Leaf {
     fn native(self) -> NativeDatatype {
-        hdf5::sync::sync(|| {
+        libhdf5::sync::sync(|| {
             let id = match self {
                 // SAFETY: Each predefined datatype ID is live, and copying transfers a new ID.
                 Self::Integer => unsafe { h5t::H5Tcopy(*globals::H5T_STD_I16BE) },
@@ -365,11 +365,11 @@ impl OpaqueTag {
 fn owned(id: hid_t) -> NativeDatatype {
     assert!(id >= 0);
     // SAFETY: Every caller transfers a newly created datatype ID exactly once.
-    unsafe { hdf5::from_id::<NativeDatatype>(id) }.unwrap()
+    unsafe { libhdf5::from_id::<NativeDatatype>(id) }.unwrap()
 }
 
 fn encode(datatype: &NativeDatatype) -> Vec<u8> {
-    hdf5::sync::sync(|| {
+    libhdf5::sync::sync(|| {
         let mut length = 0;
         assert_eq!(
             // SAFETY: The datatype is live. A null output requests the required byte count.

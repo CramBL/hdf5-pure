@@ -1,6 +1,6 @@
 //! Native reads of independent committed-datatype and hard-link layouts.
 
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use rstest::rstest;
 use test_util::identity::Fixture;

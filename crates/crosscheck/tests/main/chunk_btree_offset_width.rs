@@ -1,8 +1,8 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 use std::path::Path;
 
-use hdf5::plist::file_create::{Sizeof, SizeofInfo};
 use hdf5_pure::File;
+use libhdf5::plist::file_create::{Sizeof, SizeofInfo};
 use rstest::rstest;
 
 fn write_c_chunked_file(path: &Path, sizeof_addr: Sizeof, sizeof_size: Sizeof) {
@@ -10,7 +10,7 @@ fn write_c_chunked_file(path: &Path, sizeof_addr: Sizeof, sizeof_size: Sizeof) {
         sizeof_addr,
         sizeof_size,
     };
-    let f = hdf5::File::with_options()
+    let f = libhdf5::File::with_options()
         .with_create_plist(|p| p.sizes(sizes))
         .create(path)
         .unwrap();

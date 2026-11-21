@@ -47,9 +47,9 @@ def test_every_release_has_a_tag_and_a_digest(entry):
     [
         ("1.8", "1.8.23", ""),
         ("1.8.23", "1.8.23", ""),
-        ("1.14", "1.14.6", "__hdf5-1.14"),
-        ("2", "2.2.0", "__hdf5-2"),
-        ("2.2.0", "2.2.0", "__hdf5-2"),
+        ("1.14", "1.14.6", "__libhdf5-1.14"),
+        ("2", "2.2.0", "__libhdf5-2"),
+        ("2.2.0", "2.2.0", "__libhdf5-2"),
     ],
 )
 def test_a_series_or_its_release_names_the_release(name, version, feature):

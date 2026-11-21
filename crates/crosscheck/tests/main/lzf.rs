@@ -1,18 +1,18 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 //! Native LZF decoding, pipeline metadata, and incompressible rewrites.
 
 use std::fmt::Debug;
 use std::path::Path;
 use std::ptr;
 
-use hdf5::H5Type;
-use hdf5::filters::Filter as NativeFilter;
-use hdf5::filters::FilterInfo;
 use hdf5_pure::File;
 use hdf5_pure::FilterDisposition;
 use hdf5_pure::FilterId;
-use hdf5_sys::h5p;
-use hdf5_sys::h5z::H5Z_FLAG_OPTIONAL;
+use libhdf5::H5Type;
+use libhdf5::filters::Filter as NativeFilter;
+use libhdf5::filters::FilterInfo;
+use libhdf5_sys::h5p;
+use libhdf5_sys::h5z::H5Z_FLAG_OPTIONAL;
 use test_util::temp;
 use test_util_hdf5::dataset;
 use test_util_hdf5::dataset::Filter;
@@ -27,7 +27,7 @@ fn native_reader_observes_and_rewrites_fresh_pure_lzf_output() {
     std::fs::write(&path, fixture.pure_bytes()).unwrap();
     assert_native_values(&path, &fixture, fixture.noise());
     let rewritten = fixture.rewritten_noise();
-    let native = hdf5::File::open_rw(&path).unwrap();
+    let native = libhdf5::File::open_rw(&path).unwrap();
     let noise = native.dataset("incompressible_u8").unwrap();
     let chunks = noise.num_chunks().unwrap();
     assert_eq!(chunks, fixture.noise().len() / 1024);
@@ -44,7 +44,7 @@ fn native_reader_observes_and_rewrites_fresh_pure_lzf_output() {
 
     assert_native_values(&path, &fixture, &rewritten);
     let bytes = std::fs::read(&path).unwrap();
-    let native = hdf5::File::open(&path).unwrap();
+    let native = libhdf5::File::open(&path).unwrap();
     let noise = native.dataset("incompressible_u8").unwrap();
     assert_eq!(noise.num_chunks(), Some(chunks));
     for index in 0..chunks {
@@ -109,7 +109,7 @@ fn assert_lzf_available() {
 }
 
 fn assert_native_values(path: &Path, fixture: &lzf::Fixture, noise: &[u8]) {
-    let native = hdf5::File::open(path).unwrap();
+    let native = libhdf5::File::open(path).unwrap();
     let mut names = native.member_names().unwrap();
     names.sort();
     assert_eq!(
@@ -147,7 +147,7 @@ fn assert_native_values(path: &Path, fixture: &lzf::Fixture, noise: &[u8]) {
 }
 
 fn assert_native_dataset<T: H5Type + PartialEq + Debug>(
-    file: &hdf5::File,
+    file: &libhdf5::File,
     name: &str,
     expected: &[T],
     chunk: usize,
@@ -184,7 +184,7 @@ fn assert_native_dataset<T: H5Type + PartialEq + Debug>(
         let mut parameters = vec![0; expected_parameters.len()];
         let mut parameter_count = parameters.len();
         let index = u32::try_from(index).unwrap();
-        let id = hdf5::sync::sync(|| {
+        let id = libhdf5::sync::sync(|| {
             // SAFETY: The binding lock and live property list cover the call. The parameter
             // buffer holds `parameter_count` writable words. No name or configuration is requested.
             unsafe {

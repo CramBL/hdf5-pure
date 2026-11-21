@@ -3,19 +3,19 @@
 //! HDF5 1.10 and later run the equality assertions. Full paired snapshots use the
 //! bundled build. Manager metadata comparisons use fresh read-only C handles.
 
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::fs;
 use std::io::Write as _;
 use std::panic;
 use std::path::Path;
 
-use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
-use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::{File, FileBuilder, FileSpacePageSize, FileSpaceStrategy, UserblockSize};
-use hdf5_sys::h5f;
+use libhdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use libhdf5::{MajorErrorCode, MinorErrorCode};
+use libhdf5_sys::h5f;
 use rstest::rstest;
 use test_util_hdf5::file_space;
 use test_util_hdf5::file_space_oracle::{self, ExtentError, OracleError, SectionMap};
@@ -34,7 +34,7 @@ fn c_created_sections_have_supported_manager_attribution(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("c-attributed-sections.h5");
-    let file = hdf5::FileBuilder::new()
+    let file = libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties
@@ -96,7 +96,7 @@ fn c_created_files_without_datasets_preserve_persistence_configuration(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("c-empty-sections.h5");
-    hdf5::FileBuilder::new()
+    libhdf5::FileBuilder::new()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties
@@ -260,7 +260,7 @@ fn edits_by_both_libraries_preserve_matching_free_sections(
             FileSpaceStrategy::Aggr => CStrategy::PageAggregation,
             FileSpaceStrategy::None => CStrategy::None,
         };
-        let file = hdf5::FileBuilder::new()
+        let file = libhdf5::FileBuilder::new()
             .with_fapl(|p| p.libver_v110())
             .with_fcpl(|p| {
                 p.file_space_strategy(c_strategy)
@@ -339,7 +339,7 @@ fn edits_by_both_libraries_preserve_matching_free_sections(
             persist,
         );
     }
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     let dataset = file
         .new_dataset::<i32>()
         .shape([3000])
@@ -349,7 +349,7 @@ fn edits_by_both_libraries_preserve_matching_free_sections(
     drop(dataset);
     file.close().unwrap();
     append_checkpoint(&mut observations, &path, &case, "c-reuse", persist);
-    let file = hdf5::File::open_rw(&path).unwrap();
+    let file = libhdf5::File::open_rw(&path).unwrap();
     file.unlink("from_c").unwrap();
     file.close().unwrap();
     append_checkpoint(&mut observations, &path, &case, "c-delete", persist);
@@ -518,7 +518,7 @@ fn rejects_incomplete_enumeration(#[case] expected: usize, #[case] actual: isize
 
 #[test]
 fn rejects_c_api_error() {
-    let error = hdf5::sync::sync(|| {
+    let error = libhdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access. A null buffer and zero count write nothing.
         // The invalid identifier exercises the C API's argument error path.
         let count = unsafe {

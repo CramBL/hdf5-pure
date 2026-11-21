@@ -1,6 +1,6 @@
 //! Native content and free-space observations of an independent paged index.
 
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use test_util::temp;
 use test_util_hdf5::file_space_oracle;

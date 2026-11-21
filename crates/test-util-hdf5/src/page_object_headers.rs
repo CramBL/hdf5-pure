@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use hdf5::dataset::Layout;
-use hdf5::datatype::ByteOrder as NativeByteOrder;
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
+use libhdf5::dataset::Layout;
+use libhdf5::datatype::ByteOrder as NativeByteOrder;
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 
 use crate::numeric::ByteOrder;
 
@@ -46,7 +46,7 @@ pub fn assert_edited(
     padding: usize,
     observation: Observation,
 ) {
-    let native = hdf5::File::with_options()
+    let native = libhdf5::File::with_options()
         .with_fapl(|properties| {
             properties.page_buffer_size(usize::try_from(4 * page).unwrap(), 0, 0)
         })
@@ -195,7 +195,7 @@ pub fn write_native(
     persist: bool,
     padding: usize,
 ) {
-    let file = hdf5::File::with_options()
+    let file = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
             properties

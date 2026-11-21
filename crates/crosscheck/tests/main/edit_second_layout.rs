@@ -1,6 +1,6 @@
-#![cfg(feature = "__hdf5-1.10")]
-use hdf5::dataset::Layout as CLayout;
+#![cfg(feature = "__libhdf5-1.10")]
 use hdf5_pure::File;
+use libhdf5::dataset::Layout as CLayout;
 use rstest::rstest;
 use test_util::bytes;
 use test_util::data_layout;
@@ -69,7 +69,7 @@ fn libhdf5_reads_an_overwrite_through_the_first_layout(
         file.commit().unwrap();
     }
 
-    let file = hdf5::File::open(&path).unwrap();
+    let file = libhdf5::File::open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.layout(), layout);
     assert_eq!(dataset.read_raw::<u8>().unwrap(), NEW_VALUES);

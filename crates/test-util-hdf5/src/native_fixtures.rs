@@ -32,15 +32,6 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::Path;
 
-use hdf5::Dataset as NativeDataset;
-use hdf5::Datatype as NativeDatatype;
-use hdf5::FileBuilder as NativeFileBuilder;
-use hdf5::GroupStorageType;
-use hdf5::H5Type;
-use hdf5::SimpleExtents;
-use hdf5::dataset::Layout as NativeLayout;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Datatype;
@@ -50,6 +41,15 @@ use hdf5_pure::FileSpaceStrategy as PureStrategy;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::FloatingPointType;
 use hdf5_pure::Layout;
+use libhdf5::Dataset as NativeDataset;
+use libhdf5::Datatype as NativeDatatype;
+use libhdf5::FileBuilder as NativeFileBuilder;
+use libhdf5::GroupStorageType;
+use libhdf5::H5Type;
+use libhdf5::SimpleExtents;
+use libhdf5::dataset::Layout as NativeLayout;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy;
 
 use crate::numeric::ByteOrder as NumericOrder;
 

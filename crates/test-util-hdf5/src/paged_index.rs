@@ -16,17 +16,9 @@
 //! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use std::path::Path;
 
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::H5Type;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::dataset::Layout as NativeLayout;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::datatype::ByteOrder as NativeByteOrder;
-#[cfg(feature = "__hdf5-1.10")]
-use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
@@ -52,8 +44,16 @@ use hdf5_pure_format::__private::ExtensibleArrayDataBlock;
 use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::H5Type;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::dataset::Layout as NativeLayout;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::datatype::ByteOrder as NativeByteOrder;
+#[cfg(feature = "__libhdf5-1.10")]
+use libhdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 use crate::numeric::ByteOrder as NumericOrder;
 use crate::storage;
 
@@ -237,7 +237,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
 /// # Panics
 ///
 /// Panics if opening, reading, or close fails, or any observation differs from the edited fixture.
-#[cfg(feature = "__hdf5-1.10")]
+#[cfg(feature = "__libhdf5-1.10")]
 pub fn assert_native_after_edit(path: &Path, order: NumericOrder) {
     let file = crate::file::libhdf5_open(path);
     let mut names = file.member_names().unwrap();

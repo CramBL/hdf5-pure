@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use hdf5::File;
-use hdf5::FileBuilder;
-use hdf5::plist::file_create::FileSpaceStrategy;
+use libhdf5::File;
+use libhdf5::FileBuilder;
+use libhdf5::plist::file_create::FileSpaceStrategy;
 
 /// The file-space strategies rejected by the PAGE publication failure hook.
 #[derive(Clone, Copy, Debug)]

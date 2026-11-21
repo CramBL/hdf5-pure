@@ -1,9 +1,9 @@
 //! Native conformance for independent and repacked compressed chunks.
 
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::datatype::ByteOrder;
 use hdf5_pure::DatatypeByteOrder;
+use libhdf5::datatype::ByteOrder;
 use rstest::rstest;
 use test_util::temp;
 use test_util_hdf5::legacy_chunked;

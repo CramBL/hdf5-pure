@@ -1,12 +1,12 @@
-#![cfg(feature = "hdf5")]
+#![cfg(feature = "libhdf5")]
 
-use hdf5::plist::file_create::Sizeof;
-use hdf5::plist::file_create::SizeofInfo;
-use hdf5::types::VarLenArray;
-use hdf5::types::VarLenAscii;
 use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::RepackOptions;
+use libhdf5::plist::file_create::Sizeof;
+use libhdf5::plist::file_create::SizeofInfo;
+use libhdf5::types::VarLenArray;
+use libhdf5::types::VarLenAscii;
 use rstest::rstest;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -51,7 +51,7 @@ fn reads_native_variable_length_references_with_independent_widths(
     let path = dir.path().join("vlen.h5");
     let expected = ["alpha", "", "gamma", "delta"];
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_create_plist(|properties| {
                 properties.sizes(SizeofInfo {
                     sizeof_addr,
@@ -166,7 +166,7 @@ fn repack_preserves_eight_byte_output_widths_for_variable_length_sources(
         VarLenArray::from_slice(&[7u16]),
     ];
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_create_plist(|properties| {
                 properties.sizes(SizeofInfo {
                     sizeof_addr,
@@ -193,7 +193,7 @@ fn repack_preserves_eight_byte_output_widths_for_variable_length_sources(
     assert_eq!(pure.superblock().offset_size, OffsetWidth::Eight);
     assert_eq!(pure.superblock().length_size, LengthWidth::Eight);
     pure.close().unwrap();
-    let file = hdf5::File::open(&destination).unwrap();
+    let file = libhdf5::File::open(&destination).unwrap();
     assert_eq!(
         file.dataset("strings")
             .unwrap()
@@ -221,7 +221,7 @@ fn repack_rejects_embedded_variable_length_references_with_narrow_offsets(
     let source = dir.path().join("source.h5");
     let destination = dir.path().join("destination.h5");
     {
-        let file = hdf5::File::with_options()
+        let file = libhdf5::File::with_options()
             .with_create_plist(|properties| {
                 properties.sizes(SizeofInfo {
                     sizeof_addr,

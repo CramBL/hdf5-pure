@@ -1,10 +1,10 @@
-#![cfg(feature = "__hdf5-1.10")]
+#![cfg(feature = "__libhdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::GroupStorageType;
 use hdf5_pure::{Error, File, MessageType};
 use hdf5_pure_format::__private::{AccessMode, LinkInfoMessage, ObjectHeader};
+use libhdf5::GroupStorageType;
 use rstest::rstest;
 use test_util_hdf5::{file, user_defined_link};
 
@@ -16,7 +16,7 @@ use test_util_hdf5::{file, user_defined_link};
 #[case::version_2_dense_empty(file::libhdf5_create_v18, 2, true, b"")]
 #[case::version_2_dense_binary(file::libhdf5_create_v18, 2, true, b"\x00\xff\x80\x00")]
 fn root_dataset_creation_rejects_native_user_links_as_unsupported(
-    #[case] create: fn(&Path) -> hdf5::File,
+    #[case] create: fn(&Path) -> libhdf5::File,
     #[case] version: u8,
     #[case] dense: bool,
     #[case] value: &[u8],

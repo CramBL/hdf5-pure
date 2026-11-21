@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use hdf5::File;
-use hdf5::GroupStorageType;
-use hdf5::file::LibraryVersion;
-use hdf5::plist::file_create::FileSpaceStrategy;
-use hdf5::plist::group_create::LinkPhaseChange;
+use libhdf5::File;
+use libhdf5::GroupStorageType;
+use libhdf5::file::LibraryVersion;
+use libhdf5::plist::file_create::FileSpaceStrategy;
+use libhdf5::plist::group_create::LinkPhaseChange;
 
 use crate::creation_order::Indexing;
 use crate::dense_links;
