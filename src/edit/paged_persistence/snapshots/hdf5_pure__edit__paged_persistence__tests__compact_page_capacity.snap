@@ -2,11 +2,11 @@
 source: src/edit/paged_persistence/tests.rs
 expression: report.finish()
 ---
-projection
-  phase     managers  records  vector capacity  encoded bytes
-  --------  --------  -------  ---------------  -------------
-  admitted         2        2                2            234
-  reserved         2        2                2            234
+manager encoding
+  phase     managers  records  encoded bytes
+  --------  --------  -------  -------------
+  admitted         2        2            234
+  reserved         2        2            234
 
 capacity contributions
   Metric               records
