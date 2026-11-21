@@ -8,6 +8,7 @@ use core::num::NonZeroU32;
 use core::num::NonZeroU64;
 
 use hdf5_pure_core::__private::ElementCount;
+use hdf5_pure_core::__private::FileRange;
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
@@ -364,20 +365,27 @@ impl WriteEngine {
         slots: &ReferenceSlots,
         referenced: &mut impl HeapReferenceSink,
     ) -> Result<(), FormatError> {
-        let start = self.context.addresses().resolve(address)?.get();
+        let start = self.context.addresses().resolve(address)?;
         let element_size = NonZeroU64::from(slots.element_size);
         let batch_len = element_size.saturating_mul(ELEMENT_BATCH);
+        let source = self.image();
+        let mut scratch = Vec::new();
         for first in (0..len).step_by(batch_len.get().to_usize()?) {
-            let offset = start
-                .checked_add(first)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: start,
-                    length: first,
-                })?;
+            let offset = start.checked_add(first)?;
             let read_len = (len - first).min(batch_len.get());
-            let bytes = self.image().read_exact_at(offset, read_len.to_usize()?)?;
+            let range = FileRange::new(offset, read_len)?;
+            let available = source.len();
+            // Check the range before sizing scratch from the stored datatype and extent.
+            if range.end().get() > available {
+                return Err(FormatError::UnexpectedSourceEof {
+                    expected: range.end().get(),
+                    available,
+                });
+            }
+            scratch.resize(read_len.to_usize()?, 0);
+            source.read_at(offset.get(), &mut scratch)?;
             self.collect_element_collections(
-                &bytes,
+                &scratch,
                 ElementCount::new(read_len / element_size),
                 slots,
                 referenced,

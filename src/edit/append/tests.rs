@@ -49,7 +49,11 @@ fn finite_appends_reuse_the_ownership_proof_until_commit(
 
     let reads = Arc::new(Mutex::new(Vec::<FileRange>::new()));
     let file = File::from_test_edit_session(
-        edit_test_util::open_observed_engine(&path, Arc::clone(&reads)),
+        edit_test_util::open_observed_engine(
+            &path,
+            crate::EditBacking::Bounded,
+            Arc::clone(&reads),
+        ),
         FileAccessProperties::new(),
     )
     .unwrap();
