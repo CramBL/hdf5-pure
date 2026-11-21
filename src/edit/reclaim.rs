@@ -48,7 +48,10 @@ use super::GlobalHeapLiveness;
 use super::analysis::AnalysisPhase;
 use super::analysis::CompleteTopology;
 use super::copy::ObjModel;
-use super::{MAX_LINK_GRAPH_NODES, OhRegion, SpaceOwnership, WriteEngine};
+use super::{MAX_LINK_GRAPH_NODES, OhRegion, WriteEngine};
+
+#[cfg(test)]
+pub(super) mod test_util;
 
 /// The recognized object shape after collecting its supported storage.
 ///
@@ -92,24 +95,13 @@ impl ExclusiveChunkOwners {
 }
 
 impl WriteEngine {
-    /// Returns the byte ownership this editor can identify for a committed file.
-    ///
-    /// The editor visits each reachable object once, including objects with several hard
-    /// links or cycles. The identified storage includes the userblock, the superblock, its
-    /// extension, persisted free-space managers, reusable free extents, and the global heap
-    /// collections that reachable objects refer to. Unsupported storage or a traversal limit makes
-    /// the analysis incomplete, as does a [`GlobalHeapLiveness`] analysis that is incomplete.
+    /// Checks the storage extents before using a fresh PAGE boundary.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if supported reachable metadata, a variable-length element, or a
-    /// global heap collection that a reachable object refers to cannot be parsed. Returns
-    /// [`Error::MissingMessage`] if a dataset lacks its datatype or dataspace message. Returns
-    /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
-    /// Returns [`Error::InvalidSpaceOwnershipExtent`] if identified extents overlap or exceed
-    /// the logical end of file.
-    pub(crate) fn space_ownership(&self) -> Result<SpaceOwnership, Error> {
-        self.space_ownership_with_headers(None)
+    /// Propagates the metadata, geometry, and overlap errors of [`Self::checked_ownership`].
+    pub(super) fn check_space_ownership(&self) -> Result<(), Error> {
+        self.checked_ownership(None).map(|_| ())
     }
 
     /// Analyzes complete storage ownership and retains reachable object-header identities.
@@ -119,13 +111,12 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if analysis is incomplete. Propagates the metadata,
-    /// geometry, and overlap errors of [`Self::space_ownership`].
+    /// geometry, and overlap errors of [`Self::checked_ownership`].
     pub(super) fn exclusive_chunk_owners(&self) -> Result<ExclusiveChunkOwners, Error> {
         #[cfg(test)]
         super::observations::record_chunk_ownership_analysis();
         let mut headers = BTreeSet::new();
-        let ownership = self.space_ownership_with_headers(Some(&mut headers))?;
-        if !ownership.analysis_complete {
+        if !self.checked_ownership(Some(&mut headers))? {
             return Err(Error::AppendUnsupported(
                 "chunk storage ownership analysis is incomplete",
             ));
@@ -133,17 +124,25 @@ impl WriteEngine {
         Ok(ExclusiveChunkOwners { headers })
     }
 
-    /// Collects storage ownership and optionally records reachable header identities.
+    /// Checks the identified byte ownership of a committed file.
+    ///
+    /// The editor visits each reachable object once, including objects with several hard
+    /// links or cycles. The identified storage includes the userblock, the superblock, its
+    /// extension, persisted free-space managers, reusable free extents, and the global heap
+    /// collections that reachable objects refer to. Unsupported storage or a traversal limit makes
+    /// the analysis incomplete, as does a [`GlobalHeapLiveness`] analysis that is incomplete.
     ///
     /// When recording headers, collects global-heap references during the same object walk.
     ///
     /// # Errors
     ///
-    /// Returns the metadata, geometry, and overlap errors of [`Self::space_ownership`].
-    fn space_ownership_with_headers(
-        &self,
-        headers: Option<&mut BTreeSet<ObjectId>>,
-    ) -> Result<SpaceOwnership, Error> {
+    /// Returns [`Error::Format`] if supported reachable metadata, a variable-length element, or a
+    /// global heap collection that a reachable object refers to cannot be parsed. Returns
+    /// [`Error::MissingMessage`] if a dataset lacks its datatype or dataspace message. Returns
+    /// [`Error::InvalidFractalHeapStorage`] if a heap has inconsistent allocation geometry.
+    /// Returns [`Error::InvalidSpaceOwnershipExtent`] if identified extents overlap or exceed
+    /// the logical end of file.
+    fn checked_ownership(&self, headers: Option<&mut BTreeSet<ObjectId>>) -> Result<bool, Error> {
         let physical_size = self.image.len();
         let logical_size = self.context.superblock().eof_address;
         if logical_size > physical_size {
@@ -183,11 +182,9 @@ impl WriteEngine {
         for collection in referenced_collections {
             live_raw_space.push(self.collection_span(collection)?);
         }
-        let userblock_space: Vec<FileRange> = (self.context.signature().get() > 0)
+        let userblock_space = (self.context.signature().get() > 0)
             .then(|| FileRange::new(PhysicalAddress::new(0), self.context.signature().get()))
-            .transpose()?
-            .into_iter()
-            .collect();
+            .transpose()?;
 
         let superblock_len = u64::try_from(
             hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?.len(),
@@ -264,34 +261,7 @@ impl WriteEngine {
             }
             previous_end = range.end();
         }
-        let unclassified_space = complement_spans(logical_size, &claimed)?;
-        let trailing_slack_space = if physical_size > logical_size {
-            vec![FileRange::new(
-                PhysicalAddress::new(logical_size),
-                physical_size - logical_size,
-            )?]
-        } else {
-            Vec::new()
-        };
-        let report_extents = |ranges: Vec<FileRange>| {
-            ranges
-                .into_iter()
-                .map(|range| (range.start().get(), range.length()))
-                .collect()
-        };
-
-        Ok(SpaceOwnership {
-            physical_size,
-            logical_size,
-            userblock_space: report_extents(userblock_space),
-            live_raw_space: report_extents(live_raw_space),
-            live_metadata_space: report_extents(live_metadata_space),
-            free_space_manager_space: report_extents(free_space_manager_space),
-            reusable_free_space: report_extents(reusable_free_space),
-            unclassified_space: report_extents(unclassified_space),
-            analysis_complete,
-            trailing_slack_space: report_extents(trailing_slack_space),
-        })
+        Ok(analysis_complete)
     }
 
     /// Returns the complete physical range of the global heap collection at `address`.
@@ -1731,36 +1701,6 @@ fn huge_object_free_class(
     } else {
         FreeClass::Dead
     }
-}
-
-/// Returns the gaps in `0..limit` left by sorted, disjoint `claimed` spans.
-///
-/// The caller passes physical ranges contained in `0..limit`.
-///
-/// # Errors
-///
-/// Returns [`FormatError::Internal`] if a computed gap has reversed endpoints, or
-/// [`FormatError::OffsetOverflow`] if its exclusive end exceeds [`u64::MAX`].
-fn complement_spans(limit: u64, claimed: &[FileRange]) -> Result<Vec<FileRange>, FormatError> {
-    let mut out = Vec::new();
-    let mut cursor = PhysicalAddress::new(0);
-    for &range in claimed {
-        if cursor < range.start() {
-            let length = range.start().checked_distance_from(cursor).ok_or_else(|| {
-                FormatError::Internal("a claimed range precedes the gap cursor".into())
-            })?;
-            out.push(FileRange::new(cursor, length)?);
-        }
-        cursor = range.end();
-    }
-    let limit = PhysicalAddress::new(limit);
-    if cursor < limit {
-        let length = limit.checked_distance_from(cursor).ok_or_else(|| {
-            FormatError::Internal("the ownership limit precedes the gap cursor".into())
-        })?;
-        out.push(FileRange::new(cursor, length)?);
-    }
-    Ok(out)
 }
 
 /// Tags each span as metadata for reclamation.

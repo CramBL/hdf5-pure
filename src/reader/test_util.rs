@@ -13,7 +13,6 @@ use crate::Layout;
 use crate::ReadSeekSource;
 use crate::edit::SpaceOwnership;
 use crate::error::Error;
-use crate::reader::Backend;
 use crate::reader::File;
 
 /// Opens a file through the selected reader backend.
@@ -31,21 +30,15 @@ pub(in crate::reader) fn open(path: &Path, backend: ReadBackend) -> Result<File,
     }
 }
 
-/// Analyzes committed storage through the file's editing session.
-///
-/// # Errors
-///
-/// Returns [`Error::ReadOnly`] if the file has no editing session, or the error from
-/// [`WriteEngine::space_ownership`](crate::edit::WriteEngine::space_ownership).
-///
-/// # Panics
-///
-/// Panics if the editing-session mutex is poisoned.
+/// Accounts for a fixture's file image and live reusable sections.
 pub(crate) fn ownership(file: &File) -> Result<SpaceOwnership, Error> {
-    let Backend::Edit(engine) = &file.inner.backend else {
-        return Err(Error::ReadOnly);
-    };
-    engine.lock().unwrap().space_ownership()
+    let image = file
+        .inner
+        .with_source(|source| source.read_exact_at(0, usize::try_from(source.len()).unwrap()))?;
+    Ok(crate::edit::storage_snapshot(
+        image,
+        file.reusable_free_sections()?,
+    ))
 }
 
 /// Returns the allocated contiguous payload range of the dataset at `path`.

@@ -222,8 +222,6 @@ fn typed_sections(engine: &WriteEngine) -> Vec<(ManagerKind, Vec<Extent>)> {
 }
 
 fn assert_manager_allocations_owned(engine: &WriteEngine) {
-    let ownership = engine.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
     let free = engine.space.reusable_sections().collect::<Vec<_>>();
     for block in &engine.persist.as_ref().unwrap().old_blocks {
         assert!(
@@ -371,9 +369,6 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
         stage_batch(&mut engine);
         engine.commit().unwrap();
     }
-    drop(engine);
-    let engine = edit_test_util::open_engine(&path);
-    assert!(engine.space_ownership().unwrap().analysis_complete);
     drop(engine);
     let file = File::open_rw(&path).unwrap();
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 100]);

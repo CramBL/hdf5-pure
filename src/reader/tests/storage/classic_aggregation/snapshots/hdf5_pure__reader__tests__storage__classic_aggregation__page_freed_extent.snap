@@ -12,9 +12,9 @@ Operation
      1  Create dataset  "big"            400
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -45,9 +45,9 @@ Operation
      2  Create dataset  "next"            16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -81,9 +81,9 @@ Operation
      3  Delete link  "big"   -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -116,9 +116,9 @@ Operation
      4  Create dataset  "reuse"            16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length

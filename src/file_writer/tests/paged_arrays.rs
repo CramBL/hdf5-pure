@@ -172,7 +172,7 @@ fn assert_recovered_ownership(path: &Path, page: u64) {
     let free_bytes = report.free_sections().free_bytes();
     file.close().unwrap();
     let engine = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
-    let ownership = engine.space_ownership().unwrap();
+    let ownership = engine.storage_snapshot();
     ownership.assert_classified(&expected);
     assert_eq!(
         ownership

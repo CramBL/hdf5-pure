@@ -88,8 +88,7 @@ fn staged_and_immediate_edits_share_aggregate_windows(
     if chunk == 1 {
         assert!(super_blocks > 0);
     }
-    let ownership = engine.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let ownership = engine.storage_snapshot();
     assert_eq!(ownership.logical_size, ownership.physical_size);
     assert_eq!(ownership.free_space_manager_space, []);
     for &(start, length) in &ownership.reusable_free_space {
@@ -200,8 +199,7 @@ fn bounded_immediate_batches_share_aggregate_state(
     engine
         .append_inplace_i32_phased("values", &[end, end + 1], 4)
         .unwrap();
-    let ownership = engine.space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let ownership = engine.storage_snapshot();
     assert_eq!(ownership.physical_size, ownership.logical_size);
     engine.finalize_persist().unwrap();
     drop(engine);

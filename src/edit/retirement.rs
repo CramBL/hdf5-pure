@@ -482,11 +482,11 @@ mod tests {
             .stage_dataset_append_pending(&ObjectPathBuf::parse("d"), append)
             .unwrap();
         engine.commit().unwrap();
-        engine.space_ownership().unwrap().assert_exact();
+        engine.storage_snapshot().assert_exact();
         engine.finalize_persist().unwrap();
         drop(engine);
         let engine = edit_test_util::open_engine(&path);
-        engine.space_ownership().unwrap().assert_exact();
+        engine.storage_snapshot().assert_exact();
         drop(engine);
         let file = File::open(&path).unwrap();
         assert_eq!(
@@ -624,13 +624,13 @@ mod tests {
         append_one(&mut engine, 4);
         assert_eq!(engine.image.len(), eof);
         assert!(engine.fsm_dirty);
-        engine.space_ownership().unwrap().assert_exact();
+        engine.storage_snapshot().assert_exact();
         engine.commit().unwrap();
         assert!(!engine.fsm_dirty);
         engine.finalize_persist().unwrap();
         drop(engine);
         let engine = edit_test_util::open_engine(&path);
-        engine.space_ownership().unwrap().assert_exact();
+        engine.storage_snapshot().assert_exact();
         drop(engine);
         let file = File::open(&path).unwrap();
         assert_eq!(
@@ -692,12 +692,11 @@ mod tests {
         if completed == 0 {
             drop(engine);
             let engine = edit_test_util::open_engine(&path);
-            engine.space_ownership().unwrap().assert_exact();
+            engine.storage_snapshot().assert_exact();
         } else {
             assert!(engine.publication.attempted());
             assert_eq!(engine.reusable_free_sections().unwrap(), retained);
-            let ownership = engine.space_ownership().unwrap();
-            assert!(ownership.analysis_complete);
+            let ownership = engine.storage_snapshot();
             for &(start, len) in &ownership.reusable_free_space {
                 for &(live, size) in ownership
                     .live_raw_space

@@ -12,9 +12,9 @@ Operation
      1  Create group  "g0"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          4,096         4,096  complete
+  Physical size  Logical size
+  -------------  ------------
+          4,096         4,096
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -42,9 +42,9 @@ Operation
      2  Create dataset  "d0"              16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -77,9 +77,9 @@ Operation
      3  Create group  "g1"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -113,9 +113,9 @@ Operation
      4  Create dataset  "d1"              16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -152,9 +152,9 @@ Operation
      5  Create group  "g2"    -
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
@@ -192,9 +192,9 @@ Operation
      6  Create dataset  "d2"              16
 
 Allocation summary (bytes)
-  Physical size  Logical size  Analysis
-  -------------  ------------  --------
-          8,192         8,192  complete
+  Physical size  Logical size
+  -------------  ------------
+          8,192         8,192
 
 Allocation extents (bytes, exclusive end)
   Category             Start    End  Length
