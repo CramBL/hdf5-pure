@@ -2,6 +2,7 @@ use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_space::__private::{AllocationClass, PageType, ReservationRequest, SessionSpace};
 use rstest::rstest;
+use test_util::disk_log::{self, DiskOp};
 
 use crate::edit::WriteEngine;
 use crate::edit::block::{BlockRequest, EncodingDependency};
@@ -48,7 +49,7 @@ fn large_page_reservations_preserve_padding_and_buffering_limits(
         .unwrap();
     let start = engine.image.len();
     assert_eq!(start % page, 0);
-    let before = engine.image.buffering_work();
+    disk_log::start();
     let requests = [
         request(64, 16, PageType::Raw),
         request(48, 48, PageType::Meta),
@@ -85,59 +86,46 @@ fn large_page_reservations_preserve_padding_and_buffering_limits(
     assert_eq!(end, start + 2 * page + 80);
     assert_eq!(engine.space.paged_tail_type(), Some(Some(PageType::Raw)));
     assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
-    let pending = engine.image.buffering_work();
-    assert!(pending.pending_capacity >= pending.pending_bytes);
-    assert!(pending.pending_bytes <= budget as u64);
-    if ample && !matches!(buffering, Buffering::Unbuffered) {
-        assert_eq!(pending.pending_runs, 1);
-        assert_eq!(pending.pending_bytes, end - start);
-        assert_eq!(pending.copied_bytes - before.copied_bytes, end - start);
-        assert_eq!(pending.write_calls, before.write_calls);
-    }
+    let before_flush = disk_log::take();
+    disk_log::start();
     engine.image.flush().unwrap();
-    let after = engine.image.buffering_work();
-    assert_eq!(after.pending_bytes, 0);
-    assert_eq!(after.pending_capacity, 0);
-    assert_eq!(after.write_bytes - before.write_bytes, end - start);
-    assert_eq!(after.clean_gap_bytes - before.clean_gap_bytes, 0);
-    assert_eq!(after.clean_gap_calls - before.clean_gap_calls, 0);
-    let copied = after.copied_bytes - before.copied_bytes;
+    let after_flush = disk_log::take();
+
+    let mut next = start;
+    for operation in before_flush.iter().chain(&after_flush) {
+        let DiskOp::Write { offset, bytes } = operation else {
+            panic!("unexpected resize: {operation:?}");
+        };
+        assert_eq!(*offset, next);
+        next += bytes.len() as u64;
+    }
+    assert_eq!(next, end);
+    let flush_bytes = after_flush
+        .iter()
+        .map(|operation| match operation {
+            DiskOp::Write { bytes, .. } => bytes.len(),
+            DiskOp::SetLen(_) => panic!("flush unexpectedly resized the file"),
+        })
+        .sum::<usize>();
+    assert!(flush_bytes <= budget);
+    let writes = before_flush.len() + after_flush.len();
     match buffering {
         Buffering::Unbuffered => {
-            assert_eq!(copied, 0);
-            assert_eq!(after.flush_peak_bytes, 0);
-            assert_eq!(
-                after.write_calls - before.write_calls,
-                5 + 2 * page.div_ceil(65_536)
-            );
+            assert!(after_flush.is_empty());
+            assert_eq!(writes as u64, 5 + 2 * page.div_ceil(65_536));
         }
         Buffering::Operation | Buffering::Session if ample => {
-            assert_eq!(copied, end - start);
-            assert_eq!(after.write_calls - before.write_calls, 1);
-            assert_eq!(after.flush_peak_bytes, end - start);
-            assert!(after.flush_peak_capacity >= after.flush_peak_bytes);
+            assert!(before_flush.is_empty());
+            assert_eq!(after_flush.len(), 1);
         }
         Buffering::Operation | Buffering::Session => {
-            assert!(copied >= 192, "{copied}");
-            assert!(copied <= 384, "{copied}");
-            assert_eq!(
-                after.write_calls - before.write_calls,
-                3 + 2 * page.div_ceil(65_536)
-            );
-            assert!(after.flush_peak_bytes <= budget as u64);
+            assert_eq!(writes as u64, 3 + 2 * page.div_ceil(65_536));
         }
     }
-    match backing {
-        MemoryStrategy::Mirrored => {
-            assert_eq!(after.mirror_bytes, end);
-            assert!(after.mirror_capacity >= end);
-        }
-        MemoryStrategy::Bounded => {
-            assert_eq!(after.mirror_bytes, 0);
-            assert_eq!(after.mirror_capacity, 0);
-        }
-        MemoryStrategy::Auto => panic!("the case must select an explicit backing"),
-    }
+    assert_eq!(
+        engine.image.as_slice().map(|mirror| mirror.len() as u64),
+        (backing == MemoryStrategy::Mirrored).then_some(end)
+    );
     let mut expected = vec![0; usize::try_from(end - start).unwrap()];
     expected[..16].fill(7);
     expected[page as usize..page as usize + 48].fill(8);

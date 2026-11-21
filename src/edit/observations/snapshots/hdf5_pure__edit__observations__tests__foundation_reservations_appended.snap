@@ -32,10 +32,7 @@ Manager projection
   Encoded metadata (bytes)               0
   Encoded metadata capacity (bytes)      0
 
-Image I/O
-  Metric                          Value
-  ------------------------------  -----
-  Issued writes (calls)               1
-  Issued writes (bytes)             192
-  Clean-gap reads (bytes)             0
-  Explicit buffer copies (bytes)    192
+Issued writes
+  Physical address  Bytes
+  ----------------  -----
+               131    192

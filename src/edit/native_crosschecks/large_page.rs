@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use rstest::rstest;
+use test_util::disk_log::{self, DiskOp};
 use test_util_hdf5::{file_space_oracle, large_page};
 
 use crate::edit::WriteEngine;
@@ -48,7 +49,7 @@ fn large_page_small_commits_preserve_native_values_and_free_sections(
             .unwrap(),
     }
     let initial_len = usize::try_from(engine.image.len()).unwrap();
-    let before = engine.image.buffering_work();
+    disk_log::start();
     let mut first = DatasetBuilder::new("first");
     first.with_i32_data(&[11, 12, 13, 14]);
     engine
@@ -63,13 +64,14 @@ fn large_page_small_commits_preserve_native_values_and_free_sections(
     engine.commit().unwrap();
     engine.force_sync().unwrap();
     engine.release_status_flags().unwrap();
-    let after = engine.image.buffering_work();
-    assert_eq!(after.pending_bytes, 0);
-    assert!(after.write_calls > before.write_calls);
-    assert!(after.write_bytes - before.write_bytes > PAGE / 2);
-    assert!(
-        after.copied_bytes - before.copied_bytes <= 4 * (after.write_bytes - before.write_bytes)
-    );
+    let written = disk_log::take()
+        .iter()
+        .filter_map(|operation| match operation {
+            DiskOp::Write { bytes, .. } => Some(bytes.len() as u64),
+            DiskOp::SetLen(_) => None,
+        })
+        .sum::<u64>();
+    assert!(written > PAGE / 2);
     let length = engine.image.len();
     drop(engine);
     let bytes = std::fs::read(&path).unwrap();

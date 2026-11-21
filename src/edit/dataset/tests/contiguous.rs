@@ -270,14 +270,13 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
         StorageAllocation::Allocated,
     )
     .unwrap();
+    assert!(engine.image.reserve_write_observations(count + 1));
     let before_writes = engine.image.issued_write_order().len();
-    let before_work = engine.image.buffering_work();
-    let ((header, held), measured) =
+    let (header, measured) =
         allocation::measure(&format!("contiguous_creation_{count}_{budget}"), || {
             let header = engine.write_contiguous_chunk_set(&set).unwrap();
-            let held = engine.image.buffering_work();
             engine.image.ordering_barrier().unwrap();
-            (header, held)
+            header
         });
     let ChunkedHeader {
         layout_message,
@@ -347,11 +346,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
             <= u64::try_from(count * 64 + index_length * 2 + budget * 2 + 65_536).unwrap(),
         "{measured}"
     );
-    let work = engine.image.buffering_work();
-    assert!(
-        work.copied_bytes - before_work.copied_bytes
-            <= 2 * u64::try_from(control.data_bytes.len()).unwrap()
-    );
+    assert!(measured.live_bytes < 4_096, "{measured}");
     let mut legacy = WriteEngine::open_rw_with_strategy(
         &reference,
         MetadataCacheConfig::disabled(),
@@ -361,7 +356,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
     )
     .unwrap();
     legacy.set_write_buffering(buffering).unwrap();
-    let ((old_header, old_held), old) = allocation::measure(
+    let (old_header, old) = allocation::measure(
         &format!("contiguous_creation_legacy_{count}_{budget}"),
         || {
             let header = legacy
@@ -379,9 +374,8 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
                 )
                 .unwrap()
                 .1;
-            let held = legacy.image.buffering_work();
             legacy.image.ordering_barrier().unwrap();
-            (header, held)
+            header
         },
     );
     assert_eq!(old_header, (layout_message, pipeline_message));
@@ -394,9 +388,7 @@ fn creation_bounds_temporary_storage_and_gathers_adjacent_writes(
             .unwrap(),
         control.data_bytes
     );
-    eprintln!(
-        "legacy {old}; before_drain={held:?}; legacy_before_drain={old_held:?}; buffering={work:?}"
-    );
+    eprintln!("streamed {measured}; assembled {old}");
 
     let mut cursor = physical;
     for &(offset, length) in &writes {

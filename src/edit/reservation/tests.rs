@@ -688,7 +688,8 @@ fn bounded_unbuffered_emission_keeps_heap_below_payload_size(#[case] count: usiz
     let requests = [request(length, PageType::Raw)];
     let mut plan = planned(&mut engine, &requests);
     let start = plan.reservations()[0].range().start().get();
-    let before = plan.engine.image.buffering_work();
+    let before_writes = plan.engine.image.issued_writes();
+    let before_bytes = plan.engine.image.issued_write_bytes();
     let (address, measured) = allocation::measure(&format!("streamed_reservation_{count}"), || {
         plan.write_next_with(|writer| {
             for _ in 0..count {
@@ -699,15 +700,16 @@ fn bounded_unbuffered_emission_keeps_heap_below_payload_size(#[case] count: usiz
         .unwrap()
     });
     assert_eq!(address.get(), start);
-    let after = plan.engine.image.buffering_work();
     assert_eq!(
-        after.write_calls - before.write_calls,
-        u64::try_from(count).unwrap()
+        plan.engine.image.issued_writes() - before_writes,
+        count as u64
     );
-    assert_eq!(after.write_bytes - before.write_bytes, length);
-    assert_eq!(after.mirror_bytes, 0);
-    assert_eq!(after.mirror_capacity, 0);
-    assert_eq!(after.pending_bytes, 0);
+    assert_eq!(
+        plan.engine.image.issued_write_bytes() - before_bytes,
+        length
+    );
+    assert!(plan.engine.image.as_slice().is_none());
+    assert!(measured.live_bytes < 4_096, "{measured}");
     assert!(
         measured.peak_bytes < length / 4,
         "{measured:?}, payload={length}"
