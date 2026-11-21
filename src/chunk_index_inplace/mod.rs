@@ -3096,6 +3096,7 @@ mod tests {
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
 
+    mod append_records;
     mod fixed;
     mod metadata;
     mod single;
@@ -3583,58 +3584,6 @@ mod tests {
         assert_eq!(reason, expected);
         assert_eq!(store.data, original);
         assert!(store.allocations.borrow().is_empty());
-    }
-
-    #[rstest]
-    #[case::direct(4, 54, [0, 0, 3, 80])]
-    #[case::secondary(244, 444, [1, 54, 10, 496])]
-    fn retry_counts_referenced_blocks_after_interrupted_publication(
-        #[case] start: i32,
-        #[case] staged_end: i32,
-        #[case] counts: [u64; 4],
-        #[values(1, 2, 3)] phase: u8,
-        #[values(false, true)] reopen: bool,
-        #[values(false, true)] filtered: bool,
-    ) {
-        let mut store = allocation_store(start, filtered);
-        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        let staged: Vec<_> = (start..staged_end).collect();
-        append_state(&mut store, &mut state, &staged, phase).unwrap();
-        assert_eq!(
-            state.index.allocated().unwrap().allocation_stats.is_none(),
-            phase == 2
-        );
-        if reopen {
-            store = WindowProbeStore::open(store.data);
-            state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        }
-        append_state(&mut store, &mut state, &[start], 4).unwrap();
-        append_state(&mut store, &mut state, &[start + 1], 4).unwrap();
-        let [secondary, secondary_bytes, data, capacity] = if phase == 1 {
-            if start == 4 {
-                [0, 0, 1, 16]
-            } else {
-                [1, 54, 7, 304]
-            }
-        } else {
-            counts
-        };
-        assert_eq!(
-            stored_stats(&store, state.index.allocated().unwrap()),
-            [
-                secondary,
-                secondary_bytes,
-                data,
-                capacity * state.index.allocated().unwrap().ea_elem_size.to_u64() + data * 22,
-                u64::try_from(start + 2).unwrap(),
-                4 + capacity,
-            ]
-        );
-        let file = crate::File::from_bytes(store.data).unwrap();
-        assert_eq!(
-            file.dataset("d").unwrap().read_i32().unwrap(),
-            (0..start + 2).collect::<Vec<_>>()
-        );
     }
 
     #[rstest]
@@ -5259,126 +5208,54 @@ mod tests {
             (Stored::Filtered, [108, EDGE_FILL, EDGE_FILL, EDGE_FILL]),
         ],
     )]
-    fn every_publication_state_of_an_edge_append_reads_under_its_extent(
+    fn every_issued_write_of_an_edge_append_preserves_chunk_records(
         #[case] raw_edges: bool,
         #[case] appended: &[i32],
         #[case] written: &[(Stored, [i32; 4])],
         #[values(EdgeFilter::Deflate, EdgeFilter::Shuffle, EdgeFilter::ShuffleDeflate)]
         filter: EdgeFilter,
-        #[values(1, 2, 3, 4)] max_phase: u8,
     ) {
-        let mut store = edge_store(filter, raw_edges);
-        let before = stored_chunks(&store.data);
-        append_to_edge_store(&mut store, appended, max_phase).unwrap();
-
+        let mut image = edge_store(filter, raw_edges).data;
+        let before = stored_chunks(&image);
         let written = filter.stored_chunks_after_the_kept_one(written);
-        let (chunks, values) = match max_phase {
-            1 => (before, EDGE_INITIAL.to_vec()),
-            2 | 3 => (
-                [&before[..1], &written[..1]].concat(),
-                EDGE_INITIAL.to_vec(),
-            ),
-            _ => (
-                [&before[..1], &written].concat(),
-                [&EDGE_INITIAL[..], appended].concat(),
-            ),
-        };
-        assert_eq!(stored_chunks(&store.data), chunks);
-        let file = crate::File::from_bytes(store.data).unwrap();
-        assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), values);
-    }
+        let replacement = [&before[..1], &written[..1]].concat();
+        let completed = [&before[..1], &written].concat();
+        let values = [&EDGE_INITIAL[..], appended].concat();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("edge.h5");
+        std::fs::write(&path, &image).unwrap();
 
-    #[rstest]
-    #[case::payload_barrier(4, Some(1), &[1.46, 1.56], 0)]
-    #[case::eof_barrier(4, Some(2), &[1.46, 1.56], 0)]
-    #[case::index_barrier(4, Some(3), &[1.46, 1.56], 1)]
-    #[case::header_barrier(4, Some(4), &[1.46, 1.56], 1)]
-    #[case::payloads(1, None, &[1.46, 1.56], 0)]
-    #[case::index(2, None, &[1.46, 1.56], 1)]
-    #[case::header(3, None, &[1.46, 1.56], 1)]
-    #[case::extent_barrier(4, Some(5), &[1.46, 1.56, 1.0, 2.0], 1)]
-    #[case::filtered_barrier(4, Some(6), &[1.5, 1.6, 1.0, 2.0], 0)]
-    #[case::complete(4, None, &[1.5, 1.6, 1.0, 2.0], 0)]
-    fn lossy_raw_tail_publication_remains_readable_at_each_barrier(
-        #[case] phase: u8,
-        #[case] fail_sync: Option<usize>,
-        #[case] expected: &[f64],
-        #[case] mask: u32,
-    ) {
-        let mut builder = FileBuilder::new();
-        builder
-            .create_dataset("d")
-            .with_f64_data(&[1.46, 1.56])
-            .with_shape(&[2])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_create_properties(
-                DatasetCreateProperties::new()
-                    .with_chunks(&[4])
-                    .with_scale_offset(ScaleOffset::FloatDScale(1))
-                    .with_partial_edge_filtering(PartialEdgeFiltering::Skip),
-            );
-        let mut store = WindowProbeStore::open(builder.finish().unwrap());
-        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        let original = state
-            .index
-            .allocated()
-            .unwrap()
-            .read_element(&store, 0)
-            .unwrap()
-            .unwrap();
-        let original = FileRange::new(
-            store.addresses().resolve(original.addr).unwrap(),
-            original.stored_size,
-        )
-        .unwrap();
-        let intermediate = FileRange::new(PhysicalAddress::new(store.len()), 32).unwrap();
-        let raw: Vec<_> = [1.0_f64, 2.0]
-            .into_iter()
-            .flat_map(f64::to_le_bytes)
-            .collect();
-        let plan = plan_ea_append(
-            &store,
-            state.index.allocated().unwrap(),
-            &state.datatype,
-            &state.spatial,
-            state.element_size,
-            state.pipeline.as_ref(),
-            true,
-            LossyTailReencoding::Reject,
-            &raw,
-            2,
-            state.fill.pattern(state.element_size),
-        )
-        .unwrap();
-        store.fail_sync = fail_sync;
-        match apply_ea_append(
-            &mut store,
-            state.index.allocated_mut().unwrap(),
-            plan,
-            phase,
-        ) {
-            Ok(()) => assert_eq!(fail_sync, None),
-            Err(Error::Io(error)) => {
-                assert!(fail_sync.is_some());
-                assert_eq!(error.kind(), std::io::ErrorKind::Other);
-                assert_eq!(error.to_string(), "injected synchronization failure");
+        let file = append_records::open(&path);
+        test_util::disk_log::start();
+        file.dataset("d").unwrap().append(appended).unwrap();
+        file.close().unwrap();
+        let mut states = 0;
+        for operation in test_util::disk_log::take() {
+            operation.apply(&mut image);
+            let chunks = stored_chunks(&image);
+            let file = crate::File::from_bytes(image.clone()).unwrap();
+            let dataset = file.dataset("d").unwrap();
+            let visible = dataset.read_i32().unwrap();
+            if visible == EDGE_INITIAL {
+                if chunks == before {
+                    assert_eq!(states, 0);
+                } else {
+                    assert_eq!(chunks, replacement);
+                    assert!(states <= 1);
+                    states = 1;
+                }
+            } else {
+                assert_eq!(visible, values);
+                assert_eq!(chunks, completed);
+                assert!(
+                    states >= 1,
+                    "no prefix published the replacement at the old extent"
+                );
+                states = 2;
             }
-            Err(error) => panic!("expected a synchronization error, got {error:?}"),
         }
-        let mut retired = Vec::new();
-        if phase >= 2 && fail_sync.is_none_or(|barrier| barrier > 3) {
-            retired.push(original);
-        }
-        if phase == 4 && fail_sync.is_none() {
-            retired.push(intermediate);
-        }
-        assert_eq!(store.retired, retired);
-        let file = crate::File::from_bytes(store.data).unwrap();
-        let dataset = file.dataset("d").unwrap();
-        assert_eq!(dataset.read_f64().unwrap(), expected);
-        let chunks = dataset.chunks().unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].filter_mask().raw_bits(), mask);
+        assert_eq!(states, 2, "the append did not publish the new extent");
+        assert_eq!(image, std::fs::read(&path).unwrap());
     }
 
     #[rstest]
@@ -5496,92 +5373,6 @@ mod tests {
             state.fill.pattern(state.element_size),
         )
         .unwrap()
-    }
-
-    #[rstest]
-    #[case::partial_payloads(1, None, &[-0.26], &[1.46, 1.56])]
-    #[case::partial_index(2, None, &[-0.26], &[1.44, 1.54])]
-    #[case::partial_header(3, None, &[-0.26], &[1.44, 1.54])]
-    #[case::partial_index_barrier(4, Some(3), &[-0.26], &[1.44, 1.54])]
-    #[case::partial_extent_barrier(4, Some(5), &[-0.26], &[1.44, 1.54, -0.26])]
-    #[case::partial_complete(4, None, &[-0.26], &[1.44, 1.54, -0.26])]
-    #[case::full_payloads(1, None, &[-0.26, 2.0], &[1.46, 1.56])]
-    #[case::full_index(2, None, &[-0.26, 2.0], &[1.44, 1.54])]
-    #[case::full_header(3, None, &[-0.26, 2.0], &[1.44, 1.54])]
-    #[case::full_index_barrier(4, Some(3), &[-0.26, 2.0], &[1.44, 1.54])]
-    #[case::full_extent_barrier(4, Some(5), &[-0.26, 2.0], &[1.44, 1.54, -0.26, 2.04])]
-    #[case::full_complete(4, None, &[-0.26, 2.0], &[1.44, 1.54, -0.26, 2.04])]
-    fn lossy_tail_reencoding_keeps_each_recorded_extent_readable(
-        #[case] phase: u8,
-        #[case] fail_sync: Option<usize>,
-        #[case] appended: &[f64],
-        #[case] expected: &[f64],
-    ) {
-        let mut builder = FileBuilder::new();
-        builder
-            .create_dataset("d")
-            .with_f64_data(&[1.46, 1.56])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[4])
-            .with_scale_offset(ScaleOffset::FloatDScale(1));
-        let mut store = WindowProbeStore::open(builder.finish().unwrap());
-        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        let original = state
-            .index
-            .allocated()
-            .unwrap()
-            .read_element(&store, 0)
-            .unwrap()
-            .unwrap();
-        let original = FileRange::new(
-            store.addresses().resolve(original.addr).unwrap(),
-            original.stored_size,
-        )
-        .unwrap();
-        let plan = plan_ea_append(
-            &store,
-            state.index.allocated().unwrap(),
-            &state.datatype,
-            &state.spatial,
-            state.element_size,
-            state.pipeline.as_ref(),
-            true,
-            LossyTailReencoding::Allow,
-            &appended
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect::<Vec<_>>(),
-            appended.len().to_u64(),
-            state.fill.pattern(state.element_size),
-        )
-        .unwrap();
-        store.fail_sync = fail_sync;
-        match apply_ea_append(
-            &mut store,
-            state.index.allocated_mut().unwrap(),
-            plan,
-            phase,
-        ) {
-            Ok(()) => assert_eq!(fail_sync, None),
-            Err(Error::Io(error)) => {
-                assert!(fail_sync.is_some());
-                assert_eq!(error.kind(), std::io::ErrorKind::Other);
-                assert_eq!(error.to_string(), "injected synchronization failure");
-            }
-            Err(error) => panic!("expected a synchronization error, got {error:?}"),
-        }
-        let expected_retired = if phase >= 2 && fail_sync.is_none_or(|barrier| barrier > 3) {
-            vec![original]
-        } else {
-            Vec::new()
-        };
-        assert_eq!(store.retired, expected_retired);
-        let file = crate::File::from_bytes(store.data).unwrap();
-        let dataset = file.dataset("d").unwrap();
-        assert_eq!(dataset.read_f64().unwrap(), expected);
-        let chunks = dataset.chunks().unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].filter_mask().raw_bits(), 0);
     }
 
     #[test]
@@ -5911,28 +5702,6 @@ mod tests {
             filter_mask: 0,
         };
         loc.ea_insert(store, 1, rec).unwrap();
-    }
-
-    fn append_to_edge_store(
-        store: &mut WindowProbeStore,
-        values: &[i32],
-        max_phase: u8,
-    ) -> Result<(), Error> {
-        let mut state = edit::locate_dataset_state(&*store, dataset_address(store)).unwrap();
-        let plan = plan_ea_append(
-            store,
-            state.index.allocated().unwrap(),
-            &state.datatype,
-            &state.spatial,
-            state.element_size,
-            state.pipeline.as_ref(),
-            true,
-            LossyTailReencoding::Reject,
-            &i32_bytes(values),
-            values.len() as u64,
-            state.fill.pattern(state.element_size),
-        )?;
-        apply_ea_append(store, state.index.allocated_mut().unwrap(), plan, max_phase)
     }
 
     fn stored_chunks(data: &[u8]) -> Vec<(Vec<u64>, u32, Vec<u8>)> {
