@@ -211,7 +211,13 @@ fn compact_reconstruction_preserves_records_and_optional_prefixes(
     assert_eq!(&replacement[..], &expected_records(&final_body));
     assert_eq!(replacement.props(), fixture.props);
     let allocation = Extent::new(StoredAddress::new(1_024), ByteLength::new(262_144)).unwrap();
-    let encoded = build_v2_object_header_allocation(&replacement, allocation).unwrap();
+    let header = PreparedHeader::new(&replacement).unwrap();
+    let encoded = header
+        .geometry()
+        .unwrap()
+        .into_allocation(allocation.start(), allocation.len().get())
+        .unwrap()
+        .encode();
     assert_eq!(
         u64::try_from(encoded.len()).unwrap(),
         allocation.len().get()

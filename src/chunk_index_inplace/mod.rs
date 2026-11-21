@@ -406,36 +406,6 @@ pub(crate) enum AppendIndex {
 }
 
 impl AppendIndex {
-    /// Returns allocated Extensible Array metadata by value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::AppendUnsupported`] for a finite index or an unallocated Extensible Array.
-    #[cfg(test)]
-    fn into_allocated(self) -> Result<Located, Error> {
-        match self {
-            Self::Allocated(located) => Ok(located),
-            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => Err(
-                Error::AppendUnsupported("allocated Extensible Array metadata is required"),
-            ),
-        }
-    }
-
-    /// Borrows allocated Extensible Array metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::AppendUnsupported`] for a finite index or an unallocated Extensible Array.
-    #[cfg(test)]
-    pub(crate) fn allocated(&self) -> Result<&Located, Error> {
-        match self {
-            Self::Allocated(located) => Ok(located),
-            Self::Fixed(_) | Self::Single(_) | Self::Unallocated(_) => Err(
-                Error::AppendUnsupported("allocated Extensible Array metadata is required"),
-            ),
-        }
-    }
-
     /// Borrows allocated Extensible Array metadata for mutation.
     ///
     /// # Errors
@@ -3075,6 +3045,7 @@ mod tests {
     mod append_records;
     mod finite_interruptions;
     mod fixed;
+    mod inspection;
     mod metadata;
     mod single;
 
