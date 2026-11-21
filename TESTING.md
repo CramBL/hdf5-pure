@@ -1,11 +1,29 @@
 # Testing
 
-## Choosing tests
+## Test design
 
 Prefer integration tests through the owning crate's public API. Use unit tests for
 focused coverage of internal algorithms and invariants.
 
 Cover new or changed public behavior with tests.
+
+Keep each test focused on one behavior or invariant. Use all the assertions
+needed to establish it. Split tests that cover unrelated scenarios.
+
+Use named `rstest` cases when inputs vary and the behavior and assertions stay
+the same. Write separate tests when combining cases requires branches or
+elaborate setup.
+
+Assert specific error variants and fields using the [exact-error rules][errors].
+
+### Test examples
+
+- The [complex datatype tests][complex-tests] focus on one invariant at a time
+  and use named `rstest` cases for component sizes and byte orders.
+- The [object header continuation tests][continuation-tests] build malformed
+  bytes at runtime and check the error through two read paths.
+- The [dense attribute tests][dense-attribute-tests] check files written by
+  libhdf5 and use libhdf5 to read independently constructed fixtures.
 
 ## Test organization
 
@@ -32,7 +50,7 @@ that the operation requires.
 When testing I/O failures, inject faults at the I/O boundary so the library
 handles them through its usual path.
 
-## Format conformance and fixtures
+## Fixtures and format conformance
 
 Generate ordinary regression fixtures at test runtime in Rust.
 
@@ -55,25 +73,20 @@ their original bytes are needed to establish compatibility or reproduce a defect
 Record where each file came from and what it tests in the [fixture notices][fixtures]. Use
 `test_util::data` or `copy_data` for runtime paths to committed fixtures.
 
-## Writing tests
+## Specialized testing
 
-Keep each test focused on one behavior or invariant. Use all the assertions
-needed to establish it. Split tests that cover unrelated scenarios.
+Apply only the requirements for the testing methods your change needs.
 
-Use named `rstest` cases when inputs vary and the behavior and assertions stay
-the same. Write separate tests when combining cases requires branches or
-elaborate setup.
-
-Assert specific error variants and fields using the [exact-error rules][errors].
-
-### Test examples
-
-- [Complex datatypes][complex-tests] tests one invariant at a time and uses named
-  `rstest` cases for component sizes and byte orders.
-- [Object header continuations][continuation-tests] builds malformed bytes at
-  runtime and checks the error through two read paths.
-- [Dense attributes][dense-attribute-tests] checks files written by libhdf5 and
-  uses libhdf5 to read independently constructed fixtures.
+| Category | Guidance | Reference |
+| --- | --- | --- |
+| Native interoperability | Compare against independent observations from libhdf5 or libmatio. Selected cases fail on missing prerequisites or protocol errors. Preserve the native locking contract. Verify nextest and CI selection when adding or moving cases. | [Interop recipes][interop], [native locking][locking], [interop profiles][nextest] |
+| Unsafe code and portability | Exercise affected cases under Miri and in the target and feature configurations they depend on. | [Miri][soundness], [portability][portability] |
+| Allocation testing | Assert resource bounds and verify allocation measurements. Justify and bound resource increases using comparable workloads and measurement intervals. | [Allocation measurements][allocation], [baseline recipes][soundness] |
+| Property testing | Use bounded, shrinkable cases with explicit persistence paths. Preserve seeds and minimized regressions. | [Property tests][properties] |
+| Differential fuzzing | Compare equivalent operations, including errors. Document permitted differences and bound traversal and resources. | [Differential target][differential] |
+| Snapshots | Normalize irrelevant variation and inspect changes. Keep resource-bound assertions when updating snapshots. | [Free-space snapshots][snapshots] |
+| Child processes | Bound fixture startup and execution. Clean up children and fail the parent on infrastructure errors. | [Fixture binary][child], [target declaration][targets], [interrupted writer test][child-example] |
+| Doctests | Prefer executable examples. Justify `no_run` beside the example. Preserve public API and diagnostic checks. | [Documentation style][docstyle], [API checks][api] |
 
 ## Extended tests
 
@@ -83,26 +96,6 @@ them alongside related tests.
 
 CI runs these cases separately using the [nextest profiles][nextest] `extended`
 and `extended-interop`.
-
-## Specialized testing
-
-Follow each requirement when the change calls for that testing method.
-
-| Category | Guidance | Reference |
-| --- | --- | --- |
-| Native interoperability | Compare against independent observations from libhdf5 or libmatio. | [Interop recipes][interop], [native locking][locking] |
-| Unsafe code and portability | Exercise affected cases under Miri and in the target and feature configurations they depend on. | [Miri][soundness], [portability][portability] |
-| Allocation testing | Assert resource bounds and verify allocation measurements. Justify and bound resource increases using comparable workloads and measurement intervals. | [Allocation measurements][allocation], [baseline recipes][soundness] |
-| Property testing | Use bounded, shrinkable cases with explicit persistence paths. Preserve seeds and minimized regressions. | [Property tests][properties] |
-| Differential fuzzing | Compare equivalent operations, including errors. Document permitted differences and bound traversal and resources. | [Differential target][differential] |
-| Snapshots | Normalize irrelevant variation and inspect changes. Keep resource-bound assertions when updating snapshots. | [Free-space snapshots][snapshots] |
-| Child processes | Bound fixture startup and execution. Clean up children and fail the parent on infrastructure errors. | [Fixture binary][child], [target declaration][targets], [interrupted writer test][child-example] |
-| Doctests | Prefer executable examples. Justify `no_run` beside the example. Preserve public API and diagnostic checks. | [Documentation style][docstyle], [API checks][api] |
-
-Selected native cases fail on missing prerequisites or protocol errors. Preserve
-the synchronization contract in the [native locking helpers][locking]. When
-adding or moving native cases, verify selection by the [interop profiles][nextest]
-and CI.
 
 ## Running tests
 
