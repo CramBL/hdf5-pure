@@ -29,6 +29,16 @@ def test_windows_paths_are_spelled_for_bash(monkeypatch):
     assert build_hdf5.posix(Path("D:\\a\\hdf5\\bin")) == "/d/a/hdf5/bin"
 
 
+@pytest.mark.parametrize("filename", ["libz.lib", "z.lib", "zlib.lib"])
+def test_find_vcpkg_zlib_import_library(tmp_path, filename):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    archive = lib / filename
+    archive.touch()
+
+    assert build_hdf5.vcpkg_zlib_import_library(tmp_path) == archive
+
+
 def test_installed_version_comes_from_the_header(tmp_path):
     include = tmp_path / "include"
     include.mkdir()
