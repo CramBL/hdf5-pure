@@ -234,7 +234,8 @@ fn contained_views_and_buffered_reads_add_no_payload_allocations(#[case] backing
     assert_eq!(bytes.as_ref(), &DATA[5..7]);
     assert_eq!(bytes.as_ptr(), view.region().bytes()[1..].as_ptr());
     assert_eq!(measured.blocks, 0, "{measured}");
-    assert_eq!(bytes.retained_bytes(), view.bytes.retained_bytes());
+    assert_eq!(bytes.retained_bytes(), 0);
+    assert!(bytes.shared().is_none());
     assert!(source.calls.borrow().is_empty());
     let mut buffer = [0; 8];
     let name = format!("current-metadata-buffer-{backing:?}");
@@ -309,9 +310,11 @@ impl ObservedSource {
             backing: match backing {
                 Backing::Borrowed => MetadataBacking::Borrowed,
                 Backing::Owned => MetadataBacking::Owned,
-                Backing::Shared => MetadataBacking::Shared(
-                    MetadataBytes::owned(range(bias, DATA.len().to_u64()), DATA.to_vec()).unwrap(),
-                ),
+                Backing::Shared => {
+                    let mut bytes = Vec::with_capacity(DATA.len());
+                    bytes.extend_from_slice(&DATA[4..8]);
+                    MetadataBacking::Shared(MetadataBytes::from_vec(bias + 4, bytes).unwrap())
+                }
             },
             bias,
             calls: RefCell::new(Vec::with_capacity(64)),
@@ -361,9 +364,11 @@ impl Source for ObservedSource {
     fn read_metadata(&self, offset: u64, length: usize) -> Result<MetadataBytes<'_>, FormatError> {
         let (range, bytes) = self.read(offset, length, ReadKind::Metadata)?;
         match &self.backing {
-            MetadataBacking::Borrowed => MetadataBytes::borrowed(range, bytes),
             MetadataBacking::Owned => MetadataBytes::owned(range, bytes.to_vec()),
-            MetadataBacking::Shared(owner) => owner.subregion(range),
+            MetadataBacking::Shared(owner) if owner.range() == range => Ok(owner.clone()),
+            MetadataBacking::Borrowed | MetadataBacking::Shared(_) => {
+                MetadataBytes::borrowed(range, bytes)
+            }
         }
     }
 }

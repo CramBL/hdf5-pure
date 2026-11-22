@@ -32,9 +32,10 @@ semantic space state, assigns manager slots and block addresses, passes manager 
 `hdf5-pure-format` for encoding, writes them, and owns synchronization, superblock publication,
 reclamation, and crash ordering.
 
-The core crate holds types whose public shape must remain compatible through the file crate's
-re-exports. Each package supports `no_std` with `alloc` for its portable paths, and
-`hdf5-pure-space` requires that portability for all of its file-space algorithms.
+Change workspace interfaces together with their callers when a safer or simpler design
+warrants it. When a change breaks a supported public API, follow the versioning and changelog
+rules in [RELEASES.md](RELEASES.md). Each package supports `no_std` with `alloc` for its portable
+paths.
 
 ## API compatibility
 

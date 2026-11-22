@@ -97,10 +97,9 @@ fn workspace_subregions_preserve_contained_ranges(
     let data = [1, 2, 3, 4];
     let owner = bytes(backing, 512, &data);
     let range = FileRange::new(PhysicalAddress::new(start), length).unwrap();
-    let selected = owner.subregion(range).unwrap();
+    let selected = owner.region().subregion(range).unwrap();
     assert_eq!(selected.range(), range);
-    assert_eq!(selected.region().range(), range);
-    assert_eq!(selected.region().bytes(), expected);
+    assert_eq!(selected.bytes(), expected);
 }
 
 #[rstest]
@@ -119,7 +118,7 @@ fn workspace_subregions_reject_uncontained_ranges(
     let owner = bytes(backing, 512, &data);
     let range = FileRange::new(PhysicalAddress::new(start), length).unwrap();
     assert_eq!(
-        owner.subregion(range).unwrap_err(),
+        owner.region().subregion(range).unwrap_err(),
         FormatError::InsufficientRegion {
             required_start: start,
             required_length: length,
@@ -130,7 +129,7 @@ fn workspace_subregions_reject_uncontained_ranges(
 }
 
 #[test]
-fn workspace_subregions_share_nested_offsets_and_retained_capacity() {
+fn workspace_subregions_borrow_from_the_owner() {
     let mut data = Vec::with_capacity(64);
     data.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
     let pointer = data.as_ptr();
@@ -139,21 +138,19 @@ fn workspace_subregions_share_nested_offsets_and_retained_capacity() {
     let owner = MetadataBytes::owned(range, data).unwrap();
     assert_eq!(owner.as_ptr(), pointer);
     let middle = owner
+        .region()
         .subregion(FileRange::new(PhysicalAddress::new(u64::MAX - 5), 4).unwrap())
         .unwrap();
     let nested = middle
         .subregion(FileRange::new(PhysicalAddress::new(u64::MAX - 4), 2).unwrap())
         .unwrap();
-    let expected_pointer = owner.get(2..).unwrap().as_ptr();
-    let retained: MetadataBytes<'static> = nested.shared().unwrap();
-    drop(owner);
-    drop(middle);
-    drop(nested);
-    assert_eq!(retained.offset(), u64::MAX - 4);
-    assert_eq!(retained.as_ref(), &[3, 4]);
-    assert_eq!(retained.as_ptr(), expected_pointer);
-    assert_eq!(retained.retained_bytes(), capacity);
-    assert_eq!(retained.into_vec(), vec![3, 4]);
+    let selected = MetadataBytes::from_region(nested);
+    assert_eq!(selected.offset(), u64::MAX - 4);
+    assert_eq!(selected.as_ref(), &[3, 4]);
+    assert_eq!(selected.as_ptr(), owner.get(2..).unwrap().as_ptr());
+    assert!(selected.shared().is_none());
+    assert_eq!(selected.retained_bytes(), 0);
+    assert_eq!(owner.retained_bytes(), capacity);
 }
 
 #[test]
