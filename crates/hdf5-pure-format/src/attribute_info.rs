@@ -1,6 +1,5 @@
 //! The version 0 Attribute Info message (type 0x0015).
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -206,11 +205,37 @@ impl AttributeInfoMessage {
 
     /// Returns the version 0 body without object header padding.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![0; self.encoded_size()];
-        // The allocation has the exact length required by the encoder.
-        self.write_into(&mut bytes)
-            .expect("exact Attribute Info length");
+        let mut bytes = Vec::with_capacity(self.encoded_size());
+        bytes.extend(self.encoded_pairs().flatten());
         bytes
+    }
+
+    /// Yields the prefix, optional maximum creation index, and stored addresses in two-byte pairs.
+    ///
+    /// Yields the low bytes first, in one, two, or four pairs per address at the file width.
+    fn encoded_pairs(&self) -> impl Iterator<Item = [u8; 2]> {
+        let pairs_per_address = usize::from(self.offset_width.get()) / 2;
+        let addresses = [
+            self.fractal_heap_address,
+            self.btree_name_index_address,
+            self.btree_creation_order_address,
+        ];
+        let addresses = addresses
+            .into_iter()
+            .take(self.address_count())
+            .flat_map(move |address| {
+                let [a, b, c, d, e, f, g, h] = address.get().to_le_bytes();
+                [[a, b], [c, d], [e, f], [g, h]]
+                    .into_iter()
+                    .take(pairs_per_address)
+            });
+        core::iter::once([VERSION, self.flags])
+            .chain(self.max_creation_index().map(u16::to_le_bytes))
+            .chain(addresses)
+    }
+
+    fn address_count(&self) -> usize {
+        REQUIRED_ADDRESS_COUNT + usize::from(self.indexes_creation_order())
     }
 
     /// Builds the message from addresses acquired or checked at `offset_width`.
@@ -305,8 +330,7 @@ impl Encode for AttributeInfoMessage {
     fn encoded_len(&self) -> usize {
         PREFIX_SIZE
             + MAXIMUM_INDEX_SIZE * usize::from(self.tracks_creation_order())
-            + usize::from(self.offset_width.get())
-                * (REQUIRED_ADDRESS_COUNT + usize::from(self.indexes_creation_order()))
+            + usize::from(self.offset_width.get()) * self.address_count()
     }
 
     fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
@@ -316,39 +340,9 @@ impl Encode for AttributeInfoMessage {
             required: len,
             available,
         })?;
-        let Self {
-            offset_width,
-            flags,
-            max_creation_index,
-            fractal_heap_address,
-            btree_name_index_address,
-            btree_creation_order_address,
-        } = *self;
-
-        // The encoded length includes both prefix bytes.
-        let (prefix, fields) = record
-            .split_first_chunk_mut::<PREFIX_SIZE>()
-            .expect("two prefix bytes");
-        *prefix = [VERSION, flags];
-
-        let addresses = if flags & TRACK_CREATION_ORDER != 0 {
-            // The encoded length includes the maximum when tracking is enabled.
-            let (field, addresses) = fields
-                .split_first_chunk_mut::<MAXIMUM_INDEX_SIZE>()
-                .expect("maximum field");
-            *field = max_creation_index.to_le_bytes();
-            addresses
-        } else {
-            fields
-        };
-        let width = usize::from(offset_width.get());
-        let stored = [
-            fractal_heap_address,
-            btree_name_index_address,
-            btree_creation_order_address,
-        ];
-        for (field, address) in addresses.chunks_exact_mut(width).zip(stored) {
-            field.copy_from_slice(&address.get().to_le_bytes()[..width]);
+        let (pairs, _) = record.as_chunks_mut::<2>();
+        for (output, pair) in pairs.iter_mut().zip(self.encoded_pairs()) {
+            *output = pair;
         }
         Ok(len)
     }
