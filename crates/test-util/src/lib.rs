@@ -11,6 +11,7 @@ pub mod attribute_info;
 pub mod attribute_policy;
 pub mod attribute_values;
 pub mod btree;
+pub mod btree_k_values;
 pub mod bytes;
 pub mod checksum;
 pub mod chunk_offsets;
