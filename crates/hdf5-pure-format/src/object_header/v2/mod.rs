@@ -526,6 +526,21 @@ impl MessageRecordLayout {
         region: &'a [u8],
         msg_start: usize,
     ) -> Result<Option<MessageRecord<'a>>, FormatError> {
+        Ok(self
+            .next_message_with_type_byte(region, msg_start)?
+            .map(|(_, record)| record))
+    }
+
+    /// Reads the record and its original type byte, or returns `None` for a trailing gap.
+    ///
+    /// # Errors
+    ///
+    /// Returns the truncation error documented by [`Self::next_message`].
+    fn next_message_with_type_byte<'a>(
+        self,
+        region: &'a [u8],
+        msg_start: usize,
+    ) -> Result<Option<(u8, MessageRecord<'a>)>, FormatError> {
         let Some((&[type_byte, size_low, size_high, flags], rest)) = region
             .get(msg_start..)
             .and_then(|record| record.split_first_chunk::<4>())
@@ -548,13 +563,14 @@ impl MessageRecordLayout {
                 available: region.len(),
             });
         };
-        Ok(Some(MessageRecord {
+        let record = MessageRecord {
             msg_type: MessageType::from_u16(u16::from(type_byte)),
             flags: MessageFlags::new(flags),
             creation_index,
             body,
             body_range: body_start..body_start + body_len,
-        }))
+        };
+        Ok(Some((type_byte, record)))
     }
 
     /// Returns the creation index of the record at `msg_start` in `region`, or `None` where the

@@ -16,7 +16,7 @@ use crate::message_type::MessageType;
 use crate::width::{self, FormatWidths, UintWidth};
 
 use super::worklist;
-use super::{CHECKSUM_LEN, OCHK_SIGNATURE, ObjectHeaderPrefix};
+use super::{CHECKSUM_LEN, MessageRecordLayout, OCHK_SIGNATURE, ObjectHeaderPrefix};
 
 /// Holds checked chunk geometry and stored addresses for a version 2 object header.
 ///
@@ -153,8 +153,7 @@ impl<'a> ObjectHeaderAllocation<'a> {
         } else {
             out.extend_from_slice(&OCHK_SIGNATURE);
         }
-        let trailing_gap =
-            chunk.next.is_some() && chunk.padding < self.geometry.prefix.layout.prefix_len();
+        let trailing_gap = chunk.next.is_some() && matches!(chunk.padding, ChunkPadding::Gap(_));
         if !trailing_gap {
             self.write_padding(out, chunk.padding);
         }
@@ -186,23 +185,21 @@ impl<'a> ObjectHeaderAllocation<'a> {
 
     // H5O__chunk_deserialize in H5Ocache.c, HDF5 2.2.0, rejects gaps after NIL
     // records and coalesces adjacent NIL records on read-write opening within each chunk.
-    fn write_padding(&self, out: &mut Vec<u8>, len: usize) {
-        let prefix = self.geometry.prefix.layout.prefix_len();
-        if len >= prefix {
-            let body = len - prefix;
-            // Allocation constructors bound every NIL body to its two-byte field.
-            let body = u16::try_from(body).expect("a planned NIL body fits its size field");
-            self.geometry.prefix.layout.write_record_prefix(
-                out,
-                MessageType::NIL.to_u16().to_le_bytes()[0],
-                MessageFlags::NONE,
-                0,
-                body,
-            );
-            out.resize(out.len() + usize::from(body), 0);
-        } else {
-            out.resize(out.len() + len, 0);
-        }
+    fn write_padding(&self, out: &mut Vec<u8>, padding: ChunkPadding) {
+        let len = match padding {
+            ChunkPadding::Gap(len) => len,
+            ChunkPadding::Nil(body) => {
+                self.geometry.prefix.layout.write_record_prefix(
+                    out,
+                    MessageType::NIL.to_u16().to_le_bytes()[0],
+                    MessageFlags::NONE,
+                    0,
+                    body,
+                );
+                body
+            }
+        };
+        out.resize(out.len() + usize::from(len), 0);
     }
 }
 
@@ -664,16 +661,17 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
             OCHK_SIGNATURE.len() + CHECKSUM_LEN
         };
         let len = length.to_usize()?;
+        let padding = len
+            - fixed
+            - if next.is_some() {
+                self.continuation_len()
+            } else {
+                0
+            };
         Ok(Chunk {
             address,
             len,
-            padding: len
-                - fixed
-                - if next.is_some() {
-                    self.continuation_len()
-                } else {
-                    0
-                },
+            padding: ChunkPadding::new(self.prefix.layout, padding)?,
             remaining: None,
             next,
         })
@@ -767,7 +765,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
 struct Chunk {
     address: StoredAddress,
     len: usize,
-    padding: usize,
+    padding: ChunkPadding,
     /// The complete length reserved for subsequent chunks, in bytes.
     remaining: Option<usize>,
     /// The address and complete length of the next chunk, once planned.
@@ -795,7 +793,7 @@ impl Chunk {
             return Ok(Self {
                 address,
                 len: fixed + available,
-                padding: available,
+                padding: ChunkPadding::new(prefix.layout, available)?,
                 remaining: None,
                 next: None,
             });
@@ -812,9 +810,41 @@ impl Chunk {
         Ok(Self {
             address,
             len,
-            padding,
+            padding: ChunkPadding::new(prefix.layout, padding)?,
             remaining: Some(remaining),
             next: None,
+        })
+    }
+}
+
+/// Padding in an object header chunk as a short gap or a NIL record.
+#[derive(Clone, Copy, Debug)]
+enum ChunkPadding {
+    /// The number of padding bytes in a gap shorter than a record prefix.
+    Gap(u16),
+    /// The length of the NIL body in bytes.
+    Nil(u16),
+}
+
+impl ChunkPadding {
+    /// Plans a NIL record when `len` can fit its prefix, or a gap otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the padding cannot fit in one
+    /// NIL record.
+    fn new(layout: MessageRecordLayout, len: usize) -> Result<Self, FormatError> {
+        let body = len.checked_sub(layout.prefix_len());
+        let size = body.unwrap_or(len);
+        let size =
+            u16::try_from(size).map_err(|_error| FormatError::ObjectHeaderMessageTooLarge {
+                message_type: MessageType::NIL.to_u16(),
+                size,
+            })?;
+        Ok(if body.is_some() {
+            Self::Nil(size)
+        } else {
+            Self::Gap(size)
         })
     }
 }
