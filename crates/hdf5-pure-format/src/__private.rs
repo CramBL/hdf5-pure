@@ -146,6 +146,7 @@ pub use crate::extensible_array::ExtensibleArrayStats;
 pub use crate::extensible_array::ExtensibleArraySuperBlock;
 pub use crate::extensible_array::ExtensibleArraySuperBlockRef;
 pub use crate::extensible_array::MaxIndexBits;
+pub use crate::extensible_array::PageElementCount;
 pub use crate::extensible_array::SlotOccupancy;
 pub use crate::extensible_array::SuperBlockGeometry;
 pub use crate::extensible_array::build_extensible_array_at;

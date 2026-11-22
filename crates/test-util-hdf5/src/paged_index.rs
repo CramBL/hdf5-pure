@@ -162,7 +162,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
             array.header().idx_blk_elmts,
             array.header().super_blk_min_data_ptrs,
             array.header().min_dblk_nelmts,
-            u8::try_from(array.header().page_nelmts().get().trailing_zeros()).unwrap(),
+            array.header().page_nelmts().exponent(),
         ],
     );
     let index = array.index_block().unwrap();
