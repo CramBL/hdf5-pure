@@ -1,5 +1,7 @@
 use hdf5_pure_core::__private::StoredAddressExt;
-use hdf5_pure_core::{DecodedStoredAddress, FormatError, OffsetWidth, StoredAddress};
+use hdf5_pure_core::{
+    AttributeInfoField, DecodedStoredAddress, FormatError, OffsetWidth, StoredAddress,
+};
 use hdf5_pure_format::__private::{
     AttributeCreationOrderIndex, AttributeInfoMessage, AttributeInfoOutputTooSmall,
 };
@@ -66,11 +68,49 @@ fn attribute_info_parses_undefined_addresses(
 }
 
 #[rstest]
-#[case::version(0)]
-#[case::flags(1)]
-fn attribute_info_reports_an_incomplete_prefix(#[case] available: usize) {
-    let fixture = defined_addresses(Width::Two, None, false);
-    assert_eof(fixture, available, 2);
+#[case::empty_prefix(
+    &[],
+    FormatError::IncompleteAttributeInfo {
+        expected: 2,
+        available: 0,
+        field: AttributeInfoField::Version,
+        field_offset: 0,
+        field_size: 1,
+        field_available: 0,
+    }
+)]
+#[case::unsupported_version_without_flags(
+    &[1],
+    FormatError::IncompleteAttributeInfo {
+        expected: 2,
+        available: 1,
+        field: AttributeInfoField::Flags,
+        field_offset: 1,
+        field_size: 1,
+        field_available: 0,
+    }
+)]
+#[case::unsupported_version_with_reserved_flags(&[1, 0xff], FormatError::InvalidAttributeInfoVersion(1))]
+#[case::reserved_flags_without_body(&[0, 0xff], FormatError::InvalidAttributeInfoFlags(0xff))]
+#[case::valid_prefix_without_body(
+    &[0, 0x03],
+    FormatError::IncompleteAttributeInfo {
+        expected: 16,
+        available: 2,
+        field: AttributeInfoField::MaximumCreationIndex,
+        field_offset: 2,
+        field_size: 2,
+        field_available: 0,
+    }
+)]
+fn attribute_info_reports_framing_errors_in_acquisition_order(
+    #[case] input: &[u8],
+    #[case] expected: FormatError,
+) {
+    assert_eq!(
+        AttributeInfoMessage::parse_with_offset_width(input, OffsetWidth::Four).unwrap_err(),
+        expected
+    );
 }
 
 #[rstest]
@@ -78,25 +118,54 @@ fn attribute_info_reports_an_incomplete_prefix(#[case] available: usize) {
 #[case::partial(3)]
 fn attribute_info_reports_an_incomplete_maximum_creation_index(#[case] available: usize) {
     let fixture = defined_addresses(Width::Two, Some(0x1234), false);
-    assert_eof(fixture, available, 4);
+    assert_incomplete_field(
+        fixture,
+        available,
+        AttributeInfoField::MaximumCreationIndex,
+        2,
+        2,
+    );
 }
 
 #[rstest]
-#[case::heap(0)]
-#[case::name_index(1)]
-#[case::creation_order_index(2)]
+#[case::heap(0, AttributeInfoField::FractalHeapAddress, false)]
+#[case::name_index(1, AttributeInfoField::NameIndexAddress, false)]
+#[case::indexed_heap(0, AttributeInfoField::FractalHeapAddress, true)]
+#[case::indexed_name_index(1, AttributeInfoField::NameIndexAddress, true)]
+#[case::creation_order_index(2, AttributeInfoField::CreationOrderIndexAddress, true)]
 fn attribute_info_reports_an_incomplete_address(
-    #[case] field: usize,
+    #[case] address: usize,
+    #[case] field: AttributeInfoField,
+    #[case] indexed: bool,
     #[values(Width::Two, Width::Four, Width::Eight)] offsets: Width,
     #[values(None, Some(0x1234))] maximum: Option<u16>,
 ) {
-    let fixture = defined_addresses(offsets, maximum, true);
+    let fixture = defined_addresses(offsets, maximum, indexed);
     let width = usize::from(offsets.get());
-    let start = maximum.map_or(2, |_| 4) + field * width;
-    let end = start + width;
-    for available in start..end {
-        assert_eof(fixture, available, end);
+    let start = maximum.map_or(2, |_| 4) + address * width;
+    for available in start..start + width {
+        assert_incomplete_field(fixture, available, field, start, width);
     }
+}
+
+#[test]
+fn attribute_info_truncation_offsets_are_relative_to_the_supplied_body() {
+    let fixture = defined_addresses(Width::Four, Some(0x1234), true);
+    let mut body = fixture.build();
+    body.truncate(14);
+    let mut buffer = vec![0xa5; 3];
+    buffer.extend(body);
+    assert_eq!(
+        AttributeInfoMessage::parse_with_offset_width(&buffer[3..], OffsetWidth::Four).unwrap_err(),
+        FormatError::IncompleteAttributeInfo {
+            expected: 16,
+            available: 14,
+            field: AttributeInfoField::CreationOrderIndexAddress,
+            field_offset: 12,
+            field_size: 4,
+            field_available: 2,
+        }
+    );
 }
 
 #[test]
@@ -399,14 +468,25 @@ fn offset_width(fixture: AttributeInfo) -> OffsetWidth {
     OffsetWidth::try_from(fixture.offsets().get()).unwrap()
 }
 
-fn assert_eof(fixture: AttributeInfo, available: usize, expected: usize) {
+fn assert_incomplete_field(
+    fixture: AttributeInfo,
+    available: usize,
+    field: AttributeInfoField,
+    field_offset: usize,
+    field_size: usize,
+) {
     let mut body = fixture.build();
+    let expected = body.len();
     body.truncate(available);
     assert_eq!(
         AttributeInfoMessage::parse_with_offset_width(&body, offset_width(fixture)).unwrap_err(),
-        FormatError::UnexpectedEof {
+        FormatError::IncompleteAttributeInfo {
             expected,
             available,
+            field,
+            field_offset,
+            field_size,
+            field_available: available - field_offset,
         }
     );
 }

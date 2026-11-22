@@ -564,6 +564,7 @@ pub(crate) mod ndarray_support;
 
 #[cfg(feature = "std")]
 pub use error::{Error, HeapCompactionState};
+pub use hdf5_pure_core::AttributeInfoField;
 pub use hdf5_pure_core::EditStorageConflict;
 #[doc(inline)]
 pub use hdf5_pure_core::FormatError;
