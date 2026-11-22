@@ -632,7 +632,7 @@ struct BTreeV2CollectionInfo {
 
 impl BTreeV2CollectionInfo {
     fn compute(node_size: u32, record_size: u16, offsets: OffsetWidth, depth: u16) -> Self {
-        let mut info = BTreeV2NodeInfo::leaf_only(node_size, record_size);
+        let mut info = BTreeV2NodeInfo::leaf_only(max_records_leaf(node_size, record_size));
         for _ in 1..=depth {
             let previous = info.max_nrec.len() - 1;
             info.push_level(node_size, record_size, offsets);
@@ -2009,9 +2009,8 @@ pub struct BTreeV2NodeInfo {
 }
 
 impl BTreeV2NodeInfo {
-    /// Returns the table of a tree whose root is a leaf.
-    fn leaf_only(node_size: u32, record_size: u16) -> BTreeV2NodeInfo {
-        let max_nrec0 = max_records_leaf(node_size, record_size);
+    /// Returns the table of a tree whose root is a leaf with room for `max_nrec0` records.
+    fn leaf_only(max_nrec0: u64) -> Self {
         BTreeV2NodeInfo {
             max_nrec_size: bytes_for_max_records(max_nrec0),
             cum_max_nrec_size: vec![0],
@@ -2021,7 +2020,15 @@ impl BTreeV2NodeInfo {
     }
 
     /// Adds the capacities and the widths of one internal depth above the deepest in the table.
-    fn push_level(&mut self, node_size: u32, record_size: u16, offset_width: OffsetWidth) {
+    ///
+    /// Returns the record capacities of one node and its subtree at the added depth, in that
+    /// order.
+    fn push_level(
+        &mut self,
+        node_size: u32,
+        record_size: u16,
+        offset_width: OffsetWidth,
+    ) -> (u64, u64) {
         let u = self.max_nrec.len();
         // Internal-pointer size at this level uses the *previous* level's
         // subtree-total width (H5B2_INT_POINTER_SIZE).
@@ -2038,6 +2045,7 @@ impl BTreeV2NodeInfo {
         self.cum_max_nrec_size.push(bytes_for_max_records(cum));
         self.max_nrec.push(max_nrec_u);
         self.cum_max_nrec.push(cum);
+        (max_nrec_u, cum)
     }
 
     /// Computes the table for a tree of `depth`, with nodes of `node_size` bytes and records of
@@ -2050,7 +2058,7 @@ impl BTreeV2NodeInfo {
         offset_width: OffsetWidth,
         depth: u16,
     ) -> BTreeV2NodeInfo {
-        let mut info = BTreeV2NodeInfo::leaf_only(node_size, record_size);
+        let mut info = BTreeV2NodeInfo::leaf_only(max_records_leaf(node_size, record_size));
         for _ in 1..=depth {
             info.push_level(node_size, record_size, offset_width);
         }
@@ -2068,14 +2076,17 @@ impl BTreeV2NodeInfo {
         offset_width: OffsetWidth,
         records: u64,
     ) -> Option<(BTreeV2NodeInfo, u16)> {
-        let mut info = BTreeV2NodeInfo::leaf_only(node_size, record_size);
+        let mut capacity = max_records_leaf(node_size, record_size);
+        let mut info = Self::leaf_only(capacity);
         let mut depth = 0u16;
-        while *info.cum_max_nrec.last().expect("table is never empty") < records {
-            info.push_level(node_size, record_size, offset_width);
+        while capacity < records {
+            let (node_capacity, subtree_capacity) =
+                info.push_level(node_size, record_size, offset_width);
             depth += 1;
-            if *info.max_nrec.last().expect("just pushed") == 0 {
+            if node_capacity == 0 {
                 return None;
             }
+            capacity = subtree_capacity;
         }
         Some((info, depth))
     }
