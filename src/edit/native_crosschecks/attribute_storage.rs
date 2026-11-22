@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use ::test_util::attribute_info::{AttributeInfo, CreationOrderIndex, Width};
 use test_util_hdf5::creation_order;
 use test_util_hdf5::file;
 
@@ -111,6 +112,14 @@ fn dense_reversion_preserves_encoded_records_and_prefix() {
         &prepared.region[start..body.start],
         &region[info_start..info_body.start]
     );
+    let expected = AttributeInfo::new(
+        Width::Eight,
+        Some(17),
+        None,
+        None,
+        CreationOrderIndex::Undefined,
+    );
+    assert_eq!(prepared.region[body], expected.build());
     assert_eq!(compact.max_creation_index(), Some(17));
     assert_eq!(compact.fractal_heap_address(), None);
     assert_eq!(compact.btree_name_index_address(), None);

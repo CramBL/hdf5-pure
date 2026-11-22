@@ -17,6 +17,7 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ReservationRequest;
 
 use crate::address::AddressContext;
+use crate::attribute_info::AttributeInfoMessage;
 use crate::convert::Narrow;
 use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout, LAYOUT_CLASS_COMPACT};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
@@ -863,6 +864,26 @@ impl OhRegion {
     /// Appends records already encoded at this region's file widths and record layout.
     pub(super) fn push_bytes(&mut self, record: &[u8]) {
         self.bytes.extend_from_slice(record);
+    }
+
+    /// Appends the spliced region with `info` encoded into the selected record's body.
+    ///
+    /// The caller passes a splice for an Attribute Info record and a message checked at this
+    /// region's offset width.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`RecordSplice::replace_body_with`].
+    pub(super) fn append_spliced_attribute_info(
+        &mut self,
+        splice: &RecordSplice<'_>,
+        info: &AttributeInfoMessage,
+    ) -> Result<(), FormatError> {
+        splice.replace_body_with(&mut self.bytes, info.encoded_size(), |body| {
+            info.write_into(body)
+                .map(|_| ())
+                .map_err(|error| FormatError::Internal(error.to_string()))
+        })
     }
 
     /// Returns the record bytes for a patch that preserves record lengths.
