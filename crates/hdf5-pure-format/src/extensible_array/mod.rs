@@ -1156,7 +1156,7 @@ impl Layout {
             self.elements_len(u64::from(self.inline_elements))?,
             self.addresses_len(self.direct_data_blocks())?,
             self.addresses_len(u64::from(self.super_blocks - self.first_super_block))?,
-            CHECKSUM_LEN,
+            CHECKSUM_LEN.to_u64(),
         ])
     }
 
@@ -1175,7 +1175,7 @@ impl Layout {
             u64::from(self.block_offset_len),
             self.bitmap_len(super_block)?,
             self.addresses_len(super_block.blocks)?,
-            CHECKSUM_LEN,
+            CHECKSUM_LEN.to_u64(),
         ])
     }
 
@@ -1186,17 +1186,20 @@ impl Layout {
                 self.prefix_len(),
                 u64::from(self.block_offset_len),
                 self.elements_len(block.elements)?,
-                CHECKSUM_LEN,
+                CHECKSUM_LEN.to_u64(),
             ]),
         }
     }
 
     fn pages_offset(self) -> u64 {
-        self.prefix_len() + u64::from(self.block_offset_len) + CHECKSUM_LEN
+        self.prefix_len() + u64::from(self.block_offset_len) + CHECKSUM_LEN.to_u64()
     }
 
     fn page_len(self) -> Result<u64, FormatError> {
-        sum([self.elements_len(self.page_nelmts.get())?, CHECKSUM_LEN])
+        sum([
+            self.elements_len(self.page_nelmts.get())?,
+            CHECKSUM_LEN.to_u64(),
+        ])
     }
 
     fn prefix_len(self) -> u64 {
@@ -1258,12 +1261,8 @@ impl PageBitmap<'_> {
     }
 }
 
-fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> u64 {
-    SIGNATURE_LEN
-        + HEADER_BYTE_FIELDS
-        + u64::from(STATISTICS) * u64::from(lengths.get())
-        + u64::from(offsets.get())
-        + CHECKSUM_LEN
+fn header_len(widths: FormatWidths) -> u64 {
+    ExtensibleArrayHeader::serialized_size_with_widths(widths).to_u64()
 }
 
 /// Returns the bytes of a block from `pos` to its checksum.
@@ -1688,7 +1687,10 @@ impl ExtensibleArrayHeader {
 
     /// Returns the header length for validated format widths.
     pub fn serialized_size_with_widths(widths: FormatWidths) -> usize {
-        4 + 8 + 6 * usize::from(widths.lengths.get()) + usize::from(widths.offsets.get()) + 4
+        HEADER_PREFIX_LEN
+            + ExtensibleArrayStats::fields_len(widths.lengths)
+            + usize::from(widths.offsets.get())
+            + CHECKSUM_LEN
     }
 
     /// Returns the parsed maximum element bit count and data block page exponent.
@@ -2297,7 +2299,7 @@ impl ExtensibleArrayStats {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
     pub fn fields_range(lengths: LengthWidth) -> Range<u64> {
-        let start = SIGNATURE_LEN + HEADER_BYTE_FIELDS;
+        let start = HEADER_PREFIX_LEN.to_u64();
         start..start + u64::from(STATISTICS) * u64::from(lengths.get())
     }
 
@@ -2335,6 +2337,39 @@ impl ExtensibleArrayStats {
         output: &mut [u8],
         lengths: LengthWidth,
     ) -> Result<usize, FormatError> {
+        self.require_field_fits(lengths)?;
+        let size = Self::fields_len(lengths);
+        let available = output.len();
+        let fields = output.get_mut(..size).ok_or(FormatError::UnexpectedEof {
+            expected: size,
+            available,
+        })?;
+        self.write_fields(fields, lengths);
+        Ok(size)
+    }
+
+    fn require_field_fits(&self, lengths: LengthWidth) -> Result<(), FormatError> {
+        for value in self.field_values() {
+            bytes::require_length(value, lengths)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the statistics into a slice of exactly [`Self::fields_len`] bytes.
+    ///
+    /// The caller checks that each statistic fits `lengths`.
+    fn write_fields(&self, output: &mut [u8], lengths: LengthWidth) {
+        let width = usize::from(lengths.get());
+        for (field, value) in output.chunks_exact_mut(width).zip(self.field_values()) {
+            field.copy_from_slice(&value.to_le_bytes()[..width]);
+        }
+    }
+
+    fn fields_len(lengths: LengthWidth) -> usize {
+        usize::from(STATISTICS) * usize::from(lengths.get())
+    }
+
+    fn field_values(&self) -> [u64; STATISTICS as usize] {
         let Self {
             nsuper_blks,
             super_blk_size,
@@ -2343,23 +2378,14 @@ impl ExtensibleArrayStats {
             max_idx_set,
             nelmts,
         } = *self;
-        let fields = [
+        [
             nsuper_blks,
             super_blk_size,
             ndata_blks,
             data_blk_size,
             max_idx_set,
             nelmts,
-        ];
-        for value in fields {
-            bytes::require_length(value, lengths)?;
-        }
-        let size = usize::from(STATISTICS) * usize::from(lengths.get());
-        bytes::ensure_len(output, 0, size)?;
-        for (index, value) in fields.into_iter().enumerate() {
-            bytes::write_length_at(output, index * usize::from(lengths.get()), value, lengths)?;
-        }
-        Ok(size)
+        ]
     }
 
     /// The maximum encoded statistics length across the supported length widths.
@@ -2528,13 +2554,14 @@ const DATA_BLOCK_SIGNATURE: [u8; 4] = *b"EADB";
 const VERSION: u8 = 0;
 const SIGNATURE_LEN: u64 = 4;
 // The version, client ID, element size, and the five creation parameters of a header.
-const HEADER_BYTE_FIELDS: u64 = 8;
+const HEADER_BYTE_FIELDS: usize = 8;
+const HEADER_PREFIX_LEN: usize = HEADER_SIGNATURE.len() + HEADER_BYTE_FIELDS;
 // The six statistics of a header, each a length, of which "Max Index Set" is the fifth.
 const STATISTICS: u8 = 6;
 const STATISTICS_BEFORE_MAX_INDEX_SET: u64 = 4;
 // The version and client ID of a block.
 const BLOCK_BYTE_FIELDS: u64 = 2;
-const CHECKSUM_LEN: u64 = 4;
+const CHECKSUM_LEN: usize = 4;
 // The bounds `H5EA__hdr_create` checks the creation parameters against (`H5EAhdr.c`, HDF5 2.2.0).
 const MAX_INDEX_BITS: u8 = 64;
 const MIN_DATA_BLOCKS: u8 = 2;
@@ -3860,11 +3887,10 @@ mod tests {
         let local = fixture.local(range.start());
         fixture.bytes[local + HEADER_MINIMUM_POINTERS] = minimum_pointers;
         fixture.restamp(range);
-        let header_len = SIGNATURE_LEN
-            + HEADER_BYTE_FIELDS
+        let header_len = HEADER_PREFIX_LEN.to_u64()
             + u64::from(STATISTICS) * u64::from(lengths.get())
             + u64::from(offsets.get())
-            + CHECKSUM_LEN;
+            + CHECKSUM_LEN.to_u64();
         let expected = ExtensibleArrayHeader {
             client_id: u8::from(filtered),
             element_size: offsets.get() + if filtered { 2 + FILTER_MASK_BYTES } else { 0 },

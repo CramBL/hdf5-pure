@@ -16,18 +16,17 @@ use super::SuperBlock;
 use crate::address::StoredAddress;
 use crate::chunk_record;
 use crate::chunk_record::ChunkElementEncoding;
-use crate::chunk_record::ElementEncoding;
 use crate::chunk_record::IndexSlots;
-use crate::chunk_record::InvalidElementEncoding;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::width;
 use crate::width::FormatWidths;
 
 mod encode;
+mod header;
 
 pub use encode::ExtensibleArrayEmission;
 pub use encode::ExtensibleArrayEncoding;
+pub use header::ExtensibleArrayHeaderWithoutIndexBlock;
 
 /// The complete blocks selected by an Extensible Array's creation geometry and occupied slots.
 ///
@@ -549,14 +548,7 @@ fn element_layout(
         client_id,
     } = encoding;
     let element_size = elem_size.narrow_or_else(|| FormatError::InvalidExtensibleArrayGeometry)?;
-    let elements = ElementEncoding::new(widths.offsets, client_id, element_size).map_err(
-        |error| match error {
-            InvalidElementEncoding::Client(client) => {
-                FormatError::InvalidExtensibleArrayClient(client)
-            }
-            InvalidElementEncoding::EntrySize => FormatError::InvalidExtensibleArrayGeometry,
-        },
-    )?;
+    let elements = header::check_elements(widths.offsets, client_id, element_size)?;
     Ok((encoding, creation.layout(elements)))
 }
 
@@ -701,29 +693,7 @@ impl ExtensibleArrayStats {
     ///
     /// Returns [`FormatError::LengthTooLarge`] if a statistic exceeds `widths.lengths`.
     fn with_widths(self, widths: FormatWidths) -> Result<Self, FormatError> {
-        let Self {
-            nsuper_blks,
-            super_blk_size,
-            ndata_blks,
-            data_blk_size,
-            max_idx_set,
-            nelmts,
-        } = self;
-        for length in [
-            nsuper_blks,
-            super_blk_size,
-            ndata_blks,
-            data_blk_size,
-            max_idx_set,
-            nelmts,
-        ] {
-            if !width::length_width_holds(widths.lengths, length) {
-                return Err(FormatError::LengthTooLarge {
-                    length,
-                    length_size: widths.lengths.get(),
-                });
-            }
-        }
+        self.require_field_fits(widths.lengths)?;
         Ok(self)
     }
 
