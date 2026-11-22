@@ -115,7 +115,7 @@ impl FixedPointType {
                 high_padding: false,
                 signed: true,
                 bit_offset: 0,
-                bit_precision: standard_precision(8),
+                bit_precision: PRECISION_8,
             },
         }
     }
@@ -123,14 +123,14 @@ impl FixedPointType {
     /// Constructs a signed 16-bit integer datatype in little-endian byte order.
     pub const fn i16() -> Self {
         Self {
-            size: standard_size(2),
+            size: SIZE_16,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
                 low_padding: false,
                 high_padding: false,
                 signed: true,
                 bit_offset: 0,
-                bit_precision: standard_precision(16),
+                bit_precision: PRECISION_16,
             },
         }
     }
@@ -138,14 +138,14 @@ impl FixedPointType {
     /// Constructs a signed 32-bit integer datatype in little-endian byte order.
     pub const fn i32() -> Self {
         Self {
-            size: standard_size(4),
+            size: SIZE_32,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
                 low_padding: false,
                 high_padding: false,
                 signed: true,
                 bit_offset: 0,
-                bit_precision: standard_precision(32),
+                bit_precision: PRECISION_32,
             },
         }
     }
@@ -153,14 +153,14 @@ impl FixedPointType {
     /// Constructs a signed 64-bit integer datatype in little-endian byte order.
     pub const fn i64() -> Self {
         Self {
-            size: standard_size(8),
+            size: SIZE_64,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
                 low_padding: false,
                 high_padding: false,
                 signed: true,
                 bit_offset: 0,
-                bit_precision: standard_precision(64),
+                bit_precision: PRECISION_64,
             },
         }
     }
@@ -175,7 +175,7 @@ impl FixedPointType {
                 high_padding: false,
                 signed: false,
                 bit_offset: 0,
-                bit_precision: standard_precision(8),
+                bit_precision: PRECISION_8,
             },
         }
     }
@@ -183,14 +183,14 @@ impl FixedPointType {
     /// Constructs an unsigned 16-bit integer datatype in little-endian byte order.
     pub const fn u16() -> Self {
         Self {
-            size: standard_size(2),
+            size: SIZE_16,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
                 low_padding: false,
                 high_padding: false,
                 signed: false,
                 bit_offset: 0,
-                bit_precision: standard_precision(16),
+                bit_precision: PRECISION_16,
             },
         }
     }
@@ -198,14 +198,14 @@ impl FixedPointType {
     /// Constructs an unsigned 32-bit integer datatype in little-endian byte order.
     pub const fn u32() -> Self {
         Self {
-            size: standard_size(4),
+            size: SIZE_32,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
                 low_padding: false,
                 high_padding: false,
                 signed: false,
                 bit_offset: 0,
-                bit_precision: standard_precision(32),
+                bit_precision: PRECISION_32,
             },
         }
     }
@@ -213,14 +213,14 @@ impl FixedPointType {
     /// Constructs an unsigned 64-bit integer datatype in little-endian byte order.
     pub const fn u64() -> Self {
         Self {
-            size: standard_size(8),
+            size: SIZE_64,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
                 low_padding: false,
                 high_padding: false,
                 signed: false,
                 bit_offset: 0,
-                bit_precision: standard_precision(64),
+                bit_precision: PRECISION_64,
             },
         }
     }
@@ -394,7 +394,7 @@ impl FloatingPointType {
     /// Constructs a four-byte IEEE 754 binary32 datatype.
     pub const fn ieee754_binary32(byte_order: DatatypeByteOrder) -> Self {
         Self {
-            size: standard_size(4),
+            size: SIZE_32,
             byte_order,
             layout: FloatingPointLayout::IEEE754_BINARY32,
         }
@@ -403,7 +403,7 @@ impl FloatingPointType {
     /// Constructs an eight-byte IEEE 754 binary64 datatype.
     pub const fn ieee754_binary64(byte_order: DatatypeByteOrder) -> Self {
         Self {
-            size: standard_size(8),
+            size: SIZE_64,
             byte_order,
             layout: FloatingPointLayout::IEEE754_BINARY64,
         }
@@ -926,15 +926,15 @@ const FLOATING_POINT_CLASS: u8 = 1;
 const TIME_CLASS: u8 = 2;
 const BIT_FIELD_CLASS: u8 = 4;
 
-const fn standard_size(size: u32) -> NonZeroU32 {
-    // Every caller supplies a positive standard numeric width.
-    NonZeroU32::new(size).expect("standard numeric widths are positive")
-}
+// Constant evaluation checks each standard size and precision before use.
+const SIZE_16: NonZeroU32 = NonZeroU32::new(2).unwrap();
+const SIZE_32: NonZeroU32 = NonZeroU32::new(4).unwrap();
+const SIZE_64: NonZeroU32 = NonZeroU32::new(8).unwrap();
 
-const fn standard_precision(precision: u16) -> NonZeroU16 {
-    // Every caller supplies a positive standard integer precision.
-    NonZeroU16::new(precision).expect("standard integer precisions are positive")
-}
+const PRECISION_8: NonZeroU16 = NonZeroU16::new(8).unwrap();
+const PRECISION_16: NonZeroU16 = NonZeroU16::new(16).unwrap();
+const PRECISION_32: NonZeroU16 = NonZeroU16::new(32).unwrap();
+const PRECISION_64: NonZeroU16 = NonZeroU16::new(64).unwrap();
 
 #[cfg(test)]
 mod tests {

@@ -91,11 +91,8 @@ impl<A> AddressRange<A> {
     where
         A: Address,
     {
-        // Checked construction and intersection preserve endpoint order. The blanket arithmetic
-        // implementation computes the distance from the unchanged coordinate values.
-        self.end
-            .distance_from(self.start)
-            .expect("a checked range has ordered endpoints")
+        // Construction and intersection preserve endpoint order.
+        self.end.value() - self.start.value()
     }
 
     /// Returns `true` if the endpoints are equal.
@@ -227,11 +224,8 @@ impl<A> NonEmptyRange<A> {
     where
         A: Address,
     {
-        // Construction checks this sum through the blanket arithmetic implementation, and the
-        // private start and length cannot change independently.
-        self.start
-            .checked_add(self.length.get())
-            .expect("a nonempty range has a representable end")
+        // Construction bounds the sum of the stored start and length.
+        A::from_u64(self.start.value() + self.length.get())
     }
 
     /// Returns the positive number of bytes between the endpoints.

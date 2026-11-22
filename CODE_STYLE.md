@@ -101,17 +101,28 @@ Dataspace::default()
 
 Where possible, avoid writing `validate` or `check` type functions that try to check for error conditions based on the state of a populated object. Prefer ["parse, don't validate"](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/) style and try to use the type system to make it impossible for invalid states to be represented.
 
+Preserve semantic guarantees in parameter and return types. Establish static invariants through
+const evaluation and input-dependent invariants through checked construction. Subsequent
+operations should use that checked state directly.
+
 ### Error handling
 
-We use `Result` types pervasively throughout the code to signal error cases. Outside of unit and integration tests we prefer to avoid `unwrap()` and `expect()` calls unless there is a clear invariant which can be locally validated by the structure of the code. If there is such an invariant, we usually add a comment explaining how the invariant is upheld. In other cases, and especially for error cases which can arise from the contents of a file, which could be crafted by an attacker, we always handle the error and return it to the caller.
+Use `Result` for operations that can fail. In the library implementation, prefer pattern
+matching or error propagation to `unwrap()` and `expect()`. Where either call is permitted,
+use it only when the code at the call site shows why the value must be `Some` or `Ok`.
+Return an error if file contents can cause the operation to fail.
 
 A file is untrusted input. The fuzz targets and the property tests feed the reader damaged files, and a panic on any of them is a bug (`effect:crash`). This includes slice indexing and arithmetic on a value that came from the file: use `.get()` and the checked conversions in `src/convert.rs`, which turn an out-of-range value into a `FormatError`. Every offset and length read from a file goes through one, so that a value which does not fit a 32-bit `usize` is an error and never a truncation.
 
 - Every error is returned to the caller and handled once. Code that converts an error returns the conversion.
 - A failure mode is a variant of `Error` or `FormatError`, with the values a caller needs to act on it as fields. A new failure mode is a new variant, not a string.
-- An invariant the type system can express is a type: a value that cannot be zero is a `NonZeroU64`.
+- Use a checked type for invariants the type system can express. For example, use `NonZeroU64`
+  for a nonzero count or a checked exponent for a count that must be a power of two.
 - An invariant it cannot express is a `debug_assert!`, or an `assert!` where a violation would write a wrong file. The code panics only on a bug in the code.
-- A value read from a file never reaches a panic. A file that breaks an invariant is an error, and a violation that only a bug in the crate can produce is `FormatError::Internal` in a function that returns a `Result`.
+- Return a typed error when file contents violate a format invariant. An already fallible
+  operation can return `FormatError::Internal` if a crate bug prevents it from producing a
+  correct result. Keep operations infallible when their checked inputs establish all required
+  invariants.
 - A `Result` that is deliberately dropped is dropped with `.ok()`, which stops compiling if the return type changes. `let _ = f();` and `unwrap_or(())` are not used for that.
 - A string in an error message is formatted with `{:?}`, so that a path or a name is quoted and an embedded newline or tab is escaped.
 
