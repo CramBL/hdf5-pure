@@ -1,6 +1,7 @@
 //! Link storage thresholds and entry estimates from version 0 Group Info messages.
 
 use alloc::vec::Vec;
+use core::num::NonZeroU16;
 
 /// The link thresholds and optional entry estimates of a version 0 Group Info message.
 ///
@@ -102,8 +103,7 @@ impl GroupInfo {
             phase_change,
             estimates,
         } = self;
-        let stores_phase_change = phase_change.max_compact != DEFAULT_MAX_COMPACT
-            || phase_change.min_dense != DEFAULT_MIN_DENSE;
+        let stores_phase_change = *phase_change != GroupPhaseChange::DEFAULT;
         let flags = if stores_phase_change {
             STORES_PHASE_CHANGE
         } else {
@@ -120,8 +120,8 @@ impl GroupInfo {
         );
         bytes.extend_from_slice(&[GROUP_INFO_VERSION, flags]);
         if stores_phase_change {
-            bytes.extend_from_slice(&phase_change.max_compact.to_le_bytes());
-            bytes.extend_from_slice(&phase_change.min_dense.to_le_bytes());
+            bytes.extend_from_slice(&phase_change.max_compact().to_le_bytes());
+            bytes.extend_from_slice(&phase_change.min_dense().to_le_bytes());
         }
         if let Some(GroupEstimates {
             entries,
@@ -160,10 +160,7 @@ pub struct GroupEstimates {
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GroupPhaseChange {
-    max_compact: u16,
-    min_dense: u16,
-}
+pub struct GroupPhaseChange(Option<GroupThresholds>);
 
 impl GroupPhaseChange {
     /// Creates thresholds with a minimum dense count at most the maximum compact count.
@@ -181,9 +178,12 @@ impl GroupPhaseChange {
                 min_dense,
             });
         }
-        Ok(Self {
-            max_compact,
-            min_dense,
+        Ok(match NonZeroU16::new(max_compact) {
+            Some(max_compact) => Self::from_thresholds(GroupThresholds {
+                max_compact,
+                min_dense,
+            }),
+            None => Self::ALWAYS_DENSE,
         })
     }
 
@@ -208,15 +208,13 @@ impl GroupPhaseChange {
         if actual != u16::from(expected) {
             return Err(GroupInfoError::Length { expected, actual });
         }
-        let (max_compact, min_dense) = if flags & STORES_PHASE_CHANGE != 0 {
-            let &[_version, _flags, a, b, c, d, ..] = bytes else {
-                return Err(GroupInfoError::Length { expected, actual });
-            };
-            (u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d]))
-        } else {
-            (DEFAULT_MAX_COMPACT, DEFAULT_MIN_DENSE)
+        if flags & STORES_PHASE_CHANGE == 0 {
+            return Ok(Self::DEFAULT);
+        }
+        let &[_version, _flags, a, b, c, d, ..] = bytes else {
+            return Err(GroupInfoError::Length { expected, actual });
         };
-        Self::new(max_compact, min_dense)
+        Self::new(u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d]))
     }
 
     /// Returns the length of the message at the start of `bytes`, computed from its flags byte.
@@ -242,15 +240,68 @@ impl GroupPhaseChange {
         Ok(usize::from(expected))
     }
 
+    pub const fn from_thresholds(thresholds: GroupThresholds) -> Self {
+        Self(Some(thresholds))
+    }
+
+    pub const fn thresholds(&self) -> Option<GroupThresholds> {
+        self.0
+    }
+
     /// Returns the maximum number of links to store in the object header.
-    pub fn max_compact(&self) -> u16 {
-        self.max_compact
+    pub const fn max_compact(&self) -> u16 {
+        match self.0 {
+            Some(thresholds) => thresholds.max_compact().get(),
+            None => 0,
+        }
     }
 
     /// Returns the minimum number of links to store in the fractal heap.
-    pub fn min_dense(&self) -> u16 {
+    pub const fn min_dense(&self) -> u16 {
+        match self.0 {
+            Some(thresholds) => thresholds.min_dense(),
+            None => 0,
+        }
+    }
+
+    pub const ALWAYS_DENSE: Self = Self(None);
+    pub const DEFAULT: Self = Self::from_thresholds(GroupThresholds::DEFAULT);
+}
+
+/// An ordered threshold pair with a positive compact limit.
+///
+/// The minimum dense count is at most the maximum compact count. A zero minimum disables
+/// reversion from dense to compact storage by link count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GroupThresholds {
+    max_compact: NonZeroU16,
+    min_dense: u16,
+}
+
+impl GroupThresholds {
+    /// Constructs thresholds from constants checked at compile time.
+    ///
+    /// `MAX` must be positive and `MIN` must be at most `MAX`.
+    pub const fn from_constants<const MAX: u16, const MIN: u16>() -> Self {
+        const { assert!(MIN <= MAX, "min_dense must not exceed max_compact") };
+        Self {
+            max_compact: const { NonZeroU16::new(MAX).expect("max_compact must be positive") },
+            min_dense: MIN,
+        }
+    }
+
+    /// Returns the largest link count that permits compact storage.
+    pub const fn max_compact(&self) -> NonZeroU16 {
+        self.max_compact
+    }
+
+    /// Returns the minimum dense link count. Zero disables compact reversion by link count.
+    pub const fn min_dense(&self) -> u16 {
         self.min_dense
     }
+
+    /// The default compact limit of eight and reversion threshold of six links.
+    pub const DEFAULT: Self = Self::from_constants::<DEFAULT_MAX_COMPACT, DEFAULT_MIN_DENSE>();
 }
 
 /// The flags byte of a Group Info message, the message length for those flags, and the number of
@@ -413,10 +464,7 @@ mod tests {
         let thresholds = GroupPhaseChange::parse(bytes).unwrap();
         assert_eq!(
             thresholds,
-            GroupPhaseChange {
-                max_compact,
-                min_dense
-            }
+            GroupPhaseChange::new(max_compact, min_dense).unwrap()
         );
         assert_eq!(thresholds.max_compact(), max_compact);
         assert_eq!(thresholds.min_dense(), min_dense);

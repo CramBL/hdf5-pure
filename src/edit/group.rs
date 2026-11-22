@@ -899,10 +899,7 @@ mod tests {
         );
         region.push(
             MessageType::GROUP_INFO,
-            &LinkPhaseChange::AlwaysDense
-                .group_info()
-                .unwrap()
-                .serialize(),
+            &LinkPhaseChange::AlwaysDense.group_info().serialize(),
         );
         region
             .push_link("child", StoredAddress::new(100), None)

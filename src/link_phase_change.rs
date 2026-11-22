@@ -6,10 +6,10 @@ use hdf5_pure_format::__private::GroupInfo;
 #[cfg(feature = "std")]
 use hdf5_pure_format::__private::GroupInfoError;
 use hdf5_pure_format::__private::GroupPhaseChange;
+use hdf5_pure_format::__private::GroupThresholds;
 
-use crate::FormatError;
 #[cfg(feature = "std")]
-use crate::MessageType;
+use crate::{FormatError, MessageType};
 
 /// The thresholds for transitions between compact and dense group link storage.
 ///
@@ -54,14 +54,8 @@ impl LinkPhaseChange {
 
     /// Converts parsed Group Info thresholds to a storage policy.
     pub(crate) fn from_group_phase_change(value: GroupPhaseChange) -> Self {
-        match NonZeroU16::new(value.max_compact()) {
-            Some(max_compact) => Self::Thresholds(LinkThresholds {
-                max_compact,
-                compact_reversion: match NonZeroU16::new(value.min_dense()) {
-                    Some(min_dense) => CompactReversion::Below(min_dense),
-                    None => CompactReversion::Disabled,
-                },
-            }),
+        match value.thresholds() {
+            Some(thresholds) => Self::Thresholds(LinkThresholds { thresholds }),
             None => Self::AlwaysDense,
         }
     }
@@ -96,45 +90,35 @@ impl LinkPhaseChange {
         GroupInfo::parse(body).map_err(|error| group_info_error(error, body.len()))
     }
 
-    /// Converts the policy to Group Info with default entry estimates.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::Internal`] if a library bug violates the checked threshold ordering.
-    pub(crate) fn group_info(self) -> Result<GroupInfo, FormatError> {
-        GroupPhaseChange::new(self.max_compact(), self.min_dense())
-            .map(GroupInfo::new)
-            .map_err(|_error| {
-                FormatError::Internal("a checked link policy has inverted thresholds".into())
-            })
+    pub(crate) fn group_info(self) -> GroupInfo {
+        GroupInfo::new(self.group_phase_change())
+    }
+
+    pub(crate) const fn group_phase_change(self) -> GroupPhaseChange {
+        match self {
+            Self::AlwaysDense => GroupPhaseChange::ALWAYS_DENSE,
+            Self::Thresholds(thresholds) => {
+                GroupPhaseChange::from_thresholds(thresholds.thresholds)
+            }
+        }
     }
 
     /// Returns the maximum compact link count, or zero for [`Self::AlwaysDense`].
     pub const fn max_compact(self) -> u16 {
-        match self {
-            Self::AlwaysDense => 0,
-            Self::Thresholds(thresholds) => thresholds.max_compact.get(),
-        }
+        self.group_phase_change().max_compact()
     }
 
     /// Returns the minimum dense link count, or zero when compact reversion is disabled.
     ///
     /// Returns zero for [`Self::AlwaysDense`] as well.
     pub const fn min_dense(self) -> u16 {
-        match self {
-            Self::AlwaysDense => 0,
-            Self::Thresholds(thresholds) => match thresholds.compact_reversion {
-                CompactReversion::Below(min_dense) => min_dense.get(),
-                CompactReversion::Disabled => 0,
-            },
-        }
+        self.group_phase_change().min_dense()
     }
 
     /// The default maximum compact count of eight and minimum dense count of six.
-    pub(crate) const DEFAULT: Self = Self::builder()
-        .max_compact::<DEFAULT_MAX_COMPACT>()
-        .min_dense::<DEFAULT_MIN_DENSE>()
-        .build();
+    pub(crate) const DEFAULT: Self = Self::Thresholds(LinkThresholds {
+        thresholds: GroupThresholds::DEFAULT,
+    });
 }
 
 impl Default for LinkPhaseChange {
@@ -149,19 +133,21 @@ impl Default for LinkPhaseChange {
 /// at most the maximum compact count.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinkThresholds {
-    max_compact: NonZeroU16,
-    compact_reversion: CompactReversion,
+    thresholds: GroupThresholds,
 }
 
 impl LinkThresholds {
     /// Returns the largest link count that permits compact storage.
     pub const fn max_compact(self) -> NonZeroU16 {
-        self.max_compact
+        self.thresholds.max_compact()
     }
 
     /// Returns the condition for reverting from dense to compact storage.
     pub const fn compact_reversion(self) -> CompactReversion {
-        self.compact_reversion
+        match NonZeroU16::new(self.thresholds.min_dense()) {
+            Some(min_dense) => CompactReversion::Below(min_dense),
+            None => CompactReversion::Disabled,
+        }
     }
 }
 
@@ -217,9 +203,8 @@ impl LinkPhaseChangeBuilder {
     ///     .max_compact::<65_537>().min_dense::<1>().build();
     /// ```
     pub const fn max_compact<const MAX: u16>(self) -> LinkThresholdsBuilder<MAX> {
-        const { assert!(MAX > 0, "max_compact must be positive") };
         LinkThresholdsBuilder {
-            compact_reversion: CompactReversion::Disabled,
+            thresholds: GroupThresholds::from_constants::<MAX, 0>(),
         }
     }
 }
@@ -238,7 +223,7 @@ impl LinkPhaseChangeBuilder {
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinkThresholdsBuilder<const MAX: u16, const COMPLETE: bool = false> {
-    compact_reversion: CompactReversion,
+    thresholds: GroupThresholds,
 }
 
 impl<const MAX: u16> LinkThresholdsBuilder<MAX> {
@@ -275,20 +260,16 @@ impl<const MAX: u16> LinkThresholdsBuilder<MAX> {
     ///     .max_compact::<65_535>().min_dense::<65_537>().build();
     /// ```
     pub const fn min_dense<const MIN: u16>(self) -> LinkThresholdsBuilder<MAX, true> {
-        const {
-            assert!(MIN > 0, "min_dense must be positive");
-            assert!(MIN <= MAX, "min_dense must not exceed max_compact");
-        }
+        const { assert!(MIN > 0, "min_dense must be positive") };
         LinkThresholdsBuilder {
-            // The inline `const` assertion rejects every zero `MIN` at compilation.
-            compact_reversion: CompactReversion::Below(NonZeroU16::new(MIN).unwrap()),
+            thresholds: GroupThresholds::from_constants::<MAX, MIN>(),
         }
     }
 
     /// Keeps dense storage regardless of the link count after a transition to dense storage.
     pub const fn disable_compact_reversion(self) -> LinkThresholdsBuilder<MAX, true> {
         LinkThresholdsBuilder {
-            compact_reversion: CompactReversion::Disabled,
+            thresholds: GroupThresholds::from_constants::<MAX, 0>(),
         }
     }
 }
@@ -297,9 +278,7 @@ impl<const MAX: u16> LinkThresholdsBuilder<MAX, true> {
     /// Completes the policy with the chosen maximum and reversion condition.
     pub const fn build(self) -> LinkPhaseChange {
         LinkPhaseChange::Thresholds(LinkThresholds {
-            // `max_compact` checks that `MAX` is positive before either reversion choice is available.
-            max_compact: NonZeroU16::new(MAX).unwrap(),
-            compact_reversion: self.compact_reversion,
+            thresholds: self.thresholds,
         })
     }
 }
@@ -331,11 +310,6 @@ fn group_info_error(error: GroupInfoError, actual_length: usize) -> FormatError 
 // version one with padded message bodies.
 #[cfg(feature = "std")]
 const PADDED_HEADER_VERSION: u8 = 1;
-
-// `H5G_CRT_GINFO_MAX_COMPACT` in `H5Gprivate.h`, HDF5 2.2.0, defines the default maximum.
-const DEFAULT_MAX_COMPACT: u16 = 8;
-// `H5G_CRT_GINFO_MIN_DENSE` in `H5Gprivate.h`, HDF5 2.2.0, defines the default minimum.
-const DEFAULT_MIN_DENSE: u16 = 6;
 
 #[cfg(test)]
 mod tests {
@@ -369,9 +343,9 @@ mod tests {
         #[case] bytes: &[u8],
         #[case] expected: LinkPhaseChange,
     ) {
-        assert_eq!(
-            LinkPhaseChange::from_group_phase_change(GroupPhaseChange::parse(bytes).unwrap()),
-            expected
-        );
+        let phase_change = GroupPhaseChange::parse(bytes).unwrap();
+        let policy = LinkPhaseChange::from_group_phase_change(phase_change);
+        assert_eq!(policy, expected);
+        assert_eq!(policy.group_phase_change(), phase_change);
     }
 }
