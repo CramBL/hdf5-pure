@@ -8,8 +8,6 @@
 #![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
-#[cfg(feature = "std")]
-extern crate std;
 
 mod address;
 mod address_range;

@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** Removed the `std` Cargo feature from `hdf5-pure-core`. Its error types, including
+  `FormatError`, implement `core::error::Error` in every configuration ([#1316](https://github.com/CramBL/hdf5-pure/pull/1316)).
 - `FileBuilder` stores the strings of variable-length string attributes in global heap collections shared across the file, and `repack` in collections shared across each object. Each starts another 4096-byte collection once a string does not fit the newest one ([#881](https://github.com/CramBL/hdf5-pure/pull/881)).
 
 ### Fixed

@@ -57,10 +57,8 @@ from there. Rust visibility, the `unnameable_types` lint and review keep to
 this rule. The facade's re-exported types belong to its API even though
 `hdf5-pure-core` owns their definitions.
 
-`cargo-semver-checks` compares `hdf5-pure` and `hdf5-pure-core` with their
-released versions under the profiles in `scripts/api-profiles.toml`. The
-`default` and `full-public` profiles enable `std` in the core crate, and the
-`no-std` profile builds it without `std`.
+`cargo-semver-checks` compares supported public APIs with their released versions
+using the profiles in `scripts/api-profiles.toml`.
 
 The first release containing the core crate compares against the last
 release that defined those types in `hdf5-pure`. Three ownership-move lints are

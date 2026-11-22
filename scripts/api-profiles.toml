@@ -24,8 +24,3 @@ package = "hdf5-pure-core"
 name = "no-std"
 default_features = false
 features = []
-
-[[crate.profile]]
-name = "std"
-default_features = false
-features = ["std"]

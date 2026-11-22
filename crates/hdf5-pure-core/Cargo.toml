@@ -12,7 +12,6 @@ include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [features]
 default = []
-std = []
 
 [dev-dependencies]
 rstest.workspace = true

@@ -328,7 +328,6 @@ mod tests {
         assert_eq!(u16::from(message), 0x1234);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn every_known_message_uses_its_format_name() {
         for &(raw, message, display, _) in KNOWN {
@@ -336,7 +335,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn an_unknown_message_reports_its_raw_identifier() {
         assert_eq!(
@@ -345,7 +343,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn every_known_message_uses_its_symbolic_debug_name() {
         for &(raw, message, _, debug) in KNOWN {
@@ -353,7 +350,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn an_unknown_message_uses_the_unknown_debug_form() {
         assert_eq!(

@@ -12,7 +12,7 @@ include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [features]
 default = ["checksum"]
-std = ["hdf5-pure-core/std"]
+std = []
 checksum = []
 
 [dependencies]

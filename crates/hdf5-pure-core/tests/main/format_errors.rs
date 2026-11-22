@@ -1,3 +1,9 @@
+extern crate alloc;
+
+use alloc::collections::TryReserveError;
+use core::error::Error;
+use core::str::Utf8Error;
+
 use hdf5_pure_core::__private;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::Datatype;
@@ -5,6 +11,43 @@ use hdf5_pure_core::EditStorageConflict;
 use hdf5_pure_core::FixedPointType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::PhysicalAddress;
+
+#[test]
+fn edit_storage_conflicts_have_no_source() {
+    let conflict = EditStorageConflict::Truncation {
+        proposed: PhysicalAddress::new(64),
+        required: PhysicalAddress::new(128),
+    };
+    assert!(Error::source(&conflict).is_none());
+}
+
+#[test]
+fn allocation_failure_exposes_its_reservation_error() {
+    let source = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err();
+    let error = FormatError::AllocationFailed {
+        values: usize::MAX,
+        source: source.clone(),
+    };
+    assert_eq!(
+        Error::source(&error)
+            .unwrap()
+            .downcast_ref::<TryReserveError>(),
+        Some(&source)
+    );
+}
+
+#[rstest::rstest]
+#[case::local_heap(|source| FormatError::InvalidLocalHeapName { offset: 8, source })]
+#[case::soft_link(|source| FormatError::InvalidSoftLinkEncoding { source })]
+#[case::datatype_member(|source| FormatError::UnsupportedDatatypeMemberEncoding { class: 6, offset: 8, source })]
+fn utf8_decoding_errors_expose_their_source(#[case] make_error: fn(Utf8Error) -> FormatError) {
+    let source = core::str::from_utf8(core::slice::from_ref(&u8::MAX)).unwrap_err();
+    let error = make_error(source);
+    assert_eq!(
+        Error::source(&error).unwrap().downcast_ref::<Utf8Error>(),
+        Some(&source)
+    );
+}
 
 #[rstest::rstest]
 #[case::bounds(EditStorageConflict::Bounds { range: storage_range(4_294_967_600, 16), end: PhysicalAddress::new(4_294_967_608) }, "range 4294967600..4294967616 extends past 4294967608")]
