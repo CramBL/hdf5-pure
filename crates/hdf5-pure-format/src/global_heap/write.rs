@@ -389,18 +389,17 @@ impl<'a> Members<'a> {
         }
     }
 
+    /// Yields the supplied members or assigns consecutive indices to the object slices.
     fn iter(&self) -> impl Iterator<Item = GlobalHeapMember<'a>> + '_ {
-        (0..self.len()).map(move |position| match self {
-            Self::Consecutive(objects) => {
-                // The consecutive source is created only after its length is bounded by u16::MAX.
-                // Its 1-based position fits u16 and cannot be zero.
-                let index =
-                    NonZeroU16::new(u16::try_from(position + 1).expect("bounded member count"))
-                        .expect("one-based member index");
-                GlobalHeapMember::new(index, 1, objects[position])
-            }
-            Self::Supplied(members) => members[position],
-        })
+        let (objects, supplied): (&[_], &[_]) = match self {
+            Self::Consecutive(objects) => (objects, &[]),
+            Self::Supplied(members) => (&[], members),
+        };
+        let indices = core::iter::successors(Some(NonZeroU16::MIN), |index| index.checked_add(1));
+        indices
+            .zip(objects)
+            .map(|(index, object)| GlobalHeapMember::new(index, 1, object))
+            .chain(supplied.iter().copied())
     }
 }
 
@@ -435,3 +434,20 @@ const FREE_SPACE_INDEX: u16 = 0;
 
 // Version 1 free-space objects use zero ("Global Heap", format specification, version 4.0).
 const FREE_SPACE_REFERENCE_COUNT: u16 = 0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consecutive_members_include_every_positive_index() {
+        let objects = alloc::vec![&[][..]; GLOBAL_HEAP_MAX_OBJECTS];
+        let members = Members::Consecutive(&objects);
+        assert!(
+            members
+                .iter()
+                .map(|member| member.index.get())
+                .eq(1..=u16::MAX)
+        );
+    }
+}
