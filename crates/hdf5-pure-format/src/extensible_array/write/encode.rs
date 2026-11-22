@@ -2,8 +2,9 @@
 
 use alloc::vec::Vec;
 
+use super::BlockLocation;
+use super::ChildBlock;
 use super::ExtensibleArrayBlock;
-use super::ExtensibleArrayBlockKind;
 use super::ExtensibleArrayPlacement;
 use super::ExtensibleArrayPlan;
 use super::HEADER_BLOCK;
@@ -109,12 +110,11 @@ impl<'a> ExtensibleArrayEncoding<'a> {
             });
         }
         let mut next = slots.next_occupied(u64::from(layout.inline_elements));
-        for block in blocks
-            .iter()
-            .filter(|block| block.kind == ExtensibleArrayBlockKind::Data)
-        {
-            // Every data descriptor is constructed with its complete logical slot range.
-            let range = block.slots.as_ref().expect("data blocks have slot ranges");
+        for block in blocks {
+            let BlockLocation::Data(block) = &block.location else {
+                continue;
+            };
+            let range = &block.slots;
             if let Some(slot) = next.filter(|&slot| slot < range.start) {
                 return Err(FormatError::ExtensibleArrayUnplannedSlot { slot });
             }
@@ -158,17 +158,17 @@ impl<'a> ExtensibleArrayEncoding<'a> {
                 values: blocks.len().saturating_sub(2),
                 source,
             })?;
-        for (child, block) in blocks.iter().enumerate().skip(2) {
-            // Every data and secondary descriptor is constructed with its pointer holder.
-            let (parent, mut slot) = block
-                .parent
-                .expect("allocated children have pointer holders");
-            if block.kind == ExtensibleArrayBlockKind::Secondary {
-                slot += layout.direct_data_blocks();
-            }
+        let direct_blocks = layout.direct_data_blocks();
+        for (child, block) in blocks.iter().enumerate() {
+            let (block, slot_base) = match &block.location {
+                BlockLocation::Header | BlockLocation::Index { .. } => continue,
+                BlockLocation::Secondary(block) => (block, direct_blocks),
+                BlockLocation::Data(block) => (block, 0),
+            };
+            let (parent, slot) = block.parent;
             pointers.push(Pointer {
                 parent,
-                slot,
+                slot: slot + slot_base,
                 child,
             });
         }
@@ -256,11 +256,11 @@ impl ExtensibleArrayEmission<'_> {
                 values: start.saturating_add(length),
                 source,
             })?;
-        match self.block().kind {
-            ExtensibleArrayBlockKind::Header => self.header(output)?,
-            ExtensibleArrayBlockKind::Index => self.index(output)?,
-            ExtensibleArrayBlockKind::Secondary => self.secondary(output)?,
-            ExtensibleArrayBlockKind::Data => self.data(output)?,
+        match &self.block().location {
+            BlockLocation::Header => self.header(output)?,
+            BlockLocation::Index { .. } => self.index(output)?,
+            BlockLocation::Secondary(block) => self.secondary(output, block)?,
+            BlockLocation::Data(block) => self.data(output, block)?,
         }
         if output.len().checked_sub(start) != Some(length) {
             return Err(FormatError::Internal(alloc::format!(
@@ -330,38 +330,30 @@ impl ExtensibleArrayEmission<'_> {
         Ok(())
     }
 
-    fn secondary(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
+    fn secondary(&self, output: &mut Vec<u8>, descriptor: &ChildBlock) -> Result<(), FormatError> {
         let block_start = output.len();
         let plan = self.encoding.placement.plan;
-        let descriptor = self.block();
-        // Every secondary descriptor retains its complete logical range and first block offset.
-        let range = descriptor
-            .slots
-            .as_ref()
-            .expect("secondary blocks have slot ranges");
-        // Every secondary descriptor is addressed by an index-block secondary pointer.
-        let (_, pointer) = descriptor
-            .parent
-            .expect("secondary blocks have pointer holders");
+        let (_, pointer) = descriptor.parent;
         let block = plan.layout.super_block(
             plan.layout.first_super_block
                 + u32::try_from(pointer)
                     .map_err(|_error| FormatError::InvalidExtensibleArrayGeometry)?,
         )?;
         self.prefix(output, &extensible_array::SUPER_BLOCK_SIGNATURE)?;
-        self.block_offset(output);
+        self.block_offset(output, descriptor.offset);
         let bitmap_start = output.len();
         output.resize(bitmap_start + plan.layout.bitmap_len(block)?.to_usize()?, 0);
         if let Some(pages) = plan.layout.pages(block.block_elements) {
+            let page_nelmts = plan.layout.page_nelmts.get();
             for child in self.encoding.children(self.index) {
                 let start = extensible_array::sum([
-                    range.start,
+                    descriptor.slots.start,
                     extensible_array::product(child.slot, block.block_elements)?,
                 ])?;
                 let end = extensible_array::sum([start, block.block_elements])?;
                 let mut next = self.encoding.slots.next_occupied(start);
                 while let Some(slot) = next.filter(|&slot| slot < end) {
-                    let page = (slot - start) / plan.layout.page_elements();
+                    let page = (slot - start) / page_nelmts;
                     let bit = extensible_array::sum([
                         extensible_array::product(child.slot, pages)?,
                         page,
@@ -370,7 +362,7 @@ impl ExtensibleArrayEmission<'_> {
                     output[byte] |= 0x80 >> (bit % 8);
                     next = self.encoding.slots.next_occupied(extensible_array::sum([
                         start,
-                        extensible_array::product(page + 1, plan.layout.page_elements())?,
+                        extensible_array::product(page + 1, page_nelmts)?,
                     ])?);
                 }
             }
@@ -380,23 +372,19 @@ impl ExtensibleArrayEmission<'_> {
         Ok(())
     }
 
-    fn data(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
+    fn data(&self, output: &mut Vec<u8>, descriptor: &ChildBlock) -> Result<(), FormatError> {
         let block_start = output.len();
         let layout = self.encoding.placement.plan.layout;
-        // Every data descriptor retains its complete logical slot range.
-        let slots = self
-            .block()
-            .slots
-            .as_ref()
-            .expect("data blocks have slot ranges");
+        let slots = &descriptor.slots;
         self.prefix(output, &extensible_array::DATA_BLOCK_SIGNATURE)?;
-        self.block_offset(output);
+        self.block_offset(output, descriptor.offset);
         match layout.pages(slots.end - slots.start) {
             None => {
                 self.elements(output, slots.start, slots.end - slots.start)?;
                 append_checksum(output, block_start);
             }
             Some(pages) => {
+                let page_nelmts = layout.page_nelmts.get();
                 append_checksum(output, block_start);
                 for page in 0..pages {
                     let page_start = output.len();
@@ -404,9 +392,9 @@ impl ExtensibleArrayEmission<'_> {
                         output,
                         extensible_array::sum([
                             slots.start,
-                            extensible_array::product(page, layout.page_elements())?,
+                            extensible_array::product(page, page_nelmts)?,
                         ])?,
-                        layout.page_elements(),
+                        page_nelmts,
                     )?;
                     append_checksum(output, page_start);
                 }
@@ -424,13 +412,7 @@ impl ExtensibleArrayEmission<'_> {
         self.address_field(output, Some(HEADER_BLOCK))
     }
 
-    fn block_offset(&self, output: &mut Vec<u8>) {
-        // Only data and secondary emission calls this method. Their checked descriptors retain
-        // offsets that fit the encoded field.
-        let offset = self
-            .block()
-            .offset
-            .expect("data and secondary blocks have offsets");
+    fn block_offset(&self, output: &mut Vec<u8>, offset: u64) {
         output.extend_from_slice(
             &offset.to_le_bytes()
                 [..usize::from(self.encoding.placement.plan.layout.block_offset_len)],
@@ -516,6 +498,7 @@ mod tests {
     use crate::extensible_array::ExtensibleArrayCreationParameters;
     use crate::extensible_array::ExtensibleArrayHeaderLocator;
     use crate::extensible_array::SlotOccupancy;
+    use crate::extensible_array::write::ExtensibleArrayBlockKind;
     use crate::extensible_array::write::ExtensibleArrayPlan;
     use crate::width::FormatWidths;
 
@@ -682,7 +665,7 @@ mod tests {
                 header.idx_blk_elmts,
                 header.super_blk_min_data_ptrs,
                 header.min_dblk_nelmts,
-                header.page_nelmts().get().ilog2().try_into().unwrap()
+                header.page_nelmts().exponent()
             ],
             creation
         );

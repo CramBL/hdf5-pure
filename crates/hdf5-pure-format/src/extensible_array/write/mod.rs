@@ -140,11 +140,12 @@ impl ExtensibleArrayPlan {
                     push(
                         &mut blocks,
                         ExtensibleArrayBlock {
-                            kind: ExtensibleArrayBlockKind::Secondary,
                             length,
-                            slots: Some(slots),
-                            offset: Some(block.offset),
-                            parent: Some((INDEX_BLOCK, pointer)),
+                            location: BlockLocation::Secondary(ChildBlock {
+                                slots,
+                                offset: block.offset,
+                                parent: (INDEX_BLOCK, pointer),
+                            }),
                         },
                     )?;
                 }
@@ -360,17 +361,19 @@ impl ExtensibleArrayPlacement<'_> {
 /// descriptors.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensibleArrayBlock {
-    kind: ExtensibleArrayBlockKind,
     length: u64,
-    slots: Option<Range<u64>>,
-    offset: Option<u64>,
-    parent: Option<(usize, u64)>,
+    location: BlockLocation,
 }
 
 impl ExtensibleArrayBlock {
     /// Returns the block's role in the index.
     pub fn kind(&self) -> ExtensibleArrayBlockKind {
-        self.kind
+        match self.location {
+            BlockLocation::Header => ExtensibleArrayBlockKind::Header,
+            BlockLocation::Index { .. } => ExtensibleArrayBlockKind::Index,
+            BlockLocation::Secondary(_) => ExtensibleArrayBlockKind::Secondary,
+            BlockLocation::Data(_) => ExtensibleArrayBlockKind::Data,
+        }
     }
     /// Returns the complete allocation length, including checksums and any data block pages.
     pub fn length(&self) -> u64 {
@@ -378,13 +381,22 @@ impl ExtensibleArrayBlock {
     }
     /// Returns the logical slot range, including unoccupied slots, or `None` for the header.
     pub fn slots(&self) -> Option<Range<u64>> {
-        self.slots.clone()
+        match &self.location {
+            BlockLocation::Header => None,
+            BlockLocation::Index { inline_elements } => Some(0..u64::from(*inline_elements)),
+            BlockLocation::Secondary(block) | BlockLocation::Data(block) => {
+                Some(block.slots.clone())
+            }
+        }
     }
     /// Returns the block offset relative to the end of the index block's inline slots.
     ///
     /// The header and index block have no block offset.
     pub fn offset(&self) -> Option<u64> {
-        self.offset
+        match &self.location {
+            BlockLocation::Header | BlockLocation::Index { .. } => None,
+            BlockLocation::Secondary(block) | BlockLocation::Data(block) => Some(block.offset),
+        }
     }
     /// Returns the parent descriptor index and the pointer slot within its address table.
     ///
@@ -392,8 +404,29 @@ impl ExtensibleArrayBlock {
     /// when the parent is the index block. The index block's parent is the header at slot zero.
     /// The header has no parent. A parent descriptor may follow its child.
     pub fn parent(&self) -> Option<(usize, u64)> {
-        self.parent
+        match &self.location {
+            BlockLocation::Header => None,
+            BlockLocation::Index { .. } => Some((HEADER_BLOCK, 0)),
+            BlockLocation::Secondary(block) | BlockLocation::Data(block) => Some(block.parent),
+        }
     }
+}
+
+/// The block role and its location within the array's index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BlockLocation {
+    Header,
+    Index { inline_elements: u8 },
+    Secondary(ChildBlock),
+    Data(ChildBlock),
+}
+
+/// The logical slot range, stored offset, and parent pointer for a secondary or data block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChildBlock {
+    slots: Range<u64>,
+    offset: u64,
+    parent: (usize, u64),
 }
 
 /// The role of a complete Extensible Array allocation.
@@ -710,18 +743,14 @@ fn vec_blocks(
 ) -> Result<Vec<ExtensibleArrayBlock>, FormatError> {
     Ok(alloc::vec![
         ExtensibleArrayBlock {
-            kind: ExtensibleArrayBlockKind::Header,
             length: super::header_len(widths),
-            slots: None,
-            offset: None,
-            parent: None
+            location: BlockLocation::Header,
         },
         ExtensibleArrayBlock {
-            kind: ExtensibleArrayBlockKind::Index,
             length: layout.index_block_len()?,
-            slots: Some(0..u64::from(layout.inline_elements)),
-            offset: None,
-            parent: Some((HEADER_BLOCK, 0))
+            location: BlockLocation::Index {
+                inline_elements: layout.inline_elements
+            },
         },
     ])
 }
@@ -797,11 +826,12 @@ fn push_data(
     push(
         blocks,
         ExtensibleArrayBlock {
-            kind: ExtensibleArrayBlockKind::Data,
             length,
-            slots: Some(slots),
-            offset: Some(block.offset),
-            parent: Some(parent),
+            location: BlockLocation::Data(ChildBlock {
+                slots,
+                offset: block.offset,
+                parent,
+            }),
         },
     )?;
     Ok(())

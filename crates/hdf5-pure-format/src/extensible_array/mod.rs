@@ -20,7 +20,6 @@
 use alloc::format;
 use alloc::vec::Vec;
 use core::num::NonZeroU8;
-use core::num::NonZeroU64;
 use core::ops::Range;
 
 use hdf5_pure_core::__private::FileRange;
@@ -128,18 +127,18 @@ impl ExtensibleArrayHeaderLocator {
                 InvalidElementEncoding::EntrySize => FormatError::InvalidExtensibleArrayGeometry,
             },
         )?;
-        let layout = Layout::new(
-            encoding,
+        let creation = ExtensibleArrayCreationParameters::parse(&[
             max_index_bits,
             index_block_elements,
-            data_block_min_elements,
             super_block_min_data_blocks,
+            data_block_min_elements,
             page_bits,
-        )?;
+        ])?;
+        let layout = creation.layout(encoding);
         let header = ExtensibleArrayHeader {
             client_id,
             element_size,
-            bit_geometry: ExtensibleArrayBitGeometry::parse(max_index_bits, page_bits)?,
+            bit_geometry: creation.bit_geometry(),
             idx_blk_elmts: index_block_elements,
             min_dblk_nelmts: data_block_min_elements,
             super_blk_min_data_ptrs: super_block_min_data_blocks,
@@ -848,9 +847,10 @@ impl<'a> ExtensibleArrayPages<'a> {
             bitmap,
         } = *self;
         let layout = owner.layout;
+        let page_elements = layout.page_nelmts.get();
         (0..bitmap.pages)
             .take_while(move |&page| {
-                page.checked_mul(layout.page_elements())
+                page.checked_mul(page_elements)
                     .and_then(|offset| offset.checked_add(first_slot))
                     .is_some_and(|slot| slot < owner.max_index_set)
             })
@@ -863,7 +863,7 @@ impl<'a> ExtensibleArrayPages<'a> {
                         first_page.checked_add(product(page, page_len)?)?,
                         page_len,
                     )?,
-                    first_slot: sum([first_slot, product(page, layout.page_elements())?])?,
+                    first_slot: sum([first_slot, product(page, page_elements)?])?,
                 })
             })
     }
@@ -920,7 +920,7 @@ impl ExtensibleArrayPageRef {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range ends past
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
-        let elements = self.owner.layout.page_elements();
+        let elements = self.owner.layout.page_nelmts.get();
         let end = sum([self.first_slot, elements])?;
         Ok(self.first_slot..end)
     }
@@ -1071,8 +1071,7 @@ struct Layout {
     inline_elements: u8,
     /// The base 2 logarithm of the number of elements in the smallest data block.
     min_elements_bits: u32,
-    /// The base 2 logarithm of the number of elements in a page.
-    page_bits: u32,
+    page_nelmts: PageElementCount,
     block_offset_len: u8,
     /// The index of the first super block whose address the index block holds.
     first_super_block: u32,
@@ -1081,24 +1080,6 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(
-        encoding: ElementEncoding,
-        max_index_bits: u8,
-        inline_elements: u8,
-        min_elements: u8,
-        min_data_blocks: u8,
-        page_bits: u8,
-    ) -> Result<Self, FormatError> {
-        Ok(ExtensibleArrayCreationParameters::parse(&[
-            max_index_bits,
-            inline_elements,
-            min_data_blocks,
-            min_elements,
-            page_bits,
-        ])?
-        .layout(encoding))
-    }
-
     fn direct_blocks(self) -> impl Iterator<Item = Result<DataBlock, FormatError>> {
         (0..self.first_super_block)
             .map(move |index| self.super_block(index))
@@ -1119,13 +1100,13 @@ impl Layout {
     // `2 * (min_data_blocks - 1)`, the data blocks of the super blocks before
     // `first_super_block`.
     fn direct_data_blocks(self) -> u64 {
-        // `Layout::new` rejects fewer than 2 data block addresses, so `first_super_block` is at
-        // least 2 and the shift at least 1.
+        // Construction requires at least two data block pointers per super block, so
+        // `first_super_block` is at least 2 and the shift is at least 1.
         2 * ((1 << (self.first_super_block / 2)) - 1)
     }
 
     fn super_block(self, index: u32) -> Result<SuperBlock, FormatError> {
-        // Every caller passes an index below `super_blocks`, which `Layout::new` bounds at 65, so
+        // Every caller passes an index below `super_blocks`, whose checked value is at most 65, so
         // the subtraction and the shifts below stay inside a `u64`.
         debug_assert!(index < self.super_blocks);
         let min_elements = 1 << self.min_elements_bits;
@@ -1141,15 +1122,12 @@ impl Layout {
     // A data block of more elements than a page is paged, as `H5EA__dblock_alloc` pages it
     // (`H5EAdblock.c`, HDF5 2.2.0).
     fn pages(self, elements: u64) -> Option<u64> {
-        let block = DataBlockGeometry {
+        let pages = DataBlockGeometry {
             dblk_nelmts: elements,
-            page_nelmts: self.page_elements(),
-        };
-        block.is_paged().then(|| block.npages())
-    }
-
-    const fn page_elements(self) -> u64 {
-        1 << self.page_bits
+            page_nelmts: self.page_nelmts,
+        }
+        .npages();
+        (pages != 0).then_some(pages)
     }
 
     /// Returns the slot of the first element of the block at `offset`.
@@ -1171,7 +1149,8 @@ impl Layout {
     }
 
     fn index_block_len(self) -> Result<u64, FormatError> {
-        // `Layout::new` rejects a `first_super_block` past `super_blocks`.
+        // `ExtensibleArrayCreationParameters::from_bit_geometry` checks that `first_super_block`
+        // is at most `super_blocks`.
         sum([
             self.prefix_len(),
             self.elements_len(u64::from(self.inline_elements))?,
@@ -1217,7 +1196,7 @@ impl Layout {
     }
 
     fn page_len(self) -> Result<u64, FormatError> {
-        sum([self.elements_len(self.page_elements())?, CHECKSUM_LEN])
+        sum([self.elements_len(self.page_nelmts.get())?, CHECKSUM_LEN])
     }
 
     fn prefix_len(self) -> u64 {
@@ -1338,40 +1317,8 @@ impl ExtensibleArrayCreationParameters {
     /// [`FormatError::InvalidExtensibleArrayGeometry`] if the fields are outside the supported
     /// block and page geometry.
     pub fn parse(data: &[u8]) -> Result<Self, FormatError> {
-        let mut cursor = bytes::ByteCursor::new(data);
-        let [
-            max_index_bits,
-            inline_elements,
-            min_data_blocks,
-            min_elements,
-            page_bits,
-        ] = cursor.array()?;
-        if !(1..=MAX_INDEX_BITS).contains(&max_index_bits)
-            || !min_elements.is_power_of_two()
-            || !min_data_blocks.is_power_of_two()
-            || min_data_blocks < MIN_DATA_BLOCKS
-            || page_bits > max_index_bits.min(MAX_PAGE_BITS)
-        {
-            return Err(FormatError::InvalidExtensibleArrayGeometry);
-        }
-        let min_elements_bits = min_elements.trailing_zeros();
-        let first_super_block = 2 * min_data_blocks.trailing_zeros();
-        let super_blocks = (u32::from(max_index_bits) + 1)
-            .checked_sub(min_elements_bits)
-            .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
-        if first_super_block > super_blocks
-            || min_elements_bits + first_super_block / 2 > u32::from(page_bits)
-        {
-            return Err(FormatError::InvalidExtensibleArrayGeometry);
-        }
-        Ok(Self {
-            bits: ExtensibleArrayBitGeometry::parse(max_index_bits, page_bits)?,
-            inline_elements,
-            min_data_blocks: NonZeroU8::new(min_data_blocks)
-                .ok_or(FormatError::InvalidExtensibleArrayGeometry)?,
-            min_elements: NonZeroU8::new(min_elements)
-                .ok_or(FormatError::InvalidExtensibleArrayGeometry)?,
-        })
+        let fields = bytes::ByteCursor::new(data).array()?;
+        Self::from_fields(fields).ok_or(FormatError::InvalidExtensibleArrayGeometry)
     }
 
     /// Returns the writer's default creation parameters.
@@ -1380,15 +1327,17 @@ impl ExtensibleArrayCreationParameters {
     /// data block pointer count is four, the minimum data block size is 16 elements, and a page
     /// holds 1024 elements.
     pub fn canonical() -> Self {
-        // These constant parameters satisfy the checked block and page geometry.
-        Self::parse(&[
-            EA_MAX_NELMTS_BITS,
-            EA_IDX_BLK_ELMTS,
-            EA_SUPER_BLK_MIN_DATA_PTRS,
-            EA_MIN_DBLK_NELMTS,
-            EA_MAX_DBLK_NELMTS_BITS,
-        ])
-        .expect("canonical Extensible Array geometry is representable")
+        const {
+            // Constant evaluation checks these creation fields before the writer uses them.
+            Self::from_fields([
+                EA_MAX_NELMTS_BITS,
+                EA_IDX_BLK_ELMTS,
+                EA_SUPER_BLK_MIN_DATA_PTRS,
+                EA_MIN_DBLK_NELMTS,
+                EA_MAX_DBLK_NELMTS_BITS,
+            ])
+            .expect("the writer's creation fields have valid geometry")
+        }
     }
 
     /// Returns the creation fields in data layout message order.
@@ -1398,7 +1347,7 @@ impl ExtensibleArrayCreationParameters {
             self.inline_elements,
             self.min_data_blocks.get(),
             self.min_elements.get(),
-            self.bits.page_bits.0,
+            self.bits.page_nelmts().exponent(),
         ]
     }
 
@@ -1422,6 +1371,65 @@ impl ExtensibleArrayCreationParameters {
         self.min_elements
     }
 
+    /// Constructs creation parameters from the five fields in data layout message order.
+    ///
+    /// Returns `None` if the fields describe an unsupported block or page geometry.
+    const fn from_fields(fields: [u8; 5]) -> Option<Self> {
+        let [
+            max_index_bits,
+            inline_elements,
+            min_data_blocks,
+            min_elements,
+            page_bits,
+        ] = fields;
+        let Ok(bits) = ExtensibleArrayBitGeometry::from_fields(max_index_bits, page_bits) else {
+            return None;
+        };
+        Self::from_bit_geometry(bits, inline_elements, min_data_blocks, min_elements)
+    }
+
+    /// Combines checked bit geometry with the counts for index and data blocks.
+    ///
+    /// Returns `None` if the minimum block element or pointer count is unsupported, or if the
+    /// block geometry exceeds the array or page bounds.
+    const fn from_bit_geometry(
+        bits: ExtensibleArrayBitGeometry,
+        inline_elements: u8,
+        min_data_blocks: u8,
+        min_elements: u8,
+    ) -> Option<Self> {
+        let (Some(min_data_blocks), Some(min_elements)) = (
+            NonZeroU8::new(min_data_blocks),
+            NonZeroU8::new(min_elements),
+        ) else {
+            return None;
+        };
+        if !min_elements.get().is_power_of_two()
+            || !min_data_blocks.get().is_power_of_two()
+            || min_data_blocks.get() < MIN_DATA_BLOCKS
+        {
+            return None;
+        }
+        let min_elements_bits = min_elements.get().trailing_zeros();
+        let first_super_block = 2 * min_data_blocks.get().trailing_zeros();
+        let Some(super_blocks) =
+            (bits.max_index_bits().get() as u32 + 1).checked_sub(min_elements_bits)
+        else {
+            return None;
+        };
+        if first_super_block > super_blocks
+            || min_elements_bits + first_super_block / 2 > bits.page_nelmts().exponent() as u32
+        {
+            return None;
+        }
+        Some(Self {
+            bits,
+            inline_elements,
+            min_data_blocks,
+            min_elements,
+        })
+    }
+
     // `H5EA_SBLK_FIRST_IDX` and `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`, HDF5 2.2.0)
     // determine the first super block and block-offset width.
     fn layout(self, encoding: ElementEncoding) -> Layout {
@@ -1429,7 +1437,7 @@ impl ExtensibleArrayCreationParameters {
             encoding,
             inline_elements: self.inline_elements,
             min_elements_bits: self.min_elements.get().trailing_zeros(),
-            page_bits: u32::from(self.bits.page_bits.0),
+            page_nelmts: self.bits.page_nelmts(),
             block_offset_len: self.bits.max_index_bits().get().div_ceil(8),
             first_super_block: 2 * self.min_data_blocks.get().trailing_zeros(),
             super_blocks: u32::from(self.bits.max_index_bits().get()) + 1
@@ -1694,7 +1702,7 @@ impl ExtensibleArrayHeader {
     }
 
     /// Returns the number of elements in a data block page, a nonzero power of two.
-    pub fn page_nelmts(&self) -> NonZeroU64 {
+    pub const fn page_nelmts(&self) -> PageElementCount {
         self.bit_geometry.page_nelmts()
     }
 
@@ -1714,42 +1722,40 @@ impl ExtensibleArrayHeader {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensibleArrayBitGeometry {
     max_index_bits: MaxIndexBits,
-    page_bits: PageBits,
+    page_nelmts: PageElementCount,
 }
 
 impl ExtensibleArrayBitGeometry {
-    fn for_writer() -> Self {
-        ExtensibleArrayCreationParameters::canonical().bit_geometry()
-    }
-
     /// Parses the maximum element bit count and the data block page exponent.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidChunkGeometry`] if `max_index_bits` is outside `1..=64`,
-    /// the page count does not fit a [`u64`], or `page_bits` exceeds `max_index_bits`.
+    /// the page element count does not fit a [`u64`], or `page_bits` exceeds `max_index_bits`.
     fn parse(max_index_bits: u8, page_bits: u8) -> Result<Self, FormatError> {
-        let max_index_bits = MaxIndexBits::parse(max_index_bits)?;
-        let page_bits = PageBits::parse(page_bits)?;
-        if page_bits.0 > max_index_bits.get() {
-            return Err(FormatError::InvalidChunkGeometry(
-                "Extensible Array page exponent exceeds maximum element bit count",
-            ));
-        }
-        Ok(Self {
-            max_index_bits,
-            page_bits,
+        Self::from_fields(max_index_bits, page_bits).map_err(|error| {
+            FormatError::InvalidChunkGeometry(match error {
+                InvalidBitGeometry::MaximumIndexBits => {
+                    "Extensible Array maximum element bit count must be in 1..=64"
+                }
+                InvalidBitGeometry::PageElementCount => {
+                    "Extensible Array page element count does not fit u64"
+                }
+                InvalidBitGeometry::PageExponentExceedsIndexBits => {
+                    "Extensible Array page exponent exceeds maximum element bit count"
+                }
+            })
         })
     }
 
     /// Returns the "Max Nelmts Bits" field, in `1..=64`.
-    pub fn max_index_bits(self) -> MaxIndexBits {
+    pub const fn max_index_bits(self) -> MaxIndexBits {
         self.max_index_bits
     }
 
     /// Returns the number of elements in a data block page, a nonzero power of two.
-    pub fn page_nelmts(self) -> NonZeroU64 {
-        self.page_bits.nelmts()
+    pub const fn page_nelmts(self) -> PageElementCount {
+        self.page_nelmts
     }
 
     /// Returns the maximum element bit count rounded up to a block-offset byte width.
@@ -1765,6 +1771,37 @@ impl ExtensibleArrayBitGeometry {
             _ => BlockOffsetWidth::Eight,
         }
     }
+
+    /// Constructs checked bit geometry from the maximum element bit count and page exponent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidBitGeometry::MaximumIndexBits`] if the maximum bit count is outside
+    /// `1..=64`, [`InvalidBitGeometry::PageElementCount`] if the page element count does not fit in
+    /// [`u64`], or [`InvalidBitGeometry::PageExponentExceedsIndexBits`] if the page exponent
+    /// exceeds the maximum bit count.
+    const fn from_fields(max_index_bits: u8, page_bits: u8) -> Result<Self, InvalidBitGeometry> {
+        let max_index_bits = match NonZeroU8::new(max_index_bits) {
+            Some(bits) if bits.get() <= MAX_INDEX_BITS => MaxIndexBits(bits),
+            _ => return Err(InvalidBitGeometry::MaximumIndexBits),
+        };
+        if page_bits > MAX_PAGE_BITS {
+            return Err(InvalidBitGeometry::PageElementCount);
+        }
+        if page_bits > max_index_bits.get() {
+            return Err(InvalidBitGeometry::PageExponentExceedsIndexBits);
+        }
+        Ok(Self {
+            max_index_bits,
+            page_nelmts: PageElementCount(page_bits),
+        })
+    }
+}
+
+enum InvalidBitGeometry {
+    MaximumIndexBits,
+    PageElementCount,
+    PageExponentExceedsIndexBits,
 }
 
 /// An Extensible Array header's "Max Nelmts Bits" field, in `1..=64`.
@@ -1778,50 +1815,43 @@ impl ExtensibleArrayBitGeometry {
 pub struct MaxIndexBits(NonZeroU8);
 
 impl MaxIndexBits {
-    /// Parses the maximum element bit count supported by the reader and writer.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidChunkGeometry`] if `bits` is outside `1..=64`.
-    fn parse(bits: u8) -> Result<Self, FormatError> {
-        NonZeroU8::new(bits)
-            .filter(|bits| bits.get() <= 64)
-            .map(Self)
-            .ok_or(FormatError::InvalidChunkGeometry(
-                "Extensible Array maximum element bit count must be in 1..=64",
-            ))
-    }
-
     /// Returns the bit count as a [`u8`], in `1..=64`.
-    pub fn get(self) -> u8 {
+    pub const fn get(self) -> u8 {
         self.0.get()
     }
 }
 
-/// The base 2 logarithm of the number of elements in a data block page, in `0..=63`.
+/// A data block page's element count, a nonzero power of two.
+///
+/// Stores the base 2 exponent in `0..=63`. The version 0 Extensible Array header's
+/// `Max Dblk Page Nelmts Bits` field is defined in "The Extensible Array Index" of the
+/// [format specification, version 4.0][spec].
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
+///
+/// let geometry = ExtensibleArrayCreationParameters::canonical().bit_geometry();
+/// let count = geometry.page_nelmts();
+/// assert_eq!(count.get(), 1024);
+/// assert_eq!(count.exponent(), 10);
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
-struct PageBits(u8);
+pub struct PageElementCount(u8);
 
-impl PageBits {
-    /// Parses a page exponent whose element count fits a [`u64`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidChunkGeometry`] if `bits` exceeds 63.
-    fn parse(bits: u8) -> Result<Self, FormatError> {
-        if bits > 63 {
-            return Err(FormatError::InvalidChunkGeometry(
-                "Extensible Array page element count does not fit u64",
-            ));
-        }
-        Ok(Self(bits))
+impl PageElementCount {
+    /// Returns the number of elements in a page, a nonzero power of two.
+    pub const fn get(self) -> u64 {
+        1 << self.0
     }
 
-    /// Returns the number of elements in a page, a nonzero power of two.
-    fn nelmts(self) -> NonZeroU64 {
-        // The constructor admits only exponents at most 63, so this power of two is nonzero.
-        NonZeroU64::new(1u64 << self.0).expect("a parsed page exponent produces a nonzero count")
+    /// Returns the base 2 exponent stored in the page size field.
+    pub const fn exponent(self) -> u8 {
+        self.0
     }
 }
 
@@ -1902,7 +1932,11 @@ impl ExtensibleArrayGeometry {
     /// `j` counts the super block addresses, and the first `first_indirect_sblk` super blocks have
     /// none.
     #[cfg(test)]
-    pub(crate) fn super_block_at(&self, j: usize, page_nelmts: u64) -> SuperBlockGeometry {
+    pub(crate) fn super_block_at(
+        &self,
+        j: usize,
+        page_nelmts: PageElementCount,
+    ) -> SuperBlockGeometry {
         let (ndblks, dblk_nelmts) = self.sblks[self.first_indirect_sblk + j];
         SuperBlockGeometry {
             ndblks,
@@ -1946,15 +1980,14 @@ impl ExtensibleArrayGeometry {
                     }
                 },
             )?;
-        let layout = Layout::new(
-            encoding,
-            bit_geometry.max_index_bits().get(),
+        let creation = ExtensibleArrayCreationParameters::from_bit_geometry(
+            bit_geometry,
             idx_blk_elmts,
-            min_dblk_nelmts,
             super_blk_min_data_ptrs,
-            bit_geometry.page_bits.0,
-        )?;
-        Self::from_layout(layout)
+            min_dblk_nelmts,
+        )
+        .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
+        Self::from_layout(creation.layout(encoding))
     }
 
     /// Returns the `(ndblks, dblk_nelmts)` of each super block: the number of its data blocks and
@@ -2013,20 +2046,21 @@ impl ExtensibleArrayGeometry {
 pub struct DataBlockGeometry {
     /// The number of elements in the data block.
     pub dblk_nelmts: u64,
-    /// The number of elements in a page.
-    pub page_nelmts: u64,
+    /// The checked element count per page.
+    pub page_nelmts: PageElementCount,
 }
 
 impl DataBlockGeometry {
     /// Returns whether the data block is stored in pages.
     pub const fn is_paged(self) -> bool {
-        self.dblk_nelmts > self.page_nelmts
+        self.dblk_nelmts > self.page_nelmts.get()
     }
 
-    /// Returns the number of pages in the data block, or 0 if it is not paged.
+    /// Returns the number of pages in the data block, or zero for an unpaged block.
     pub const fn npages(self) -> u64 {
-        if self.is_paged() {
-            self.dblk_nelmts / self.page_nelmts
+        let page_nelmts = self.page_nelmts.get();
+        if self.dblk_nelmts > page_nelmts {
+            self.dblk_nelmts / page_nelmts
         } else {
             0
         }
@@ -2145,7 +2179,8 @@ pub fn encode_data_block(
     client_id: u8,
     bits: ExtensibleArrayBitGeometry,
 ) -> Result<Vec<u8>, FormatError> {
-    let page_nelmts = bits.page_nelmts().get().to_usize()?;
+    let page_element_count = bits.page_nelmts();
+    let page_nelmts = page_element_count.get().to_usize()?;
     let mut buf = Vec::new();
     buf.extend_from_slice(b"EADB");
     buf.push(0); // version
@@ -2156,7 +2191,7 @@ pub fn encode_data_block(
     // The counts are `usize` loop bounds, and the page arithmetic below stays in `usize`.
     let blocks = DataBlockGeometry {
         dblk_nelmts: dblk_nelmts as u64,
-        page_nelmts: page_nelmts as u64,
+        page_nelmts: page_element_count,
     };
     let write_elements = |buf: &mut Vec<u8>, start: usize, count: usize| {
         for slot in start..start + count {
@@ -2452,28 +2487,12 @@ pub fn build_extensible_array_at(
 /// The capacity is 8,589,934,580 slots: 4 in the index block, 240 in six data blocks, and
 /// 8,589,934,336 in 25 super blocks.
 pub fn extensible_array_capacity() -> u64 {
-    let geom_header = ExtensibleArrayHeader {
-        client_id: 0,
-        element_size: 8,
-        bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
-        idx_blk_elmts: EA_IDX_BLK_ELMTS,
-        min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
-        super_blk_min_data_ptrs: EA_SUPER_BLK_MIN_DATA_PTRS,
-        max_idx_set: 0,
-        index_block_address: StoredAddress::new(0),
-    };
-    // Eight-byte unfiltered elements and the constant creation parameters
-    // satisfy the checked layout's bounds.
-    let geom = ExtensibleArrayGeometry::from_header(&geom_header, OffsetWidth::Eight)
-        .expect("the writer's Extensible Array geometry is representable");
-    let direct: u64 = geom.direct_dblk_nelmts.iter().sum();
-    let indirect: u64 = (0..geom.nsblk_addrs)
-        .map(|j| {
-            let (ndblks, dn) = geom.sblks[geom.first_indirect_sblk + j];
-            ndblks * dn
-        })
-        .sum();
-    u64::from(EA_IDX_BLK_ELMTS) + direct + indirect
+    // Each super block holds twice as many slots as the previous one. The sum starts at
+    // `EA_MIN_DBLK_NELMTS` and includes a final block of `2^EA_MAX_NELMTS_BITS` slots.
+    const {
+        assert!((EA_MAX_NELMTS_BITS as u32) < u64::BITS - 1);
+        (1u64 << (EA_MAX_NELMTS_BITS + 1)) - EA_MIN_DBLK_NELMTS as u64 + EA_IDX_BLK_ELMTS as u64
+    }
 }
 
 /// The client ID of an array that indexes unfiltered chunks, whose elements each store a chunk
@@ -2521,6 +2540,11 @@ const MAX_INDEX_BITS: u8 = 64;
 const MIN_DATA_BLOCKS: u8 = 2;
 // The largest page exponent whose page element count fits a `u64`.
 const MAX_PAGE_BITS: u8 = 63;
+
+const _: () = {
+    assert!(MAX_INDEX_BITS as u32 == u64::BITS);
+    assert!(MAX_PAGE_BITS as u32 + 1 == u64::BITS);
+};
 
 #[cfg(test)]
 mod tests {
@@ -2624,9 +2648,12 @@ mod tests {
     // The oracle is `H5EA__dblock_alloc`, which pages a block of more elements than a page.
     #[test]
     fn a_data_block_is_paged_only_past_a_full_page() {
+        let page_nelmts = ExtensibleArrayBitGeometry::parse(32, 4)
+            .unwrap()
+            .page_nelmts();
         let at = |dblk_nelmts| DataBlockGeometry {
             dblk_nelmts,
-            page_nelmts: 16,
+            page_nelmts,
         };
         assert!(!at(15).is_paged(), "under a page");
         assert!(!at(16).is_paged(), "exactly a page is not paged");
@@ -2637,11 +2664,14 @@ mod tests {
 
     #[test]
     fn the_page_init_bitmap_is_a_byte_per_eight_pages_per_block() {
+        let page_nelmts = ExtensibleArrayBitGeometry::parse(32, 4)
+            .unwrap()
+            .page_nelmts();
         let sb = |ndblks, dblk_nelmts| SuperBlockGeometry {
             ndblks,
             blocks: DataBlockGeometry {
                 dblk_nelmts,
-                page_nelmts: 16,
+                page_nelmts,
             },
         };
         // Not paged: no bitmap.
@@ -2696,8 +2726,8 @@ mod tests {
     fn bit_geometry_stores_two_bytes_with_byte_alignment() {
         assert_eq!(core::mem::size_of::<MaxIndexBits>(), 1);
         assert_eq!(core::mem::align_of::<MaxIndexBits>(), 1);
-        assert_eq!(core::mem::size_of::<PageBits>(), 1);
-        assert_eq!(core::mem::align_of::<PageBits>(), 1);
+        assert_eq!(core::mem::size_of::<PageElementCount>(), 1);
+        assert_eq!(core::mem::align_of::<PageElementCount>(), 1);
         assert_eq!(core::mem::size_of::<ExtensibleArrayBitGeometry>(), 2);
         assert_eq!(core::mem::align_of::<ExtensibleArrayBitGeometry>(), 1);
         assert_eq!(core::mem::size_of::<BlockOffsetWidth>(), 1);
@@ -2739,7 +2769,17 @@ mod tests {
         10,
         "Extensible Array maximum element bit count must be in 1..=64"
     )]
+    #[case::invalid_maximum_precedes_page_overflow(
+        0,
+        64,
+        "Extensible Array maximum element bit count must be in 1..=64"
+    )]
     #[case::page_64(64, 64, "Extensible Array page element count does not fit u64")]
+    #[case::page_element_count_overflow_precedes_exponent_above_maximum_element_bits(
+        10,
+        64,
+        "Extensible Array page element count does not fit u64"
+    )]
     #[case::page_255(64, 255, "Extensible Array page element count does not fit u64")]
     #[case::page_exceeds_maximum(
         10,
@@ -2781,7 +2821,9 @@ mod tests {
         test_util::checksum::restamp(&mut bytes, 0, eahd_len(8, 8));
         let header = ExtensibleArrayHeader::parse(&bytes, 0, 8, 8).unwrap();
         assert_eq!(header.max_index_bits().get(), max_bits);
-        assert_eq!(header.page_nelmts().get(), page_nelmts);
+        let page_count = header.page_nelmts();
+        assert_eq!(page_count.exponent(), page_bits);
+        assert_eq!(page_count.get(), page_nelmts);
         assert_eq!(header.block_offset_width().bytes(), offset_size);
 
         let offset = u64::MAX >> (8 * (8 - offset_size));
@@ -3828,7 +3870,7 @@ mod tests {
             element_size: offsets.get() + if filtered { 2 + FILTER_MASK_BYTES } else { 0 },
             bit_geometry: ExtensibleArrayBitGeometry {
                 max_index_bits: MaxIndexBits(NonZeroU8::new(32).unwrap()),
-                page_bits: PageBits(10),
+                page_nelmts: PageElementCount(10),
             },
             idx_blk_elmts: 4,
             min_dblk_nelmts: 16,
@@ -4109,7 +4151,7 @@ mod tests {
         let header = ExtensibleArrayHeader {
             client_id,
             element_size,
-            bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
+            bit_geometry: ExtensibleArrayCreationParameters::canonical().bit_geometry(),
             idx_blk_elmts: EA_IDX_BLK_ELMTS,
             min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
             super_blk_min_data_ptrs: minimum_pointers,
@@ -4117,15 +4159,16 @@ mod tests {
             index_block_address: StoredAddress::new(0),
         };
         let geometry = ExtensibleArrayGeometry::from_header(&header, offsets).unwrap();
-        let layout = Layout::new(
+        let layout = layout_from_fields(
             ElementEncoding::new(offsets, client_id, element_size).unwrap(),
-            EA_MAX_NELMTS_BITS,
-            EA_IDX_BLK_ELMTS,
-            EA_MIN_DBLK_NELMTS,
-            minimum_pointers,
-            EA_MAX_DBLK_NELMTS_BITS,
-        )
-        .unwrap();
+            [
+                EA_MAX_NELMTS_BITS,
+                EA_IDX_BLK_ELMTS,
+                minimum_pointers,
+                EA_MIN_DBLK_NELMTS,
+                EA_MAX_DBLK_NELMTS_BITS,
+            ],
+        );
         assert_eq!(
             layout.index_block_len().unwrap(),
             u64::try_from(measurement_sizes::index_block_len(
@@ -4138,7 +4181,7 @@ mod tests {
             .unwrap()
         );
         for ordinal in 0..geometry.nsblk_addrs() {
-            let writer = geometry.super_block_at(ordinal, header.page_nelmts().get());
+            let writer = geometry.super_block_at(ordinal, header.page_nelmts());
             let reader = layout
                 .super_block(u32::try_from(geometry.first_indirect_sblk() + ordinal).unwrap())
                 .unwrap();
@@ -4179,7 +4222,7 @@ mod tests {
         let header = ExtensibleArrayHeader {
             client_id: 0,
             element_size: 8,
-            bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
+            bit_geometry: ExtensibleArrayCreationParameters::canonical().bit_geometry(),
             idx_blk_elmts: EA_IDX_BLK_ELMTS,
             min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
             super_blk_min_data_ptrs: min_data_pointers,
@@ -4199,15 +4242,16 @@ mod tests {
             ),
             index_bytes
         );
-        let layout = Layout::new(
+        let layout = layout_from_fields(
             ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap(),
-            EA_MAX_NELMTS_BITS,
-            EA_IDX_BLK_ELMTS,
-            EA_MIN_DBLK_NELMTS,
-            min_data_pointers,
-            EA_MAX_DBLK_NELMTS_BITS,
-        )
-        .unwrap();
+            [
+                EA_MAX_NELMTS_BITS,
+                EA_IDX_BLK_ELMTS,
+                min_data_pointers,
+                EA_MIN_DBLK_NELMTS,
+                EA_MAX_DBLK_NELMTS_BITS,
+            ],
+        );
         assert_eq!(
             layout
                 .direct_blocks()
@@ -4424,7 +4468,7 @@ mod tests {
         #[case] first_super_block: u32,
     ) {
         let encoding = ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap();
-        let layout = Layout::new(encoding, 32, 4, 16, min_data_blocks, 10).unwrap();
+        let layout = layout_from_fields(encoding, [32, 4, min_data_blocks, 16, 10]);
         assert_eq!(layout.first_super_block, first_super_block);
         assert_eq!(
             layout
@@ -4463,7 +4507,7 @@ mod tests {
         #[case] expected: u64,
     ) {
         let encoding = ElementEncoding::new(offsets, client_id, element_size).unwrap();
-        let layout = Layout::new(encoding, max_index_bits, 4, 4, 2, 10).unwrap();
+        let layout = layout_from_fields(encoding, [max_index_bits, 4, 2, 4, 10]);
         assert_eq!(
             layout
                 .data_block_len(DataBlock {
@@ -4485,11 +4529,15 @@ mod tests {
     fn the_block_offset_is_the_index_bits_in_whole_bytes(#[case] bits: u8, #[case] len: u8) {
         let encoding = ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap();
         assert_eq!(
-            Layout::new(encoding, bits, 0, 1, 2, 1)
-                .unwrap()
-                .block_offset_len,
+            layout_from_fields(encoding, [bits, 0, 2, 1, 1]).block_offset_len,
             len
         );
+    }
+
+    fn layout_from_fields(encoding: ElementEncoding, fields: [u8; 5]) -> Layout {
+        ExtensibleArrayCreationParameters::parse(&fields)
+            .unwrap()
+            .layout(encoding)
     }
 
     // An array of 64 index bits whose one chunk is in page 255 of data block 1 of super block 28,

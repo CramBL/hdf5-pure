@@ -35,6 +35,7 @@ use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use hdf5_pure_format::__private::PageElementCount;
 use hdf5_pure_format::__private::SuperBlockGeometry;
 use hdf5_pure_space::__private::{AllocationClass, Extent, FreeClass};
 
@@ -1107,7 +1108,7 @@ impl Located {
         let elem_size = self.ea_elem_size as u64;
         let idx = self.idx_blk_elmts;
         let blk_off = self.ea_bits.block_offset_width();
-        let page_nelmts = self.ea_bits.page_nelmts().get();
+        let page_nelmts = self.ea_bits.page_nelmts();
 
         if e < idx {
             let ib_prefix = (4 + 1 + 1 + os) as u64;
@@ -1142,6 +1143,7 @@ impl Located {
             let db_prefix = (4 + 1 + 1 + os + blk_off.bytes()) as u64;
             dblk_addr.get() + db_prefix + slot * elem_size
         } else {
+            let page_nelmts = page_nelmts.get();
             let header_size = (4 + 1 + 1 + os + blk_off.bytes() + 4) as u64;
             let page = slot / page_nelmts;
             let slot_in_page = slot % page_nelmts;
@@ -1175,7 +1177,7 @@ impl Located {
                     os,
                     sblk_addr,
                     dblk_local,
-                    region.super_block(self.ea_bits.page_nelmts().get()),
+                    region.super_block(self.ea_bits.page_nelmts()),
                     blk_off,
                 ))
             }
@@ -1244,7 +1246,7 @@ impl Located {
 
         let region = locate_data_block(&self.geom, idx, e)?;
         let dblk_nelmts = region.dblk_nelmts;
-        let sb_geom = region.super_block(self.ea_bits.page_nelmts().get());
+        let sb_geom = region.super_block(self.ea_bits.page_nelmts());
         let is_paged = sb_geom.blocks.is_paged();
         let slot = e - region.db_start;
         let block_offset_rel = region.db_start - idx;
@@ -1318,7 +1320,7 @@ impl Located {
             if slot_in_page == 0 {
                 file.sync()?;
                 let sblk_addr = sblk_addr.unwrap();
-                let npages = dblk_nelmts / self.ea_bits.page_nelmts().get();
+                let npages = dblk_nelmts / page_nelmts;
                 if let Parent::Super { dblk_local, .. } = region.parent {
                     let global_page = dblk_local as u64 * npages + page;
                     let (byte, set) = sb_page_bit(file, sblk_addr, blk_off, global_page)?;
@@ -1611,7 +1613,7 @@ impl Located {
                     if addr.is_undefined(self.offset_width) && last_new_secondary != Some(sblk_j) {
                         self.add_super_block(
                             &mut stats,
-                            region.super_block(self.ea_bits.page_nelmts().get()),
+                            region.super_block(self.ea_bits.page_nelmts()),
                         )?;
                         last_new_secondary = Some(sblk_j);
                     }
@@ -1713,7 +1715,7 @@ impl Located {
                 ndblks,
                 blocks: DataBlockGeometry {
                     dblk_nelmts: elements,
-                    page_nelmts: self.ea_bits.page_nelmts().get(),
+                    page_nelmts: self.ea_bits.page_nelmts(),
                 },
             };
             self.add_super_block(&mut stats, block)?;
@@ -1919,7 +1921,7 @@ impl IndexPlanningGeometry<'_> {
             let used = (num_chunks.min(end) - elem).div_ceil(elements);
             let blocks = DataBlockGeometry {
                 dblk_nelmts: elements,
-                page_nelmts: self.ea_bits.page_nelmts().get(),
+                page_nelmts: self.ea_bits.page_nelmts(),
             };
             let bitmap = ea_product(ndblks, blocks.npages().div_ceil(8))?;
             let super_size = ea_sum([
@@ -1944,7 +1946,7 @@ impl IndexPlanningGeometry<'_> {
     fn data_block_size(&self, elements: u64) -> Result<u64, FormatError> {
         let blocks = DataBlockGeometry {
             dblk_nelmts: elements,
-            page_nelmts: self.ea_bits.page_nelmts().get(),
+            page_nelmts: self.ea_bits.page_nelmts(),
         };
         if blocks.is_paged() {
             ea_sum([
@@ -1953,7 +1955,7 @@ impl IndexPlanningGeometry<'_> {
                 ea_product(
                     blocks.npages(),
                     ea_sum([
-                        ea_product(blocks.page_nelmts, self.ea_elem_size.to_u64())?,
+                        ea_product(blocks.page_nelmts.get(), self.ea_elem_size.to_u64())?,
                         EA_CHECKSUM_SIZE,
                     ])?,
                 )?,
@@ -2748,7 +2750,7 @@ impl DataBlockLoc {
     /// Meaningful for a [`Parent::Super`] block; for a [`Parent::IndexDirect`]
     /// one the counts describe the single block itself and no `EASB` exists to
     /// apply them to.
-    fn super_block(&self, page_nelmts: u64) -> SuperBlockGeometry {
+    fn super_block(&self, page_nelmts: PageElementCount) -> SuperBlockGeometry {
         SuperBlockGeometry {
             ndblks: self.ndblks,
             blocks: self.blocks(page_nelmts),
@@ -2757,7 +2759,7 @@ impl DataBlockLoc {
 
     /// How this data block is paged, which holds whether or not it has a super
     /// block above it.
-    fn blocks(&self, page_nelmts: u64) -> DataBlockGeometry {
+    fn blocks(&self, page_nelmts: PageElementCount) -> DataBlockGeometry {
         DataBlockGeometry {
             dblk_nelmts: self.dblk_nelmts,
             page_nelmts,

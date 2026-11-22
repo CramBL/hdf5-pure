@@ -32,7 +32,7 @@ pub(crate) fn data_block_len(
     let prefix = (4 + 1 + 1 + u64::from(offset_width.get())) + blk_off_size.bytes() as u64;
     if blocks.is_paged() {
         // Paged: the prefix and its checksum, then every page and its checksum.
-        prefix + 4 + blocks.npages() * (blocks.page_nelmts * elem_size as u64 + 4)
+        prefix + 4 + blocks.npages() * (blocks.page_nelmts.get() * elem_size as u64 + 4)
     } else {
         prefix + blocks.dblk_nelmts * elem_size as u64 + 4
     }
