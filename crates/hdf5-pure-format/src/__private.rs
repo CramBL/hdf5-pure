@@ -160,6 +160,7 @@ pub use crate::extensible_array::write::ExtensibleArrayBlock;
 pub use crate::extensible_array::write::ExtensibleArrayBlockKind;
 pub use crate::extensible_array::write::ExtensibleArrayEmission;
 pub use crate::extensible_array::write::ExtensibleArrayEncoding;
+pub use crate::extensible_array::write::ExtensibleArrayHeaderWithoutIndexBlock;
 pub use crate::extensible_array::write::ExtensibleArrayPlacement;
 pub use crate::extensible_array::write::ExtensibleArrayPlan;
 pub use crate::extensible_array::write_stored_address;

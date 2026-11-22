@@ -8,7 +8,6 @@ use super::ExtensibleArrayBlock;
 use super::ExtensibleArrayPlacement;
 use super::ExtensibleArrayPlan;
 use super::HEADER_BLOCK;
-use super::INDEX_BLOCK;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::bytes;
@@ -18,7 +17,6 @@ use crate::chunk_record::IndexSlots;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::extensible_array;
-use crate::extensible_array::ExtensibleArrayStats;
 use crate::width;
 
 impl ExtensibleArrayPlacement<'_> {
@@ -257,7 +255,11 @@ impl ExtensibleArrayEmission<'_> {
                 source,
             })?;
         match &self.block().location {
-            BlockLocation::Header => self.header(output)?,
+            BlockLocation::Header => self
+                .encoding
+                .placement
+                .header_encoding()
+                .append_into(output),
             BlockLocation::Index { .. } => self.index(output)?,
             BlockLocation::Secondary(block) => self.secondary(output, block)?,
             BlockLocation::Data(block) => self.data(output, block)?,
@@ -268,48 +270,6 @@ impl ExtensibleArrayEmission<'_> {
                 output.len().saturating_sub(start)
             )));
         }
-        Ok(())
-    }
-
-    fn header(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
-        let block_start = output.len();
-        let ExtensibleArrayPlan {
-            creation,
-            widths,
-            encoding,
-            layout,
-            blocks: _,
-            stats,
-            total_length: _,
-        } = self.encoding.placement.plan;
-        output.extend_from_slice(&extensible_array::HEADER_SIGNATURE);
-        output.extend_from_slice(&[
-            extensible_array::VERSION,
-            encoding.client_id,
-            layout.encoding.stride().get(),
-        ]);
-        let [max_bits, inline, min_blocks, min_elements, page_bits] = creation.encode();
-        output.extend_from_slice(&[max_bits, inline, min_elements, min_blocks, page_bits]);
-        let ExtensibleArrayStats {
-            nsuper_blks,
-            super_blk_size,
-            ndata_blks,
-            data_blk_size,
-            max_idx_set,
-            nelmts,
-        } = *stats;
-        for value in [
-            nsuper_blks,
-            super_blk_size,
-            ndata_blks,
-            data_blk_size,
-            max_idx_set,
-            nelmts,
-        ] {
-            bytes::try_write_length(output, value, widths.lengths)?;
-        }
-        self.address_field(output, Some(INDEX_BLOCK))?;
-        append_checksum(output, block_start);
         Ok(())
     }
 
