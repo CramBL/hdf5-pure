@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Incomplete ownership or reference evidence retains
   the affected storage. Compaction failures report the completed collection prefix and restoration state ([#1253](https://github.com/CramBL/hdf5-pure/pull/1253)).
 
+- `BTreeKValues` in `hdf5-pure-format` parses and encodes the version 0 B-tree K Values message
+  in the superblock extension, preserving all three positive K values ([#1319](https://github.com/CramBL/hdf5-pure/pull/1319)).
 - `DecodedStoredAddress::to_stored` in `hdf5-pure-core` converts decoded addresses to stored bits at a selected address width, rejecting oversized defined addresses and collisions with the undefined marker ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 - `SymbolTableMessage::write_into` in `hdf5-pure-format` encodes group symbol-table addresses at each supported width, preserving stored address bits and leaving the destination unchanged on error ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 - `PreparedGlobalHeapCollection` in `hdf5-pure-format` encodes version 1 collections at a checked capacity and length width, preserving supplied member indices, reference counts, physical order, and payloads. It supports explicit free-space records, implied free tails, and full collections ([#1233](https://github.com/CramBL/hdf5-pure/pull/1233)).

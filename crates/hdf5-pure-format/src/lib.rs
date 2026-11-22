@@ -29,6 +29,7 @@ mod address;
 mod attribute_info;
 mod attribute_message;
 mod btree;
+mod btree_k_values;
 mod bytes;
 mod checksum;
 mod chunk_record;

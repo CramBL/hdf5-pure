@@ -561,6 +561,8 @@ pub enum FormatError {
     },
     /// Invalid attribute message version.
     InvalidAttributeVersion(u8),
+    /// A B-tree K Values message stores a version other than 0.
+    InvalidBTreeKValuesVersion(u8),
     /// Invalid B-tree node type.
     InvalidBTreeNodeType(u8),
     /// Invalid B-tree v1 signature.
@@ -1599,7 +1601,13 @@ pub enum FormatError {
     VlDataError(String),
     /// A reference belongs to an independently constructed layout.
     WrongLayout,
+    /// A B-tree K Values message stores zero in a K field.
+    ZeroBTreeKValue {
+        /// The offset of the K field from the start of the message body, in bytes.
+        field_offset: usize,
+    },
     /// A caller passed zero as the declared width of a fixed-width string.
+    ///
     /// HDF5 string datatypes require a positive width. Explicitly sized dataset
     /// and attribute strings can report this error. A width derived from empty
     /// values is one byte.
@@ -2159,6 +2167,12 @@ impl fmt::Display for FormatError {
                     f,
                     "the local heap name at data segment offset {offset} is not UTF-8: {source}"
                 )
+            }
+            Self::InvalidBTreeKValuesVersion(version) => {
+                write!(f, "unsupported B-tree K Values message version: {version}")
+            }
+            Self::ZeroBTreeKValue { field_offset } => {
+                write!(f, "zero B-tree K value at byte {field_offset}")
             }
             Self::InvalidBTreeSignature => {
                 write!(f, "invalid B-tree v1 signature")

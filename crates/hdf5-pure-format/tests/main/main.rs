@@ -1,5 +1,6 @@
 mod attribute_info;
 mod btree;
+mod btree_k_values;
 mod datatype_array_complex_codec;
 mod datatype_canonical_atomic;
 mod datatype_canonical_recursive;

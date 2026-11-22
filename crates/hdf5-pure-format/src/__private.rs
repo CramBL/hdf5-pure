@@ -52,6 +52,7 @@ pub use crate::btree::v2::write::BTreeV2Image;
 pub use crate::btree::v2::write::BTreeV2Placement;
 pub use crate::btree::v2::write::BTreeV2Plan;
 pub use crate::btree::v2::write::BTreeV2WriteDialect;
+pub use crate::btree_k_values::{BTreeKValues, BTreeKValuesOutputTooSmall};
 pub use crate::bytes::ensure_len;
 pub use crate::bytes::read_offset_width;
 pub use crate::bytes::write_defined_stored_address_at;
