@@ -3,13 +3,11 @@
 use core::num::NonZeroU16;
 
 use hdf5_pure_format::__private::GroupInfo;
-#[cfg(feature = "std")]
-use hdf5_pure_format::__private::GroupInfoError;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::GroupThresholds;
 
 #[cfg(feature = "std")]
-use crate::{FormatError, MessageType};
+use crate::{FormatError, MessageType, OBJECT_HEADER_MESSAGE_MAX};
 
 /// The thresholds for transitions between compact and dense group link storage.
 ///
@@ -52,7 +50,7 @@ impl LinkPhaseChange {
         LinkPhaseChangeBuilder { _private: () }
     }
 
-    /// Converts parsed Group Info thresholds to a storage policy.
+    /// Converts effective Group Info thresholds to a storage policy.
     pub(crate) fn from_group_phase_change(value: GroupPhaseChange) -> Self {
         match value.thresholds() {
             Some(thresholds) => Self::Thresholds(LinkThresholds { thresholds }),
@@ -75,23 +73,26 @@ impl LinkPhaseChange {
         bytes: &[u8],
         header_version: u8,
     ) -> Result<GroupInfo, FormatError> {
-        let body = if header_version == PADDED_HEADER_VERSION {
-            let length = GroupPhaseChange::encoded_len(bytes)
-                .map_err(|error| group_info_error(error, bytes.len()))?;
-            bytes
-                .get(..length)
-                .ok_or(FormatError::InvalidGroupInfoLength {
-                    expected: length,
-                    actual: bytes.len(),
-                })?
+        if bytes.len() > OBJECT_HEADER_MESSAGE_MAX {
+            return Err(FormatError::ObjectHeaderMessageTooLarge {
+                message_type: MessageType::GROUP_INFO.to_u16(),
+                size: bytes.len(),
+            });
+        }
+        if header_version == PADDED_HEADER_VERSION {
+            GroupInfo::parse_padded(bytes)
         } else {
-            bytes
-        };
-        GroupInfo::parse(body).map_err(|error| group_info_error(error, body.len()))
+            GroupInfo::parse(bytes)
+        }
     }
 
+    /// Builds Group Info for a new group with only non-default thresholds stored.
     pub(crate) fn group_info(self) -> GroupInfo {
-        GroupInfo::new(self.group_phase_change())
+        let phase_change = self.group_phase_change();
+        GroupInfo::new(
+            (phase_change != GroupPhaseChange::DEFAULT).then_some(phase_change),
+            None,
+        )
     }
 
     pub(crate) const fn group_phase_change(self) -> GroupPhaseChange {
@@ -283,29 +284,6 @@ impl<const MAX: u16> LinkThresholdsBuilder<MAX, true> {
     }
 }
 
-#[cfg(feature = "std")]
-fn group_info_error(error: GroupInfoError, actual_length: usize) -> FormatError {
-    match error {
-        GroupInfoError::Flags(flags) => FormatError::InvalidGroupInfoFlags(flags),
-        GroupInfoError::Length { expected, actual } => FormatError::InvalidGroupInfoLength {
-            expected: usize::from(expected),
-            actual: usize::from(actual),
-        },
-        GroupInfoError::Thresholds {
-            max_compact,
-            min_dense,
-        } => FormatError::InvalidGroupInfoThresholds {
-            max_compact,
-            min_dense,
-        },
-        GroupInfoError::TrailingBytes => FormatError::ObjectHeaderMessageTooLarge {
-            message_type: MessageType::GROUP_INFO.to_u16(),
-            size: actual_length,
-        },
-        GroupInfoError::Version(version) => FormatError::InvalidGroupInfoVersion(version),
-    }
-}
-
 // "Version 1 Data Object Header Prefix" in the format specification, version 4.0, defines
 // version one with padded message bodies.
 #[cfg(feature = "std")]
@@ -343,7 +321,7 @@ mod tests {
         #[case] bytes: &[u8],
         #[case] expected: LinkPhaseChange,
     ) {
-        let phase_change = GroupPhaseChange::parse(bytes).unwrap();
+        let phase_change = GroupInfo::parse(bytes).unwrap().phase_change();
         let policy = LinkPhaseChange::from_group_phase_change(phase_change);
         assert_eq!(policy, expected);
         assert_eq!(policy.group_phase_change(), phase_change);
