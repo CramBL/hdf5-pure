@@ -12,7 +12,6 @@ include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [features]
 default = ["checksum"]
-std = []
 checksum = []
 
 [dependencies]

@@ -4,10 +4,8 @@ use rstest::rstest;
 use super::*;
 
 mod complex;
-mod serialization;
-
-#[cfg(feature = "std")]
 mod display;
+mod serialization;
 
 /// `class_may_hold_object_address` admits the encoded class of every datatype
 /// that `datatype_holds_object_address` accepts.

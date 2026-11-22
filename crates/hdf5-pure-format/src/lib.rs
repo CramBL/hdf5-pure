@@ -11,10 +11,15 @@
 
 #![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 #![cfg_attr(not(test), no_std)]
+#![deny(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 #![warn(unreachable_pub)]
 extern crate alloc;
-#[cfg(feature = "std")]
-extern crate std;
 
 #[doc(hidden)]
 pub mod __private;

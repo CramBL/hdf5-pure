@@ -1,3 +1,5 @@
+use core::error::Error;
+
 use hdf5_pure_core::FormatError;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, OffsetWidth,
@@ -449,9 +451,9 @@ fn datatype_compound_parser_rejects_non_utf8_member_names() {
     assert_eq!(*offset, 8);
     assert_eq!(source.valid_up_to(), 0);
     assert_eq!(source.error_len(), Some(1));
-    #[cfg(feature = "std")]
     assert_eq!(
-        std::error::Error::source(&error)
+        error
+            .source()
             .unwrap()
             .downcast_ref::<core::str::Utf8Error>()
             .unwrap(),
