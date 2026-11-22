@@ -54,14 +54,14 @@ impl<'a> FileRegion<'a> {
     /// Returns [`FormatError::InsufficientRegion`] if `required` is outside this region's range.
     pub fn subregion(self, required: FileRange) -> Result<Self, FormatError> {
         let Self { range, bytes } = self;
-        let error = FormatError::InsufficientRegion {
+        let insufficient = || FormatError::InsufficientRegion {
             required_start: required.start().get(),
             required_length: required.length(),
             provided_start: range.start().get(),
             provided_length: range.length(),
         };
         if !range.contains(required) {
-            return Err(error);
+            return Err(insufficient());
         }
         let start = required.start().get() - range.start().get();
         let end = required.end().get() - range.start().get();
@@ -69,7 +69,7 @@ impl<'a> FileRegion<'a> {
             .ok()
             .zip(usize::try_from(end).ok())
             .and_then(|(start, end)| bytes.get(start..end))
-            .ok_or(error)?;
+            .ok_or_else(insufficient)?;
         Ok(Self {
             range: required,
             bytes,

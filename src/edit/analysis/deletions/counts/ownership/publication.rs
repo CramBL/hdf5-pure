@@ -433,7 +433,10 @@ impl<S: Source + ?Sized> MetadataSource for CurrentMetadata<'_, S> {
             return MetadataBytes::borrowed(request, &[]);
         }
         if bytes.range().contains(request) {
-            return bytes.subregion(request);
+            return bytes
+                .region()
+                .subregion(request)
+                .map(MetadataBytes::from_region);
         }
         let Some(parts) = ReadParts::new(request, bytes.range())? else {
             return self.external(request);

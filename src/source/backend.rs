@@ -1475,7 +1475,7 @@ mod tests {
     #[rstest]
     #[case::exact_backing(4, 4, 1, 4)]
     #[case::retained_capacity_exceeds_budget(32, 4, 0, 0)]
-    #[case::subregion_retains_the_larger_allocation(8, 2, 0, 0)]
+    #[case::admitted_spare_capacity_counts_toward_budget(4, 2, 1, 4)]
     fn metadata_cache_admission_accounts_for_retained_backing(
         #[case] capacity: usize,
         #[case] len: usize,
@@ -1484,11 +1484,8 @@ mod tests {
     ) {
         let cache = std::sync::Mutex::new(MetadataReadCache::new());
         let mut payload = Vec::with_capacity(capacity);
-        payload.resize(capacity.min(8), 1);
+        payload.resize(len, 1);
         let owner = MetadataBytes::from_vec(0, payload).unwrap();
-        let owner = owner
-            .subregion(FileRange::new(PhysicalAddress::new(0), len as u64).unwrap())
-            .unwrap();
         let pointer = owner.as_ptr();
         let bytes =
             MetadataReadCache::read_through(&cache, MetadataCacheConfig::new(4), 0, len, || {

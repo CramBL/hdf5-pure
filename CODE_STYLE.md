@@ -115,6 +115,9 @@ A file is untrusted input. The fuzz targets and the property tests feed the read
 - A `Result` that is deliberately dropped is dropped with `.ok()`, which stops compiling if the return type changes. `let _ = f();` and `unwrap_or(())` are not used for that.
 - A string in an error message is formatted with `{:?}`, so that a path or a name is quoted and an embedded newline or tab is escaped.
 
+Prefer safe, compact interfaces and migrate callers when this improves the model. New
+fallibility or unsafe ownership code needs a reason grounded in the operation's design.
+
 ### Faithful or nothing
 
 An operation either produces a result that is correct down to the bytes, or it returns an error that says why. The editor returns `Error::EditUnsupported` for an object it cannot reproduce, `repack` returns `Error::RepackUnsupported` and leaves the destination path absent, and a reader returns a `FormatError` for a structure it does not handle. Silently writing a file that differs, or reading a value that differs, is the one thing the crate must never do. A new feature that cannot cover a case reports it as an error of that kind.

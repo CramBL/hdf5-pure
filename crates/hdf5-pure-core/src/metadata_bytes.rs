@@ -2,7 +2,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::ops::{Deref, Range};
+use core::ops::Deref;
 
 use crate::address::PhysicalAddress;
 use crate::error::FormatError;
@@ -44,8 +44,6 @@ use crate::region::{FileRange, FileRegion};
 #[derive(Clone, Debug)]
 pub struct MetadataBytes<'a> {
     backing: MetadataBacking<'a>,
-    local: Range<usize>,
-    range: FileRange,
 }
 
 impl<'a> MetadataBytes<'a> {
@@ -102,7 +100,7 @@ impl<'a> MetadataBytes<'a> {
 
     /// Returns the physical file position of the first byte.
     pub fn offset(&self) -> u64 {
-        self.range.start().get()
+        self.range().start().get()
     }
 
     /// Shares owned backing bytes independently of this owner's lifetime.
@@ -125,68 +123,43 @@ impl<'a> MetadataBytes<'a> {
     pub fn shared(&self) -> Option<MetadataBytes<'static>> {
         match &self.backing {
             MetadataBacking::Borrowed(_) => None,
-            MetadataBacking::Shared(bytes) => Some(MetadataBytes {
-                backing: MetadataBacking::Shared(bytes.clone()),
-                local: self.local.clone(),
-                range: self.range,
+            MetadataBacking::Shared { range, allocation } => Some(MetadataBytes {
+                backing: MetadataBacking::Shared {
+                    range: *range,
+                    allocation: Arc::clone(allocation),
+                },
             }),
         }
     }
 
     /// Returns the capacity of the owned backing allocation, or zero for borrowed bytes.
     ///
-    /// Includes capacity outside the selected subregion and excludes ownership bookkeeping.
+    /// Counts the vector's spare capacity as part of the allocation.
     pub fn retained_bytes(&self) -> usize {
         match &self.backing {
             MetadataBacking::Borrowed(_) => 0,
-            MetadataBacking::Shared(bytes) => bytes.capacity(),
+            MetadataBacking::Shared { allocation, .. } => allocation.capacity(),
         }
     }
 
-    /// Returns the selected bytes in a vector.
+    /// Returns the metadata bytes in a vector.
     ///
-    /// Reuses the backing vector when this is its sole owner and selects the entire vector.
-    /// Copies the selected bytes otherwise.
+    /// Reuses the backing vector when this is its sole owner. Copies borrowed bytes and
+    /// clones a vector shared with other owners.
     pub fn into_vec(self) -> Vec<u8> {
-        let Self {
-            backing,
-            local,
-            range,
-        } = self;
-        match backing {
-            MetadataBacking::Shared(bytes) if local == (0..bytes.len()) => {
-                Arc::try_unwrap(bytes).unwrap_or_else(|bytes| bytes.as_ref().clone())
-            }
-            backing => {
-                let bytes = MetadataBytes {
-                    backing,
-                    local,
-                    range,
-                };
-                bytes.as_ref().to_vec()
-            }
-        }
-    }
-
-    fn from_borrowed(region: FileRegion<'a>) -> Self {
-        Self {
-            backing: MetadataBacking::Borrowed(region.bytes()),
-            local: 0..region.bytes().len(),
-            range: region.range(),
+        match self.backing {
+            MetadataBacking::Borrowed(region) => region.bytes().to_vec(),
+            MetadataBacking::Shared { allocation, .. } => Arc::unwrap_or_clone(allocation),
         }
     }
 }
 
 impl AsRef<[u8]> for MetadataBytes<'_> {
     fn as_ref(&self) -> &[u8] {
-        let bytes = match &self.backing {
-            MetadataBacking::Borrowed(bytes) => bytes,
-            MetadataBacking::Shared(bytes) => bytes.as_slice(),
-        };
-        // Constructors cover the entire backing, and subregion accepts only contained ranges.
-        bytes
-            .get(self.local.clone())
-            .expect("contained metadata bytes")
+        match &self.backing {
+            MetadataBacking::Borrowed(region) => region.bytes(),
+            MetadataBacking::Shared { allocation, .. } => allocation.as_slice(),
+        }
     }
 }
 
@@ -212,7 +185,8 @@ impl Deref for MetadataBytes<'_> {
 /// let data = [1, 2, 3, 4];
 /// let range = FileRange::new(PhysicalAddress::new(512), 4)?;
 /// let bytes = MetadataBytes::borrowed(range, &data)?;
-/// let selected = bytes.subregion(FileRange::new(PhysicalAddress::new(513), 2)?)?;
+/// let selected = bytes.region().subregion(FileRange::new(PhysicalAddress::new(513), 2)?)?;
+/// let selected = MetadataBytes::from_region(selected);
 /// assert_eq!(selected.as_ref(), &[2, 3]);
 /// assert_eq!(selected.range().start().get(), 513);
 /// # Ok::<(), hdf5_pure_core::FormatError>(())
@@ -232,69 +206,54 @@ pub trait MetadataBytesExt<'a>: Sized {
     /// Returns [`FormatError::FileRegionLengthMismatch`] if the byte count differs from the
     /// range length.
     fn owned(range: FileRange, bytes: Vec<u8>) -> Result<Self, FormatError>;
+    /// Wraps a checked region as borrowed metadata.
+    fn from_region(region: FileRegion<'a>) -> Self;
     /// Returns the physical range associated with these bytes.
     fn range(&self) -> FileRange;
     /// Borrows the bytes and their checked physical range.
     fn region(&self) -> FileRegion<'_>;
-    /// Shares the backing bytes for a contained physical range.
-    ///
-    /// An empty range at either endpoint is contained. A subregion retains the entire backing
-    /// allocation when the bytes are owned.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InsufficientRegion`] if `required` is outside this owner's range.
-    fn subregion(&self, required: FileRange) -> Result<Self, FormatError>;
 }
 
 impl<'a> MetadataBytesExt<'a> for MetadataBytes<'a> {
     fn borrowed(range: FileRange, bytes: &'a [u8]) -> Result<Self, FormatError> {
-        Ok(Self::from_borrowed(FileRegion::new(range, bytes)?))
+        Ok(Self::from_region(FileRegion::new(range, bytes)?))
     }
 
     fn owned(range: FileRange, bytes: Vec<u8>) -> Result<Self, FormatError> {
-        FileRegion::new(range, &bytes)?;
-        let local = 0..bytes.len();
+        let range = FileRegion::new(range, &bytes)?.range();
         Ok(Self {
-            backing: MetadataBacking::Shared(Arc::new(bytes)),
-            local,
-            range,
+            backing: MetadataBacking::Shared {
+                range,
+                allocation: Arc::new(bytes),
+            },
         })
     }
 
+    fn from_region(region: FileRegion<'a>) -> Self {
+        Self {
+            backing: MetadataBacking::Borrowed(region),
+        }
+    }
+
     fn range(&self) -> FileRange {
-        self.range
+        match &self.backing {
+            MetadataBacking::Borrowed(region) => region.range(),
+            MetadataBacking::Shared { range, .. } => *range,
+        }
     }
 
     fn region(&self) -> FileRegion<'_> {
         FileRegion::from(self)
     }
-
-    fn subregion(&self, required: FileRange) -> Result<Self, FormatError> {
-        let region = self.region().subregion(required)?;
-        let error = FormatError::InsufficientRegion {
-            required_start: required.start().get(),
-            required_length: required.length(),
-            provided_start: self.range.start().get(),
-            provided_length: self.range.length(),
-        };
-        let start = usize::try_from(required.start().get() - self.range.start().get())
-            .ok()
-            .and_then(|offset| self.local.start.checked_add(offset))
-            .ok_or(error.clone())?;
-        let end = start.checked_add(region.bytes().len()).ok_or(error)?;
-        Ok(Self {
-            backing: self.backing.clone(),
-            local: start..end,
-            range: region.range(),
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
 enum MetadataBacking<'a> {
-    Borrowed(&'a [u8]),
-    Shared(Arc<Vec<u8>>),
+    Borrowed(FileRegion<'a>),
+    Shared {
+        range: FileRange,
+        allocation: Arc<Vec<u8>>,
+    },
 }
 
 /// A borrowed slice whose first byte has a known physical position.
@@ -354,7 +313,7 @@ impl<'a> MetadataFrame<'a> {
     /// and [`FormatError::InsufficientRegion`] if the range extends outside the slice.
     pub fn read_at(self, offset: u64, length: u64) -> Result<MetadataBytes<'a>, FormatError> {
         let range = FileRange::new(self.origin().checked_add(offset)?, length)?;
-        Ok(MetadataBytes::from_borrowed(self.region.subregion(range)?))
+        Ok(MetadataBytes::from_region(self.region.subregion(range)?))
     }
 }
 
@@ -407,7 +366,7 @@ mod tests {
         assert_eq!(cloned.range().start().get(), u64::MAX);
         assert_eq!(cloned.range().length(), 0);
         assert_eq!(
-            cloned.subregion(cloned.range()).unwrap().region(),
+            cloned.region().subregion(cloned.range()).unwrap(),
             owner.region()
         );
     }
@@ -448,24 +407,42 @@ mod tests {
     #[rstest]
     #[case::borrowed(Backing::Borrowed)]
     #[case::shared(Backing::Shared)]
-    fn nested_subregions_keep_local_offsets_and_survive_parent_drop(#[case] backing: Backing) {
+    fn nested_subregions_borrow_the_selected_bytes(#[case] backing: Backing) {
         let data = [1, 2, 3, 4, 5, 6];
         let original = bytes(backing, u64::MAX - 6, &data);
         let middle = original
+            .region()
             .subregion(FileRange::new(PhysicalAddress::new(u64::MAX - 5), 4).unwrap())
             .unwrap();
         let nested = middle
             .subregion(FileRange::new(PhysicalAddress::new(u64::MAX - 4), 2).unwrap())
             .unwrap();
         assert_eq!(
-            nested.as_ref().as_ptr(),
+            nested.bytes().as_ptr(),
             original.as_ref().get(2..).unwrap().as_ptr()
         );
-        drop(original);
-        drop(middle);
-        assert_eq!(nested.as_ref(), &[3, 4]);
-        assert_eq!(nested.region().range().start().get(), u64::MAX - 4);
-        assert_eq!(nested.region().range().length(), 2);
+        assert_eq!(nested.bytes(), &[3, 4]);
+        assert_eq!(nested.range().start().get(), u64::MAX - 4);
+        assert_eq!(nested.range().length(), 2);
+    }
+
+    #[test]
+    fn shared_owners_and_borrowed_regions_can_be_read_on_another_thread() {
+        let owner = MetadataBytes::from_vec(512, vec![1, 2, 3, 4]).unwrap();
+        let selected = owner
+            .region()
+            .subregion(FileRange::new(PhysicalAddress::new(513), 2).unwrap())
+            .unwrap();
+        let retained = owner.shared().unwrap();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    assert_eq!(selected.bytes(), &[2, 3]);
+                    assert_eq!(retained.as_ref(), &[1, 2, 3, 4]);
+                })
+                .join()
+                .unwrap();
+        });
     }
 
     #[rstest]
@@ -479,8 +456,8 @@ mod tests {
     ) {
         let original = bytes(Backing::Shared, 512, &[1, 2, 3, 4]);
         let required = FileRange::new(PhysicalAddress::new(start), length).unwrap();
-        let selected = original.subregion(required).unwrap();
-        assert_eq!(selected.as_ref(), expected);
+        let selected = original.region().subregion(required).unwrap();
+        assert_eq!(selected.bytes(), expected);
         assert_eq!(selected.range(), required);
     }
 
@@ -492,7 +469,7 @@ mod tests {
         let original = bytes(Backing::Shared, 512, &[1, 2, 3, 4]);
         let required = FileRange::new(PhysicalAddress::new(start), length).unwrap();
         assert_eq!(
-            original.subregion(required).unwrap_err(),
+            original.region().subregion(required).unwrap_err(),
             FormatError::InsufficientRegion {
                 required_start: start,
                 required_length: length,
