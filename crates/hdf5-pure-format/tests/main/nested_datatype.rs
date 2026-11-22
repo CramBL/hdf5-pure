@@ -3,11 +3,47 @@ use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
 use hdf5_pure_core::FixedPointType;
 use hdf5_pure_core::FormatError;
+use hdf5_pure_core::ReferenceType;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
 use test_util::dataspace;
 use test_util::datatype;
 use test_util::datatype::Class;
+
+#[test]
+fn object_reference_slots_scan_complete_elements_in_order() {
+    let datatype = Datatype::Compound {
+        size: 10,
+        members: vec![__private::compound_member(
+            "target".into(),
+            1,
+            Datatype::Reference {
+                size: 8,
+                ref_type: ReferenceType::Object,
+            },
+        )],
+    };
+    let first = 0x1234_5678_9abc_def0_u64;
+    let second = 0x9876_5432_10fe_dcba_u64;
+    let mut bytes = Vec::new();
+    for address in [first, second] {
+        bytes.push(0xff);
+        bytes.extend_from_slice(&address.to_le_bytes());
+        bytes.push(0xff);
+    }
+    bytes.extend_from_slice(&[0xff; 9]);
+
+    let slots = format::embedded_reference_slots(&datatype).unwrap();
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots.element_size(), 10);
+    assert_eq!(
+        slots
+            .stored_references(&bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        [(1, first), (11, second)]
+    );
+}
 
 #[rstest]
 #[case::empty(0)]

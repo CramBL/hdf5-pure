@@ -32,6 +32,8 @@ pub(crate) fn datatype_class_name(datatype: &Datatype) -> &'static str {
 }
 
 #[cfg(feature = "std")]
+pub use hdf5_pure_format::__private::EmbeddedReferenceSlots;
+#[cfg(feature = "std")]
 pub use hdf5_pure_format::__private::class_may_hold_object_address;
 #[cfg(feature = "std")]
 pub use hdf5_pure_format::__private::datatype_holds_file_address;
@@ -39,8 +41,6 @@ pub use hdf5_pure_format::__private::datatype_holds_file_address;
 pub use hdf5_pure_format::__private::datatype_holds_object_address;
 #[cfg(feature = "std")]
 pub use hdf5_pure_format::__private::embedded_reference_slots;
-#[cfg(feature = "std")]
-pub use hdf5_pure_format::__private::stored_object_references;
 
 pub(crate) mod byte_order;
 pub(crate) mod layout;

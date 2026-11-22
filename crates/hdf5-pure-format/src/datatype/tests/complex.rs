@@ -221,7 +221,7 @@ fn native_complex_contains_no_file_addresses() {
     ));
     assert!(!datatype_holds_object_address(&datatype));
     assert!(!datatype_holds_file_address(&datatype));
-    assert_eq!(embedded_reference_slots(&datatype), Some(Vec::new()));
+    assert!(embedded_reference_slots(&datatype).unwrap().is_empty());
 }
 
 fn ieee_parent(size: u32, big_endian: bool) -> Vec<u8> {

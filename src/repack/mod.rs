@@ -1220,7 +1220,7 @@ fn emit_embedded_address_dataset(
     layout: &DataLayout,
     pipeline: &Option<FilterPipeline>,
     vlen_slots: &[EmbeddedVlSlot],
-    reference_slots: &[usize],
+    reference_slots: &datatype::EmbeddedReferenceSlots,
     file: &Arc<File>,
     objects: &SourceObjects,
 ) -> Result<(), Error> {
@@ -1265,7 +1265,7 @@ fn emit_embedded_address_dataset(
     // variable-length staging below consumes `raw`. The two kinds occupy disjoint
     // slots, so reading one is unaffected by rewriting the other.
     let reference_patches =
-        resolve_embedded_references(&raw, datatype, dims, path, objects, reference_slots)?;
+        resolve_embedded_references(&raw, dims, path, objects, reference_slots)?;
 
     if vlen_slots.is_empty() {
         db.with_embedded_object_references(datatype.clone(), raw, n_elements, reference_patches);
@@ -1296,16 +1296,15 @@ fn emit_embedded_address_dataset(
 /// resolves at serialization time.
 fn resolve_embedded_references(
     raw: &[u8],
-    datatype: &Datatype,
     dims: &[u64],
     path: &ObjectPathBuf,
     objects: &SourceObjects,
-    slots: &[usize],
+    slots: &datatype::EmbeddedReferenceSlots,
 ) -> Result<Vec<ObjectRefPatch>, Error> {
     if slots.is_empty() {
         return Ok(Vec::new());
     }
-    let stride = datatype.type_size() as usize;
+    let stride = slots.element_size();
     let n_elements: usize = dims.iter().product::<u64>().to_usize()?;
     let needed = n_elements
         .checked_mul(stride)
@@ -1313,28 +1312,18 @@ fn resolve_embedded_references(
             offset: n_elements as u64,
             length: stride as u64,
         })?;
-    if raw.len() < needed {
-        return Err(FormatError::UnexpectedEof {
-            expected: needed,
-            available: raw.len(),
-        }
-        .into());
-    }
+    let elements = raw.get(..needed).ok_or(FormatError::UnexpectedEof {
+        expected: needed,
+        available: raw.len(),
+    })?;
 
     let mut patches = Vec::with_capacity(n_elements * slots.len());
-    for e in 0..n_elements {
-        for &slot in slots {
-            let at = e * stride + slot;
-            let v = StoredAddress::new(u64::from_le_bytes(
-                raw[at..at + 8]
-                    .try_into()
-                    .expect("slot offsets leave 8 bytes inside the element"),
-            ));
-            patches.push(ObjectRefPatch {
-                byte_offset: at,
-                target: resolve_reference_address(v, path, objects)?,
-            });
-        }
+    for reference in slots.stored_references(elements) {
+        let (byte_offset, address) = reference?;
+        patches.push(ObjectRefPatch {
+            byte_offset,
+            target: resolve_reference_address(StoredAddress::new(address), path, objects)?,
+        });
     }
     Ok(patches)
 }
