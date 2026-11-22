@@ -1,5 +1,6 @@
 use hdf5_pure_format::__private::{AttributePhaseChange, MessageRecordLayout, ObjectHeaderPrefix};
 use rstest::rstest;
+use test_util::attribute_info::{AttributeInfo, CreationOrderIndex, Width};
 #[cfg(feature = "checksum")]
 use test_util::checksum;
 use test_util::object_header::v2::HeaderFlags;
@@ -117,7 +118,14 @@ fn compact_overwrite_preserves_storage_above_the_stored_maximum() {
 }
 
 #[rstest]
-#[case::invalid_version(vec![0xff, 0], FormatError::InvalidAttributeInfoVersion(0xff))]
+#[case::invalid_version(
+    {
+        let mut body = AttributeInfo::new(Width::Eight, None, None, None, CreationOrderIndex::Absent).build();
+        body[0] = 0xff;
+        body
+    },
+    FormatError::InvalidAttributeInfoVersion(0xff)
+)]
 #[case::truncated(vec![], FormatError::UnexpectedEof { expected: 2, available: 0 })]
 fn bulk_attribute_edits_preserve_metadata_parse_errors(
     #[case] body: Vec<u8>,

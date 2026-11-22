@@ -1,3 +1,4 @@
+mod attribute_info;
 mod btree;
 mod datatype_array_complex_codec;
 mod datatype_canonical_atomic;

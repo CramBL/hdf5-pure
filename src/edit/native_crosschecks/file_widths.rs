@@ -4,7 +4,7 @@ use rstest::rstest;
 use test_util_hdf5::file;
 
 use crate::address::AddressContext;
-use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::edit::WriteEngine;
 use crate::edit::context;
 use crate::edit::group::LinkPatches;
@@ -103,9 +103,12 @@ fn native_header_reconstruction_preserves_independent_widths(
             if record.msg_type == MessageType::ATTRIBUTE_INFO {
                 let info =
                     AttributeInfoMessage::parse_with_offset_width(record.body, offsets).unwrap();
-                assert_eq!(info.fractal_heap_address, None);
-                assert_eq!(info.btree_name_index_address, None);
-                assert_eq!(info.btree_creation_order_address, None);
+                assert_eq!(info.fractal_heap_address(), None);
+                assert_eq!(info.btree_name_index_address(), None);
+                assert_eq!(
+                    info.creation_order_index(),
+                    AttributeCreationOrderIndex::Absent
+                );
             } else {
                 retained.extend_from_slice(&region[position..record.body_range.end]);
             }

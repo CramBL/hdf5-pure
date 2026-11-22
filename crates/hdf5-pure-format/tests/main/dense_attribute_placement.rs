@@ -59,10 +59,7 @@ fn contiguous_dense_attribute_placement_preserves_bytes(
     assert_eq!(emitted, addresses);
     let contiguous = plan.build(base).unwrap();
     assert_eq!(bytes, contiguous.blob);
-    assert_eq!(
-        info.serialize(hdf5_pure_core::OffsetWidth::Eight).unwrap(),
-        contiguous.attr_info_message
-    );
+    assert_eq!(info.to_bytes(), contiguous.attribute_info.to_bytes());
 }
 
 #[rstest]
@@ -94,7 +91,7 @@ fn dense_attribute_geometry_classifies_and_borrows_huge_payloads(
     }
     let placed = plan.place(&addresses).unwrap();
     assert_eq!(
-        placed.attribute_info().fractal_heap_address,
+        placed.attribute_info().fractal_heap_address(),
         Some(addresses[0])
     );
     let blocks = placed

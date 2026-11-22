@@ -236,7 +236,7 @@ fn assert_copy_geometry(path: &Path, group: &str, widths: FormatWidths, fixture:
             dense |=
                 AttributeInfoMessage::parse_with_offset_width(&header[body..end], widths.offsets)
                     .unwrap()
-                    .fractal_heap_address
+                    .fractal_heap_address()
                     .is_some();
         }
         position = end;
@@ -512,7 +512,7 @@ fn screen_native_legacy_reference(widths: FormatWidths, site: ReferenceSite) {
             dense |=
                 AttributeInfoMessage::parse_with_offset_width(&root[body..end], widths.offsets)
                     .unwrap()
-                    .fractal_heap_address
+                    .fractal_heap_address()
                     .is_some();
         }
         position = end;

@@ -136,7 +136,7 @@ fn prepared_attribute_bodies_produce_canonical_dense_storage(#[case] name: &str,
         .unwrap()
         .build(StoredAddress::new(0x8000))
         .unwrap();
-    assert_eq!(actual.attr_info_message, expected.attr_info_message);
+    assert_eq!(actual.attribute_info, expected.attribute_info);
     assert_eq!(actual.blob, expected.blob);
 }
 
@@ -394,7 +394,7 @@ fn dense_attribute_plan_rejects_invalid_extent(
         }
     };
     assert_eq!(
-        plan.attr_info_message(StoredAddress::new(base))
+        plan.attribute_info_for_heap(StoredAddress::new(base))
             .unwrap_err(),
         expected
     );
@@ -451,12 +451,16 @@ fn assert_valid_extent(widths: FormatWidths, attrs: &[AttributeMessage]) {
     let built = plan.build(base).unwrap();
     assert_eq!(built.blob.len() as u64, plan.blob_len());
     assert_eq!(
-        built.attr_info_message,
-        plan.attr_info_message(base).unwrap()
+        built.attribute_info,
+        plan.attribute_info_for_heap(base).unwrap()
     );
-    let info = AttributeInfoMessage::parse(&built.attr_info_message, widths.offsets.get()).unwrap();
-    assert_eq!(info.fractal_heap_address, Some(base));
-    assert!(info.btree_name_index_address.unwrap().get() < maximum);
+    let info = AttributeInfoMessage::parse_with_offset_width(
+        &built.attribute_info.to_bytes(),
+        widths.offsets,
+    )
+    .unwrap();
+    assert_eq!(info.fractal_heap_address(), Some(base));
+    assert!(info.btree_name_index_address().unwrap().get() < maximum);
 }
 
 #[rstest]
@@ -521,7 +525,7 @@ fn finalization_retains_geometry_and_encodes_resolved_references(#[case] referen
     let retained = geometry(&prepared.plan);
     let reserved = prepared.blob_len();
     let info = prepared
-        .attr_info_message(StoredAddress::new(0x8000))
+        .attribute_info_for_heap(StoredAddress::new(0x8000))
         .unwrap();
     // Collections shared with other attributes hold the strings at any object index.
     let mut resolved = attrs[0].raw_data.clone();
@@ -553,7 +557,9 @@ fn finalization_retains_geometry_and_encodes_resolved_references(#[case] referen
     assert_eq!(geometry(&ready), retained);
     assert_eq!(ready.blob_len(), reserved);
     assert_eq!(
-        ready.attr_info_message(StoredAddress::new(0x8000)).unwrap(),
+        ready
+            .attribute_info_for_heap(StoredAddress::new(0x8000))
+            .unwrap(),
         info
     );
     attrs[0].datatype_location = DatatypeLocation::Committed(StoredAddress::new(0x3456));
@@ -809,7 +815,7 @@ fn prepared_dense_output_matches_baseline_bytes(
     );
     assert_eq!(built.blob.len(), len);
     assert_eq!(canonical_hash(&built.blob), blob_hash);
-    assert_eq!(canonical_hash(&built.attr_info_message), info_hash);
+    assert_eq!(canonical_hash(&built.attribute_info.to_bytes()), info_hash);
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -134,7 +134,7 @@ fn libhdf5_reads_independently_placed_dense_attributes(
     }
     assert_eq!(emitted, addresses);
     assert_eq!(
-        placement.attribute_info().max_creation_index,
+        placement.attribute_info().max_creation_index(),
         tracked.then_some(attrs.len() as u16 * 3 + 9)
     );
     let root_at = usize::try_from(superblock.root_group_address.get() + userblock).unwrap();
@@ -142,10 +142,7 @@ fn libhdf5_reads_independently_placed_dense_attributes(
     let mut header = ObjectHeaderWriter::with_prefix(prefix);
     header.add_message(
         MessageType::ATTRIBUTE_INFO,
-        placement
-            .attribute_info()
-            .serialize(superblock.offset_size)
-            .unwrap(),
+        placement.attribute_info().to_bytes(),
     );
     header.add_message(MessageType::GROUP_INFO, vec![0, 0]);
     header.add_message(

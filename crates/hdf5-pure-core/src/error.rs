@@ -529,6 +529,8 @@ pub enum FormatError {
     InvalidAttributeFlags(u8),
     /// Invalid Attribute Info message version.
     InvalidAttributeInfoVersion(u8),
+    /// An Attribute Info flags byte with a reserved bit set.
+    InvalidAttributeInfoFlags(u8),
     /// An attribute name is empty or contains a null byte.
     InvalidAttributeName {
         /// The attribute name.
@@ -2405,6 +2407,9 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidAttributeInfoVersion(v) => {
                 write!(f, "invalid attribute info message version: {v}")
+            }
+            Self::InvalidAttributeInfoFlags(flags) => {
+                write!(f, "invalid attribute info message flags: {flags:#04x}")
             }
             Self::InvalidSharedMessageVersion(v) => {
                 write!(f, "invalid shared message version: {v}")

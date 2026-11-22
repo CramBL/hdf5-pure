@@ -5,6 +5,7 @@ use rstest::rstest;
 
 use super::*;
 use crate::access_mode::AccessMode;
+use crate::attribute_info::AttributeCreationOrderIndex;
 use crate::attribute_policy;
 use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
@@ -1266,8 +1267,8 @@ fn inline_attrs_below_threshold() {
             .unwrap()
         })
         .expect("a compact attribute set still carries an Attribute Info message");
-    assert_eq!(info.fractal_heap_address, None);
-    assert_eq!(info.btree_name_index_address, None);
+    assert_eq!(info.fractal_heap_address(), None);
+    assert_eq!(info.btree_name_index_address(), None);
     let attrs = crate::attribute::extract_attributes(&hdr, LENGTH_WIDTH).unwrap();
     assert_eq!(attrs.len(), 5);
 }
@@ -1528,13 +1529,15 @@ fn an_indexed_dense_set_emits_a_creation_order_btree() {
     let heap_address = StoredAddress::new(0x4000);
     let built = dense_attribute_write::build_dense_attrs(&attrs, creation, heap_address).unwrap();
 
-    let info =
-        crate::attribute_info::AttributeInfoMessage::parse(&built.attr_info_message, OFFSET_SIZE)
-            .expect("the emitted message parses");
-    assert_eq!(info.max_creation_index, Some(40), "the recorded maximum");
-    assert!(info.indexes_creation_order);
+    let info = crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
+        &built.attribute_info.to_bytes(),
+        OFFSET_WIDTH,
+    )
+    .expect("the emitted message parses");
+    assert_eq!(info.max_creation_index(), Some(40), "the recorded maximum");
     let corder_addr = info
-        .btree_creation_order_address
+        .creation_order_index()
+        .defined_address()
         .expect("an indexed set names its creation-order B-tree");
 
     let (at, record_size, root, nrec) = btree_header(&built.blob, 9);
@@ -1591,12 +1594,16 @@ fn an_untracked_dense_set_emits_no_creation_order_btree() {
         StoredAddress::new(0x4000),
     )
     .unwrap();
-    let info =
-        crate::attribute_info::AttributeInfoMessage::parse(&built.attr_info_message, OFFSET_SIZE)
-            .expect("the emitted message parses");
-    assert_eq!(info.max_creation_index, None);
-    assert!(!info.indexes_creation_order);
-    assert_eq!(info.btree_creation_order_address, None);
+    let info = crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
+        &built.attribute_info.to_bytes(),
+        OFFSET_WIDTH,
+    )
+    .expect("the emitted message parses");
+    assert_eq!(info.max_creation_index(), None);
+    assert_eq!(
+        info.creation_order_index(),
+        AttributeCreationOrderIndex::Absent
+    );
     assert!(
         !built
             .blob

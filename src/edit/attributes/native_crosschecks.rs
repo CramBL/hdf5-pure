@@ -116,7 +116,7 @@ fn attribute_plans_preserve_native_values_at_independent_widths(
             append_checked(&mut bytes, widths, addresses, &blob.blob);
             edited
                 .region
-                .push(MessageType::ATTRIBUTE_INFO, &blob.attr_info_message);
+                .push(MessageType::ATTRIBUTE_INFO, &blob.attribute_info.to_bytes());
         }
         EditedAttrs::Compact => panic!("the operations must prepare new attributes"),
     }

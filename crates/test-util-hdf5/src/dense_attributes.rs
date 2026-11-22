@@ -191,7 +191,7 @@ pub fn assert_storage(file: &File, image: &[u8], fixture: Fixture, byte_order: D
     assert_eq!(infos.len(), 1);
     let info =
         AttributeInfoMessage::parse_with_offset_width(&infos[0].data, widths.offsets).unwrap();
-    let heap_address = info.fractal_heap_address.unwrap();
+    let heap_address = info.fractal_heap_address().unwrap();
     let heap = FractalHeapHeader::parse(
         image,
         usize::try_from(heap_address.get()).unwrap(),
@@ -207,7 +207,7 @@ pub fn assert_storage(file: &File, image: &[u8], fixture: Fixture, byte_order: D
     assert_eq!(heap.tiny_objects_count, 0);
     let header = BTreeV2Header::parse_with_widths(
         image,
-        usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+        usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
         widths,
     )
     .unwrap();

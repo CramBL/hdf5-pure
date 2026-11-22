@@ -281,7 +281,7 @@ impl FixtureStorage<'_> {
                         self.widths.offsets,
                     )
                     .unwrap();
-                    if let Some(heap) = info.fractal_heap_address {
+                    if let Some(heap) = info.fractal_heap_address() {
                         let index = attribute::collect_dense_attribute_index_storage_extents(
                             &self.source,
                             &info,

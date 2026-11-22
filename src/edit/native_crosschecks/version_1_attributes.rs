@@ -466,9 +466,9 @@ fn write_fixture(path: &Path, storage: Storage) {
         .find(|message| message.msg_type == crate::MessageType::ATTRIBUTE_INFO)
         .unwrap();
     let info = AttributeInfoMessage::parse_with_offset_width(&info.data, widths.offsets).unwrap();
-    assert_eq!(info.max_creation_index, Some(1));
-    assert!(info.fractal_heap_address.is_some());
-    assert!(info.btree_name_index_address.is_some());
+    assert_eq!(info.max_creation_index(), Some(1));
+    assert!(info.fractal_heap_address().is_some());
+    assert!(info.btree_name_index_address().is_some());
     if matches!(storage, Storage::Modern) {
         return;
     }

@@ -1,12 +1,14 @@
 use std::ops::Range;
 use std::path::Path;
 
+use hdf5_pure_core::DecodedStoredAddress;
 use hdf5_pure_format::__private as format;
-use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::OffsetWidth;
+use hdf5_pure_format::__private::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
 use rstest::rstest;
 use test_util::attribute::Attribute;
+use test_util::attribute_info::{AttributeInfo, CreationOrderIndex, Width};
 use test_util::data_layout;
 use test_util::dataspace;
 use test_util::fractal_heap::Header as HeapHeader;
@@ -226,7 +228,15 @@ fn ownership_is_complete_only_below_the_traversal_depth_limit(
 
 #[rstest]
 #[case::invalid_layout(MessageType::DATA_LAYOUT, vec![0xff, 0], FormatError::InvalidLayoutVersion(0xff))]
-#[case::invalid_attribute_info(MessageType::ATTRIBUTE_INFO, vec![0xff, 0], FormatError::InvalidAttributeInfoVersion(0xff))]
+#[case::invalid_attribute_info(
+    MessageType::ATTRIBUTE_INFO,
+    {
+        let mut body = AttributeInfo::new(Width::Eight, None, None, None, CreationOrderIndex::Absent).build();
+        body[0] = 0xff;
+        body
+    },
+    FormatError::InvalidAttributeInfoVersion(0xff)
+)]
 #[case::invalid_attribute_heap(
     MessageType::ATTRIBUTE_INFO,
     attribute_heap_at_superblock(),
@@ -317,19 +327,17 @@ fn inconsistent_heap_ownership_is_returned_as_a_typed_error() {
     let superblock = Superblock::new(Widths::EIGHT).version(SUPERBLOCK_VERSION);
     let heap_address = superblock.build().len() as u64;
     image.place(heap_address as usize, &heap);
-    let info = AttributeInfoMessage {
-        max_creation_index: None,
-        indexes_creation_order: false,
-        fractal_heap_address: Some(StoredAddress::new(heap_address)),
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
+    let info = AttributeInfoMessage::new(
+        OffsetWidth::Eight,
+        None,
+        DecodedStoredAddress::Defined(StoredAddress::new(heap_address)),
+        DecodedStoredAddress::Undefined,
+        AttributeCreationOrderIndex::Absent,
+    )
+    .unwrap();
     let root = image.append(
         &Header::new()
-            .message(Message::new(
-                MessageType::ATTRIBUTE_INFO,
-                &info.serialize(OffsetWidth::Eight).unwrap(),
-            ))
+            .message(Message::new(MessageType::ATTRIBUTE_INFO, &info.to_bytes()))
             .build(),
     );
     image.place(
@@ -478,15 +486,15 @@ fn object_reference_dataset() -> Vec<Message> {
 }
 
 fn attribute_heap_at_superblock() -> Vec<u8> {
-    AttributeInfoMessage {
-        max_creation_index: None,
-        indexes_creation_order: false,
-        fractal_heap_address: Some(StoredAddress::new(0)),
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    }
-    .serialize(OffsetWidth::Eight)
+    AttributeInfoMessage::new(
+        OffsetWidth::Eight,
+        None,
+        DecodedStoredAddress::Defined(StoredAddress::new(0)),
+        DecodedStoredAddress::Undefined,
+        AttributeCreationOrderIndex::Absent,
+    )
     .unwrap()
+    .to_bytes()
 }
 
 const SUPERBLOCK_VERSION: u8 = 3;

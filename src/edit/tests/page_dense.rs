@@ -8,7 +8,6 @@ use rstest::rstest;
 use test_util::disk_log;
 
 use crate::address::{StoredAddress, StoredAddressExt};
-use crate::attribute_info::AttributeInfoMessage;
 use crate::edit::WriteEngine;
 use crate::edit::attributes::DenseAttrSet;
 use crate::edit::object_header::OhRegion;
@@ -42,20 +41,17 @@ fn dense_attribute_blocks_reuse_only_their_page_class(#[case] lengths: &[usize])
     let expected_bytes = plan.block_lengths().sum::<u64>();
     let before = engine.space.reusable_bytes().unwrap();
     let end = engine.image.len();
-    let bytes = engine.place_dense_attrs(plan).unwrap();
+    let info = engine.place_dense_attrs(plan).unwrap();
     assert_eq!(engine.image.len(), end);
     assert_eq!(
         engine.space.reusable_bytes().unwrap(),
         ByteLength::new(before.get() - expected_bytes)
     );
-    let info =
-        AttributeInfoMessage::parse_with_offset_width(&bytes, crate::file_writer::OFFSET_WIDTH)
-            .unwrap();
     let opened = engine.opened_source();
     let source = PhysicalSource::new(&opened).stored();
     let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
         &source,
-        info.fractal_heap_address.unwrap(),
+        info.fractal_heap_address().unwrap(),
         engine.widths(),
     )
     .unwrap();

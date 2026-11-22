@@ -311,12 +311,12 @@ fn assert_storage(path: &Path, owner: Owner, storage: Storage) {
     let dense = matches!(storage, Storage::Dense);
     assert_eq!(
         info.as_ref()
-            .is_some_and(|info| info.fractal_heap_address.is_some()),
+            .is_some_and(|info| info.fractal_heap_address().is_some()),
         dense
     );
     assert_eq!(
         info.as_ref()
-            .is_some_and(|info| info.btree_name_index_address.is_some()),
+            .is_some_and(|info| info.btree_name_index_address().is_some()),
         dense
     );
     assert_eq!(

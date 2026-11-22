@@ -315,8 +315,8 @@ fn assert_dense_storage(path: &Path) {
         file.superblock().offset_size,
     )
     .unwrap();
-    assert!(attributes.fractal_heap_address.is_some());
-    assert!(attributes.btree_name_index_address.is_some());
+    assert!(attributes.fractal_heap_address().is_some());
+    assert!(attributes.btree_name_index_address().is_some());
     assert!(
         header
             .messages

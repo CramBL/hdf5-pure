@@ -45,6 +45,7 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
+use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_write::ByteSink;
 use crate::chunked_write::ChunkedMeasure;
 use crate::chunked_write::CompressedChunkSet;
@@ -327,7 +328,7 @@ impl Object {
         let dense = self.dense()?;
         let info = dense
             .as_ref()
-            .map(|dense| dense.attr_info_message(StoredAddress::ZERO))
+            .map(|dense| dense.attribute_info_for_heap(StoredAddress::ZERO))
             .transpose()?;
         let (header, data, data_measure, array_payload, links, dense_links) = match &self.kind {
             Kind::Dataset(dataset) => {
@@ -335,7 +336,7 @@ impl Object {
                 let (measured, array_payload) = dataset.measure_source(
                     StoredAddress::ZERO,
                     chunks.as_ref(),
-                    info.as_deref(),
+                    info.as_ref(),
                     libver,
                     self.header_options(),
                 )?;
@@ -379,7 +380,7 @@ impl Object {
                 let header = group_header(
                     &links,
                     attributes,
-                    info.as_deref(),
+                    info.as_ref(),
                     link_info
                         .as_ref()
                         .unwrap_or(&compact_link_info(*creation_order)),
@@ -1120,8 +1121,9 @@ impl<S: ObjectSource> Plan<S> {
         let info = object
             .dense()?
             .map(|dense| {
-                dense
-                    .attr_info_message(record.metadata.attributes.ok_or_else(inconsistent)?.address)
+                dense.attribute_info_for_heap(
+                    record.metadata.attributes.ok_or_else(inconsistent)?.address,
+                )
             })
             .transpose()?;
         Ok(match &object.kind {
@@ -1159,7 +1161,7 @@ impl<S: ObjectSource> Plan<S> {
                 dataset.build_header(
                     address,
                     messages.as_ref(),
-                    info.as_deref(),
+                    info.as_ref(),
                     self.libver,
                     object.header_options(),
                 )?
@@ -1181,7 +1183,7 @@ impl<S: ObjectSource> Plan<S> {
                 group_header(
                     &links,
                     attributes,
-                    info.as_deref(),
+                    info.as_ref(),
                     &link_info,
                     *group_info,
                     object.header_options(),
@@ -1781,7 +1783,7 @@ fn link_storage(
 fn group_header(
     links: &[OwnedLink],
     attributes: &[AttributeMessage],
-    attribute_info: Option<&[u8]>,
+    attribute_info: Option<&AttributeInfoMessage>,
     link_info: &LinkInfoMessage,
     group_info: GroupInfo,
     header: super::HeaderOptions<'_>,

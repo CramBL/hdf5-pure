@@ -22,7 +22,7 @@ use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
-use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::btree::v2 as btree_v2;
 use crate::btree::v2::BTreeV2Header;
 use crate::btree::v2::BTreeV2Source;
@@ -77,18 +77,16 @@ pub(crate) fn collect_dense_attribute_index_storage_extents(
     attr_info: &AttributeInfoMessage,
     widths: FormatWidths,
 ) -> Result<Vec<Extent>, FormatError> {
-    let Some(fractal_heap_address) = attr_info.fractal_heap_address else {
+    let Some(fractal_heap_address) = attr_info.fractal_heap_address() else {
         return Ok(Vec::new());
     };
-    let Some(name_address) = attr_info.btree_name_index_address else {
+    let Some(name_address) = attr_info.btree_name_index_address() else {
         return Ok(Vec::new());
     };
 
     let mut indexes = Vec::with_capacity(2);
     indexes.push(DenseIndex::new(name_address, BTREE_V2_ATTRIBUTE_NAME));
-    if attr_info.indexes_creation_order
-        && let Some(address) = attr_info.btree_creation_order_address
-    {
+    if let AttributeCreationOrderIndex::Defined(address) = attr_info.creation_order_index() {
         indexes.push(DenseIndex::new(address, BTREE_V2_ATTRIBUTE_CREATION_ORDER));
     }
     dense_storage::collect_dense_index_storage_extents_from_source(
@@ -152,7 +150,7 @@ pub fn extract_attributes_full(
 
     let attr_info = find_attribute_info(header, widths.offsets)?;
     if let Some(info) = attr_info
-        && let Some(fh_addr) = info.fractal_heap_address
+        && let Some(fh_addr) = info.fractal_heap_address()
     {
         let dense_attrs =
             extract_dense_attributes(source, access_mode, &info, fh_addr, widths, sohm)?;
@@ -290,7 +288,7 @@ fn extract_stored_attributes_parsing(
 
     let attr_info = find_attribute_info(header, widths.offsets)?;
     if let Some(info) = attr_info
-        && let Some(fh_addr) = info.fractal_heap_address
+        && let Some(fh_addr) = info.fractal_heap_address()
     {
         let dense_attrs = extract_dense_attributes_from_source(
             source,
@@ -345,7 +343,7 @@ fn extract_dense_attributes(
     let (fh, _) = fractal_heap::read_header_and_range_from_source(&heap_source, fh_addr, widths)?;
 
     let btree_addr = attr_info
-        .btree_name_index_address
+        .btree_name_index_address()
         .ok_or(FormatError::UnexpectedEof {
             expected: 1,
             available: 0,
@@ -463,7 +461,7 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
     let (fh, _) = fractal_heap::read_header_and_range_from_source(&heap_source, fh_addr, widths)?;
 
     let btree_addr = attr_info
-        .btree_name_index_address
+        .btree_name_index_address()
         .ok_or(FormatError::UnexpectedEof {
             expected: 1,
             available: 0,
@@ -502,7 +500,7 @@ pub(crate) fn visit_dense_attribute_messages_from_source(
             )?,
         };
         let creation_index = attr_info
-            .max_creation_index
+            .max_creation_index()
             .and_then(|_| u16::try_from(record.creation_order()).ok());
         visit(&attr_data, creation_index)?;
     }
@@ -529,6 +527,7 @@ mod tests {
     use crate::address::AddressContext;
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
+    use crate::address::DecodedStoredAddress;
     use crate::data_read;
     use crate::fractal_heap::test_source::ObservedSource;
     use crate::message_flags::MessageFlags;
@@ -568,13 +567,14 @@ mod tests {
         let leaf = btree_v2::leaf(BTREE_V2_ATTRIBUTE_NAME, &[record]);
         image[0x200..0x200 + index.len()].copy_from_slice(&index);
         image[0x300..0x300 + leaf.len()].copy_from_slice(&leaf);
-        let info = AttributeInfoMessage {
-            max_creation_index: Some(42),
-            indexes_creation_order: false,
-            fractal_heap_address: Some(StoredAddress::new(0)),
-            btree_name_index_address: Some(StoredAddress::new(0x200)),
-            btree_creation_order_address: None,
-        };
+        let info = AttributeInfoMessage::new(
+            OffsetWidth::Eight,
+            Some(42),
+            DecodedStoredAddress::Defined(StoredAddress::new(0)),
+            DecodedStoredAddress::Defined(StoredAddress::new(0x200)),
+            AttributeCreationOrderIndex::Absent,
+        )
+        .unwrap();
         (image, info, FormatWidths::from_sizes(8, 8).unwrap())
     }
 
@@ -787,7 +787,14 @@ mod tests {
         let (mut image, mut info, widths) = shared_dense_record_fixture();
         image[corrupt_at] = 0;
         if missing_index {
-            info.btree_name_index_address = None;
+            info = AttributeInfoMessage::new(
+                widths.offsets,
+                info.max_creation_index(),
+                DecodedStoredAddress::Defined(info.fractal_heap_address().unwrap()),
+                DecodedStoredAddress::Undefined,
+                info.creation_order_index(),
+            )
+            .unwrap();
         }
         let mut physical = vec![0; base];
         physical.extend_from_slice(&image);
@@ -831,7 +838,7 @@ mod tests {
         #[case] expected: Option<u16>,
     ) {
         let (image, mut info, widths) = shared_dense_record_fixture();
-        info.max_creation_index = max_creation_index;
+        info.set_max_creation_index(max_creation_index);
         let table = attribute_shared_table(Some(StoredAddress::new(0)));
         let mut observed = Vec::new();
         visit_dense_attribute_messages_from_source(
@@ -899,19 +906,24 @@ mod tests {
     #[rstest]
     #[case::zero_base(0)]
     #[case::userblock(512)]
-    fn dense_attribute_storage_walk_omits_creation_order_index_when_not_indexed(
+    fn dense_attribute_storage_walk_uses_only_defined_indexes(
         #[case] base: usize,
+        #[values(
+            AttributeCreationOrderIndex::Absent,
+            AttributeCreationOrderIndex::Undefined
+        )]
+        index: AttributeCreationOrderIndex,
     ) {
         let mut file = vec![0; 0x800];
         let expected = place_attribute_name_index(&mut file, 0x100, 0x200);
-        let info = AttributeInfoMessage {
-            max_creation_index: Some(1),
-            indexes_creation_order: false,
-            fractal_heap_address: Some(StoredAddress::new(0x80)),
-            btree_name_index_address: Some(StoredAddress::new(0x100)),
-            // A defined address alone does not make the creation-order index live.
-            btree_creation_order_address: Some(StoredAddress::new(0x500)),
-        };
+        let info = AttributeInfoMessage::new(
+            OffsetWidth::Eight,
+            Some(1),
+            DecodedStoredAddress::Defined(StoredAddress::new(0x80)),
+            DecodedStoredAddress::Defined(StoredAddress::new(0x100)),
+            index,
+        )
+        .unwrap();
 
         let mut physical = vec![0; base];
         physical.extend_from_slice(&file);
@@ -1008,7 +1020,7 @@ mod tests {
             .unwrap()
             .expect("this many attributes are stored densely");
         let fh_addr = info
-            .fractal_heap_address
+            .fractal_heap_address()
             .expect("dense storage names its heap");
         (info, fh_addr, widths)
     }

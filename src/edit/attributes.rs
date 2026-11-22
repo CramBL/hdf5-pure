@@ -12,7 +12,7 @@ use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
 use crate::access_mode::AccessMode;
 use crate::attribute::{AttributeMessage, StoredAttribute};
-use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::attribute_policy::AttributePolicy;
 use crate::attribute_policy::AttributeStorage;
 use crate::attribute_request::AttributeName;
@@ -153,8 +153,8 @@ impl WriteEngine {
         let Some(plan) = set.into_plan()? else {
             return Ok(());
         };
-        let attr_info_message = self.place_dense_attrs(plan)?;
-        region.push(MessageType::ATTRIBUTE_INFO, &attr_info_message);
+        let info = self.place_dense_attrs(plan)?;
+        region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
         Ok(())
     }
 
@@ -173,17 +173,20 @@ impl WriteEngine {
     /// [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
     /// Propagates allocation and address-conversion
     /// errors. Returns [`Error::Io`] if writing the heap, indexes, or allocation padding fails.
-    pub(super) fn place_dense_attrs(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error> {
+    pub(super) fn place_dense_attrs(
+        &mut self,
+        plan: DenseAttrPlan,
+    ) -> Result<AttributeInfoMessage, Error> {
         if !self.space.is_paged() {
-            let (_, attr_info_message) = self.place_relocatable(
+            let (_, info) = self.place_relocatable(
                 plan.blob_len(),
                 AllocationClass::Metadata,
                 |stored_base| {
                     let blob = plan.build(stored_base)?;
-                    Ok((blob.blob, blob.attr_info_message))
+                    Ok((blob.blob, blob.attribute_info))
                 },
             )?;
-            return Ok(attr_info_message);
+            return Ok(info);
         }
         let requests = plan
             .block_lengths()
@@ -218,9 +221,7 @@ impl WriteEngine {
             reservations.write_next(&block?.bytes)?;
         }
         reservations.finish()?;
-        Ok(placement
-            .attribute_info()
-            .serialize(self.context.widths().offsets)?)
+        Ok(*placement.attribute_info())
     }
 
     /// Places prepared attribute storage and appends its header records.
@@ -293,8 +294,8 @@ pub(super) fn ensure_attribute_info(region: &mut OhRegion) -> Result<(), Error> 
         p = body_end;
     }
     if has_attrs {
-        let body = compact_attribute_info_body(region)?;
-        region.push(MessageType::ATTRIBUTE_INFO, &body);
+        let info = compact_attribute_info(region)?;
+        region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
     }
     Ok(())
 }
@@ -819,7 +820,7 @@ impl<'a> CompactBatch<'a> {
             slots: Vec::new(),
             indices: BTreeMap::new(),
             counter: find_attribute_info(original)?
-                .and_then(|(_, _, info)| info.max_creation_index),
+                .and_then(|(_, _, info)| info.max_creation_index()),
             assigned: false,
             oversized: false,
             count: 0,
@@ -1001,8 +1002,10 @@ impl<'a> CompactBatch<'a> {
                     original.widths().offsets,
                 )
             {
-                info.max_creation_index = counter;
-                info.indexes_creation_order |= layout.indexes_creation_order();
+                info.set_max_creation_index(counter);
+                if layout.indexes_creation_order() && !info.indexes_creation_order() {
+                    info.set_creation_order_index(AttributeCreationOrderIndex::Undefined)?;
+                }
                 let splice =
                     RecordSplice::first(layout, &original[range], MessageType::ATTRIBUTE_INFO)?
                         .ok_or_else(|| {
@@ -1011,8 +1014,7 @@ impl<'a> CompactBatch<'a> {
                                     .into(),
                             )
                         })?;
-                splice
-                    .replace_body_into(&mut bytes, &info.serialize(original.widths().offsets)?)?;
+                splice.replace_body_into(&mut bytes, &info.to_bytes())?;
                 has_info = true;
             } else {
                 bytes.extend_from_slice(&original[range]);
@@ -1055,17 +1057,12 @@ impl<'a> CompactBatch<'a> {
         records.extend_from_slice(&original[tail..]);
         let mut region = original.with_bytes(bytes);
         if assigned && !has_info {
-            let info = AttributeInfoMessage {
-                max_creation_index: counter,
-                indexes_creation_order: layout.indexes_creation_order(),
-                fractal_heap_address: None,
-                btree_name_index_address: None,
-                btree_creation_order_address: None,
-            };
-            region.push(
-                MessageType::ATTRIBUTE_INFO,
-                &info.serialize(original.widths().offsets)?,
+            let info = AttributeInfoMessage::compact(
+                original.widths().offsets,
+                counter,
+                layout.indexes_creation_order(),
             );
+            region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
         }
         Ok(AttrEdits {
             region,
@@ -1277,7 +1274,7 @@ fn read_attr_slots(
         position = record.body_range.end;
     }
     if let Some(info) = info
-        && let Some(heap) = info.fractal_heap_address
+        && let Some(heap) = info.fractal_heap_address()
     {
         crate::attribute::visit_dense_attribute_messages_from_source(
             &PhysicalSource::new(src).stored(),
@@ -1383,14 +1380,11 @@ fn prepare_compact_attrs(
             });
         }
     }
-    let info = AttributeInfoMessage {
-        max_creation_index: layout.tracks_creation_order().then_some(next),
-        indexes_creation_order: layout.indexes_creation_order(),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    }
-    .serialize(original.widths().offsets)?;
+    let info = AttributeInfoMessage::compact(
+        original.widths().offsets,
+        layout.tracks_creation_order().then_some(next),
+        layout.indexes_creation_order(),
+    );
     let mut region = strip_attr_messages(original)?;
     if let Some((start, body, _)) = find_attribute_info(original)? {
         let splice = RecordSplice::first(
@@ -1404,10 +1398,10 @@ fn prepare_compact_attrs(
             )
         })?;
         let mut encoded = Vec::new();
-        splice.replace_body_into(&mut encoded, &info)?;
+        splice.replace_body_into(&mut encoded, &info.to_bytes())?;
         region.push_bytes(&encoded);
     } else {
-        region.push(MessageType::ATTRIBUTE_INFO, &info);
+        region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
     }
     Ok(AttrEdits {
         region,
@@ -1599,7 +1593,7 @@ fn bump_creation_index(index: u16) -> Result<u16, Error> {
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
 pub(crate) fn attribute_info_is_dense(offsets: OffsetWidth, body: &[u8]) -> bool {
     match crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(body, offsets) {
-        Ok(ai) => ai.fractal_heap_address.is_some(),
+        Ok(ai) => ai.fractal_heap_address().is_some(),
         Err(_) => true,
     }
 }
@@ -1629,7 +1623,7 @@ fn highest_attr_creation_index(region: &OhRegion) -> Result<Option<u16>, Error> 
 /// cannot be represented.
 pub(super) fn next_attr_creation_index(region: &OhRegion) -> Result<u16, Error> {
     let recorded = find_attribute_info(region)?
-        .and_then(|(_, _, info)| info.max_creation_index)
+        .and_then(|(_, _, info)| info.max_creation_index())
         .unwrap_or(0);
     let derived = highest_attr_creation_index(region)?.map_or(0, |i| u32::from(i) + 1);
     let next = u32::from(recorded).max(derived);
@@ -1665,7 +1659,7 @@ pub(super) fn find_attribute_info(
     Ok(None)
 }
 
-/// Serializes compact Attribute Info metadata at the region's offset width.
+/// Constructs compact Attribute Info metadata at the region's offset width.
 ///
 /// Uses [`next_attr_creation_index`] for tracked headers and undefined addresses for dense
 /// storage fields.
@@ -1674,19 +1668,16 @@ pub(super) fn find_attribute_info(
 ///
 /// Returns [`Error::EditUnsupported`] if a record extends past the region or the next creation
 /// index cannot be represented.
-fn compact_attribute_info_body(region: &OhRegion) -> Result<Vec<u8>, Error> {
+fn compact_attribute_info(region: &OhRegion) -> Result<AttributeInfoMessage, Error> {
     let layout = region.layout();
-    let info = AttributeInfoMessage {
-        max_creation_index: layout
+    Ok(AttributeInfoMessage::compact(
+        region.widths().offsets,
+        layout
             .tracks_creation_order()
             .then(|| next_attr_creation_index(region))
             .transpose()?,
-        indexes_creation_order: layout.indexes_creation_order(),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
-    Ok(info.serialize(region.widths().offsets)?)
+        layout.indexes_creation_order(),
+    ))
 }
 
 /// Counts inline Attribute records in a compact region.

@@ -174,7 +174,7 @@ impl WriteEngine {
                     &region[body..body_end],
                     widths.offsets,
                 )?;
-                if ai.fractal_heap_address.is_some() {
+                if ai.fractal_heap_address().is_some() {
                     dense = true;
                 }
             }
@@ -794,7 +794,7 @@ impl CopyNode {
         if let Some(plan) = self.dense_attrs().clone().into_plan()? {
             region.push(
                 MessageType::ATTRIBUTE_INFO,
-                &engine.place_dense_attrs(plan)?,
+                &engine.place_dense_attrs(plan)?.to_bytes(),
             );
         }
         let header = super::object_header::build_v2_object_header(&region)?;
