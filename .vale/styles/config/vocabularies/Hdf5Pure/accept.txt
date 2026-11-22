@@ -34,6 +34,7 @@ codec
 codegen
 coefs
 config
+const
 dataspace
 Dataspace
 dataspaces
