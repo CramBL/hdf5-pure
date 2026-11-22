@@ -27,6 +27,7 @@ pub struct RecordSplice<'a> {
     layout: MessageRecordLayout,
     head: &'a [u8],
     record: MessageRecord<'a>,
+    type_byte: u8,
     tail: &'a [u8],
 }
 
@@ -44,7 +45,9 @@ impl<'a> RecordSplice<'a> {
         msg_type: MessageType,
     ) -> Result<Option<Self>, FormatError> {
         let mut msg_start = 0;
-        while let Some(record) = layout.next_message(region, msg_start)? {
+        while let Some((type_byte, record)) =
+            layout.next_message_with_type_byte(region, msg_start)?
+        {
             if record.msg_type == msg_type {
                 let (Some(head), Some(tail)) =
                     (region.get(..msg_start), region.get(record.body_range.end..))
@@ -57,6 +60,7 @@ impl<'a> RecordSplice<'a> {
                     layout,
                     head,
                     record,
+                    type_byte,
                     tail,
                 }));
             }
@@ -172,8 +176,15 @@ impl<'a> RecordSplice<'a> {
         creation_index: u16,
         body: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
-        let mut region = Vec::with_capacity(self.replacement_len(body.len())?);
-        self.replace_record_into(&mut region, flags, creation_index, body)?;
+        let replacement = self.replacement(body.len())?;
+        let mut region = Vec::with_capacity(replacement.len);
+        self.append_record(
+            &mut region,
+            flags,
+            creation_index,
+            body,
+            replacement.body_len,
+        );
         Ok(region)
     }
 
@@ -191,31 +202,19 @@ impl<'a> RecordSplice<'a> {
         region: &'region mut Vec<u8>,
         body_len: usize,
     ) -> Result<&'region mut [u8], FormatError> {
-        let Self {
-            layout,
-            head,
-            record,
-            tail: _,
-        } = self;
-        let replacement_len = self.replacement_len(body_len)?;
-        // The replacement length check bounds the body to the 2-byte size field.
-        let encoded_len = u16::try_from(body_len).expect("bounded record body length");
-        // The selected record's type was read from the 1-byte type field.
-        let msg_type = u8::try_from(record.msg_type.to_u16()).expect("one-byte record type");
+        let replacement = self.replacement(body_len)?;
         region
-            .try_reserve(replacement_len)
+            .try_reserve(replacement.len)
             .map_err(|source| FormatError::AllocationFailed {
-                values: replacement_len,
+                values: replacement.len,
                 source,
             })?;
 
-        region.extend_from_slice(head);
-        layout.write_record_prefix(
+        self.append_prefix(
             region,
-            msg_type,
-            record.flags,
-            record.creation_index.unwrap_or(0),
-            encoded_len,
+            self.record.flags,
+            self.record.creation_index.unwrap_or(0),
+            replacement.body_len,
         );
         let body_start = region.len();
         region.resize(body_start + body_len, 0);
@@ -239,42 +238,61 @@ impl<'a> RecordSplice<'a> {
         creation_index: u16,
         body: &[u8],
     ) -> Result<(), FormatError> {
-        let Self {
-            layout,
-            head,
-            record,
-            tail,
-        } = self;
-        region.reserve(self.replacement_len(body.len())?);
-        region.extend_from_slice(head);
-        // The type was read from the 1-byte type field and the check above bounds the body,
-        // so neither assertion of `write_record` fails.
-        layout.write_record(region, record.msg_type, flags, creation_index, body);
-        region.extend_from_slice(tail);
+        let replacement = self.replacement(body.len())?;
+        region.reserve(replacement.len);
+        self.append_record(region, flags, creation_index, body, replacement.body_len);
         Ok(())
     }
 
-    /// Returns the appended region's length in bytes for a replacement body of `body_len` bytes.
+    fn append_record(
+        &self,
+        region: &mut Vec<u8>,
+        flags: MessageFlags,
+        creation_index: u16,
+        body: &[u8],
+        body_len: u16,
+    ) {
+        self.append_prefix(region, flags, creation_index, body_len);
+        region.extend_from_slice(body);
+        region.extend_from_slice(self.tail);
+    }
+
+    /// Appends the source bytes before the selected record and the replacement record prefix.
+    fn append_prefix(
+        &self,
+        region: &mut Vec<u8>,
+        flags: MessageFlags,
+        creation_index: u16,
+        body_len: u16,
+    ) {
+        region.extend_from_slice(self.head);
+        self.layout
+            .write_record_prefix(region, self.type_byte, flags, creation_index, body_len);
+    }
+
+    /// Checks that the body length fits the record's size field and computes the append length.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body_len` exceeds
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `size` exceeds
     /// [`OBJECT_HEADER_MESSAGE_MAX`].
-    fn replacement_len(&self, body_len: usize) -> Result<usize, FormatError> {
-        let Self {
-            layout,
-            head,
-            record,
-            tail,
-        } = self;
-        if body_len > OBJECT_HEADER_MESSAGE_MAX {
-            return Err(FormatError::ObjectHeaderMessageTooLarge {
-                message_type: record.msg_type.to_u16(),
-                size: body_len,
-            });
-        }
-        Ok(head.len() + layout.prefix_len() + body_len + tail.len())
+    fn replacement(&self, size: usize) -> Result<ReplacementExtent, FormatError> {
+        const { assert!(OBJECT_HEADER_MESSAGE_MAX == u16::MAX as usize) };
+        let body_len =
+            u16::try_from(size).map_err(|_error| FormatError::ObjectHeaderMessageTooLarge {
+                message_type: self.record.msg_type.to_u16(),
+                size,
+            })?;
+        let len =
+            self.head.len() + self.layout.prefix_len() + usize::from(body_len) + self.tail.len();
+        Ok(ReplacementExtent { len, body_len })
     }
+}
+
+/// The region length to append and the body length for the record's size field.
+struct ReplacementExtent {
+    len: usize,
+    body_len: u16,
 }
 
 #[cfg(test)]
