@@ -473,7 +473,6 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
         return Ok(holds);
     };
     collect_slots(
-        &dt,
         &slots,
         FileRegion::new(FileRange::new(at, raw.len().to_u64())?, &raw)?,
         base,
@@ -693,7 +692,6 @@ fn scan_object<S: OriginalSource + ?Sized>(
                     if let Some(slots) = element_slots(&attr.datatype) {
                         edits.clear();
                         collect_slots(
-                            &attr.datatype,
                             &slots,
                             FileRegion::new(
                                 FileRange::new(
@@ -746,7 +744,6 @@ fn scan_object<S: OriginalSource + ?Sized>(
                 return Ok(out);
             };
             collect_slots(
-                &dt,
                 &slots,
                 FileRegion::new(FileRange::new(at, raw.len().to_u64())?, &raw)?,
                 base,
@@ -757,7 +754,6 @@ fn scan_object<S: OriginalSource + ?Sized>(
         DataLayout::Compact { data } => {
             edits.clear();
             collect_slots(
-                &dt,
                 &slots,
                 FileRegion::new(
                     FileRange::new(
@@ -841,22 +837,11 @@ fn record_header_edits(
     }
 }
 
-/// Where the 8-byte object references sit within one element of `dt`, or `None`
-/// when there are none to rewrite.
+/// Locates object reference slots for rewriting values of `dt`.
 ///
-/// [`datatype::embedded_reference_slots`] returns three outcomes, and this combines two of
-/// them. `None` means the type reaches an address this cannot locate — wider
-/// than eight bytes, a dataset-region reference, a variable length of them, an
-/// enumeration over one. `Some([])` means the type holds no address at all. The
-/// difference matters where a caller must *refuse* what it could not screen —
-/// which is what `edit::screen_resolved_references` does, and why conflating the
-/// two was a hole in the #317 screen — but nothing here refuses, so both answers
-/// lead to the same silence.
-///
-/// Folding them anyway is what keeps a data block from being read for a dataset
-/// with no slots to patch, which the walk would otherwise do once per dataset
-/// per commit.
-fn element_slots(dt: &Datatype) -> Option<Vec<usize>> {
+/// Calls [`datatype::embedded_reference_slots`] and returns `None` for empty results or
+/// unsupported reference layouts. In both cases the caller can skip reading the values.
+fn element_slots(dt: &Datatype) -> Option<datatype::EmbeddedReferenceSlots> {
     datatype::embedded_reference_slots(dt).filter(|s| !s.is_empty())
 }
 
@@ -880,27 +865,24 @@ pub(crate) fn attribute_references_are_repointable(dt: &Datatype) -> bool {
 
 /// Appends physical patch positions and stored replacements for relocated object references.
 ///
-/// `raw` contains the reference bytes and their physical range, and `slots` is [`element_slots`]
-/// for `dt`. The reader resolves each stored reference through `base` before looking up its
+/// `raw` contains the reference bytes and their physical range, and `slots` is the result of
+/// [`element_slots`]. The reader resolves each stored reference through `base` before looking up its
 /// object identity in `relocations`. The writer converts the replacement to a stored address.
 /// The caller groups inline edits with their header chunks for checksum updates.
-///
-/// Reads reference positions through [`datatype::stored_object_references`].
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::OffsetOverflow`] if a physical patch position exceeds [`u64::MAX`].
+/// Propagates errors from [`datatype::EmbeddedReferenceSlots::stored_references`].
 fn collect_slots(
-    dt: &Datatype,
-    slots: &[usize],
+    slots: &datatype::EmbeddedReferenceSlots,
     raw: FileRegion<'_>,
     base: AddressContext,
     relocations: &BTreeMap<ObjectId, ObjectId>,
     out: &mut Vec<(PhysicalAddress, StoredAddress)>,
 ) -> Result<(), FormatError> {
-    for (offset, stored) in
-        datatype::stored_object_references(raw.bytes(), dt.type_size() as usize, slots)
-    {
+    for reference in slots.stored_references(raw.bytes()) {
+        let (offset, stored) = reference?;
         // The two sentinels name no object and are never relocated; skipping
         // them keeps a zero-based file from matching a relocation whose old
         // address happened to be the base.
@@ -1097,9 +1079,9 @@ mod tests {
             ObjectId::new(PhysicalAddress::new(900)),
         )]);
         let mut edits = Vec::new();
+        let slots = element_slots(&type_builders::make_object_reference_type()).unwrap();
         collect_slots(
-            &type_builders::make_object_reference_type(),
-            &[0],
+            &slots,
             region,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             &relocations,

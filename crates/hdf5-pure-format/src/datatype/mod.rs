@@ -1179,22 +1179,16 @@ pub fn datatype_holds_file_address(dt: &Datatype) -> bool {
     }
 }
 
-/// Returns the byte offset of every 8-byte object reference `datatype` contains
-/// in a compound member or array entry, in declaration order.
+/// Locates the 8-byte object references within one element of `datatype`.
 ///
-/// A datatype that is itself an object reference produces a slot at offset 0,
-/// so a caller that handles that case separately must test for it first.
+/// Visits compound members in declaration order and array entries in element order. A top-level
+/// 8-byte object reference has a slot at offset zero.
 ///
-/// The counterpart of `embedded_vlen_slots`,
-/// which locates the variable-length heap addresses a rewrite invalidates.
-///
-/// Returns `None` when a computed offset exceeds the datatype's declared element
-/// size, or when the element contains an object reference whose location this
-/// walker cannot report (see [`datatype_holds_object_address`]). The caller must
-/// not treat `None` as an empty slot list. An empty list is safe to rewrite in
-/// place, while `None` means an address may be present with no known location,
-/// which the caller must reject.
-pub fn embedded_reference_slots(datatype: &Datatype) -> Option<Vec<usize>> {
+/// Returns `None` if an offset exceeds [`usize::MAX`], the reference slots do not fit in the
+/// declared element size, or the walker cannot locate a reference identified by
+/// [`datatype_holds_object_address`]. Returns an empty list if the walk succeeds and finds zero
+/// slots.
+pub fn embedded_reference_slots(datatype: &Datatype) -> Option<EmbeddedReferenceSlots> {
     /// Returns `false` when the datatype cannot be walked on this target, for the
     /// reasons [`embedded_vlen_slots`]' walker documents.
     fn collect(datatype: &Datatype, base: usize, capacity: usize, out: &mut Vec<usize>) -> bool {
@@ -1294,37 +1288,81 @@ pub fn embedded_reference_slots(datatype: &Datatype) -> Option<Vec<usize>> {
     {
         return None;
     }
-    Some(slots)
+    Some(EmbeddedReferenceSlots {
+        element_size,
+        offsets: slots,
+    })
 }
 
-/// Returns the byte offset within `raw` of each 8-byte object reference, paired
-/// with the address stored there.
-///
-/// `slots` is the result of [`embedded_reference_slots`] for the datatype `raw`
-/// holds elements of, and `element_size` is its `type_size`. This function is
-/// the single implementation of the slot scan, shared by callers that screen
-/// addresses against what a commit vacates and callers that rewrite them to a
-/// new location. A second implementation could disagree about the element
-/// stride, about a trailing partial element, or about which slots exist.
-///
-/// A trailing run shorter than one element is skipped. `chunks_exact` yields
-/// whole elements only, matching what every reader of these bytes does with a
-/// truncated tail.
-pub fn stored_object_references<'a>(
-    raw: &'a [u8],
+/// The size of an element and the checked offsets of its 8-byte object references.
+#[derive(Debug)]
+pub struct EmbeddedReferenceSlots {
     element_size: usize,
-    slots: &'a [usize],
-) -> impl Iterator<Item = (usize, u64)> + 'a {
-    raw.chunks_exact(element_size.max(1))
-        .enumerate()
-        .flat_map(move |(i, element)| {
-            slots.iter().map(move |&at| {
-                let stored = u64::from_le_bytes(element[at..at + 8].try_into().expect(
-                    "embedded_reference_slots keeps every slot 8 bytes inside the element",
-                ));
-                (i * element_size + at, stored)
+    offsets: Vec<usize>,
+}
+
+impl EmbeddedReferenceSlots {
+    /// Returns the datatype's element size in bytes, as used to bound the slot offsets.
+    pub const fn element_size(&self) -> usize {
+        self.element_size
+    }
+
+    /// Returns the number of reference slots per element.
+    pub fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// Returns whether the datatype has zero reference slots.
+    pub fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    /// Yields each reference's byte offset from the start of `raw` and its stored address.
+    ///
+    /// Pass bytes encoded with the datatype used to obtain these slots. Visits complete
+    /// elements in order and skips a trailing partial element.
+    ///
+    /// # Errors
+    ///
+    /// Yields [`FormatError::Internal`] if an address field extends past its element.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{Datatype, FormatError, ReferenceType};
+    /// use hdf5_pure_format::__private::embedded_reference_slots;
+    ///
+    /// let datatype = Datatype::Reference { size: 8, ref_type: ReferenceType::Object };
+    /// let slots = embedded_reference_slots(&datatype).unwrap();
+    /// let raw = 0x1000u64.to_le_bytes();
+    /// let references = slots.stored_references(&raw).collect::<Result<Vec<_>, _>>()?;
+    /// assert_eq!(references, [(0, 0x1000)]);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn stored_references<'a>(
+        &'a self,
+        raw: &'a [u8],
+    ) -> impl Iterator<Item = Result<(usize, u64), FormatError>> + 'a {
+        raw.chunks_exact(self.element_size.max(1))
+            .enumerate()
+            .flat_map(move |(index, element)| {
+                self.offsets.iter().map(move |&offset| {
+                    let field = element
+                        .get(offset..)
+                        .and_then(<[u8]>::first_chunk::<8>)
+                        .ok_or_else(reference_slot_outside_element)?;
+                    Ok((
+                        index * self.element_size + offset,
+                        u64::from_le_bytes(*field),
+                    ))
+                })
             })
-        })
+    }
+}
+
+#[cold]
+fn reference_slot_outside_element() -> FormatError {
+    FormatError::Internal("an object reference slot extends past its element".into())
 }
 
 /// Build a datatype header (8 bytes) for testing.

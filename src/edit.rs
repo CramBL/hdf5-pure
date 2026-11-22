@@ -3359,7 +3359,8 @@ fn screen_resolved_references(
     };
     // Non-empty slots mean the datatype has room for at least one 8-byte
     // address, so the element size is at least 8.
-    for (_, stored) in datatype::stored_object_references(raw, dt.type_size() as usize, &slots) {
+    for reference in slots.stored_references(raw) {
+        let (_, stored) = reference?;
         if let Some(refusal) = invalidated.refusal(StoredAddress::new(stored)) {
             return Err(Error::EditUnsupported(refusal));
         }
