@@ -1799,7 +1799,7 @@ impl FileWriter {
             let link_plan = dense_links_plan(
                 widths,
                 &dummy_links,
-                g.link_phase_change.group_info()?.phase_change(),
+                g.link_phase_change.group_phase_change(),
             )?;
             let link_info = link_plan
                 .as_ref()
@@ -1822,7 +1822,7 @@ impl FileWriter {
                 &g.attrs,
                 attr_info.as_ref(),
                 link_info.as_ref(),
-                g.link_phase_change.group_info()?,
+                g.link_phase_change.group_info(),
             )?;
             group_oh_sizes.push(oh.len());
         }
@@ -1835,7 +1835,7 @@ impl FileWriter {
         let root_link_plan = dense_links_plan(
             widths,
             &root_dummy_links,
-            self.root_link_phase_change.group_info()?.phase_change(),
+            self.root_link_phase_change.group_phase_change(),
         )?;
         let root_link_info = root_link_plan
             .as_ref()
@@ -1856,7 +1856,7 @@ impl FileWriter {
             &root_attrs,
             root_attr_info.as_ref(),
             root_link_info.as_ref(),
-            self.root_link_phase_change.group_info()?,
+            self.root_link_phase_change.group_info(),
         )?
         .len();
 
@@ -2186,7 +2186,7 @@ impl FileWriter {
                         &root_group_indices,
                     ),
                     span,
-                    self.root_link_phase_change.group_info()?.phase_change(),
+                    self.root_link_phase_change.group_phase_change(),
                 )
             })
             .transpose()?;
@@ -2203,7 +2203,7 @@ impl FileWriter {
                             &group.sub_group_indices,
                         ),
                         span,
-                        group.link_phase_change.group_info()?.phase_change(),
+                        group.link_phase_change.group_phase_change(),
                     )
                 })
                 .transpose()
@@ -2391,7 +2391,7 @@ impl FileWriter {
                 &root_attrs,
                 root_dense_blob.as_ref().map(|b| &b.attribute_info),
                 root_link_image.as_ref().map(|image| &image.info),
-                self.root_link_phase_change.group_info()?,
+                self.root_link_phase_change.group_info(),
             )?;
             if root_oh.len() != root_oh_size {
                 return Err(FormatError::Internal(
@@ -2415,7 +2415,7 @@ impl FileWriter {
                     &g.attrs,
                     group_dense_blobs[gi].as_ref().map(|b| &b.attribute_info),
                     group_link_images[gi].as_ref().map(|image| &image.info),
-                    g.link_phase_change.group_info()?,
+                    g.link_phase_change.group_info(),
                 )?;
                 if oh.len() != group_oh_sizes[gi] {
                     return Err(FormatError::Internal(
@@ -2778,7 +2778,7 @@ impl FileWriter {
             &root_attrs,
             root_dense_blob.as_ref().map(|b| &b.attribute_info),
             root_link_image.as_ref().map(|image| &image.info),
-            self.root_link_phase_change.group_info()?,
+            self.root_link_phase_change.group_info(),
         )?;
         if root_oh.len() != root_oh_size {
             return Err(FormatError::Internal(
@@ -2972,7 +2972,7 @@ impl FileWriter {
                     &g.attrs,
                     group_dense_blobs[gi].as_ref().map(|b| &b.attribute_info),
                     group_link_images[gi].as_ref().map(|image| &image.info),
-                    g.link_phase_change.group_info()?,
+                    g.link_phase_change.group_info(),
                 )?;
                 if oh.len() != group_oh_sizes[gi] {
                     return Err(FormatError::Internal(

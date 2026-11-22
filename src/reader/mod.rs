@@ -2194,7 +2194,7 @@ impl FileInner {
             .iter()
             .filter(|message| message.msg_type == MessageType::GROUP_INFO);
         let Some(message) = messages.next() else {
-            return Ok(LinkPhaseChange::default().group_info()?);
+            return Ok(LinkPhaseChange::default().group_info());
         };
         if messages.next().is_some() {
             return Err(FormatError::DuplicateGroupInfo.into());

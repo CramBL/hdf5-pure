@@ -294,6 +294,7 @@ pub use crate::group_info::GroupEstimates;
 pub use crate::group_info::GroupInfo;
 pub use crate::group_info::GroupInfoError;
 pub use crate::group_info::GroupPhaseChange;
+pub use crate::group_info::GroupThresholds;
 pub use crate::link_info::LinkInfoMessage;
 pub use crate::link_message::LinkMessage;
 pub use crate::link_message::LinkTarget;

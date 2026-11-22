@@ -1912,19 +1912,13 @@ mod tests {
         let plan = file_writer::dense_links_plan(
             crate::file_writer::WIDTHS,
             &links,
-            LinkPhaseChange::default()
-                .group_info()
-                .unwrap()
-                .phase_change(),
+            LinkPhaseChange::default().group_phase_change(),
         )
         .unwrap()
         .unwrap();
         let geometry = DenseLinks::new(
             &plan.link_info(StoredAddress::new(0)).unwrap(),
-            LinkPhaseChange::default()
-                .group_info()
-                .unwrap()
-                .phase_change(),
+            LinkPhaseChange::default().group_phase_change(),
         )
         .unwrap();
         let span = Allocation {
@@ -1947,10 +1941,7 @@ mod tests {
         let plan = tracked_dense_plan(indexed);
         let geometry = DenseLinks::new(
             &plan.link_info(StoredAddress::ZERO).unwrap(),
-            LinkPhaseChange::default()
-                .group_info()
-                .unwrap()
-                .phase_change(),
+            LinkPhaseChange::default().group_phase_change(),
         )
         .unwrap();
         let span = Allocation {
@@ -2007,15 +1998,9 @@ mod tests {
             btree_creation_order_address: Some(creation),
         };
         assert_eq!(
-            DenseLinks::new(
-                &info,
-                LinkPhaseChange::default()
-                    .group_info()
-                    .unwrap()
-                    .phase_change(),
-            )
-            .map(|_| ())
-            .unwrap_err(),
+            DenseLinks::new(&info, LinkPhaseChange::default().group_phase_change(),)
+                .map(|_| ())
+                .unwrap_err(),
             FormatError::Internal(
                 "source-backed metadata differs from its planned allocation".into()
             )
@@ -2033,10 +2018,7 @@ mod tests {
                 btree_name_index_address: Some(StoredAddress::new(512)),
                 btree_creation_order_address: Some(Some(StoredAddress::new(1024))),
             },
-            LinkPhaseChange::default()
-                .group_info()
-                .unwrap()
-                .phase_change(),
+            LinkPhaseChange::default().group_phase_change(),
         )
         .unwrap();
         assert_eq!(
@@ -2065,20 +2047,14 @@ mod tests {
         let plan = file_writer::dense_links_plan(
             crate::file_writer::WIDTHS,
             &links,
-            LinkPhaseChange::default()
-                .group_info()
-                .unwrap()
-                .phase_change(),
+            LinkPhaseChange::default().group_phase_change(),
         )
         .unwrap()
         .unwrap();
         let plan = indexed.map(tracked_dense_plan).unwrap_or(plan);
         let geometry = DenseLinks::new(
             &plan.link_info(StoredAddress::new(0)).unwrap(),
-            LinkPhaseChange::default()
-                .group_info()
-                .unwrap()
-                .phase_change(),
+            LinkPhaseChange::default().group_phase_change(),
         )
         .unwrap();
         let length = plan.serialized_len();
@@ -2282,7 +2258,7 @@ mod tests {
             if index == *count {
                 return Ok(Object::group(
                     &GroupBuilder::new("root").finish().attrs,
-                    LinkPhaseChange::default().group_info()?,
+                    LinkPhaseChange::default().group_info(),
                     LinkCreationPolicy::Untracked,
                 )?);
             }
@@ -2605,7 +2581,7 @@ mod tests {
             if index == 1 {
                 return Ok(Object::group(
                     &GroupBuilder::new("root").finish().attrs,
-                    LinkPhaseChange::default().group_info()?,
+                    LinkPhaseChange::default().group_info(),
                     LinkCreationPolicy::Untracked,
                 )?);
             }
@@ -2710,7 +2686,7 @@ mod tests {
             }
             Ok(Object::group(
                 &group.finish().attrs,
-                LinkPhaseChange::default().group_info()?,
+                LinkPhaseChange::default().group_info(),
                 LinkCreationPolicy::Untracked,
             )?)
         }
