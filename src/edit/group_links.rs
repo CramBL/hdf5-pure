@@ -1,12 +1,12 @@
 //! Reads compact and dense group links with their encoded names, targets, and creation order.
 
-use hdf5_pure_format::__private::GroupInfoError;
+use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkMessageV1;
 use hdf5_pure_format::__private::OwnedLink;
 
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::group::v2::storage;
 pub(super) use crate::group::v2::storage::storage_error;
 use crate::message_flags::MessageFlags;
@@ -109,22 +109,24 @@ pub(super) fn inspect(
 /// Returns [`Error::EditUnsupported`] if the message has an unsupported encoding or its
 /// minimum dense threshold exceeds its maximum compact threshold.
 pub(super) fn phase_change(bytes: &[u8]) -> Result<GroupPhaseChange, Error> {
-    GroupPhaseChange::parse(bytes).map_err(group_info_error)
+    GroupInfo::parse(bytes)
+        .map(|info| info.phase_change())
+        .map_err(group_info_error)
 }
 
-pub(super) fn group_info_error(error: GroupInfoError) -> Error {
+pub(super) fn group_info_error(error: FormatError) -> Error {
     match error {
-        GroupInfoError::Length { expected, actual } if actual < u16::from(expected) => {
+        FormatError::InvalidGroupInfoLength { expected, actual } if actual < expected => {
             Error::EditUnsupported("a group's group-info message is truncated")
         }
-        GroupInfoError::Thresholds { .. } => Error::EditUnsupported(
+        FormatError::InvalidGroupInfoThresholds { .. } => Error::EditUnsupported(
             "a group's minimum dense threshold exceeds its maximum compact threshold",
         ),
-        GroupInfoError::Flags(_)
-        | GroupInfoError::Version(_)
-        | GroupInfoError::Length { .. }
-        | GroupInfoError::TrailingBytes => {
+        FormatError::InvalidGroupInfoFlags(_)
+        | FormatError::InvalidGroupInfoVersion(_)
+        | FormatError::InvalidGroupInfoLength { .. } => {
             Error::EditUnsupported("a group's group-info message uses an unsupported encoding")
         }
+        error => error.into(),
     }
 }

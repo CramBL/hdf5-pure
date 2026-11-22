@@ -1,5 +1,6 @@
 use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
 use hdf5_pure::RepackOptions;
 use hdf5_pure_format::__private::AccessMode;
@@ -9,9 +10,11 @@ use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
 use test_util::group_info;
+use test_util::group_info::Estimates;
 use test_util::group_info::HeaderVersion;
 use test_util::group_info::LinkDamage;
 use test_util::group_info::LinkOrder;
+use test_util::group_info::PhaseChange;
 use test_util::group_info::Userblock;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType;
@@ -19,26 +22,37 @@ use test_util::widths::Widths;
 use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
-#[case::absent(None, &[0, 0])]
-#[case::default(Some([0, 0].as_slice()), &[0, 0])]
-#[case::thresholds(Some([0, 1, 12, 0, 8, 0].as_slice()), &[0, 1, 12, 0, 8, 0])]
-#[case::one_way(Some([0, 1, 12, 0, 0, 0].as_slice()), &[0, 1, 12, 0, 0, 0])]
-#[case::always_dense(Some([0, 1, 0, 0, 0, 0].as_slice()), &[0, 1, 0, 0, 0, 0])]
-#[case::estimates(Some([0, 2, 7, 0, 20, 0].as_slice()), &[0, 2, 7, 0, 20, 0])]
-#[case::default_estimates(Some([0, 2, 4, 0, 8, 0].as_slice()), &[0, 2, 4, 0, 8, 0])]
-#[case::zero_estimates(Some([0, 2, 0, 0, 0, 0].as_slice()), &[0, 2, 0, 0, 0, 0])]
-#[case::both(Some([0, 3, 12, 0, 8, 0, 7, 0, 20, 0].as_slice()), &[0, 3, 12, 0, 8, 0, 7, 0, 20, 0])]
-#[case::maximum(Some([0, 3, 255, 255, 255, 255, 255, 255, 255, 255].as_slice()), &[0, 3, 255, 255, 255, 255, 255, 255, 255, 255])]
+#[case::absent(false, None, None)]
+#[case::omitted_fields(true, None, None)]
+#[case::explicit_defaults(true, Some((8, 6)), None)]
+#[case::thresholds(true, Some((12, 8)), None)]
+#[case::one_way(true, Some((12, 0)), None)]
+#[case::always_dense(true, Some((0, 0)), None)]
+#[case::estimates(true, None, Some((7, 20)))]
+#[case::default_estimates(true, None, Some((4, 8)))]
+#[case::zero_estimates(true, None, Some((0, 0)))]
+#[case::both(true, Some((12, 8)), Some((7, 20)))]
+#[case::both_explicit_defaults(true, Some((8, 6)), Some((4, 8)))]
+#[case::maximum(true, Some((u16::MAX, u16::MAX)), Some((u16::MAX, u16::MAX)))]
 fn repack_preserves_independent_group_info_fields(
-    #[case] body: Option<&[u8]>,
-    #[case] expected: &[u8],
+    #[case] stores_message: bool,
+    #[case] thresholds: Option<(u16, u16)>,
+    #[case] estimates: Option<(u16, u16)>,
     #[values(HeaderVersion::V1, HeaderVersion::V2)] version: HeaderVersion,
     #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("source.h5");
-    let messages = body
-        .map(|body| Message::new(MessageType::GROUP_INFO, body))
+    let body = group_info::GroupInfo {
+        phase_change: thresholds.map(|(max, min)| PhaseChange::new(max, min).unwrap()),
+        estimates: estimates.map(|(entries, name_length)| Estimates {
+            entries,
+            name_length,
+        }),
+    }
+    .build();
+    let messages = stores_message
+        .then(|| Message::new(MessageType::GROUP_INFO, &body))
         .into_iter()
         .collect::<Vec<_>>();
     std::fs::write(
@@ -56,17 +70,37 @@ fn repack_preserves_independent_group_info_fields(
         file.group("child").unwrap().groups().unwrap(),
         Vec::<String>::new()
     );
-    assert_group_info(&file, &bytes, "/", expected);
+    assert_group_info(&file, &bytes, "/", &body);
     let expected_policy = file.root().link_phase_change().unwrap();
+    assert_eq!(
+        (expected_policy.max_compact(), expected_policy.min_dense()),
+        thresholds.unwrap_or((8, 6)),
+    );
     assert_eq!(
         file.group("child").unwrap().link_phase_change().unwrap(),
         expected_policy
     );
     if expected_policy.max_compact() > 0 {
-        assert_group_info(&file, &bytes, "child", expected);
+        assert_group_info(&file, &bytes, "child", &body);
     }
     file.close().unwrap();
     directory.close().unwrap();
+}
+
+#[test]
+fn new_groups_omit_default_group_info_fields() {
+    let mut builder = FileBuilder::new();
+    builder.create_group_with("child", |_| Ok(())).unwrap();
+    let bytes = builder.finish().unwrap();
+    let file = File::from_bytes(bytes.clone()).unwrap();
+    let expected = group_info::GroupInfo {
+        phase_change: None,
+        estimates: None,
+    }
+    .build();
+    assert_group_info(&file, &bytes, "/", &expected);
+    assert_group_info(&file, &bytes, "child", &expected);
+    file.close().unwrap();
 }
 
 #[rstest]

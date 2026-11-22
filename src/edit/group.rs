@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
+use hdf5_pure_format::__private::GroupInfo as GroupInfoMessage;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
@@ -289,7 +290,7 @@ impl WriteEngine {
     ) -> Result<bool, Error> {
         let links = group_links::inspect(&self.opened_source(), self.context.widths(), region)?;
         let mut pos = 0;
-        let mut thresholds = group_links::phase_change(&GROUP_INFO_BODY)?;
+        let mut thresholds = GroupPhaseChange::DEFAULT;
         let mut filtered = false;
         while let Some(record) = region.layout().next_message(region, pos)? {
             match record.msg_type {
@@ -415,7 +416,7 @@ fn dense_link_error(error: DenseLinkPlanError) -> Error {
 /// version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
-pub(super) const GROUP_INFO_BODY: [u8; 2] = [0, 0];
+pub(super) const GROUP_INFO_BODY: [u8; 2] = GroupInfoMessage::DEFAULT_BODY;
 
 /// Creates an empty compact-link region with Link Info and Group Info messages.
 ///
@@ -505,7 +506,7 @@ fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&
             .serialize(offset_width)?
             .len(),
         MessageType::GROUP_INFO => {
-            GroupPhaseChange::encoded_len(data).map_err(group_links::group_info_error)?
+            GroupInfoMessage::unpadded_body_len(data).map_err(group_links::group_info_error)?
         }
         MessageType::LINK => {
             let (wire, consumed) = LinkMessageV1::parse_prefix(data, offset_width)

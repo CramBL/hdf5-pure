@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `repack` dropping explicitly stored default link thresholds from Group Info messages ([#1320](https://github.com/CramBL/hdf5-pure/pull/1320)).
 - Fixed `Group::attrs` and related attribute reads accepting reserved flag bits in Attribute Info
   messages. The reader also reports the first incomplete field and its byte extent in a truncated
   message ([#1315](https://github.com/CramBL/hdf5-pure/pull/1315)).

@@ -9,6 +9,64 @@ use crate::object_header::{v1, v2};
 use crate::superblock::v2::Superblock;
 use crate::widths::Widths;
 
+/// The two independently optional field pairs of a version 0 Group Info body.
+#[derive(Clone, Copy, Debug)]
+pub struct GroupInfo {
+    /// The stored link thresholds, if present.
+    pub phase_change: Option<PhaseChange>,
+    /// The stored entry estimates, if present.
+    pub estimates: Option<Estimates>,
+}
+
+impl GroupInfo {
+    /// Builds the body with both pairs encoded in wire order when supplied.
+    pub fn build(self) -> Vec<u8> {
+        let flags = self.phase_change.map_or(NO_FLAGS, |_| STORES_PHASE_CHANGE)
+            | self.estimates.map_or(NO_FLAGS, |_| STORES_ESTIMATES);
+        let mut bytes = vec![GROUP_INFO_VERSION, flags];
+        if let Some(phase_change) = self.phase_change {
+            bytes.extend_from_slice(&phase_change.max_compact.to_le_bytes());
+            bytes.extend_from_slice(&phase_change.min_dense.to_le_bytes());
+        }
+        if let Some(estimates) = self.estimates {
+            bytes.extend_from_slice(&estimates.entries.to_le_bytes());
+            bytes.extend_from_slice(&estimates.name_length.to_le_bytes());
+        }
+        bytes
+    }
+}
+
+/// The compact and dense link thresholds in a Group Info field pair.
+#[derive(Clone, Copy, Debug)]
+pub struct PhaseChange {
+    max_compact: u16,
+    min_dense: u16,
+}
+
+impl PhaseChange {
+    /// Constructs a pair if `min_dense` is at most `max_compact`.
+    pub fn new(max_compact: u16, min_dense: u16) -> Option<Self> {
+        (min_dense <= max_compact).then_some(Self {
+            max_compact,
+            min_dense,
+        })
+    }
+
+    /// Returns the compact maximum followed by the dense minimum.
+    pub fn thresholds(self) -> (u16, u16) {
+        (self.max_compact, self.min_dense)
+    }
+}
+
+/// The two entry estimates in a Group Info field pair.
+#[derive(Clone, Copy, Debug)]
+pub struct Estimates {
+    /// The estimated link count.
+    pub entries: u16,
+    /// The estimated length of a link name, in bytes.
+    pub name_length: u16,
+}
+
 /// The object header encoding for both groups.
 #[derive(Clone, Copy, Debug)]
 pub enum HeaderVersion {
@@ -270,6 +328,9 @@ const GROUP_INFO_VERSION: u8 = 0;
 // "The Group Info Message" in the format specification, version 4.0, defines bit zero for
 // thresholds.
 const STORES_PHASE_CHANGE: u8 = 0x01;
+// "The Group Info Message" in the format specification, version 4.0, defines bit one for
+// stored entry estimates.
+const STORES_ESTIMATES: u8 = 0x02;
 // "The Link Info Message" in the format specification, version 4.0, defines the tracking flag bit.
 const TRACKS_ORDER: u8 = 0x01;
 // "The Link Info Message" in the format specification, version 4.0, defines the creation-index

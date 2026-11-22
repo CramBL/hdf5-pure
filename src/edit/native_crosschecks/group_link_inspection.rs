@@ -3,7 +3,7 @@ use std::path::Path;
 
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::FractalHeapHeader;
-use hdf5_pure_format::__private::GroupPhaseChange;
+use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OwnedLinkTarget;
@@ -304,7 +304,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
     assert_eq!(links[b"k69209".as_slice()].target(), hard.target());
     assert_eq!(links[b"k155448".as_slice()].target(), hard.target());
     assert_eq!(info.group_info, [0, 1, 12, 0, 4, 0]);
-    let thresholds = GroupPhaseChange::parse(&info.group_info).unwrap();
+    let thresholds = GroupInfo::parse(&info.group_info).unwrap().phase_change();
     assert_eq!(thresholds.max_compact(), 12);
     assert_eq!(thresholds.min_dense(), 4);
     if form.0 == "dense" {

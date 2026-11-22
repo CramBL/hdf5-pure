@@ -13,10 +13,12 @@ use rstest::rstest;
 use test_util::data_layout as layout_bytes;
 use test_util::dataspace as dataspace_bytes;
 use test_util::datatype as datatype_bytes;
+use test_util::group_info::{GroupInfo, PhaseChange};
 use test_util::link_message::HardLink;
 use test_util::link_message::SymbolicLink;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType as FixtureMessage;
+use test_util::object_header::v1::MESSAGE_ALIGNMENT;
 use test_util::object_header::v2 as v2_bytes;
 use test_util::object_header::v2::HeaderFlags;
 use test_util::widths::Widths;
@@ -672,11 +674,23 @@ fn fresh_group_region_pairs_link_info_with_group_info() {
 #[test]
 fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
     let link_info = padded(&LINK_INFO_UNTRACKED_COMPACT, 24);
-    let group_info = padded(&GROUP_INFO_BODY, 8);
+    let group_info = GroupInfo {
+        phase_change: Some(PhaseChange::new(8, 6).unwrap()),
+        estimates: None,
+    }
+    .build();
+    let padded_group_info = padded(
+        &group_info,
+        group_info.len().next_multiple_of(MESSAGE_ALIGNMENT),
+    );
     let link = padded(&hard_link_a(), 16);
     let header = version_1_header(vec![
         (MessageType::LINK_INFO, MessageFlags::CONSTANT, link_info),
-        (MessageType::GROUP_INFO, MessageFlags::CONSTANT, group_info),
+        (
+            MessageType::GROUP_INFO,
+            MessageFlags::CONSTANT,
+            padded_group_info,
+        ),
         (MessageType::LINK, MessageFlags::NONE, link),
     ]);
     let region = edit::group::link_message_region(&header, crate::file_writer::WIDTHS).unwrap();
@@ -694,11 +708,7 @@ fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
                 MessageFlags::CONSTANT,
                 LINK_INFO_UNTRACKED_COMPACT.to_vec()
             ),
-            (
-                MessageType::GROUP_INFO,
-                MessageFlags::CONSTANT,
-                GROUP_INFO_BODY.to_vec()
-            ),
+            (MessageType::GROUP_INFO, MessageFlags::CONSTANT, group_info),
             (MessageType::LINK, MessageFlags::NONE, hard_link_a()),
         ]
     );
@@ -803,10 +813,15 @@ fn ensure_group_info_appends_when_missing() {
         region_types(&region),
         vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]
     );
+    let expected = GroupInfo {
+        phase_change: None,
+        estimates: None,
+    }
+    .build();
     let mut p = 0;
     while let Some((mt, body, end)) = region.next_message(p).unwrap() {
         if mt == MessageType::GROUP_INFO {
-            assert_eq!(&region[body..end], &GROUP_INFO_BODY);
+            assert_eq!(&region[body..end], expected.as_slice());
         }
         p = end;
     }
