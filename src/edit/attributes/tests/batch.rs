@@ -2,7 +2,9 @@ use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use rstest::rstest;
-use test_util::object_header::v2::HeaderFlags;
+use test_util::attribute_info::{AttributeInfo, CreationOrderIndex, Width};
+use test_util::object_header::v2::{self, HeaderFlags};
+use test_util::object_header::{self, Message};
 
 use super::super::AttrOp;
 use super::super::test_util::encode_attr_body;
@@ -13,6 +15,84 @@ use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::type_builders::AttrValue;
+use crate::width::{FormatWidths, OffsetWidth};
+
+#[rstest]
+#[case::two_byte_offsets(Width::Two)]
+#[case::four_byte_offsets(Width::Four)]
+#[case::eight_byte_offsets(Width::Eight)]
+fn compact_edits_preserve_the_attribute_info_record_metadata(#[case] width: Width) {
+    let flags = HeaderFlags::TRACKS_CREATION_ORDER | HeaderFlags::INDEXES_CREATION_ORDER;
+    let layout = MessageRecordLayout::from_header_flags(flags.0);
+    let props = ObjectHeaderPrefix::with_layout(layout);
+    let widths = FormatWidths {
+        offsets: OffsetWidth::try_from(width.get()).unwrap(),
+        ..crate::file_writer::WIDTHS
+    };
+    let preceding = Message::nil(3).with_creation_order(2);
+    let following = Message::nil(5).with_creation_order(4);
+    let source_info = AttributeInfo::new(width, Some(4), None, None, CreationOrderIndex::Absent);
+    let record = Message::new(
+        object_header::MessageType::ATTRIBUTE_INFO,
+        &source_info.build(),
+    )
+    .with_flags(object_header::MessageFlags::FORBID_SHARING)
+    .with_creation_order(3);
+    let gap = [0x12, 0x34, 0x56];
+    let mut source = v2::message_records(
+        &[preceding.clone(), record.clone(), following.clone()],
+        flags,
+    );
+    source.extend_from_slice(&gap);
+    let region = OhRegion::new(widths, source, props);
+    let mut batch = super::super::CompactBatch::parse(&region).unwrap();
+    batch
+        .apply(
+            &AttrOp::Set {
+                name: "added".into(),
+                value: AttrValue::I64(7),
+            },
+            0,
+        )
+        .unwrap();
+
+    let result = batch
+        .into_compact(super::super::AttributePredecessors::default())
+        .unwrap();
+
+    let expected_info =
+        AttributeInfo::new(width, Some(5), None, None, CreationOrderIndex::Undefined).build();
+    let expected = v2::message_records(
+        &[
+            preceding,
+            Message {
+                data: expected_info.clone(),
+                ..record
+            },
+            following,
+        ],
+        flags,
+    );
+    assert_eq!(&*result.region, expected);
+    assert_eq!(result.region.props(), props);
+    assert_eq!(result.region.widths(), widths);
+    let first = layout.next_message(&result.region, 0).unwrap().unwrap();
+    let rewritten = layout
+        .next_message(&result.region, first.body_range.end)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rewritten.msg_type, MessageType::ATTRIBUTE_INFO);
+    assert_eq!(rewritten.flags, MessageFlags::FORBID_SHARING);
+    assert_eq!(rewritten.creation_index, Some(3));
+    assert_eq!(rewritten.body, expected_info);
+    let super::super::EditedAttrs::RebuildCompact(compact) = result.attrs else {
+        panic!("expected compact storage");
+    };
+    let added = layout.next_message(&compact.records, 0).unwrap().unwrap();
+    assert_eq!(added.msg_type, MessageType::ATTRIBUTE);
+    assert_eq!(added.creation_index, Some(4));
+    assert_eq!(&compact.records[added.body_range.end..], gap);
+}
 
 #[rstest]
 #[case::fixed(false)]

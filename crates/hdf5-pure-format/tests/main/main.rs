@@ -19,6 +19,7 @@ mod link_message_v1;
 mod link_projection;
 mod nested_datatype;
 mod object_header_allocation;
+mod object_header_splice;
 mod object_reference_count;
 mod opaque_tags;
 mod prepared_global_heap;

@@ -103,6 +103,60 @@ impl<'a> RecordSplice<'a> {
         )
     }
 
+    /// Appends the source region with a new body for the selected record.
+    ///
+    /// Calls `write_body` with a zero-filled slice of `body_len` bytes for the replacement body.
+    /// Preserves the record's type, flags, and creation index and copies the surrounding bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body_len` exceeds
+    /// [`OBJECT_HEADER_MESSAGE_MAX`] or [`FormatError::AllocationFailed`] if reserving space fails.
+    /// Propagates an error from `write_body`. Preserves the contents and length of `region` on
+    /// error. Reserving space may increase its capacity.
+    ///
+    /// # Examples
+    ///
+    /// Updates the next creation index for tracked compact attributes. The tracking flag is
+    /// defined in "Version 2 Data Object Header Prefix" of the [format specification,
+    /// version 4.0][spec].
+    ///
+    /// ```
+    /// use hdf5_pure_format::{FormatError, MessageType, OffsetWidth};
+    /// use hdf5_pure_format::__private::{AttributeInfoMessage, MessageRecordLayout, RecordSplice};
+    ///
+    /// const TRACK_CREATION_ORDER: u8 = 0x04;
+    /// let layout = MessageRecordLayout::from_header_flags(TRACK_CREATION_ORDER);
+    /// let mut info = AttributeInfoMessage::compact(OffsetWidth::Two, Some(3), false);
+    /// let source = layout.record(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+    /// let splice = RecordSplice::first(layout, &source, MessageType::ATTRIBUTE_INFO)?.unwrap();
+    ///
+    /// info.set_max_creation_index(Some(4));
+    /// let mut output = Vec::new();
+    /// splice.replace_body_with(&mut output, info.encoded_size(), |body| {
+    ///     assert_eq!(info.write_into(body).unwrap(), body.len());
+    ///     Ok(())
+    /// })?;
+    /// let record = layout.next_message(&output, 0)?.unwrap();
+    /// let updated = AttributeInfoMessage::parse_with_offset_width(record.body, OffsetWidth::Two)?;
+    /// assert_eq!(updated, info);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
+    pub fn replace_body_with(
+        &self,
+        region: &mut Vec<u8>,
+        body_len: usize,
+        write_body: impl FnOnce(&mut [u8]) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        let original_len = region.len();
+        let body = self.prepare_replacement_body(region, body_len)?;
+        let result = write_body(body);
+        self.finish_replacement(region, original_len, result.is_ok());
+        result
+    }
+
     /// Returns a copy of the region in which the selected record has `flags`, `creation_index`,
     /// and `body`.
     ///
@@ -118,9 +172,64 @@ impl<'a> RecordSplice<'a> {
         creation_index: u16,
         body: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
-        let mut region = Vec::with_capacity(self.replacement_len(body)?);
+        let mut region = Vec::with_capacity(self.replacement_len(body.len())?);
         self.replace_record_into(&mut region, flags, creation_index, body)?;
         Ok(region)
+    }
+
+    /// Reserves the full replacement region and returns a zero-filled body slice.
+    ///
+    /// Appends the source bytes preceding the selected record and writes the replacement
+    /// record's prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body_len` exceeds
+    /// [`OBJECT_HEADER_MESSAGE_MAX`] or [`FormatError::AllocationFailed`] if reserving space fails.
+    fn prepare_replacement_body<'region>(
+        &self,
+        region: &'region mut Vec<u8>,
+        body_len: usize,
+    ) -> Result<&'region mut [u8], FormatError> {
+        let Self {
+            layout,
+            head,
+            record,
+            tail: _,
+        } = self;
+        let replacement_len = self.replacement_len(body_len)?;
+        // The replacement length check bounds the body to the 2-byte size field.
+        let encoded_len = u16::try_from(body_len).expect("bounded record body length");
+        // The selected record's type was read from the 1-byte type field.
+        let msg_type = u8::try_from(record.msg_type.to_u16()).expect("one-byte record type");
+        region
+            .try_reserve(replacement_len)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: replacement_len,
+                source,
+            })?;
+
+        region.extend_from_slice(head);
+        layout.write_record_prefix(
+            region,
+            msg_type,
+            record.flags,
+            record.creation_index.unwrap_or(0),
+            encoded_len,
+        );
+        let body_start = region.len();
+        region.resize(body_start + body_len, 0);
+        Ok(&mut region[body_start..])
+    }
+
+    /// Appends the source tail after a successful write or truncates `region` to `original_len`
+    /// after an error.
+    fn finish_replacement(&self, region: &mut Vec<u8>, original_len: usize, body_written: bool) {
+        if body_written {
+            region.extend_from_slice(self.tail);
+        } else {
+            region.truncate(original_len);
+        }
     }
 
     fn replace_record_into(
@@ -136,7 +245,7 @@ impl<'a> RecordSplice<'a> {
             record,
             tail,
         } = self;
-        region.reserve(self.replacement_len(body)?);
+        region.reserve(self.replacement_len(body.len())?);
         region.extend_from_slice(head);
         // The type was read from the 1-byte type field and the check above bounds the body,
         // so neither assertion of `write_record` fails.
@@ -145,20 +254,26 @@ impl<'a> RecordSplice<'a> {
         Ok(())
     }
 
-    fn replacement_len(&self, body: &[u8]) -> Result<usize, FormatError> {
+    /// Returns the appended region's length in bytes for a replacement body of `body_len` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body_len` exceeds
+    /// [`OBJECT_HEADER_MESSAGE_MAX`].
+    fn replacement_len(&self, body_len: usize) -> Result<usize, FormatError> {
         let Self {
             layout,
             head,
             record,
             tail,
         } = self;
-        if body.len() > OBJECT_HEADER_MESSAGE_MAX {
+        if body_len > OBJECT_HEADER_MESSAGE_MAX {
             return Err(FormatError::ObjectHeaderMessageTooLarge {
                 message_type: record.msg_type.to_u16(),
-                size: body.len(),
+                size: body_len,
             });
         }
-        Ok(head.len() + layout.prefix_len() + body.len() + tail.len())
+        Ok(head.len() + layout.prefix_len() + body_len + tail.len())
     }
 }
 

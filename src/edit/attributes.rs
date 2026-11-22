@@ -983,7 +983,7 @@ impl<'a> CompactBatch<'a> {
             tail,
         } = self;
         let layout = original.layout();
-        let mut bytes = Vec::with_capacity(original.len());
+        let mut region = original.with_bytes(Vec::with_capacity(original.len()));
         let mut has_info = false;
         for CompactRecord {
             range,
@@ -1014,10 +1014,10 @@ impl<'a> CompactBatch<'a> {
                                     .into(),
                             )
                         })?;
-                splice.replace_body_into(&mut bytes, &info.to_bytes())?;
+                region.append_spliced_attribute_info(&splice, &info)?;
                 has_info = true;
             } else {
-                bytes.extend_from_slice(&original[range]);
+                region.push_bytes(&original[range]);
             }
         }
         let mut slots: Vec<_> = slots
@@ -1055,7 +1055,6 @@ impl<'a> CompactBatch<'a> {
             }
         }
         records.extend_from_slice(&original[tail..]);
-        let mut region = original.with_bytes(bytes);
         if assigned && !has_info {
             let info = AttributeInfoMessage::compact(
                 original.widths().offsets,
@@ -1397,9 +1396,7 @@ fn prepare_compact_attrs(
                 "a parsed Attribute Info record is absent from its source range".into(),
             )
         })?;
-        let mut encoded = Vec::new();
-        splice.replace_body_into(&mut encoded, &info.to_bytes())?;
-        region.push_bytes(&encoded);
+        region.append_spliced_attribute_info(&splice, &info)?;
     } else {
         region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
     }
