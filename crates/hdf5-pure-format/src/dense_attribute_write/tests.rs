@@ -113,7 +113,7 @@ fn prepared_attributes_reject_mixed_widths(
 fn prepared_attribute_bodies_produce_canonical_dense_storage(#[case] name: &str, #[case] len: u32) {
     let attribute = canonical_attribute(name, len);
     let expected = dense_attrs_plan(
-        std::slice::from_ref(&attribute),
+        core::slice::from_ref(&attribute),
         DenseAttrCreationOrder::Untracked,
     )
     .unwrap()

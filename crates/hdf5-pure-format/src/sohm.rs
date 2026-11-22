@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn an_index_header_round_trips_through_its_image() {
         let index = sample_index();
-        let table = SohmTable::parse(&table_image(std::slice::from_ref(&index)), 1, 8).unwrap();
+        let table = SohmTable::parse(&table_image(core::slice::from_ref(&index)), 1, 8).unwrap();
         assert_eq!(table.indexes, vec![index]);
     }
 
