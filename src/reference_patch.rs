@@ -802,7 +802,7 @@ fn require_dense_reference_widths(
     resolver: &impl SharedResolver,
 ) -> Result<(), FormatError> {
     let info = AttributeInfoMessage::parse_with_offset_width(body, widths.offsets)?;
-    let Some(heap) = info.fractal_heap_address else {
+    let Some(heap) = info.fractal_heap_address() else {
         return Ok(());
     };
     crate::attribute::visit_dense_attribute_messages_from_source(

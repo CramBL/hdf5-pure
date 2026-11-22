@@ -7,6 +7,7 @@ use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 use crate::attribute;
 use crate::attribute::AttributeMessage;
+use crate::attribute_info::AttributeCreationOrderIndex;
 use crate::edit::WriteEngine;
 use crate::edit::attributes;
 use crate::edit::attributes::AttrOp;
@@ -70,7 +71,7 @@ fn dense_reversion_preserves_encoded_records_and_prefix() {
         &PhysicalSource::new(&engine.opened_source()).stored(),
         AccessMode::ReadWrite,
         &info,
-        info.fractal_heap_address.unwrap(),
+        info.fractal_heap_address().unwrap(),
         crate::file_writer::WIDTHS,
         None,
         |_| true,
@@ -110,11 +111,13 @@ fn dense_reversion_preserves_encoded_records_and_prefix() {
         &prepared.region[start..body.start],
         &region[info_start..info_body.start]
     );
-    assert_eq!(compact.max_creation_index, Some(17));
-    assert!(compact.indexes_creation_order);
-    assert_eq!(compact.fractal_heap_address, None);
-    assert_eq!(compact.btree_name_index_address, None);
-    assert_eq!(compact.btree_creation_order_address, None);
+    assert_eq!(compact.max_creation_index(), Some(17));
+    assert_eq!(compact.fractal_heap_address(), None);
+    assert_eq!(compact.btree_name_index_address(), None);
+    assert_eq!(
+        compact.creation_order_index(),
+        AttributeCreationOrderIndex::Undefined
+    );
     let mut position = 0;
     let mut count = 0;
     while let Some((kind, body, end)) = prepared.region.next_message(position).unwrap() {

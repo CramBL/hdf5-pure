@@ -730,12 +730,12 @@ fn assert_reference_attribute_storage(file: &File, bytes: &[u8], site: Reference
     if site == ReferenceSite::DenseAttribute {
         assert_eq!(compact, 0);
         let info = info.unwrap();
-        assert!(info.fractal_heap_address.is_some());
-        assert!(info.btree_name_index_address.is_some());
+        assert!(info.fractal_heap_address().is_some());
+        assert!(info.btree_name_index_address().is_some());
     } else {
         assert_eq!(compact, 1);
         assert!(info.is_none_or(|info| {
-            info.fractal_heap_address.is_none() && info.btree_name_index_address.is_none()
+            info.fractal_heap_address().is_none() && info.btree_name_index_address().is_none()
         }));
     }
 }
@@ -873,8 +873,8 @@ fn assert_dense(file: &File, dense: bool) {
     assert_eq!(links.fractal_heap_address.is_some(), dense);
     assert_eq!(links.btree_name_index_address.is_some(), dense);
     let attributes = attributes.unwrap();
-    assert_eq!(attributes.fractal_heap_address.is_some(), dense);
-    assert_eq!(attributes.btree_name_index_address.is_some(), dense);
+    assert_eq!(attributes.fractal_heap_address().is_some(), dense);
+    assert_eq!(attributes.btree_name_index_address().is_some(), dense);
 }
 
 fn numeric_lifecycle(

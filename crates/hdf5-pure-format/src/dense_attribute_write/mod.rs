@@ -10,9 +10,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::__private as format_boundary;
-use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::attribute_info::AttributeInfoMessage;
+use crate::address::{DecodedStoredAddress, StoredAddress};
+use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::attribute_message::{AttributeMessage, PreparedAttributeMessage};
 use crate::btree::v2::AttributeRecord;
 use crate::btree::v2::BTREE_V2_ATTRIBUTE_CREATION_ORDER;
@@ -54,8 +54,8 @@ pub use placement::{DenseAttrBlock, DenseAttrPlacement};
 
 /// Serialized dense attribute storage and its object-header message.
 pub struct DenseAttrBlob {
-    /// The serialized [`AttributeInfoMessage`] for the object header.
-    pub attr_info_message: Vec<u8>,
+    /// The checked object-header message for the placed storage.
+    pub attribute_info: AttributeInfoMessage,
     /// The heap header, managed blocks, indexes, and huge-object payloads.
     pub blob: Vec<u8>,
 }
@@ -462,13 +462,16 @@ impl PreparedDenseAttrs {
         self.plan.blob_len()
     }
 
-    /// Serializes the object-header message for the retained heap placement.
+    /// Returns the object-header metadata for a heap placed at `heap_address`.
     ///
     /// # Errors
     ///
-    /// Returns the address errors documented by [`DenseAttrPlan::attr_info_message`].
-    pub fn attr_info_message(&self, heap_address: StoredAddress) -> Result<Vec<u8>, FormatError> {
-        self.plan.attr_info_message(heap_address)
+    /// Returns the address errors documented by [`DenseAttrPlan::attribute_info_for_heap`].
+    pub fn attribute_info_for_heap(
+        &self,
+        heap_address: StoredAddress,
+    ) -> Result<AttributeInfoMessage, FormatError> {
+        self.plan.attribute_info_for_heap(heap_address)
     }
 }
 
@@ -603,7 +606,7 @@ impl DenseAttrPlan {
     ///     address
     /// }).collect();
     /// let placement = plan.place(&addresses)?;
-    /// assert_eq!(placement.attribute_info().fractal_heap_address, Some(addresses[0]));
+    /// assert_eq!(placement.attribute_info().fractal_heap_address(), Some(addresses[0]));
     /// for ((address, length), block) in placement.blocks().zip(placement.serialize_blocks()?) {
     ///     let block = block?;
     ///     assert_eq!(block.address, address);
@@ -623,7 +626,7 @@ impl DenseAttrPlan {
         self.geometry.total_len
     }
 
-    /// Serializes the object-header message for a heap placed at `heap_address`.
+    /// Returns the object-header metadata for a heap placed at `heap_address`.
     ///
     /// The message length is independent of the chosen address.
     ///
@@ -633,32 +636,24 @@ impl DenseAttrPlan {
     /// [`FormatError::AddressTooLarge`] if the start or reserved exclusive end exceeds the
     /// retained address width, or [`FormatError::OffsetOverflow`] if the extent exceeds
     /// [`u64::MAX`].
-    pub fn attr_info_message(&self, heap_address: StoredAddress) -> Result<Vec<u8>, FormatError> {
-        self.extent(heap_address)?;
-        self.attribute_info(heap_address)?
-            .serialize(self.geometry.widths.offsets)
-    }
-
-    /// Returns the creation metadata and placement addresses for the object header.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::OffsetOverflow`] if an index address exceeds [`u64::MAX`].
-    fn attribute_info(
+    pub fn attribute_info_for_heap(
         &self,
         heap_address: StoredAddress,
     ) -> Result<AttributeInfoMessage, FormatError> {
-        Ok(AttributeInfoMessage {
-            max_creation_index: self.geometry.next_index,
-            indexes_creation_order: self.geometry.indexed,
-            fractal_heap_address: Some(heap_address),
-            btree_name_index_address: Some(heap_address.checked_add(self.geometry.btree_off)?),
-            btree_creation_order_address: self
-                .geometry
-                .indexed
-                .then(|| heap_address.checked_add(self.geometry.corder_bthd_off))
-                .transpose()?,
-        })
+        self.extent(heap_address)?;
+        AttributeInfoMessage::new(
+            self.geometry.widths.offsets,
+            self.geometry.next_index,
+            DecodedStoredAddress::Defined(heap_address),
+            DecodedStoredAddress::Defined(heap_address.checked_add(self.geometry.btree_off)?),
+            if self.geometry.indexed {
+                AttributeCreationOrderIndex::Defined(
+                    heap_address.checked_add(self.geometry.corder_bthd_off)?,
+                )
+            } else {
+                AttributeCreationOrderIndex::Absent
+            },
+        )
     }
 
     /// Emits the blob for a heap placed at `heap_address`.
@@ -862,7 +857,7 @@ impl DenseAttrPlan {
         }
 
         Ok(DenseAttrBlob {
-            attr_info_message: self.attr_info_message(frhp_addr)?,
+            attribute_info: self.attribute_info_for_heap(frhp_addr)?,
             blob,
         })
     }

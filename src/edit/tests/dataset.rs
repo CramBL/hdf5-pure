@@ -148,7 +148,7 @@ fn native_complex_editing_applies_ceilings_to_attribute_metadata(
             file.superblock().offset_size,
         )
         .unwrap();
-        assert_eq!(info.fractal_heap_address.is_some(), dense);
+        assert_eq!(info.fractal_heap_address().is_some(), dense);
     }
     drop(dataset);
     drop(file);

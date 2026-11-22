@@ -109,21 +109,21 @@ fn allocations(
     );
     if let Some((_, _, info)) = attribute_info {
         let dense = !matches!(contents, Contents::Empty | Contents::Revert);
-        assert_eq!(info.fractal_heap_address.is_some(), dense);
-        assert_eq!(info.btree_name_index_address.is_some(), dense);
+        assert_eq!(info.fractal_heap_address().is_some(), dense);
+        assert_eq!(info.btree_name_index_address().is_some(), dense);
         assert_eq!(
-            info.btree_creation_order_address.is_some(),
+            info.creation_order_index().defined_address().is_some(),
             dense && matches!(indexing, Indexing::Yes)
         );
         assert_eq!(
-            info.max_creation_index,
+            info.max_creation_index(),
             Some(u16::try_from(contents.end()).unwrap())
         );
         assert_eq!(
-            info.indexes_creation_order,
+            info.indexes_creation_order(),
             matches!(indexing, Indexing::Yes)
         );
-        if let Some(heap) = info.fractal_heap_address {
+        if let Some(heap) = info.fractal_heap_address() {
             allocations.extend(
                 crate::attribute::collect_dense_attribute_index_storage_extents(
                     &source,

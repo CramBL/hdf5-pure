@@ -332,7 +332,7 @@ impl WriteEngine {
         let Some(attr_info) = attr_info else {
             return Some(Vec::new());
         };
-        let Some(heap_address) = attr_info.fractal_heap_address else {
+        let Some(heap_address) = attr_info.fractal_heap_address() else {
             return Some(Vec::new());
         };
 
@@ -1317,7 +1317,7 @@ impl WriteEngine {
         metadata: &mut Vec<FileRange>,
     ) -> Result<bool, Error> {
         let info = AttributeInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
-        let Some(heap) = info.fractal_heap_address else {
+        let Some(heap) = info.fractal_heap_address() else {
             return Ok(true);
         };
         let opened = self.opened_source();

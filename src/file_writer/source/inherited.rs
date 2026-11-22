@@ -53,8 +53,8 @@ impl AttributeReconstruction {
             .transpose()?;
         if (prefix.layout.indexes_creation_order() && !prefix.layout.tracks_creation_order())
             || info.as_ref().is_some_and(|info| {
-                info.max_creation_index.is_some() != prefix.layout.tracks_creation_order()
-                    || info.indexes_creation_order != prefix.layout.indexes_creation_order()
+                info.max_creation_index().is_some() != prefix.layout.tracks_creation_order()
+                    || info.indexes_creation_order() != prefix.layout.indexes_creation_order()
             })
         {
             return Err(Error::RepackUnsupported(
@@ -64,7 +64,7 @@ impl AttributeReconstruction {
         }
         let current = if info
             .as_ref()
-            .is_some_and(|info| info.fractal_heap_address.is_some())
+            .is_some_and(|info| info.fractal_heap_address().is_some())
         {
             AttributeStorage::Dense
         } else {
@@ -89,7 +89,7 @@ impl AttributeReconstruction {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let max = match info.as_ref().and_then(|info| info.max_creation_index) {
+            let max = match info.as_ref().and_then(|info| info.max_creation_index()) {
                 Some(max) => max,
                 None => match indices.iter().max() {
                     Some(index) => index.checked_add(1).ok_or_else(|| {
@@ -159,7 +159,8 @@ mod tests {
 
     use super::*;
     use crate::access_mode::AccessMode;
-    use crate::address::{StoredAddress, StoredAddressExt};
+    use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
+    use crate::attribute_info::AttributeCreationOrderIndex;
     use crate::file_writer::source::Object;
     use crate::type_builders::{self, AttrValue, DatasetBuilder};
 
@@ -321,15 +322,12 @@ mod tests {
         let mut writer = ObjectHeaderWriter::with_prefix(prefix);
         writer.add_message(
             MessageType::ATTRIBUTE_INFO,
-            AttributeInfoMessage {
+            AttributeInfoMessage::compact(
+                OffsetWidth::Eight,
                 max_creation_index,
                 indexes_creation_order,
-                fractal_heap_address: None,
-                btree_name_index_address: None,
-                btree_creation_order_address: None,
-            }
-            .serialize(OffsetWidth::Eight)
-            .unwrap(),
+            )
+            .to_bytes(),
         );
         let bytes = writer.serialize().unwrap();
         let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
@@ -361,15 +359,18 @@ mod tests {
         let mut writer = ObjectHeaderWriter::with_prefix(prefix);
         writer.add_message(
             MessageType::ATTRIBUTE_INFO,
-            AttributeInfoMessage {
-                max_creation_index: Some(next),
-                indexes_creation_order: true,
-                fractal_heap_address: dense.then_some(StoredAddress::new(1_024)),
-                btree_name_index_address: None,
-                btree_creation_order_address: None,
-            }
-            .serialize(OffsetWidth::Eight)
-            .unwrap(),
+            AttributeInfoMessage::new(
+                OffsetWidth::Eight,
+                Some(next),
+                if dense {
+                    DecodedStoredAddress::Defined(StoredAddress::new(1_024))
+                } else {
+                    DecodedStoredAddress::Undefined
+                },
+                DecodedStoredAddress::Undefined,
+                AttributeCreationOrderIndex::Undefined,
+            )?
+            .to_bytes(),
         );
         let bytes = writer.serialize().unwrap();
         let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();

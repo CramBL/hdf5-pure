@@ -12,6 +12,7 @@ use crate::address::BaseAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
+use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_request::PreparedAttributes as AttributeRequest;
 use crate::chunked_write;
 use crate::chunked_write::ArrayMeasure;
@@ -266,7 +267,7 @@ impl PreparedDataset {
         &self,
         data_address: StoredAddress,
         chunk_set: Option<&CompressedChunkSet>,
-        dense_attr_info: Option<&[u8]>,
+        dense_attr_info: Option<&AttributeInfoMessage>,
         libver: LibVer,
         header: HeaderOptions<'_>,
     ) -> Result<DatasetMeasure, FormatError> {
@@ -333,7 +334,7 @@ impl PreparedDataset {
         &self,
         data_address: StoredAddress,
         chunk_set: Option<&CompressedChunkSet>,
-        dense_attr_info: Option<&[u8]>,
+        dense_attr_info: Option<&AttributeInfoMessage>,
         libver: LibVer,
         header: HeaderOptions<'_>,
     ) -> Result<(DatasetMeasure, Option<VerbatimPayload>), FormatError> {
@@ -365,7 +366,7 @@ impl PreparedDataset {
         data_address: StoredAddress,
         data: DataMeasure,
         messages: Option<(Vec<u8>, Option<Vec<u8>>)>,
-        dense_attr_info: Option<&[u8]>,
+        dense_attr_info: Option<&AttributeInfoMessage>,
         libver: LibVer,
         header: HeaderOptions<'_>,
     ) -> Result<DatasetMeasure, FormatError> {
@@ -396,7 +397,7 @@ impl PreparedDataset {
         &self,
         data_address: StoredAddress,
         chunked_messages: Option<&(Vec<u8>, Option<Vec<u8>>)>,
-        dense_attr_info: Option<&[u8]>,
+        dense_attr_info: Option<&AttributeInfoMessage>,
         libver: LibVer,
         header: HeaderOptions<'_>,
     ) -> Result<Vec<u8>, FormatError> {

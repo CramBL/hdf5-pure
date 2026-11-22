@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::attrs` and related attribute reads accepting reserved flag bits in Attribute Info
+  messages ([#1315](https://github.com/CramBL/hdf5-pure/pull/1315)).
 - Fixed `Dataset::read_raw` and other reads of unallocated storage aborting the process when the fill buffer cannot be allocated ([#1237](https://github.com/CramBL/hdf5-pure/pull/1237)).
 - Fixed `Dataset::datatype` interpreting reserved floating-point byte-order bits as VAX, including in nested descriptions ([#1231](https://github.com/CramBL/hdf5-pure/pull/1231)).
 - Fixed `Group::attrs` silently omitting attributes when decoding a supported value fails. Attribute reads report the name and original error ([#1225](https://github.com/CramBL/hdf5-pure/pull/1225)).

@@ -727,10 +727,12 @@ fn dense_heaps(path: &Path) -> Vec<DenseHeap> {
                 .unwrap()
                 .fractal_heap_address
                 .map(|address| (owner, address)),
-            MessageType::ATTRIBUTE_INFO => AttributeInfoMessage::parse(&message.data, 8)
-                .unwrap()
-                .fractal_heap_address
-                .map(|address| (owner, address)),
+            MessageType::ATTRIBUTE_INFO => {
+                AttributeInfoMessage::parse_with_offset_width(&message.data, OffsetWidth::Eight)
+                    .unwrap()
+                    .fractal_heap_address()
+                    .map(|address| (owner, address))
+            }
             _ => None,
         })
         .map(|(owner, address)| DenseHeap {

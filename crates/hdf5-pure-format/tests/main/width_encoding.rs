@@ -4,9 +4,9 @@ use hdf5_pure_core::{
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
-    AttributeInfoMessage, BlockOffsetWidth, ChunkIndexInfo, ChunkedLayoutFlags, DataLayout,
-    Dataspace, DataspaceType, DatatypeLocation, EA_CLIENT_ID_UNFILTERED, FilteredSingleChunk,
-    FormatWidths, FractalHeapHeader, LayoutVersion, LinkInfoMessage, LinkMessage, LinkTarget,
+    BlockOffsetWidth, ChunkIndexInfo, ChunkedLayoutFlags, DataLayout, Dataspace, DataspaceType,
+    DatatypeLocation, EA_CLIENT_ID_UNFILTERED, FilteredSingleChunk, FormatWidths,
+    FractalHeapHeader, LayoutVersion, LinkInfoMessage, LinkMessage, LinkTarget,
 };
 use rstest::rstest;
 use test_util::bytes::push_uint;
@@ -491,18 +491,6 @@ fn metadata_addresses_outside_the_selected_width_are_rejected(
         .unwrap_err(),
         expected
     );
-    assert_eq!(
-        AttributeInfoMessage {
-            max_creation_index: None,
-            indexes_creation_order: false,
-            fractal_heap_address: Some(address),
-            btree_name_index_address: None,
-            btree_creation_order_address: None
-        }
-        .serialize(width)
-        .unwrap_err(),
-        expected
-    );
 }
 
 #[rstest]
@@ -545,30 +533,6 @@ fn link_info_rejects_defined_addresses_equal_to_the_undefined_marker(
 ) {
     let mut info = LinkInfoMessage {
         max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
-    change(&mut info);
-    assert_eq!(
-        info.serialize(OffsetWidth::Two).unwrap_err(),
-        FormatError::DefinedAddressIsUndefined {
-            address: 0xffff,
-            offset_size: 2
-        }
-    );
-}
-
-#[rstest]
-#[case::heap(|info: &mut AttributeInfoMessage| info.fractal_heap_address = Some(StoredAddress::new(0xffff)))]
-#[case::name_index(|info: &mut AttributeInfoMessage| info.btree_name_index_address = Some(StoredAddress::new(0xffff)))]
-#[case::creation_index(|info: &mut AttributeInfoMessage| info.btree_creation_order_address = Some(StoredAddress::new(0xffff)))]
-fn attribute_info_rejects_defined_addresses_equal_to_the_undefined_marker(
-    #[case] change: fn(&mut AttributeInfoMessage),
-) {
-    let mut info = AttributeInfoMessage {
-        max_creation_index: None,
-        indexes_creation_order: true,
         fractal_heap_address: None,
         btree_name_index_address: None,
         btree_creation_order_address: None,

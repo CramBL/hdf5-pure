@@ -25,6 +25,7 @@ use crate::PhysicalAddress;
 use crate::VariableLengthType;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_request::PreparedAttributes;
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
@@ -234,7 +235,7 @@ impl WriteEngine {
                 data_addr,
                 fd.extent,
                 &fd.attrs,
-                attr_info.as_deref(),
+                attr_info.as_ref(),
                 fd.fill_time,
                 fd.fill.as_ref().map(PreparedFill::as_bytes),
                 self.libver(),
@@ -1194,7 +1195,7 @@ impl WriteEngine {
             &layout_message,
             pipeline_message.as_deref(),
             &fd.attrs,
-            attr_info.as_deref(),
+            attr_info.as_ref(),
             fill_time,
             fd.fill.as_ref().map(PreparedFill::as_bytes),
             file_writer::HeaderOptions::PLAIN.with_widths(self.context.widths()),
@@ -1485,7 +1486,7 @@ impl WriteEngine {
     fn place_dense_attrs_if_needed(
         &mut self,
         fd: &mut FlatDataset,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<AttributeInfoMessage>, Error> {
         let Some(prepared) = fd.dense_attrs.take() else {
             return Ok(None);
         };

@@ -25,17 +25,8 @@ fn compact_batches_assign_creation_indices_in_operation_order(#[case] variable: 
         crate::file_writer::WIDTHS,
         ObjectHeaderPrefix::with_layout(layout),
     );
-    let info = AttributeInfoMessage {
-        max_creation_index: Some(4),
-        indexes_creation_order: true,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
-    region.push(
-        MessageType::ATTRIBUTE_INFO,
-        &info.serialize(crate::file_writer::OFFSET_WIDTH).unwrap(),
-    );
+    let info = AttributeInfoMessage::compact(crate::file_writer::OFFSET_WIDTH, Some(4), true);
+    region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
     let value = |number| {
         if variable {
             AttrValue::VarLenAsciiString(format!("value{number}"))
@@ -77,7 +68,7 @@ fn compact_batches_assign_creation_indices_in_operation_order(#[case] variable: 
     let (_, _, info) = super::super::find_attribute_info(&result.region)
         .unwrap()
         .unwrap();
-    assert_eq!(info.max_creation_index, Some(7));
+    assert_eq!(info.max_creation_index(), Some(7));
     let mut actual = Vec::new();
     let mut position = 0;
     while let Some(record) = layout.next_message(&compact.records, position).unwrap() {

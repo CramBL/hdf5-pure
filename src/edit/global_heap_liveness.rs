@@ -447,7 +447,7 @@ impl WriteEngine {
         referenced: &mut impl HeapReferenceSink,
     ) -> Result<bool, FormatError> {
         let info = AttributeInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
-        let Some(heap) = info.fractal_heap_address else {
+        let Some(heap) = info.fractal_heap_address() else {
             return Ok(true);
         };
         let mut shared_records = false;

@@ -2404,7 +2404,7 @@ fn attribute_heap_address(session: &WriteEngine, addr: u64) -> u64 {
     session
         .addresses()
         .resolve(
-            info.fractal_heap_address
+            info.fractal_heap_address()
                 .expect("the heap address is defined"),
         )
         .unwrap()

@@ -77,9 +77,9 @@ fn ordered_attribute_batches_preserve_values_and_creation_indices(
         .find(|record| record.msg_type == MessageType::ATTRIBUTE_INFO)
         .unwrap();
     let info = AttributeInfoMessage::parse_with_offset_width(&info.data, width).unwrap();
-    assert_eq!(info.fractal_heap_address.is_some(), added + 2 > 8);
+    assert_eq!(info.fractal_heap_address().is_some(), added + 2 > 8);
     assert_eq!(
-        info.max_creation_index,
+        info.max_creation_index(),
         Some(u16::try_from(added + 3).unwrap())
     );
     let native = libhdf5::File::open(&path).unwrap();
@@ -746,7 +746,7 @@ fn repack_preserves_other_attribute_policies_and_empty_sets(
         .and_then(|message| {
             AttributeInfoMessage::parse_with_offset_width(&message.data, width)
                 .unwrap()
-                .max_creation_index
+                .max_creation_index()
         })
         .map_or(0, usize::from);
     let mut values: BTreeMap<_, _> = (removed..initial)
@@ -1521,7 +1521,7 @@ fn assert_lifecycle_with_indices(
             .find(|message| message.msg_type == MessageType::ATTRIBUTE_INFO)
             .unwrap();
         let info = AttributeInfoMessage::parse_with_offset_width(&info.data, width).unwrap();
-        if let Some(heap) = info.fractal_heap_address {
+        if let Some(heap) = info.fractal_heap_address() {
             let base = usize::try_from(
                 file.resolve_address(hdf5_pure::StoredAddress::ZERO)
                     .unwrap()
@@ -1719,26 +1719,26 @@ fn inspect_storage(
         .map(|m| AttributeInfoMessage::parse_with_offset_width(&m.data, width).unwrap());
     assert_eq!(
         info.as_ref()
-            .is_some_and(|i| i.fractal_heap_address.is_some()),
+            .is_some_and(|i| i.fractal_heap_address().is_some()),
         dense
     );
     if count > 0 {
         let info = info.as_ref().unwrap();
         assert_eq!(
-            info.max_creation_index,
+            info.max_creation_index(),
             (!matches!(order, AttrCreationOrder::Untracked))
                 .then_some(u16::try_from(count).unwrap())
         );
         assert_eq!(
-            info.indexes_creation_order,
+            info.indexes_creation_order(),
             matches!(order, AttrCreationOrder::Indexed)
         );
     }
     if dense {
         let info = info.unwrap();
-        assert!(info.btree_name_index_address.is_some());
+        assert!(info.btree_name_index_address().is_some());
         assert_eq!(
-            info.btree_creation_order_address.is_some(),
+            info.creation_order_index().defined_address().is_some(),
             matches!(order, AttrCreationOrder::Indexed)
         );
     }

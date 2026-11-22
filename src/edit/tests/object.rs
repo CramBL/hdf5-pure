@@ -33,7 +33,7 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
-use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::checksum;
 use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::datatype;
@@ -1226,10 +1226,10 @@ fn a_new_compact_attribute_takes_the_next_creation_index() {
     let (record, _, info) = edit::attributes::find_attribute_info(&out)
         .unwrap()
         .expect("an info message");
-    assert_eq!(info.max_creation_index, Some(3));
-    assert!(
-        info.indexes_creation_order,
-        "the index flag survives a rewrite"
+    assert_eq!(info.max_creation_index(), Some(3));
+    assert_eq!(
+        info.creation_order_index(),
+        AttributeCreationOrderIndex::Undefined
     );
     assert_eq!(
         out[record + 3],
@@ -1254,16 +1254,8 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
         times: Some(FIXTURE_TIMES),
         attribute_phase_change: Some(FIXTURE_PHASE),
     };
-    let records = |max, indexed| {
-        let info = AttributeInfoMessage {
-            max_creation_index: Some(max),
-            indexes_creation_order: indexed,
-            fractal_heap_address: None,
-            btree_name_index_address: None,
-            btree_creation_order_address: None,
-        }
-        .serialize(OFFSET_WIDTH)
-        .unwrap();
+    let records = |max, indexed: bool| {
+        let info = AttributeInfoMessage::compact(OFFSET_WIDTH, Some(max), indexed).to_bytes();
         let first_info = layout.record_with_creation_index(
             MessageType::ATTRIBUTE_INFO,
             MessageFlags::FORBID_SHARING,
@@ -1356,7 +1348,7 @@ fn an_overwritten_compact_attribute_keeps_its_creation_index() {
         .unwrap()
         .expect("an info message");
     assert_eq!(
-        info.max_creation_index,
+        info.max_creation_index(),
         Some(2),
         "an overwrite must not advance the counter"
     );
@@ -1423,8 +1415,11 @@ fn a_tracked_header_without_an_info_message_gains_one() {
     let (_, _, info) = edit::attributes::find_attribute_info(&region)
         .unwrap()
         .expect("an info message");
-    assert_eq!(info.max_creation_index, Some(5));
-    assert!(info.indexes_creation_order);
+    assert_eq!(info.max_creation_index(), Some(5));
+    assert_eq!(
+        info.creation_order_index(),
+        AttributeCreationOrderIndex::Undefined
+    );
 }
 
 #[rstest]
@@ -2114,17 +2109,12 @@ fn attr_region(layout: MessageRecordLayout, attrs: &[(&str, u16)], max: u16) -> 
 fn attr_region_in(props: ObjectHeaderPrefix, attrs: &[(&str, u16)], max: u16) -> OhRegion {
     let layout = props.layout;
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, props);
-    let info = AttributeInfoMessage {
-        max_creation_index: layout.tracks_creation_order().then_some(max),
-        indexes_creation_order: layout.indexes_creation_order(),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
-    let mut record = layout.record(
-        MessageType::ATTRIBUTE_INFO,
-        &info.serialize(crate::file_writer::OFFSET_WIDTH).unwrap(),
+    let info = AttributeInfoMessage::compact(
+        crate::file_writer::OFFSET_WIDTH,
+        layout.tracks_creation_order().then_some(max),
+        layout.indexes_creation_order(),
     );
+    let mut record = layout.record(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
     record[3] = MessageFlags::FORBID_SHARING.get();
     region.push_bytes(&record);
     for (name, index) in attrs {

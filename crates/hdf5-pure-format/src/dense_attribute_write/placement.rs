@@ -1,8 +1,8 @@
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
-use crate::address::StoredAddress;
-use crate::attribute_info::AttributeInfoMessage;
+use crate::address::{DecodedStoredAddress, StoredAddress};
+use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::btree::v2::write::BTreeV2Placement;
 use crate::btree::v2::write::PreparedHeapId;
 use crate::btree::v2::{AttributeRecord, HugeObjectDirectRecord, HugeObjectRecord};
@@ -261,13 +261,17 @@ impl DenseAttrPlan {
         let geometry = &self.geometry;
         let name = 1 + geometry.managed_plan.block_lengths().len();
         let creation = name + 1 + geometry.name_plan.block_lengths().len();
-        Ok(AttributeInfoMessage {
-            max_creation_index: geometry.next_index,
-            indexes_creation_order: geometry.indexed,
-            fractal_heap_address: Some(addresses[0]),
-            btree_name_index_address: Some(addresses[name]),
-            btree_creation_order_address: geometry.indexed.then(|| addresses[creation]),
-        })
+        AttributeInfoMessage::new(
+            geometry.widths.offsets,
+            geometry.next_index,
+            DecodedStoredAddress::Defined(addresses[0]),
+            DecodedStoredAddress::Defined(addresses[name]),
+            if geometry.indexed {
+                AttributeCreationOrderIndex::Defined(addresses[creation])
+            } else {
+                AttributeCreationOrderIndex::Absent
+            },
+        )
     }
 }
 

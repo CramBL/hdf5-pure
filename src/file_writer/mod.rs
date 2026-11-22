@@ -152,7 +152,7 @@ pub(crate) fn build_chunked_dataset_oh(
     layout_message: &[u8],
     pipeline_message: Option<&[u8]>,
     attrs: &[AttributeMessage],
-    attr_info: Option<&[u8]>,
+    attr_info: Option<&AttributeInfoMessage>,
     fill_time: FillTime,
     fill: Option<&[u8]>,
     header: HeaderOptions<'_>,
@@ -220,7 +220,7 @@ pub(crate) fn build_dataset_oh(
     data_addr: StoredAddress,
     data_size: u64,
     attrs: &[AttributeMessage],
-    attr_info: Option<&[u8]>,
+    attr_info: Option<&AttributeInfoMessage>,
     fill_time: FillTime,
     fill: Option<&[u8]>,
     libver: LibVer,
@@ -333,7 +333,7 @@ pub(crate) fn build_group_oh(
     widths: FormatWidths,
     links: &[LinkMessage],
     attrs: &[AttributeMessage],
-    attr_info: Option<&[u8]>,
+    attr_info: Option<&AttributeInfoMessage>,
     link_info: Option<&LinkInfoMessage>,
     group_info: GroupInfo,
 ) -> Result<Vec<u8>, FormatError> {
@@ -350,7 +350,7 @@ pub(crate) fn build_group_oh(
 fn group_header(
     links: impl IntoIterator<Item = Result<Vec<u8>, FormatError>>,
     attrs: &[AttributeMessage],
-    attr_info: Option<&[u8]>,
+    attr_info: Option<&AttributeInfoMessage>,
     link_info: &LinkInfoMessage,
     group_info: GroupInfo,
     header: HeaderOptions<'_>,
@@ -477,7 +477,7 @@ const MAX_COMPACT_LINKS: usize = 8;
 /// message naming a dense (fractal-heap) attribute store, or the inline
 /// Attribute messages preceded by the compact-storage Attribute Info message
 /// that lets the reference library count them (see
-/// [`compact_attribute_info_message`]).
+/// [`compact_attribute_info`]).
 ///
 /// The dense case takes the Attribute Info message rather than the heap itself
 /// because that message is all a header needs. A sizing pass can therefore get
@@ -492,17 +492,17 @@ const MAX_COMPACT_LINKS: usize = 8;
 fn add_attributes(
     w: &mut ObjectHeaderWriter,
     attrs: &[AttributeMessage],
-    attr_info: Option<&[u8]>,
+    attr_info: Option<&AttributeInfoMessage>,
     header: HeaderOptions<'_>,
 ) -> Result<(), FormatError> {
     if let Some(message) = attr_info {
-        w.add_message(MessageType::ATTRIBUTE_INFO, message.to_vec());
+        w.add_message(MessageType::ATTRIBUTE_INFO, message.to_bytes());
         return Ok(());
     }
     if !attrs.is_empty() || matches!(header.creation, DenseAttrCreationOrder::Tracked { .. }) {
         w.add_message(
             MessageType::ATTRIBUTE_INFO,
-            compact_attribute_info_message(header.creation, header.widths.offsets)?,
+            compact_attribute_info(header.creation, header.widths.offsets).to_bytes(),
         );
     }
     for (index, attr) in attrs.iter().enumerate() {
@@ -661,38 +661,26 @@ fn select_attribute_storage(
 
 /// The provisional heap address used to size object headers.
 ///
-/// The writer sizes headers with [`PreparedDenseAttrs::attr_info_message`] before reserving
+/// The writer sizes headers with [`PreparedDenseAttrs::attribute_info_for_heap`] before reserving
 /// their space. The message length is independent of the chosen heap address.
 const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 
-/// Serializes compact Attribute Info with the supplied creation-order metadata.
+/// Constructs compact Attribute Info with the supplied creation-order metadata.
 ///
 /// Uses undefined heap and index addresses. Retains the creation counter and indexing policy
 /// for tracked attributes. Version 0 fields are defined in "The Attribute Info Message" of the
 /// [format specification, version 4.0][spec].
 ///
-/// # Errors
-///
-/// Propagates errors from [`AttributeInfoMessage::serialize`]. All storage addresses are undefined
-/// and representable at [`OFFSET_WIDTH`].
-///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
-pub(crate) fn compact_attribute_info_message(
+pub(crate) fn compact_attribute_info(
     creation: &DenseAttrCreationOrder,
     offset_width: OffsetWidth,
-) -> Result<Vec<u8>, FormatError> {
-    let (max_creation_index, indexes_creation_order) = match creation {
+) -> AttributeInfoMessage {
+    let (maximum, indexed) = match creation {
         DenseAttrCreationOrder::Tracked { max, indexed, .. } => (Some(*max), *indexed),
         DenseAttrCreationOrder::Untracked => (None, false),
     };
-    AttributeInfoMessage {
-        max_creation_index,
-        indexes_creation_order,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    }
-    .serialize(offset_width)
+    AttributeInfoMessage::compact(offset_width, maximum, indexed)
 }
 
 /// The undefined address at the default [`OFFSET_SIZE`] width.
@@ -1759,20 +1747,20 @@ impl FileWriter {
                     None => (None, None),
                 };
                 let (root_span, root_blob) = split(one(root_attrs, root)?);
-                let (group_spans, group_blobs) = groups
-                    .iter()
-                    .zip(group_reservations)
-                    .map(|(group, span)| one(&group.attrs, span).map(split))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .unzip();
-                let (dataset_spans, dataset_blobs) = datasets
-                    .iter()
-                    .zip(dataset_reservations)
-                    .map(|(dataset, span)| one(&dataset.attrs, span).map(split))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .unzip();
+                let mut group_spans = Vec::with_capacity(groups.len());
+                let mut group_blobs = Vec::with_capacity(groups.len());
+                for (group, reservation) in groups.iter().zip(group_reservations) {
+                    let (address, blob) = split(one(&group.attrs, reservation)?);
+                    group_spans.push(address);
+                    group_blobs.push(blob);
+                }
+                let mut dataset_spans = Vec::with_capacity(datasets.len());
+                let mut dataset_blobs = Vec::with_capacity(datasets.len());
+                for (dataset, reservation) in datasets.iter().zip(dataset_reservations) {
+                    let (address, blob) = split(one(&dataset.attrs, reservation)?);
+                    dataset_spans.push(address);
+                    dataset_blobs.push(blob);
+                }
                 Ok((
                     DenseSpans {
                         root: root_span,
@@ -1826,13 +1814,13 @@ impl FileWriter {
             );
             let attr_info = group_dense_plans[gi]
                 .as_ref()
-                .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
+                .map(|plan| plan.attribute_info_for_heap(DUMMY_DENSE_BASE))
                 .transpose()?;
             let oh = build_group_oh(
                 widths,
                 &dummy_links,
                 &g.attrs,
-                attr_info.as_deref(),
+                attr_info.as_ref(),
                 link_info.as_ref(),
                 g.link_phase_change.group_info()?,
             )?;
@@ -1860,13 +1848,13 @@ impl FileWriter {
             .transpose()?;
         let root_attr_info = root_dense_plan
             .as_ref()
-            .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
+            .map(|plan| plan.attribute_info_for_heap(DUMMY_DENSE_BASE))
             .transpose()?;
         let root_oh_size = build_group_oh(
             widths,
             &root_dummy_links,
             &root_attrs,
-            root_attr_info.as_deref(),
+            root_attr_info.as_ref(),
             root_link_info.as_ref(),
             self.root_link_phase_change.group_info()?,
         )?
@@ -1889,12 +1877,12 @@ impl FileWriter {
             let dense_plan = ds_dense_plans[i].as_ref();
             let dense_attr_info = dense_plan
                 .as_ref()
-                .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
+                .map(|plan| plan.attribute_info_for_heap(DUMMY_DENSE_BASE))
                 .transpose()?;
             let measured = d.measure(
                 dummy_cursor,
                 chunk_sets[i].as_ref(),
-                dense_attr_info.as_deref(),
+                dense_attr_info.as_ref(),
                 libver,
                 HeaderOptions::PLAIN.with_widths(widths),
             )?;
@@ -2171,9 +2159,7 @@ impl FileWriter {
                 let oh = d.build_header(
                     layout.data_addr,
                     layout.chunked_msgs.as_ref(),
-                    ds_dense_blobs[i]
-                        .as_ref()
-                        .map(|blob| blob.attr_info_message.as_slice()),
+                    ds_dense_blobs[i].as_ref().map(|blob| &blob.attribute_info),
                     libver,
                     HeaderOptions::PLAIN.with_widths(widths),
                 )?;
@@ -2403,9 +2389,7 @@ impl FileWriter {
                 widths,
                 &root_links,
                 &root_attrs,
-                root_dense_blob
-                    .as_ref()
-                    .map(|b| b.attr_info_message.as_slice()),
+                root_dense_blob.as_ref().map(|b| &b.attribute_info),
                 root_link_image.as_ref().map(|image| &image.info),
                 self.root_link_phase_change.group_info()?,
             )?;
@@ -2429,9 +2413,7 @@ impl FileWriter {
                     widths,
                     &links,
                     &g.attrs,
-                    group_dense_blobs[gi]
-                        .as_ref()
-                        .map(|b| b.attr_info_message.as_slice()),
+                    group_dense_blobs[gi].as_ref().map(|b| &b.attribute_info),
                     group_link_images[gi].as_ref().map(|image| &image.info),
                     g.link_phase_change.group_info()?,
                 )?;
@@ -2794,9 +2776,7 @@ impl FileWriter {
             widths,
             &root_links,
             &root_attrs,
-            root_dense_blob
-                .as_ref()
-                .map(|b| b.attr_info_message.as_slice()),
+            root_dense_blob.as_ref().map(|b| &b.attribute_info),
             root_link_image.as_ref().map(|image| &image.info),
             self.root_link_phase_change.group_info()?,
         )?;
@@ -2990,9 +2970,7 @@ impl FileWriter {
                     widths,
                     &links,
                     &g.attrs,
-                    group_dense_blobs[gi]
-                        .as_ref()
-                        .map(|b| b.attr_info_message.as_slice()),
+                    group_dense_blobs[gi].as_ref().map(|b| &b.attribute_info),
                     group_link_images[gi].as_ref().map(|image| &image.info),
                     g.link_phase_change.group_info()?,
                 )?;
