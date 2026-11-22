@@ -221,7 +221,7 @@ Items from the same parent module may share a `use`. A module may be grouped wit
 
 A function is never imported by its bare name. It is called through at least one level of its path: `convert::u32_from(value)` after `use crate::convert;`, and never `use crate::convert::u32_from;`. A bare function call then always means a function in the current module, and a qualified one says where it comes from.
 
-We prefer to reference types and traits by an imported symbol name and not by a qualified path. The one exception to this is when the symbol name is overly generic, or easily confused between different crates. In this case we prefer to import the symbol name under an alias, or if the parent module name is short, using a one-level qualified path. E.g. for a crate with a local `Error` type, prefer to `use std::error::Error as StdError`.
+We prefer to reference types and traits by an imported symbol name and not by a qualified path. The one exception to this is when the symbol name is overly generic, or easily confused between different crates. In this case we prefer to import the symbol name under an alias, or if the parent module name is short, using a one-level qualified path. When a crate defines its own `Error` type, use `core::error::Error as CoreError`.
 
 ## Exports
 
@@ -282,6 +282,9 @@ A public struct takes the same rule for a new field, and one with a private fiel
 ### `no_std`
 
 The format structures and the in-memory machinery use `core` and `alloc`, and only the filesystem API is behind the `std` feature. New code below the high-level API imports from `core` and `alloc`, and `just portability` checks the `no_std`, WASM and bare-metal builds.
+
+A `std` gate must correspond to a real dependency on `std`. When functionality moves to
+`core` or `alloc`, revisit its implementations, feature forwarding, and portable contracts.
 
 ### `unsafe`
 

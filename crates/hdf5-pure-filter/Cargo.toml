@@ -12,7 +12,7 @@ include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [features]
 default = []
-std = ["hdf5-pure-core/std"]
+std = []
 deflate = ["std", "dep:flate2"]
 fast-deflate = ["deflate", "flate2/zlib-ng"]
 zfp = []

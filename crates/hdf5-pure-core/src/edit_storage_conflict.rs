@@ -1,3 +1,4 @@
+use core::error::Error;
 use core::fmt;
 
 use crate::address::PhysicalAddress;
@@ -57,5 +58,4 @@ impl fmt::Display for EditStorageConflict {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for EditStorageConflict {}
+impl Error for EditStorageConflict {}

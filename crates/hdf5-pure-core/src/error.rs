@@ -1,5 +1,6 @@
 use alloc::collections::TryReserveError;
 use alloc::string::String;
+use core::error::Error;
 use core::fmt;
 use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
@@ -3055,9 +3056,8 @@ impl fmt::Display for FormatError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for FormatError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for FormatError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             FormatError::AllocationFailed { source, .. } => Some(source),
             FormatError::InvalidLocalHeapName { source, .. } => Some(source),
