@@ -64,6 +64,7 @@ pub use datatype::layout::builder::FloatingPointTypeBuilder;
 pub use datatype::layout::builder::NumericDatatypeProperty;
 pub use deflate_level::DeflateLevel;
 pub use edit_storage_conflict::EditStorageConflict;
+pub use error::AttributeInfoField;
 pub use error::FormatError;
 pub use error::OBJECT_HEADER_MESSAGE_MAX;
 pub use file_space_info::FileSpaceInfo;

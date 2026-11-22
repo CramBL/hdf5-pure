@@ -491,6 +491,21 @@ pub enum FormatError {
     /// A fractal-heap "huge" object's heap ID referenced a B-tree key that is
     /// not present in the heap's huge-objects v2 B-tree.
     HugeObjectNotFound(u64),
+    /// An Attribute Info message ends before a required field is complete.
+    IncompleteAttributeInfo {
+        /// The byte length of the required prefix or complete body, excluding padding.
+        expected: usize,
+        /// The length of the supplied body slice in bytes.
+        available: usize,
+        /// The first incomplete field.
+        field: AttributeInfoField,
+        /// The zero-based byte offset of the field from the start of the body.
+        field_offset: usize,
+        /// The length of the complete field in bytes.
+        field_size: usize,
+        /// The number of bytes supplied for the field.
+        field_available: usize,
+    },
     /// The supplied physical region does not contain the required range.
     ///
     /// This reports insufficient caller-supplied bytes for a valid range. A short storage read
@@ -2411,6 +2426,19 @@ impl fmt::Display for FormatError {
             Self::InvalidAttributeInfoFlags(flags) => {
                 write!(f, "invalid attribute info message flags: {flags:#04x}")
             }
+            Self::IncompleteAttributeInfo {
+                expected,
+                available,
+                field,
+                field_offset,
+                field_size,
+                field_available,
+            } => write!(
+                f,
+                "incomplete Attribute Info {field} at byte {field_offset} \
+                 (field needs {field_size} bytes, has {field_available}, \
+                 acquisition needs {expected} bytes, has {available})"
+            ),
             Self::InvalidSharedMessageVersion(v) => {
                 write!(f, "invalid shared message version: {v}")
             }
@@ -3037,5 +3065,40 @@ impl std::error::Error for FormatError {
             FormatError::UnsupportedDatatypeMemberEncoding { source, .. } => Some(source),
             _ => None,
         }
+    }
+}
+
+/// A field in an [`FormatError::IncompleteAttributeInfo`] diagnostic.
+///
+/// "The Attribute Info Message" of the [format specification, version 4.0][spec] defines
+/// these version 0 fields.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attrinfo
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttributeInfoField {
+    /// The version byte at the start of the body.
+    Version,
+    /// The flags byte for tracking and indexing creation order.
+    Flags,
+    /// The maximum creation index, present when the object tracks creation order.
+    MaximumCreationIndex,
+    /// The address of the fractal heap for dense attribute messages.
+    FractalHeapAddress,
+    /// The address of the version 2 B-tree for attribute names.
+    NameIndexAddress,
+    /// The address of the version 2 B-tree for creation order, present when indexing is enabled.
+    CreationOrderIndexAddress,
+}
+
+impl fmt::Display for AttributeInfoField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Version => "version",
+            Self::Flags => "flags",
+            Self::MaximumCreationIndex => "maximum creation index",
+            Self::FractalHeapAddress => "fractal heap address",
+            Self::NameIndexAddress => "name index address",
+            Self::CreationOrderIndexAddress => "creation-order index address",
+        })
     }
 }

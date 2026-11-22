@@ -76,6 +76,7 @@ pub use hdf5_pure_core::FileSpaceInfo;
 pub use hdf5_pure_core::FileSpaceStrategy;
 pub use hdf5_pure_core::Superblock;
 
+pub use hdf5_pure_core::AttributeInfoField;
 pub use hdf5_pure_core::FormatError;
 pub use hdf5_pure_core::MessageType;
 pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;

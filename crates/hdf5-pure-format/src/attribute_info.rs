@@ -4,7 +4,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::address::{DecodedStoredAddress, StoredAddress};
+use hdf5_pure_core::AttributeInfoField;
+
+use crate::address::{DecodedStoredAddress, StoredAddress, StoredAddressExt};
+use crate::bytes;
 use crate::bytes::ByteCursor;
 use crate::codec::{Decode, Encode};
 use crate::error::FormatError;
@@ -108,7 +111,8 @@ impl AttributeInfoMessage {
     ///
     /// Returns [`FormatError::InvalidAttributeInfoVersion`] for versions other than 0,
     /// [`FormatError::InvalidAttributeInfoFlags`] if a reserved flag bit is set, or
-    /// [`FormatError::UnexpectedEof`] if `data` ends before a required field is complete.
+    /// [`FormatError::IncompleteAttributeInfo`] if `data` is shorter than the required fields.
+    /// The truncation error reports the required length and the first incomplete field.
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
     pub fn parse_with_offset_width(
@@ -240,7 +244,7 @@ impl<'input> Decode<'input> for AttributeInfoMessage {
 
     fn decode(input: &'input [u8], offset_width: OffsetWidth) -> Result<Self, Self::Error> {
         let mut cursor = ByteCursor::new(input);
-        let [version, flags] = cursor.array::<PREFIX_SIZE>()?;
+        let [version, flags] = cursor.array::<PREFIX_SIZE>().map_err(incomplete_prefix)?;
         if version != VERSION {
             return Err(FormatError::InvalidAttributeInfoVersion(version));
         }
@@ -248,20 +252,49 @@ impl<'input> Decode<'input> for AttributeInfoMessage {
             return Err(FormatError::InvalidAttributeInfoFlags(flags));
         }
 
-        let max_creation_index = (flags & TRACK_CREATION_ORDER != 0)
-            .then(|| cursor.u16())
-            .transpose()?;
-        let fractal_heap_address = cursor.address(offset_width)?;
-        let btree_name_index_address = cursor.address(offset_width)?;
-        let btree_creation_order_address = (flags & INDEX_CREATION_ORDER != 0)
-            .then(|| cursor.address(offset_width))
-            .transpose()?;
+        let tracked = flags & TRACK_CREATION_ORDER != 0;
+        let indexed = flags & INDEX_CREATION_ORDER != 0;
+        let address_start = PREFIX_SIZE + usize::from(tracked) * MAXIMUM_INDEX_SIZE;
+        let address_count = REQUIRED_ADDRESS_COUNT + usize::from(indexed);
+        let address_size = usize::from(offset_width.get());
+        let body_size = address_start + address_count * address_size;
+        let incomplete = |available| {
+            incomplete_body(
+                bytes::UnexpectedEof::new(body_size, available),
+                address_start,
+                address_size,
+            )
+        };
+        let maximum_bytes = if tracked {
+            Some(
+                cursor
+                    .take_array::<MAXIMUM_INDEX_SIZE>()
+                    .map_err(|error| incomplete(error.available))?,
+            )
+        } else {
+            None
+        };
+        let address_bytes = cursor.remaining();
+        let StoredAddresses {
+            fractal_heap,
+            name_index,
+            creation_order_index,
+        } = match offset_width {
+            OffsetWidth::Two => StoredAddresses::read(address_bytes, indexed, |bytes| {
+                u64::from(u16::from_le_bytes(bytes))
+            }),
+            OffsetWidth::Four => StoredAddresses::read(address_bytes, indexed, |bytes| {
+                u64::from(u32::from_le_bytes(bytes))
+            }),
+            OffsetWidth::Eight => StoredAddresses::read(address_bytes, indexed, u64::from_le_bytes),
+        }
+        .ok_or_else(|| incomplete(input.len()))?;
         Ok(Self::from_stored(
             offset_width,
-            max_creation_index,
-            fractal_heap_address,
-            btree_name_index_address,
-            btree_creation_order_address,
+            maximum_bytes.copied().map(u16::from_le_bytes),
+            fractal_heap,
+            name_index,
+            creation_order_index,
         ))
     }
 }
@@ -318,6 +351,102 @@ impl Encode for AttributeInfoMessage {
             field.copy_from_slice(&address.get().to_le_bytes()[..width]);
         }
         Ok(len)
+    }
+}
+
+/// Addresses in their stored representation, including the undefined marker.
+///
+/// The creation-order index is `None` when its field is absent.
+struct StoredAddresses {
+    fractal_heap: StoredAddress,
+    name_index: StoredAddress,
+    creation_order_index: Option<StoredAddress>,
+}
+
+impl StoredAddresses {
+    /// Acquires the complete array of addresses before decoding its elements.
+    ///
+    /// Includes the creation-order index address if `indexed` is true. Returns `None` if the
+    /// required array extends past `input`. The caller supplies the decoder for the file's
+    /// `N`-byte addresses.
+    fn read<const N: usize>(
+        input: &[u8],
+        indexed: bool,
+        decode: impl Fn([u8; N]) -> u64,
+    ) -> Option<Self> {
+        const { assert!(N > 0) };
+        let (addresses, _) = input.as_chunks::<N>();
+        let (fractal_heap, name_index, creation_order_index) = if indexed {
+            let [fractal_heap, name_index, creation_order_index] =
+                addresses.first_chunk::<{ REQUIRED_ADDRESS_COUNT + 1 }>()?;
+            (fractal_heap, name_index, Some(creation_order_index))
+        } else {
+            let [fractal_heap, name_index] = addresses.first_chunk::<REQUIRED_ADDRESS_COUNT>()?;
+            (fractal_heap, name_index, None)
+        };
+        let read = |bytes: &[u8; N]| StoredAddress::new(decode(*bytes));
+        Some(Self {
+            fractal_heap: read(fractal_heap),
+            name_index: read(name_index),
+            creation_order_index: creation_order_index.map(read),
+        })
+    }
+}
+
+/// Reports the missing version or flags byte in a truncated prefix.
+#[cold]
+fn incomplete_prefix(error: bytes::UnexpectedEof) -> FormatError {
+    let field = if error.available == 0 {
+        AttributeInfoField::Version
+    } else {
+        AttributeInfoField::Flags
+    };
+    incomplete_field(error, field, error.available, PREFIX_FIELD_SIZE)
+}
+
+/// Locates the first incomplete payload field after a complete prefix.
+#[cold]
+fn incomplete_body(
+    error: bytes::UnexpectedEof,
+    address_start: usize,
+    address_size: usize,
+) -> FormatError {
+    if error.available < address_start {
+        return incomplete_field(
+            error,
+            AttributeInfoField::MaximumCreationIndex,
+            PREFIX_SIZE,
+            MAXIMUM_INDEX_SIZE,
+        );
+    }
+
+    let address_index = (error.available - address_start) / address_size;
+    let field = match address_index {
+        0 => AttributeInfoField::FractalHeapAddress,
+        1 => AttributeInfoField::NameIndexAddress,
+        _ => AttributeInfoField::CreationOrderIndexAddress,
+    };
+    incomplete_field(
+        error,
+        field,
+        address_start + address_index * address_size,
+        address_size,
+    )
+}
+
+fn incomplete_field(
+    error: bytes::UnexpectedEof,
+    field: AttributeInfoField,
+    field_offset: usize,
+    field_size: usize,
+) -> FormatError {
+    FormatError::IncompleteAttributeInfo {
+        expected: error.expected,
+        available: error.available,
+        field,
+        field_offset,
+        field_size,
+        field_available: error.available - field_offset,
     }
 }
 

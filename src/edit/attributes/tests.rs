@@ -7,6 +7,7 @@ use test_util::object_header::v2::HeaderFlags;
 
 use super::test_util::encode_attr_body;
 use super::{AttrOp, EditedAttrs};
+use crate::AttributeInfoField;
 use crate::attribute::AttributeMessage;
 #[cfg(feature = "checksum")]
 use crate::edit::WriteEngine;
@@ -126,7 +127,17 @@ fn compact_overwrite_preserves_storage_above_the_stored_maximum() {
     },
     FormatError::InvalidAttributeInfoVersion(0xff)
 )]
-#[case::truncated(vec![], FormatError::UnexpectedEof { expected: 2, available: 0 })]
+#[case::truncated(
+    vec![],
+    FormatError::IncompleteAttributeInfo {
+        expected: 2,
+        available: 0,
+        field: AttributeInfoField::Version,
+        field_offset: 0,
+        field_size: 1,
+        field_available: 0,
+    }
+)]
 fn bulk_attribute_edits_preserve_metadata_parse_errors(
     #[case] body: Vec<u8>,
     #[case] expected: FormatError,
