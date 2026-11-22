@@ -526,8 +526,9 @@ pub struct DenseAttrPlan {
 /// [`FormatError::DuplicateAttributeCreationIndex`] if tracked indexes repeat, or
 /// [`FormatError::InvalidAttributeCreationCounter`] if a tracked index is at or above the
 /// next creation index. Returns [`FormatError::Internal`] if the counts of attributes and
-/// tracked indexes differ. Returns [`FormatError::DenseAttributeHeapTooLarge`] if managed
-/// storage exceeds the heap address space, [`FormatError::ValueTooLargeForPlatform`] if
+/// tracked indexes differ or if the writer cannot plan one of the indexes. Returns
+/// [`FormatError::DenseAttributeHeapTooLarge`] if managed storage exceeds the heap address
+/// space, [`FormatError::ValueTooLargeForPlatform`] if
 /// storage does not fit a [`usize`], [`FormatError::ValueTooLargeForRepresentation`] if an
 /// attribute count or position does not fit a [`u32`], or [`FormatError::OffsetOverflow`] if
 /// the total length exceeds [`u64`].
@@ -1227,47 +1228,42 @@ impl EncodedDenseAttrs {
                 + 4
         );
 
-        // The writer plans every index before computing subsequent offsets from the node counts.
-        // Each fixed-size leaf holds multiple records, so additional levels suffice for larger
-        // sets.
-        let name_plan = BTreeV2Plan::new(
-            BTREE_V2_ATTRIBUTE_NAME,
-            count,
-            DENSE_ATTR_BTREE_RECORD,
-            BTREE_V2_NODE_SIZE,
-            widths.offsets,
-        )
-        .expect("a 512-byte node holds 29 name records, enough to plan any count");
-        let corder_plan = indexed.then(|| {
-            BTreeV2Plan::new(
-                BTREE_V2_ATTRIBUTE_CREATION_ORDER,
-                count,
-                DENSE_ATTR_CORDER_BTREE_RECORD,
-                BTREE_V2_NODE_SIZE,
-                widths.offsets,
-            )
-            .expect("a 512-byte node holds 38 creation-order records, enough to plan any count")
-        });
+        let plan_index = |kind, count, record_size| {
+            BTreeV2Plan::new(kind, count, record_size, BTREE_V2_NODE_SIZE, widths.offsets)
+                .ok_or_else(|| {
+                    FormatError::Internal(format!(
+                        "cannot plan a type-{kind} B-tree with {count} dense attribute records"
+                    ))
+                })
+        };
+        let name_plan = plan_index(BTREE_V2_ATTRIBUTE_NAME, count, DENSE_ATTR_BTREE_RECORD)?;
+        let corder_plan = indexed
+            .then(|| {
+                plan_index(
+                    BTREE_V2_ATTRIBUTE_CREATION_ORDER,
+                    count,
+                    DENSE_ATTR_CORDER_BTREE_RECORD,
+                )
+            })
+            .transpose()?;
         let direct =
             FractalHeapHeader::unfiltered_huge_ids_direct(DENSE_ATTR_HEAP_ID_LENGTH, widths);
-        let huge_plan = (huge_count > 0).then(|| {
-            BTreeV2Plan::new(
-                if direct {
-                    BTREE_V2_HUGE_OBJECT_DIRECT
+        let huge_plan = (huge_count > 0)
+            .then(|| {
+                let (kind, size) = if direct {
+                    (
+                        BTREE_V2_HUGE_OBJECT_DIRECT,
+                        HugeObjectDirectRecord::size(widths.offsets, widths.lengths),
+                    )
                 } else {
-                    BTREE_V2_HUGE_OBJECT
-                },
-                huge_count,
-                if direct {
-                    HugeObjectDirectRecord::size(widths.offsets, widths.lengths)
-                } else {
-                    HugeObjectRecord::size(widths.offsets, widths.lengths)
-                },
-                BTREE_V2_NODE_SIZE,
-                widths.offsets,
-            )
-            .expect("a 512-byte node holds 20 huge records, enough to plan any count")
-        });
+                    (
+                        BTREE_V2_HUGE_OBJECT,
+                        HugeObjectRecord::size(widths.offsets, widths.lengths),
+                    )
+                };
+                plan_index(kind, huge_count, size)
+            })
+            .transpose()?;
 
         // The blob contains the heap header, managed blocks, name index, optional creation-order
         // index, and optional huge-object index and payloads, in that order. The offsets are
