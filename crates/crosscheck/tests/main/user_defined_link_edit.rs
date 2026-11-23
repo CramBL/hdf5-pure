@@ -59,7 +59,7 @@ fn root_dataset_creation_rejects_native_user_links_as_unsupported(
         .find(|message| message.msg_type == MessageType::LINK_INFO)
         .unwrap();
     let info = LinkInfoMessage::parse(&info.data, superblock.offset_size.get()).unwrap();
-    assert_eq!(info.fractal_heap_address.is_some(), dense);
+    assert_eq!(info.fractal_heap_address().is_some(), dense);
     session
         .root()
         .create_dataset("d", |builder| {

@@ -247,16 +247,16 @@ pub(crate) fn collect_dense_group_index_storage_extents(
     link_info: &LinkInfoMessage,
     widths: FormatWidths,
 ) -> Result<Vec<Extent>, FormatError> {
-    let Some(fractal_heap_address) = link_info.fractal_heap_address else {
+    let Some(fractal_heap_address) = link_info.fractal_heap_address() else {
         return Ok(Vec::new());
     };
-    let Some(name_address) = link_info.btree_name_index_address else {
+    let Some(name_address) = link_info.btree_name_index_address() else {
         return Ok(Vec::new());
     };
 
     let mut indexes = Vec::with_capacity(2);
     indexes.push(DenseIndex::new(name_address, BTREE_V2_LINK_NAME));
-    if let Some(Some(address)) = link_info.btree_creation_order_address {
+    if let Some(address) = link_info.creation_order_index().defined_address() {
         indexes.push(DenseIndex::new(address, BTREE_V2_LINK_CREATION_ORDER));
     }
     dense_storage::collect_dense_index_storage_extents_from_source(
@@ -285,7 +285,7 @@ pub fn resolve_v2_group_entries(
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let link_info = find_link_info(object_header, widths.offsets)?;
 
-    if let Some(fh_addr) = link_info.fractal_heap_address {
+    if let Some(fh_addr) = link_info.fractal_heap_address() {
         resolve_dense_entries(physical.stored()?, access_mode, &link_info, fh_addr, widths)
     } else {
         resolve_compact_entries(object_header, widths.offsets)
@@ -518,7 +518,7 @@ fn holds_compact_links(
 ) -> Result<bool, FormatError> {
     Ok(!is_v1_group(header)
         && find_link_info(header, offset_width)?
-            .fractal_heap_address
+            .fractal_heap_address()
             .is_none())
 }
 
@@ -591,7 +591,7 @@ fn find_noncompact_link(
         return group_v1::find_link(physical, &table, widths, group_leaf_node_k, name);
     }
     let info = find_link_info(header, widths.offsets)?;
-    let Some(heap_address) = info.fractal_heap_address else {
+    let Some(heap_address) = info.fractal_heap_address() else {
         return Ok(None);
     };
     let stored = physical.stored()?;
@@ -600,7 +600,7 @@ fn find_noncompact_link(
     let (heap_header, _) =
         fractal_heap::read_header_and_range_from_source(&heap_source, heap_address, widths)?;
     let index = info
-        .btree_name_index_address
+        .btree_name_index_address()
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree = BTreeV2Header::parse_with_widths(file_data, index.get().to_usize()?, widths)?;
     let index = BTreeV2LinkNameIndex::new(&btree, widths.offsets, heap_header.heap_id_length)?;
@@ -657,7 +657,7 @@ fn find_noncompact_link_from_source(
         );
     }
     let info = find_link_info(header, widths.offsets)?;
-    let Some(heap_address) = info.fractal_heap_address else {
+    let Some(heap_address) = info.fractal_heap_address() else {
         return Ok(None);
     };
     let stored = PhysicalSource::new(source).stored();
@@ -665,7 +665,7 @@ fn find_noncompact_link_from_source(
     let (heap_header, _) =
         fractal_heap::read_header_and_range_from_source(&heap_source, heap_address, widths)?;
     let index = info
-        .btree_name_index_address
+        .btree_name_index_address()
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree = BTreeV2Header::parse_from_source_with_widths(
         &BTreeV2Source::new(&stored),
@@ -761,7 +761,7 @@ fn resolve_dense_entries(
     let (fh, _) = fractal_heap::read_header_and_range_from_source(&heap_source, fh_addr, widths)?;
 
     let btree_addr = link_info
-        .btree_name_index_address
+        .btree_name_index_address()
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree_hdr =
         BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
@@ -805,12 +805,7 @@ fn find_link_info(
             return LinkInfoMessage::parse_with_offset_width(&msg.data, offset_width);
         }
     }
-    Ok(LinkInfoMessage {
-        max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    })
+    Ok(LinkInfoMessage::compact(offset_width, None, false))
 }
 
 /// Returns whether the header contains Link Info or Link messages.
@@ -1008,7 +1003,7 @@ fn resolve_v2_group_entries_from_source(
     widths: FormatWidths,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let link_info = find_link_info(object_header, widths.offsets)?;
-    if let Some(fh_addr) = link_info.fractal_heap_address {
+    if let Some(fh_addr) = link_info.fractal_heap_address() {
         let stored = PhysicalSource::new(source).stored();
         resolve_dense_entries_from_source(&stored, access_mode, &link_info, fh_addr, widths)
     } else {
@@ -1036,7 +1031,7 @@ pub(crate) fn resolve_dense_entries_from_source(
     let (fh, _) = fractal_heap::read_header_and_range_from_source(&heap_source, fh_addr, widths)?;
 
     let btree_addr = link_info
-        .btree_name_index_address
+        .btree_name_index_address()
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree_hdr = BTreeV2Header::parse_from_source_with_widths(
         &BTreeV2Source::new(source),

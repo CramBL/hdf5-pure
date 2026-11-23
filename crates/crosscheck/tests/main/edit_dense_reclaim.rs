@@ -725,7 +725,7 @@ fn dense_heaps(path: &Path) -> Vec<DenseHeap> {
         .filter_map(|(owner, message)| match message.msg_type {
             MessageType::LINK_INFO => LinkInfoMessage::parse(&message.data, 8)
                 .unwrap()
-                .fractal_heap_address
+                .fractal_heap_address()
                 .map(|address| (owner, address)),
             MessageType::ATTRIBUTE_INFO => {
                 AttributeInfoMessage::parse_with_offset_width(&message.data, OffsetWidth::Eight)

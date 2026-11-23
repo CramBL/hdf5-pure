@@ -164,7 +164,7 @@ fn filtered_group_metadata(path: &Path) -> (Vec<u8>, Option<bool>) {
         .find(|message| message.msg_type == MessageType::LINK_INFO)
         .unwrap();
     let info = LinkInfoMessage::parse_with_offset_width(&info.data, OffsetWidth::Eight).unwrap();
-    let filtered = info.fractal_heap_address.map(|address| {
+    let filtered = info.fractal_heap_address().map(|address| {
         FractalHeapHeader::parse(&bytes, usize::try_from(address.get()).unwrap(), 8, 8)
             .unwrap()
             .filtering
@@ -259,11 +259,11 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
     assert_eq!(info.links.links().len(), form.1);
     let metadata = info.links.info();
     assert_eq!(
-        metadata.max_creation_order,
+        metadata.max_creation_order(),
         tracked.then_some(form.1 as u64 + 1)
     );
-    assert_eq!(metadata.btree_creation_order_address.is_some(), indexed);
-    assert_eq!(metadata.fractal_heap_address.is_some(), form.0 == "dense");
+    assert_eq!(metadata.indexes_creation_order(), indexed);
+    assert_eq!(metadata.fractal_heap_address().is_some(), form.0 == "dense");
     let links = info
         .links
         .links()
@@ -311,7 +311,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
         let bytes = std::fs::read(&path).unwrap();
         let header = BTreeV2Header::parse(
             &bytes,
-            512 + usize::try_from(metadata.btree_name_index_address.unwrap().get()).unwrap(),
+            512 + usize::try_from(metadata.btree_name_index_address().unwrap().get()).unwrap(),
             8,
             8,
         )
@@ -319,7 +319,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
         assert!(header.depth >= 2, "{header:?}");
         let heap = FractalHeapHeader::parse(
             &bytes,
-            512 + usize::try_from(metadata.fractal_heap_address.unwrap().get()).unwrap(),
+            512 + usize::try_from(metadata.fractal_heap_address().unwrap().get()).unwrap(),
             8,
             8,
         )
@@ -359,11 +359,11 @@ fn dense_root_edits_preserve_untracked_and_tracked_group_policies(
     expected.sort_by(|left, right| left.name().cmp(right.name()));
     assert_eq!(actual, expected);
     assert_eq!(
-        after.links.info().max_creation_order,
+        after.links.info().max_creation_order(),
         before
             .links
             .info()
-            .max_creation_order
+            .max_creation_order()
             .map(|counter| counter + 1)
     );
     assert_eq!(

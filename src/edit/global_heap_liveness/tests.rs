@@ -303,19 +303,13 @@ fn with_engine(base: UserblockSize, inspect: impl FnOnce(&WriteEngine)) {
 }
 
 fn with_width_engine(base: UserblockSize, widths: Widths, inspect: impl FnOnce(&WriteEngine)) {
-    let link_info = LinkInfoMessage {
-        max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
+    let link_info = LinkInfoMessage::compact(
+        OffsetWidth::try_from(u8::try_from(widths.offset).unwrap()).unwrap(),
+        None,
+        false,
+    );
     let root = Header::new()
-        .message(Message::new(
-            MessageType::LINK_INFO,
-            &link_info
-                .serialize(OffsetWidth::try_from(u8::try_from(widths.offset).unwrap()).unwrap())
-                .unwrap(),
-        ))
+        .message(Message::new(MessageType::LINK_INFO, &link_info.to_bytes()))
         .build();
     let mut image = Image::new();
     let base_at = usize::try_from(base.get()).unwrap();

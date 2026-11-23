@@ -123,7 +123,7 @@ fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, StoredAddress, FormatWidth
     .unwrap();
     let link_info = group_v2::find_link_info(&header, widths.offsets).unwrap();
     let fh_addr = link_info
-        .fractal_heap_address
+        .fractal_heap_address()
         .expect("this many long-named links are stored densely");
     (link_info, fh_addr, widths)
 }

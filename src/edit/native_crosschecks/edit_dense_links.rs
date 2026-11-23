@@ -88,7 +88,7 @@ fn dense_link_mutation_preserves_multilevel_indexes_collisions_and_symbolic_targ
     let info = after.links.info();
     let index = BTreeV2Header::parse(
         &bytes,
-        usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+        usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
         8,
         8,
     )
@@ -96,7 +96,7 @@ fn dense_link_mutation_preserves_multilevel_indexes_collisions_and_symbolic_targ
     assert!(index.depth >= 2, "{index:?}");
     let heap = FractalHeapHeader::parse(
         &bytes,
-        usize::try_from(info.fractal_heap_address.unwrap().get()).unwrap(),
+        usize::try_from(info.fractal_heap_address().unwrap().get()).unwrap(),
         8,
         8,
     )
@@ -227,7 +227,7 @@ fn symbolic_targets_and_name_encoding_survive_both_storage_transitions(
     file.commit().unwrap();
     drop(file);
     let compact = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
-    assert!(compact.links.info().fractal_heap_address.is_none());
+    assert!(compact.links.info().fractal_heap_address().is_none());
     assert_symbolic_targets_and_encoding(&compact.links);
     let mut expected = before
         .links
@@ -248,7 +248,7 @@ fn symbolic_targets_and_name_encoding_survive_both_storage_transitions(
     file.commit().unwrap();
     drop(file);
     let dense = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
-    assert!(dense.links.info().fractal_heap_address.is_some());
+    assert!(dense.links.info().fractal_heap_address().is_some());
     assert_symbolic_targets_and_encoding(&dense.links);
     let mut actual = dense
         .links
@@ -271,7 +271,7 @@ fn dense_root_mutation_resolves_stored_addresses_in_a_userblock_file(
     let path = dir.path().join("userblock.h5");
     dense_links::write_inspection_fixture(&path, dense_links::GroupOrder::Untracked);
     let before = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
-    assert!(before.links.info().fractal_heap_address.is_some());
+    assert!(before.links.info().fractal_heap_address().is_some());
     let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().create_group("added").unwrap();
     file.commit().unwrap();

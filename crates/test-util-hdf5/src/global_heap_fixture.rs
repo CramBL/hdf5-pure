@@ -158,17 +158,9 @@ impl Fixture {
             links,
             root_count,
         } = self;
-        let link_info = format::LinkInfoMessage {
-            max_creation_order: None,
-            fractal_heap_address: None,
-            btree_name_index_address: None,
-            btree_creation_order_address: None,
-        };
+        let link_info = format::LinkInfoMessage::compact(format::OffsetWidth::Eight, None, false);
         let root = Header::new()
-            .message(Message::new(
-                MessageType::LINK_INFO,
-                &link_info.serialize(format::OffsetWidth::Eight).unwrap(),
-            ))
+            .message(Message::new(MessageType::LINK_INFO, &link_info.to_bytes()))
             .messages(root_count.map(|count| Message::reference_count(count.get())))
             .messages(links)
             .build();

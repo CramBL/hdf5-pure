@@ -111,12 +111,7 @@ fn placement_rejects_an_overflowing_component_end() {
 }
 
 fn plan(count: usize, width: OffsetWidth, indexed: bool) -> DenseLinkPlan {
-    let info = LinkInfoMessage {
-        max_creation_order: indexed.then_some(count as u64 + 7),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: indexed.then_some(None),
-    };
+    let info = LinkInfoMessage::compact(width, indexed.then_some(count as u64 + 7), indexed);
     let links = (0..count)
         .map(|index| {
             OwnedLink::new(
@@ -129,7 +124,7 @@ fn plan(count: usize, width: OffsetWidth, indexed: bool) -> DenseLinkPlan {
         })
         .collect();
     DenseLinkPlan::new(
-        GroupLinkStorage::new(&info, links, width).unwrap(),
+        GroupLinkStorage::new(&info, links).unwrap(),
         LengthWidth::Eight,
     )
     .unwrap()

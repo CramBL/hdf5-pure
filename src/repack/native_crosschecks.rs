@@ -356,17 +356,17 @@ fn assert_tracked_links(
     let file = File::open(file_path).unwrap();
     let links = read_links(&file, path);
     assert_eq!(links.creation_order().next_index(), Some(next));
-    assert_eq!(links.info().fractal_heap_address.is_some(), dense);
-    assert_eq!(links.info().btree_name_index_address.is_some(), dense);
+    assert_eq!(links.info().fractal_heap_address().is_some(), dense);
+    assert_eq!(links.info().btree_name_index_address().is_some(), dense);
     assert_eq!(
-        links.info().btree_creation_order_address.is_some(),
+        links.info().indexes_creation_order(),
         matches!(indexing, Indexing::Yes)
     );
     assert_eq!(
         links
             .info()
-            .btree_creation_order_address
-            .flatten()
+            .creation_order_index()
+            .defined_address()
             .is_some(),
         dense && matches!(indexing, Indexing::Yes)
     );
@@ -422,7 +422,7 @@ fn repack_preserves_complete_link_metadata(
             Some(u64::try_from(count + 1).unwrap())
         }
     );
-    assert_eq!(before.info().fractal_heap_address.is_some(), count > 12);
+    assert_eq!(before.info().fractal_heap_address().is_some(), count > 12);
     let mut expected = normalized_links(before);
     if drop_child {
         expected.retain(|link| link.name() != b"child");
@@ -440,17 +440,17 @@ fn repack_preserves_complete_link_metadata(
     let after = read_links(&file, group_path);
     assert_eq!(after.creation_order(), expected_creation);
     let dense = count - usize::from(drop_child) > 12;
-    assert_eq!(after.info().fractal_heap_address.is_some(), dense);
-    assert_eq!(after.info().btree_name_index_address.is_some(), dense);
+    assert_eq!(after.info().fractal_heap_address().is_some(), dense);
+    assert_eq!(after.info().btree_name_index_address().is_some(), dense);
     assert_eq!(
-        after.info().btree_creation_order_address.is_some(),
+        after.info().indexes_creation_order(),
         matches!(order, GroupOrder::Indexed)
     );
     assert_eq!(
         after
             .info()
-            .btree_creation_order_address
-            .flatten()
+            .creation_order_index()
+            .defined_address()
             .is_some(),
         dense && matches!(order, GroupOrder::Indexed)
     );

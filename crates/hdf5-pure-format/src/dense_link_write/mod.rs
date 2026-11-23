@@ -31,7 +31,7 @@ use crate::fractal_heap_write::GROUP_HEAP_TABLE_WIDTH;
 use crate::fractal_heap_write::ManagedHeapPlacement;
 use crate::fractal_heap_write::ManagedHeapPlan;
 use crate::fractal_heap_write::ManagedHeapPlanError;
-use crate::link_info::LinkInfoMessage;
+use crate::link_info::{LinkInfoAddressField, LinkInfoMessage};
 use crate::link_storage::GroupLinkStorage;
 use crate::link_storage::LinkCreationPolicy;
 use crate::link_storage::LinkStorageError;
@@ -70,13 +70,8 @@ use crate::width::OffsetWidth;
 ///     OwnedLinkTarget::soft(b"/data".to_vec()),
 ///     None,
 /// )?];
-/// let info = LinkInfoMessage {
-///     max_creation_order: None,
-///     fractal_heap_address: None,
-///     btree_name_index_address: None,
-///     btree_creation_order_address: None,
-/// };
-/// let storage = GroupLinkStorage::new(&info, links, OffsetWidth::Eight)?;
+/// let info = LinkInfoMessage::compact(OffsetWidth::Eight, None, false);
+/// let storage = GroupLinkStorage::new(&info, links)?;
 /// let plan = DenseLinkPlan::new(storage, LengthWidth::Eight)?;
 /// let allocation_len = plan.serialized_len();
 /// let heap_address = StoredAddress::new(4096);
@@ -91,7 +86,7 @@ use crate::width::OffsetWidth;
 ///     address
 /// }).collect();
 /// let placement = plan.place(&addresses)?;
-/// assert_eq!(placement.link_info().fractal_heap_address, Some(addresses[0]));
+/// assert_eq!(placement.link_info().fractal_heap_address(), Some(addresses[0]));
 /// for ((address, length), encoded) in placement.blocks().zip(placement.serialize_blocks()?) {
 ///     let (stored_address, bytes) = encoded?;
 ///     assert_eq!(stored_address, address);
@@ -285,9 +280,24 @@ impl DenseLinkPlan {
                 actual: addresses.len(),
             });
         }
+        let heap_end = 1 + heap.block_lengths().len();
+        let name_end = heap_end + 1 + name.plan.block_lengths().len();
+        let mut header_fields = [
+            (0, LinkInfoAddressField::Heap),
+            (heap_end, LinkInfoAddressField::NameIndex),
+            (name_end, LinkInfoAddressField::CreationIndex),
+        ]
+        .into_iter()
+        .take(2 + usize::from(creation_index.is_some()))
+        .peekable();
+        let mut info = LinkInfoMessage::compact(*offset_width, creation.next_index(), false);
         let mut ranges = Vec::with_capacity(expected);
         for (index, (&address, length)) in addresses.iter().zip(self.block_lengths()).enumerate() {
-            self.address(address, 0)?;
+            if let Some((_, field)) = header_fields.next_if(|(position, _)| *position == index) {
+                info.set_defined_address(field, address)?;
+            } else {
+                self.address(address, 0)?;
+            }
             let end = address
                 .get()
                 .checked_add(length)
@@ -312,22 +322,12 @@ impl DenseLinkPlan {
                 });
             }
         }
-        let heap_end = 1 + heap.block_lengths().len();
-        let name_end = heap_end + 1 + name.plan.block_lengths().len();
         let heap = heap.place(&addresses[1..heap_end])?;
         let name = name.plan.place(&addresses[heap_end + 1..name_end])?;
         let creation_placement = creation_index
             .as_ref()
             .map(|index| index.plan.place(&addresses[name_end + 1..]))
             .transpose()?;
-        let info = LinkInfoMessage {
-            max_creation_order: creation.next_index(),
-            fractal_heap_address: Some(addresses[0]),
-            btree_name_index_address: Some(addresses[heap_end]),
-            btree_creation_order_address: creation_index
-                .as_ref()
-                .map(|_| Some(addresses[name_end])),
-        };
         Ok(DenseLinkPlacement {
             plan: self,
             addresses: addresses.to_vec(),
@@ -346,15 +346,17 @@ impl DenseLinkPlan {
 
     /// Returns Link Info metadata for storage beginning at the stored file address `base`.
     ///
-    /// Preserves the creation-order policy and next-index counter. Checks the complete output
-    /// extent before computing the heap and index addresses.
+    /// Preserves the creation-order policy and next-index counter. Checks the complete allocation
+    /// extent before deriving the index addresses.
     ///
     /// # Errors
     ///
     /// Returns [`DenseLinkPlanError::Format`] if `base` is undefined, an address exceeds the
     /// stored address width, or address arithmetic overflows.
     pub fn link_info(&self, base: StoredAddress) -> Result<LinkInfoMessage, DenseLinkPlanError> {
-        self.address(base, 0)?;
+        let mut info =
+            LinkInfoMessage::compact(self.offset_width, self.creation.next_index(), false);
+        info.set_defined_address(LinkInfoAddressField::Heap, base)?;
         let end = base
             .get()
             .checked_add(self.total_len)
@@ -369,16 +371,17 @@ impl DenseLinkPlan {
             }
             .into());
         }
-        Ok(LinkInfoMessage {
-            max_creation_order: self.creation.next_index(),
-            fractal_heap_address: Some(base),
-            btree_name_index_address: Some(self.address(base, self.name.offset)?),
-            btree_creation_order_address: self
-                .creation_index
-                .as_ref()
-                .map(|index| self.address(base, index.offset).map(Some))
-                .transpose()?,
-        })
+        info.set_defined_address(
+            LinkInfoAddressField::NameIndex,
+            base.checked_add(self.name.offset)?,
+        )?;
+        if let Some(index) = &self.creation_index {
+            info.set_defined_address(
+                LinkInfoAddressField::CreationIndex,
+                base.checked_add(index.offset)?,
+            )?;
+        }
+        Ok(info)
     }
 
     /// Serializes the heap and indexes at the stored file address `base` into one buffer.

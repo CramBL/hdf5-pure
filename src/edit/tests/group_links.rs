@@ -90,9 +90,7 @@ fn link_inspection_classifies_user_links_and_malformed_records(
     } else {
         region.push(
             MessageType::LINK_INFO,
-            &crate::file_writer::COMPACT_LINK_INFO
-                .serialize(widths().offsets)
-                .unwrap(),
+            &crate::file_writer::compact_link_info(widths().offsets).to_bytes(),
         );
         region.push(MessageType::LINK, body);
         Vec::new()
@@ -160,12 +158,7 @@ fn inspection_preserves_encoded_names_and_targets(
         offsets: offset_width,
         lengths: LengthWidth::Eight,
     };
-    let info = LinkInfoMessage {
-        max_creation_order: tracked.then_some(99),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: indexed.then_some(None),
-    };
+    let info = LinkInfoMessage::compact(widths.offsets, tracked.then_some(99), indexed);
     let links = vec![
         OwnedLink::new(
             vec![0xFE],
@@ -191,7 +184,7 @@ fn inspection_preserves_encoded_names_and_targets(
         )
         .unwrap(),
     ];
-    let storage = GroupLinkStorage::new(&info, links.clone(), offset_width).unwrap();
+    let storage = GroupLinkStorage::new(&info, links.clone()).unwrap();
     let (bytes, region) = fixture(storage, dense);
     assert_eq!(region.widths(), widths);
     let mut source = vec![0xAC; usize::try_from(effective_base).unwrap()];
@@ -280,7 +273,7 @@ fn dense_inspection_preserves_metadata_ownership_and_cache_admission(
         assert_eq!(after.misses(), 2 * before.misses());
     }
     let stored = PhysicalSource::new(&opened).stored();
-    let address = first.info().btree_name_index_address.unwrap();
+    let address = first.info().btree_name_index_address().unwrap();
     let metadata = stored
         .read_metadata(address, btree_v2::SIGNATURE.len())
         .unwrap();
@@ -337,7 +330,7 @@ fn dense_inspection_preserves_node_range_errors(#[case] overflow: bool, #[case] 
     physical.extend_from_slice(&image[512..]);
     let (_, start, end) = find_message(&region, MessageType::LINK_INFO);
     let info = LinkInfoMessage::parse(&region[start..end], widths().offsets.get()).unwrap();
-    let at = usize::try_from(base + info.btree_name_index_address.unwrap().get()).unwrap();
+    let at = usize::try_from(base + info.btree_name_index_address().unwrap().get()).unwrap();
     let header = BTreeV2Header::parse(&physical, at, 8, 8).unwrap();
     assert_eq!(header.depth, 0);
     assert_eq!(header.num_records_in_root, 1);
@@ -432,7 +425,7 @@ fn dense_inspection_rejects_unsupported_heap_configurations(
     update_checksum(bytes, at - 10, 11);
 }, Some("a group's link uses a non-managed heap ID"))]
 #[case::creation_id(1, |bytes: &mut Vec<u8>, info: &LinkInfoMessage| {
-    let address = info.btree_creation_order_address.flatten().unwrap();
+    let address = info.creation_order_index().defined_address().unwrap();
     let header = BTreeV2Header::parse(bytes, 512 + usize::try_from(address.get()).unwrap(), 8, 8).unwrap();
     let at = 512 + usize::try_from(header.root_node_address.get()).unwrap();
     bytes[at + 14] ^= 1;
@@ -487,7 +480,7 @@ fn dense_inspection_rejects_inconsistent_index_metadata(
 }
 
 #[rstest]
-#[case::duplicate_info(|region: &mut OhRegion| region.push(MessageType::LINK_INFO, &crate::file_writer::COMPACT_LINK_INFO.serialize(OffsetWidth::Eight).unwrap()), "a group has repeated link-info messages")]
+#[case::duplicate_info(|region: &mut OhRegion| region.push(MessageType::LINK_INFO, &crate::file_writer::compact_link_info(OffsetWidth::Eight).to_bytes()), "a group has repeated link-info messages")]
 #[case::duplicate_group_info(|region: &mut OhRegion| region.push(MessageType::GROUP_INFO, &[0, 0]), "a group has repeated group-info messages")]
 #[case::symbol_table(|region: &mut OhRegion| region.push(MessageType::SYMBOL_TABLE, &[0; 16]), "a group mixes symbol-table storage with modern link storage")]
 #[case::group_info_flags(|region: &mut OhRegion| {
@@ -556,7 +549,7 @@ fn bounded_dense_mutation_preserves_existing_children() {
     let info = engine
         .inspect_group(ObjectId::new(PhysicalAddress::new(address)))
         .unwrap();
-    assert!(info.links.info().fractal_heap_address.is_some());
+    assert!(info.links.info().fractal_heap_address().is_some());
     let mut names = info
         .links
         .links()
@@ -645,7 +638,7 @@ impl RootChildFields {
     fn parse(bytes: &[u8], info: &LinkInfoMessage) -> Self {
         let header = BTreeV2Header::parse(
             bytes,
-            512 + usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+            512 + usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
             8,
             8,
         )
@@ -680,12 +673,11 @@ impl RootChildFields {
 }
 
 fn multilevel_storage(count: usize) -> GroupLinkStorage {
-    let info = LinkInfoMessage {
-        max_creation_order: Some(u64::try_from(count).unwrap() + 5),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: Some(None),
-    };
+    let info = LinkInfoMessage::compact(
+        OffsetWidth::Eight,
+        Some(u64::try_from(count).unwrap() + 5),
+        true,
+    );
     let links = (0..count)
         .map(|index| {
             OwnedLink::new(
@@ -697,16 +689,11 @@ fn multilevel_storage(count: usize) -> GroupLinkStorage {
             .unwrap()
         })
         .collect();
-    GroupLinkStorage::new(&info, links, OffsetWidth::Eight).unwrap()
+    GroupLinkStorage::new(&info, links).unwrap()
 }
 
 fn one_link_storage() -> GroupLinkStorage {
-    let info = LinkInfoMessage {
-        max_creation_order: Some(5),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: Some(None),
-    };
+    let info = LinkInfoMessage::compact(OffsetWidth::Eight, Some(5), true);
     GroupLinkStorage::new(
         &info,
         vec![
@@ -718,7 +705,6 @@ fn one_link_storage() -> GroupLinkStorage {
             )
             .unwrap(),
         ],
-        OffsetWidth::Eight,
     )
     .unwrap()
 }
@@ -737,7 +723,7 @@ fn widths() -> FormatWidths {
 fn name_leaf(bytes: &[u8], info: &LinkInfoMessage) -> usize {
     let header = BTreeV2Header::parse(
         bytes,
-        512 + usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+        512 + usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
         8,
         8,
     )
@@ -768,15 +754,9 @@ fn fixture(storage: GroupLinkStorage, dense: bool) -> (Vec<u8>, OhRegion) {
             .serialize(StoredAddress::new(0))
             .unwrap();
         source.extend_from_slice(&image.bytes);
-        region.push(
-            MessageType::LINK_INFO,
-            &image.info.serialize(offset_width).unwrap(),
-        );
+        region.push(MessageType::LINK_INFO, &image.info.to_bytes());
     } else {
-        region.push(
-            MessageType::LINK_INFO,
-            &storage.info().serialize(storage.offset_width()).unwrap(),
-        );
+        region.push(MessageType::LINK_INFO, &storage.info().to_bytes());
         for link in storage.links() {
             region.push(
                 MessageType::LINK,
@@ -957,13 +937,12 @@ fn track_dense_root(path: &Path, indexed: bool) {
             .unwrap()
         })
         .collect::<Vec<_>>();
-    let info = LinkInfoMessage {
-        max_creation_order: Some(u64::try_from(links.len()).unwrap()),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: indexed.then_some(None),
-    };
-    let storage = GroupLinkStorage::new(&info, links, OffsetWidth::Eight).unwrap();
+    let info = LinkInfoMessage::compact(
+        OffsetWidth::Eight,
+        Some(u64::try_from(links.len()).unwrap()),
+        indexed,
+    );
+    let storage = GroupLinkStorage::new(&info, links).unwrap();
     let mut bytes = std::fs::read(path).unwrap();
     let plan = DenseLinkPlan::new(storage, LengthWidth::Eight).unwrap();
     let image = plan
@@ -975,11 +954,7 @@ fn track_dense_root(path: &Path, indexed: bool) {
         .splice_first(MessageType::LINK_INFO)
         .unwrap()
         .unwrap();
-    let region = region.with_bytes(
-        splice
-            .replace_body(&image.info.serialize(OffsetWidth::Eight).unwrap())
-            .unwrap(),
-    );
+    let region = region.with_bytes(splice.replace_body(&image.info.to_bytes()).unwrap());
     let header = crate::edit::object_header::build_v2_object_header(&region).unwrap();
     superblock.root_group_address = StoredAddress::new(u64::try_from(bytes.len()).unwrap());
     bytes.extend_from_slice(&header);

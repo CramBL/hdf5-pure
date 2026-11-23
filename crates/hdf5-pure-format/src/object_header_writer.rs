@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
+use crate::link_info::LinkInfoMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeaderPrefix;
@@ -111,6 +112,29 @@ impl ObjectHeaderWriter {
     /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if a message body exceeds
     /// [`OBJECT_HEADER_MESSAGE_MAX`]. The optional record creation index is outside that body.
     pub fn serialize(&self) -> Result<Vec<u8>, FormatError> {
+        self.serialize_records(None)
+    }
+
+    /// Serializes the header with a Link Info record before the stored records.
+    ///
+    /// The Link Info record has empty flags and a creation index of zero when the record
+    /// layout tracks creation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if a stored message body exceeds
+    /// [`OBJECT_HEADER_MESSAGE_MAX`].
+    pub fn serialize_with_link_info(
+        &self,
+        link_info: &LinkInfoMessage,
+    ) -> Result<Vec<u8>, FormatError> {
+        self.serialize_records(Some(link_info))
+    }
+
+    fn serialize_records(
+        &self,
+        link_info: Option<&LinkInfoMessage>,
+    ) -> Result<Vec<u8>, FormatError> {
         for (msg_type, data, _, _) in &self.messages {
             if data.len() > OBJECT_HEADER_MESSAGE_MAX {
                 return Err(FormatError::ObjectHeaderMessageTooLarge {
@@ -121,12 +145,17 @@ impl ObjectHeaderWriter {
         }
 
         let layout = self.prefix.layout;
-        let messages_len = self
-            .messages
-            .iter()
-            .map(|(_, data, _, _)| layout.prefix_len() + data.len())
-            .sum();
+        let first_len = link_info.map_or(0, |info| layout.prefix_len() + info.encoded_size());
+        let messages_len = first_len
+            + self
+                .messages
+                .iter()
+                .map(|(_, data, _, _)| layout.prefix_len() + data.len())
+                .sum::<usize>();
         Ok(self.prefix.encode_header_with(messages_len, |buf| {
+            if let Some(info) = link_info {
+                layout.append_link_info(buf, info);
+            }
             for (msg_type, data, msg_flags, creation_index) in &self.messages {
                 layout.write_record(buf, *msg_type, *msg_flags, *creation_index, data);
             }

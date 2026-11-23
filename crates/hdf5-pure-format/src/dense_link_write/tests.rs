@@ -13,6 +13,7 @@ use crate::fractal_heap::FractalHeapIdKind;
 use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap_block::FractalHeapBlock;
 use crate::fractal_heap_block::FractalHeapBlockLayout;
+use crate::link_info::LinkCreationOrderIndex;
 use crate::link_storage::OwnedLink;
 use crate::link_storage::OwnedLinkTarget;
 
@@ -36,13 +37,10 @@ fn planned_links_parse_at_each_supported_address_width(
     assert_eq!(image.bytes.len() as u64, plan.serialized_len());
     assert_eq!(image.info, plan.link_info(base).unwrap());
     assert_eq!(
-        image.info.max_creation_order,
-        storage.info().max_creation_order
+        image.info.max_creation_order(),
+        storage.info().max_creation_order()
     );
-    assert_eq!(
-        image.info.btree_creation_order_address.is_some(),
-        policy == 2
-    );
+    assert_eq!(image.info.indexes_creation_order(), policy == 2);
     let (mut links, _, _) = parse(&image, base, physical_base, offsets, lengths);
     links.sort_by(|a, b| a.name().cmp(b.name()));
     expected.sort_by(|a, b| a.name().cmp(b.name()));
@@ -72,8 +70,8 @@ fn heap_blocks_indexes_and_statistics_conform_to_the_parser(
     expected.sort_by_key(|link| (checksum::jenkins_lookup3(link.name()), link.name().to_vec()));
     assert_eq!(links, expected);
     for address in [
-        image.info.btree_name_index_address.unwrap(),
-        image.info.btree_creation_order_address.unwrap().unwrap(),
+        image.info.btree_name_index_address().unwrap(),
+        image.info.creation_order_index().defined_address().unwrap(),
     ] {
         let header = BTreeV2Header::parse(
             &image.bytes,
@@ -131,12 +129,7 @@ fn real_name_hash_collisions_are_sorted_by_raw_name_bytes() {
         checksum::jenkins_lookup3(&names[0]),
         checksum::jenkins_lookup3(&names[1])
     );
-    let info = LinkInfoMessage {
-        max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
+    let info = LinkInfoMessage::compact(OffsetWidth::Eight, None, false);
     let links = names
         .into_iter()
         .map(|name| {
@@ -149,7 +142,7 @@ fn real_name_hash_collisions_are_sorted_by_raw_name_bytes() {
             .unwrap()
         })
         .collect();
-    let storage = GroupLinkStorage::new(&info, links, OffsetWidth::Eight).unwrap();
+    let storage = GroupLinkStorage::new(&info, links).unwrap();
     let plan = DenseLinkPlan::new(storage, LengthWidth::Eight).unwrap();
     let image = plan.serialize(StoredAddress::new(0)).unwrap();
     let (links, _, _) = parse(
@@ -237,12 +230,14 @@ fn oversized_link_messages_are_rejected_during_planning() {
 #[test]
 fn creation_records_preserve_all_eight_bytes_and_preexisting_addresses_are_replaced() {
     let next = i64::MAX as u64;
-    let info = LinkInfoMessage {
-        max_creation_order: Some(next),
-        fractal_heap_address: Some(StoredAddress::new(111)),
-        btree_name_index_address: Some(StoredAddress::new(222)),
-        btree_creation_order_address: Some(Some(StoredAddress::new(333))),
-    };
+    let info = LinkInfoMessage::new(
+        OffsetWidth::Eight,
+        Some(next),
+        Some(StoredAddress::new(111)),
+        Some(StoredAddress::new(222)),
+        LinkCreationOrderIndex::Defined(StoredAddress::new(333)),
+    )
+    .unwrap();
     let links = [next - 1, 0x0001_0203_0405_0607]
         .into_iter()
         .enumerate()
@@ -258,21 +253,21 @@ fn creation_records_preserve_all_eight_bytes_and_preexisting_addresses_are_repla
             .unwrap()
         })
         .collect();
-    let storage = GroupLinkStorage::new(&info, links, OffsetWidth::Eight).unwrap();
+    let storage = GroupLinkStorage::new(&info, links).unwrap();
     let plan = DenseLinkPlan::new(storage, LengthWidth::Eight).unwrap();
     let image = plan.serialize(StoredAddress::new(4096)).unwrap();
-    assert_eq!(image.info.max_creation_order, Some(next));
+    assert_eq!(image.info.max_creation_order(), Some(next));
     assert_eq!(
-        image.info.fractal_heap_address,
+        image.info.fractal_heap_address(),
         Some(StoredAddress::new(4096))
     );
     assert_ne!(
-        image.info.btree_name_index_address,
-        info.btree_name_index_address
+        image.info.btree_name_index_address(),
+        info.btree_name_index_address()
     );
     assert_ne!(
-        image.info.btree_creation_order_address,
-        info.btree_creation_order_address
+        image.info.creation_order_index(),
+        info.creation_order_index()
     );
     let (links, _, _) = parse(
         &image,
@@ -325,13 +320,8 @@ fn maximum_size_managed_hard_link_round_trips() {
         link.encoded_len(OffsetWidth::Eight).unwrap() as u64,
         GROUP_HEAP_MAX_MANAGED_OBJECT
     );
-    let info = LinkInfoMessage {
-        max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
-    let storage = GroupLinkStorage::new(&info, vec![link.clone()], OffsetWidth::Eight).unwrap();
+    let info = LinkInfoMessage::compact(OffsetWidth::Eight, None, false);
+    let storage = GroupLinkStorage::new(&info, vec![link.clone()]).unwrap();
     let plan = DenseLinkPlan::new(storage, LengthWidth::Eight).unwrap();
     let image = plan.serialize(StoredAddress::new(0)).unwrap();
     let (links, _, _) = parse(
@@ -387,7 +377,7 @@ fn independently_placed_dense_links_preserve_encoded_records(
     assert_eq!(emitted, addresses);
     let image = DenseLinkImage {
         bytes,
-        info: placement.link_info().clone(),
+        info: *placement.link_info(),
     };
     let (mut links, _, _) = parse(&image, base, 512, OffsetWidth::Eight, LengthWidth::Eight);
     links.sort_by(|a, b| a.name().cmp(b.name()));
@@ -396,12 +386,11 @@ fn independently_placed_dense_links_preserve_encoded_records(
 }
 
 fn storage(count: usize, policy: u8, offsets: OffsetWidth, name_len: usize) -> GroupLinkStorage {
-    let info = LinkInfoMessage {
-        max_creation_order: (policy > 0).then_some(count as u64 * 3 + 10),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: (policy == 2).then_some(None),
-    };
+    let info = LinkInfoMessage::compact(
+        offsets,
+        (policy > 0).then_some(count as u64 * 3 + 10),
+        policy == 2,
+    );
     let links = (0..count)
         .rev()
         .map(|index| {
@@ -440,7 +429,7 @@ fn storage(count: usize, policy: u8, offsets: OffsetWidth, name_len: usize) -> G
             .unwrap()
         })
         .collect();
-    GroupLinkStorage::new(&info, links, offsets).unwrap()
+    GroupLinkStorage::new(&info, links).unwrap()
 }
 
 fn parse(
@@ -492,7 +481,7 @@ fn parse(
     let names = records(
         &image.bytes,
         base,
-        image.info.btree_name_index_address.unwrap(),
+        image.info.btree_name_index_address().unwrap(),
         offsets,
         lengths,
     );
@@ -525,7 +514,7 @@ fn parse(
         ids.push((link.creation_order(), id.to_vec()));
         links.push(link);
     }
-    if let Some(Some(address)) = image.info.btree_creation_order_address {
+    if let Some(address) = image.info.creation_order_index().defined_address() {
         let creation = records(&image.bytes, base, address, offsets, lengths);
         ids.sort_by_key(|&(order, _)| order);
         assert_eq!(creation.len(), ids.len());

@@ -161,7 +161,7 @@ fn allocations(
         links.creation_order().is_indexed(),
         matches!(indexing, Indexing::Yes)
     );
-    if let Some(heap) = links.info().fractal_heap_address {
+    if let Some(heap) = links.info().fractal_heap_address() {
         allocations.extend(
             crate::group::v2::collect_dense_group_index_storage_extents(
                 &source,

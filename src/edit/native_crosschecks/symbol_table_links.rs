@@ -14,7 +14,7 @@ use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::edit::group_inspection;
-use crate::file_writer::COMPACT_LINK_INFO;
+use crate::file_writer::compact_link_info;
 use crate::object_header::ObjectHeader;
 
 #[rstest]
@@ -48,7 +48,10 @@ fn both_readers_convert_the_links_libhdf5_writes_in_a_symbol_table_group(
         .collect();
     let converted = group_inspection::inspect_group_links(&path, "links", source_only).unwrap();
     assert_eq!(converted.links.links(), expected);
-    assert_eq!(converted.links.info(), COMPACT_LINK_INFO);
+    assert_eq!(
+        converted.links.info(),
+        compact_link_info(converted.links.offset_width())
+    );
     dir.close().unwrap();
 }
 

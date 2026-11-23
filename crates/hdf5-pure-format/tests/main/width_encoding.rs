@@ -6,7 +6,7 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     BlockOffsetWidth, ChunkIndexInfo, ChunkedLayoutFlags, DataLayout, Dataspace, DataspaceType,
     DatatypeLocation, EA_CLIENT_ID_UNFILTERED, FilteredSingleChunk, FormatWidths,
-    FractalHeapHeader, LayoutVersion, LinkInfoMessage, LinkMessage, LinkTarget,
+    FractalHeapHeader, LayoutVersion, LinkMessage, LinkTarget,
 };
 use rstest::rstest;
 use test_util::bytes::push_uint;
@@ -480,17 +480,6 @@ fn metadata_addresses_outside_the_selected_width_are_rejected(
         format::encode_committed_ref(address, width).unwrap_err(),
         expected
     );
-    assert_eq!(
-        LinkInfoMessage {
-            max_creation_order: None,
-            fractal_heap_address: Some(address),
-            btree_name_index_address: None,
-            btree_creation_order_address: None
-        }
-        .serialize(width)
-        .unwrap_err(),
-        expected
-    );
 }
 
 #[rstest]
@@ -520,29 +509,6 @@ fn fractal_heap_length_fields_reject_unrepresentable_values(
         FormatError::LengthTooLarge {
             length: 0x1_0000,
             length_size: 2
-        }
-    );
-}
-
-#[rstest]
-#[case::heap(|info: &mut LinkInfoMessage| info.fractal_heap_address = Some(StoredAddress::new(0xffff)))]
-#[case::name_index(|info: &mut LinkInfoMessage| info.btree_name_index_address = Some(StoredAddress::new(0xffff)))]
-#[case::creation_index(|info: &mut LinkInfoMessage| info.btree_creation_order_address = Some(Some(StoredAddress::new(0xffff))))]
-fn link_info_rejects_defined_addresses_equal_to_the_undefined_marker(
-    #[case] change: fn(&mut LinkInfoMessage),
-) {
-    let mut info = LinkInfoMessage {
-        max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    };
-    change(&mut info);
-    assert_eq!(
-        info.serialize(OffsetWidth::Two).unwrap_err(),
-        FormatError::DefinedAddressIsUndefined {
-            address: 0xffff,
-            offset_size: 2
         }
     );
 }

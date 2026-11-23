@@ -363,7 +363,7 @@ impl WriteEngine {
         attribute_storage: Option<&[(FileRange, FreeClass)]>,
         link_info: &LinkInfoMessage,
     ) -> Option<Vec<(FileRange, FreeClass)>> {
-        let Some(heap_address) = link_info.fractal_heap_address else {
+        let Some(heap_address) = link_info.fractal_heap_address() else {
             return Some(Vec::new());
         };
         let index = crate::group::v2::collect_dense_group_index_storage_extents(
@@ -679,7 +679,7 @@ impl WriteEngine {
             p = body_end;
         }
         let link_info = link_info?;
-        link_info.fractal_heap_address?;
+        link_info.fractal_heap_address()?;
         Some(link_info)
     }
 
@@ -1266,7 +1266,7 @@ impl WriteEngine {
         child: &mut Option<&mut dyn FnMut(ObjectId)>,
     ) -> Result<bool, Error> {
         let info = LinkInfoMessage::parse_with_offset_width(data, self.widths().offsets)?;
-        if let Some(heap) = info.fractal_heap_address {
+        if let Some(heap) = info.fractal_heap_address() {
             let opened = self.opened_source();
             let source = PhysicalSource::new(&opened).stored();
             let index = crate::group::v2::collect_dense_group_index_storage_extents(

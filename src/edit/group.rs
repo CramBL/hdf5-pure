@@ -243,7 +243,7 @@ impl GroupInfo {
             mut region,
             mut links,
         } = self;
-        let dense = links.info().fractal_heap_address.is_some();
+        let dense = links.info().fractal_heap_address().is_some();
         let names = links
             .links()
             .iter()
@@ -375,7 +375,7 @@ impl WriteEngine {
                 reservations.write_next(&bytes)?;
             }
             reservations.finish()?;
-            placement.link_info().clone()
+            *placement.link_info()
         } else {
             self.place_relocatable(plan.serialized_len(), AllocationClass::Metadata, |base| {
                 let image = plan.serialize(base).map_err(dense_link_error)?;
@@ -422,15 +422,10 @@ pub(super) const GROUP_INFO_BODY: [u8; 2] = GroupInfoMessage::DEFAULT_BODY;
 ///
 /// # Errors
 ///
-/// Propagates errors from [`LinkInfoMessage::serialize`]. All addresses in the fixed
-/// [`COMPACT_LINK_INFO`](crate::file_writer::COMPACT_LINK_INFO) message are undefined and
-/// representable at `widths.offsets`.
+/// Propagates errors from [`OhRegion::push_link_info`].
 pub(super) fn fresh_group_region(widths: FormatWidths) -> Result<OhRegion, FormatError> {
     let mut region = OhRegion::empty(widths, ObjectHeaderPrefix::PLAIN);
-    region.push(
-        MessageType::LINK_INFO,
-        &crate::file_writer::COMPACT_LINK_INFO.serialize(widths.offsets)?,
-    );
+    region.push_link_info(&crate::file_writer::compact_link_info(widths.offsets))?;
     region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     Ok(region)
 }
@@ -502,9 +497,9 @@ pub(super) fn link_message_region(
 fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&[u8], Error> {
     let data = message.data.as_slice();
     let len = match message.msg_type {
-        MessageType::LINK_INFO => LinkInfoMessage::parse_with_offset_width(data, offset_width)?
-            .serialize(offset_width)?
-            .len(),
+        MessageType::LINK_INFO => {
+            LinkInfoMessage::parse_with_offset_width(data, offset_width)?.encoded_size()
+        }
         MessageType::GROUP_INFO => {
             GroupInfoMessage::unpadded_body_len(data).map_err(group_links::group_info_error)?
         }
@@ -637,16 +632,16 @@ impl LinkCreationOrder {
         let Some(next) = self.policy.next_index() else {
             return Ok(());
         };
-        let (_, body, _) = find_link_info(region)?.ok_or(Error::EditUnsupported(
+        let (_, body, mut info) = find_link_info(region)?.ok_or(Error::EditUnsupported(
             "a group's link-info message went missing while its links were being added",
         ))?;
-        let max = body.start + 2..body.start + 10;
-        if max.end > body.end {
+        if info.max_creation_order().is_none() {
             return Err(Error::EditUnsupported(
-                "a group's link-info message is too short to record its link creation order",
+                "a group's link-info message has no next creation index",
             ));
         }
-        region.bytes_mut()[max].copy_from_slice(&next.to_le_bytes());
+        info.set_max_creation_order(Some(next));
+        info.write_into(&mut region.bytes_mut()[body])?;
         Ok(())
     }
 }
@@ -777,13 +772,31 @@ impl OhRegion {
             .map_err(HeaderCountError::into_reconstructed_group_error)
     }
 
+    /// Replaces the first Link Info body, preserving the record's flags and creation index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the region has no Link Info record and
+    /// [`FormatError::Internal`] if `info` uses a different offset width from the region.
+    /// Propagates record framing and allocation errors. Leaves the original region unchanged
+    /// on error.
     fn replace_link_info(&mut self, info: &LinkInfoMessage) -> Result<(), Error> {
         let splice = self
             .splice_first(MessageType::LINK_INFO)?
             .ok_or(Error::EditUnsupported(
                 "a target group's object header has no link-info message",
             ))?;
-        *self = self.with_bytes(splice.replace_body(&info.serialize(self.widths().offsets)?)?);
+        if info.offset_width() != self.widths().offsets {
+            return Err(FormatError::Internal(
+                "the Link Info encoding uses a different offset width from its region".into(),
+            )
+            .into());
+        }
+        let mut bytes = Vec::new();
+        splice.replace_body_with(&mut bytes, info.encoded_size(), |body| {
+            info.write_into(body).map(|_| ())
+        })?;
+        *self = self.with_bytes(bytes);
         Ok(())
     }
 }
@@ -834,6 +847,43 @@ mod tests {
             panic!("expected a Link Info format error");
         };
         assert_eq!(error, crate::FormatError::InvalidLinkInfoFlags(0x80));
+    }
+
+    #[test]
+    fn replacing_link_info_preserves_the_record_metadata_and_surrounding_bytes() {
+        use hdf5_pure_format::__private::{FormatWidths, LinkInfoMessage};
+        use test_util::link_info::{Body, CreationIndex, Width};
+
+        let widths = FormatWidths::from_sizes(2, 8).unwrap();
+        let layout = MessageRecordLayout::from_header_flags(HeaderFlags::TRACKS_CREATION_ORDER.0);
+        let mut region = OhRegion::empty(widths, ObjectHeaderPrefix::with_layout(layout));
+        let source = Body::new(Width::Two, None, None, None, CreationIndex::Absent)
+            .unwrap()
+            .build();
+        region.push(MessageType::GROUP_INFO, b"before");
+        let before = region.len();
+        region.push_bytes(&layout.record_with_creation_index(
+            MessageType::LINK_INFO,
+            MessageFlags::FORBID_SHARING,
+            7,
+            &source,
+        ));
+        let after = region.len();
+        region.push(MessageType::GROUP_INFO, b"after");
+        let original = region.clone();
+
+        let expected = Body::new(Width::Two, Some(3), None, None, CreationIndex::Undefined)
+            .unwrap()
+            .build();
+        let replacement = LinkInfoMessage::compact(widths.offsets, Some(3), true);
+        region.replace_link_info(&replacement).unwrap();
+        let record = layout.next_message(&region, before).unwrap().unwrap();
+        assert_eq!(record.msg_type, MessageType::LINK_INFO);
+        assert_eq!(record.flags, MessageFlags::FORBID_SHARING);
+        assert_eq!(record.creation_index, Some(7));
+        assert_eq!(record.body, expected);
+        assert_eq!(&region[..before], &original[..before]);
+        assert_eq!(&region[record.body_range.end..], &original[after..]);
     }
 
     #[rstest]
@@ -903,12 +953,9 @@ mod tests {
         FileBuilder::new().write(&path).unwrap();
         let engine = edit_test_util::open_engine(&path);
         let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-        region.push(
-            MessageType::LINK_INFO,
-            &file_writer::COMPACT_LINK_INFO
-                .serialize(file_writer::OFFSET_WIDTH)
-                .unwrap(),
-        );
+        region
+            .push_link_info(&file_writer::compact_link_info(file_writer::OFFSET_WIDTH))
+            .unwrap();
         region.push(
             MessageType::GROUP_INFO,
             &LinkPhaseChange::AlwaysDense.group_info().serialize(),

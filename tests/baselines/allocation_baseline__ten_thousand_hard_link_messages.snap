@@ -3,7 +3,7 @@ source: tests/allocation_baseline.rs
 expression: report
 ---
 Hard-link messages: 10,000
-Allocation count:         11,668
-Cumulative bytes:      1,162,754
+Allocation count:         11,667
+Cumulative bytes:      1,162,720
 Peak bytes:            1,162,720
 Retained bytes:          820,000

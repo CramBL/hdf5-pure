@@ -870,8 +870,8 @@ fn assert_dense(file: &File, dense: bool) {
         position = record.body_range.end;
     }
     let links = links.unwrap();
-    assert_eq!(links.fractal_heap_address.is_some(), dense);
-    assert_eq!(links.btree_name_index_address.is_some(), dense);
+    assert_eq!(links.fractal_heap_address().is_some(), dense);
+    assert_eq!(links.btree_name_index_address().is_some(), dense);
     let attributes = attributes.unwrap();
     assert_eq!(attributes.fractal_heap_address().is_some(), dense);
     assert_eq!(attributes.btree_name_index_address().is_some(), dense);

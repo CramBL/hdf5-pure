@@ -291,11 +291,9 @@ impl ResidualSource<'_> {
                         engine.widths().offsets,
                     )
                     .ok()?;
-                    if info.fractal_heap_address.is_some()
-                        || info.btree_name_index_address.is_some()
-                        || info
-                            .btree_creation_order_address
-                            .is_some_and(|address| address.is_some())
+                    if info.fractal_heap_address().is_some()
+                        || info.btree_name_index_address().is_some()
+                        || info.creation_order_index().defined_address().is_some()
                     {
                         return None;
                     }

@@ -2214,12 +2214,7 @@ impl FileInner {
     /// Propagates source, address, and parsing errors.
     fn group_link_storage(&self, header: &ObjectHeader) -> Result<GroupLinkStorage, Error> {
         let widths = self.widths;
-        let mut info = LinkInfoMessage {
-            max_creation_order: None,
-            fractal_heap_address: None,
-            btree_name_index_address: None,
-            btree_creation_order_address: None,
-        };
+        let compact = LinkInfoMessage::compact(widths.offsets, None, false);
         if let Some(message) = header
             .messages
             .iter()
@@ -2256,35 +2251,26 @@ impl FileInner {
                     }
                 })
                 .map_err(repack_link_error)?;
-            return GroupLinkStorage::new(&info, links, widths.offsets).map_err(repack_link_error);
+            return GroupLinkStorage::new(&compact, links).map_err(repack_link_error);
         }
         let mut links = Vec::new();
-        let mut has_info = false;
+        let mut storage = None;
         for message in &header.messages {
             match message.msg_type {
                 MessageType::LINK_INFO => {
-                    if has_info {
+                    if storage.is_some() {
                         return Err(Error::RepackUnsupported(
                             "a group has repeated link-info messages".into(),
                         ));
                     }
-                    has_info = true;
                     let bytes = self.message_body(message)?;
-                    let parsed = LinkInfoMessage::parse_with_offset_width(&bytes, widths.offsets)?;
-                    let bytes = if header.version == PADDED_HEADER_VERSION {
-                        bytes
-                            .get(..parsed.serialize(widths.offsets)?.len())
-                            .ok_or_else(|| {
-                                Error::RepackUnsupported(
-                                    "a group's link-info message is truncated".into(),
-                                )
-                            })?
-                    } else {
-                        &bytes
-                    };
-                    info = GroupLinkStorage::parse(bytes, Vec::new(), widths.offsets)
-                        .map_err(repack_link_error)?
-                        .info();
+                    let info = LinkInfoMessage::parse_with_offset_width(&bytes, widths.offsets)
+                        .map_err(|error| repack_link_error(error.into()))?;
+                    if header.version != PADDED_HEADER_VERSION && info.encoded_size() != bytes.len()
+                    {
+                        return Err(repack_link_error(LinkStorageError::TrailingBytes));
+                    }
+                    storage = Some(GroupLinkStorage::from_info(&info).map_err(repack_link_error)?);
                 }
                 MessageType::LINK => {
                     let bytes = self.message_body(message)?;
@@ -2299,7 +2285,12 @@ impl FileInner {
                 _ => {}
             }
         }
-        if let Some(heap) = info.fractal_heap_address {
+        let storage = match storage {
+            Some(storage) => storage,
+            None => GroupLinkStorage::from_info(&compact).map_err(repack_link_error)?,
+        };
+        let info = storage.info();
+        if let Some(heap) = info.fractal_heap_address() {
             if !links.is_empty() {
                 return Err(Error::RepackUnsupported(
                     "a group mixes compact and dense links".into(),
@@ -2331,7 +2322,7 @@ impl FileInner {
                 }
             }
         }
-        GroupLinkStorage::new(&info, links, widths.offsets).map_err(repack_link_error)
+        storage.with_links(links).map_err(repack_link_error)
     }
 
     /// Returns the absolute file address of the object header `entry` names.

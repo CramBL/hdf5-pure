@@ -147,14 +147,7 @@ fn libhdf5_reads_independently_placed_dense_attributes(
     header.add_message(MessageType::GROUP_INFO, vec![0, 0]);
     header.add_message(
         MessageType::LINK_INFO,
-        LinkInfoMessage {
-            max_creation_order: None,
-            fractal_heap_address: None,
-            btree_name_index_address: None,
-            btree_creation_order_address: None,
-        }
-        .serialize(superblock.offset_size)
-        .unwrap(),
+        LinkInfoMessage::compact(superblock.offset_size, None, false).to_bytes(),
     );
     superblock.root_group_address = StoredAddress::new(bytes.len() as u64 - userblock);
     bytes.extend(header.serialize().unwrap());

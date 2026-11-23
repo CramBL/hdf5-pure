@@ -320,14 +320,8 @@ fn incomplete_attribute_liveness_preserves_exclusive_dataset_overwrite_retiremen
         vec![
             Message::new(
                 MessageType::LINK_INFO,
-                &format::LinkInfoMessage {
-                    max_creation_order: None,
-                    fractal_heap_address: None,
-                    btree_name_index_address: None,
-                    btree_creation_order_address: None,
-                }
-                .serialize(format::OffsetWidth::Eight)
-                .unwrap(),
+                &format::LinkInfoMessage::compact(format::OffsetWidth::Eight, None, false)
+                    .to_bytes(),
             ),
             attribute("changed", attribute_collection),
         ],

@@ -1,4 +1,5 @@
 use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_format::__private::LinkCreationOrderIndex;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 
 use ::test_util;
@@ -317,12 +318,14 @@ fn place_link_name_index(file: &mut [u8], header_at: usize, root_at: usize) -> V
 fn dense_group_storage_walk_does_not_infer_an_index_from_tracking() {
     let mut file = vec![0; 0x800];
     let expected = place_link_name_index(&mut file, 0x100, 0x200);
-    let info = LinkInfoMessage {
-        max_creation_order: Some(2),
-        fractal_heap_address: Some(StoredAddress::new(0x80)),
-        btree_name_index_address: Some(StoredAddress::new(0x100)),
-        btree_creation_order_address: None,
-    };
+    let info = LinkInfoMessage::new(
+        crate::file_writer::OFFSET_WIDTH,
+        Some(2),
+        Some(StoredAddress::new(0x80)),
+        Some(StoredAddress::new(0x100)),
+        LinkCreationOrderIndex::Absent,
+    )
+    .unwrap();
 
     let extents = collect_dense_group_index_storage_extents(
         &source::zero_base_source(&BytesSource::new(file)),
@@ -338,12 +341,14 @@ fn dense_group_storage_walk_does_not_infer_an_index_from_tracking() {
 fn dense_group_storage_walk_omits_an_undefined_indexed_creation_order_tree() {
     let mut file = vec![0; 0x800];
     let expected = place_link_name_index(&mut file, 0x100, 0x200);
-    let info = LinkInfoMessage {
-        max_creation_order: Some(2),
-        fractal_heap_address: Some(StoredAddress::new(0x80)),
-        btree_name_index_address: Some(StoredAddress::new(0x100)),
-        btree_creation_order_address: Some(None),
-    };
+    let info = LinkInfoMessage::new(
+        crate::file_writer::OFFSET_WIDTH,
+        Some(2),
+        Some(StoredAddress::new(0x80)),
+        Some(StoredAddress::new(0x100)),
+        LinkCreationOrderIndex::Undefined,
+    )
+    .unwrap();
 
     let extents = collect_dense_group_index_storage_extents(
         &source::zero_base_source(&BytesSource::new(file)),

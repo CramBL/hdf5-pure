@@ -13,6 +13,7 @@ use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
+use crate::link_info::LinkInfoMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::metadata_source;
@@ -642,6 +643,41 @@ impl MessageRecordLayout {
         let body_len = body.len() as u16;
         self.write_record_prefix(buf, msg_type, flags, creation_index, body_len);
         buf.extend_from_slice(body);
+    }
+
+    /// Appends a Link Info record with empty flags and a creation index of zero when tracked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AllocationFailed`] if reserving space fails. Leaves the buffer's
+    /// contents unchanged on error.
+    pub fn write_link_info(
+        self,
+        buf: &mut Vec<u8>,
+        info: &LinkInfoMessage,
+    ) -> Result<(), FormatError> {
+        let length = self.prefix_len() + info.encoded_size();
+        buf.try_reserve(length)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: length,
+                source,
+            })?;
+        self.append_link_info(buf, info);
+        Ok(())
+    }
+
+    /// Appends a Link Info record to a buffer with capacity for its prefix and body.
+    pub(crate) fn append_link_info(self, buf: &mut Vec<u8>, info: &LinkInfoMessage) {
+        let body_len = info.body_size();
+        let type_byte = const {
+            let [low, high] = MessageType::LINK_INFO.to_u16().to_le_bytes();
+            assert!(high == 0);
+            low
+        };
+        self.write_record_prefix(buf, type_byte, MessageFlags::NONE, 0, u16::from(body_len));
+        let start = buf.len();
+        buf.resize(start + usize::from(body_len), 0);
+        info.write_body(&mut buf[start..]);
     }
 
     /// Returns a message record of `msg_type` and `body` with no flag set, and with a creation

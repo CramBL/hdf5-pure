@@ -126,7 +126,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
     let info = LinkInfoMessage::parse_with_offset_width(&message.data, widths.offsets).unwrap();
     let heap = FractalHeapHeader::parse(
         image,
-        usize::try_from(info.fractal_heap_address.unwrap().get()).unwrap(),
+        usize::try_from(info.fractal_heap_address().unwrap().get()).unwrap(),
         widths.offsets.get(),
         widths.lengths.get(),
     )
@@ -170,7 +170,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
     assert_eq!(heap.huge_objects_size, huge_bytes);
     let name_index = BTreeV2Header::parse_with_widths(
         image,
-        usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+        usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
         widths,
     )
     .unwrap();

@@ -342,7 +342,7 @@ fn tracked_multilevel_indexes_preserve_symbolic_links_and_creation_order(
         .filter(|link| link.name() != b"hard")
         .cloned()
         .collect::<Vec<_>>();
-    let next = before.links.info().max_creation_order.unwrap();
+    let next = before.links.info().max_creation_order().unwrap();
     let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     let group = file.group(&group_path).unwrap();
     group.delete("hard").unwrap();
@@ -407,13 +407,13 @@ fn tracked_multilevel_indexes_preserve_symbolic_links_and_creation_order(
     let info = after.links.info();
     let name_index = BTreeV2Header::parse(
         &bytes,
-        512 + usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+        512 + usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
         8,
         8,
     )
     .unwrap();
     assert!(name_index.depth >= 2, "{name_index:?}");
-    if let Some(Some(address)) = info.btree_creation_order_address {
+    if let Some(address) = info.creation_order_index().defined_address() {
         let index =
             BTreeV2Header::parse(&bytes, 512 + usize::try_from(address.get()).unwrap(), 8, 8)
                 .unwrap();
@@ -448,8 +448,8 @@ fn exhausted_dense_creation_counters_reject_the_batch_before_writing(
         if record.msg_type == MessageType::LINK_INFO {
             let mut info =
                 LinkInfoMessage::parse_with_offset_width(record.body, OffsetWidth::Eight).unwrap();
-            info.max_creation_order = Some(u64::try_from(i64::MAX).unwrap());
-            let serialized = info.serialize(OffsetWidth::Eight).unwrap();
+            info.set_max_creation_order(Some(u64::try_from(i64::MAX).unwrap()));
+            let serialized = info.to_bytes();
             let range = record.body_range;
             bytes[range].copy_from_slice(&serialized);
             replaced = true;
@@ -507,13 +507,13 @@ fn assert_group(
     let inspection = group_inspection::inspect_group_links(path, group_path, source_only).unwrap();
     assert_eq!(indexes(&inspection.links), expected);
     let info = inspection.links.info();
-    assert_eq!(info.max_creation_order, Some(next));
-    assert_eq!(info.fractal_heap_address.is_some(), dense);
-    assert_eq!(info.btree_name_index_address.is_some(), dense);
+    assert_eq!(info.max_creation_order(), Some(next));
+    assert_eq!(info.fractal_heap_address().is_some(), dense);
+    assert_eq!(info.btree_name_index_address().is_some(), dense);
+    assert_eq!(info.indexes_creation_order(), indexing == Indexing::Yes);
     assert_eq!(
-        info.btree_creation_order_address
-            .map(|address| address.is_some()),
-        (indexing == Indexing::Yes).then_some(dense)
+        info.creation_order_index().defined_address().is_some(),
+        indexing == Indexing::Yes && dense
     );
     creation_order::assert_link_group(path, group_path, expected, next, indexing, dense);
 }

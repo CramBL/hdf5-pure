@@ -434,7 +434,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
         })
         .expect("a dense group has a Link Info message");
     let heap_address = link_info
-        .fractal_heap_address
+        .fractal_heap_address()
         .expect("a dense group's Link Info message stores its heap");
     let link_storage = session
         .dense_group_storage_spans(&header_spans, None, &link_info)

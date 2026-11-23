@@ -107,7 +107,7 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
         maximum_object,
     );
     let expected = storage.links().to_vec();
-    let expected_counter = storage.info().max_creation_order;
+    let expected_counter = storage.info().max_creation_order();
     let plan = DenseLinkPlan::new(storage, superblock.length_size).unwrap();
     let stored = StoredAddress::new(bytes.len() as u64 - userblock);
     let info = if independently_placed {
@@ -142,7 +142,7 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
             emitted.push(stored);
         }
         assert_eq!(emitted, addresses);
-        placement.link_info().clone()
+        *placement.link_info()
     } else {
         let image = plan.serialize(stored).unwrap();
         assert_eq!(image.bytes.len() as u64, plan.serialized_len());
@@ -150,10 +150,7 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
         image.info
     };
     let mut writer = ObjectHeaderWriter::new();
-    writer.add_message(
-        MessageType::LINK_INFO,
-        info.serialize(superblock.offset_size).unwrap(),
-    );
+    writer.add_message(MessageType::LINK_INFO, info.to_bytes());
     writer.add_message(MessageType::GROUP_INFO, GROUP_INFO.to_vec());
     let new_root = bytes.len() as u64 - userblock;
     bytes.extend_from_slice(&writer.serialize().unwrap());
@@ -281,9 +278,9 @@ fn rebuilt_libhdf5_dense_links_preserve_metadata_and_creation_policy(
         .find(|message| message.msg_type == MessageType::LINK_INFO)
         .unwrap();
     let info = LinkInfoMessage::parse_with_offset_width(&info.data, offsets).unwrap();
-    assert!(info.fractal_heap_address.is_some());
+    assert!(info.fractal_heap_address().is_some());
     let links = dense_links(&bytes, &info, offsets, lengths);
-    let storage = GroupLinkStorage::new(&info, links.clone(), offsets).unwrap();
+    let storage = GroupLinkStorage::new(&info, links.clone()).unwrap();
     let plan = DenseLinkPlan::new(storage, lengths).unwrap();
     let image = if independently_placed {
         let mut cursor = 0;
@@ -304,7 +301,7 @@ fn rebuilt_libhdf5_dense_links_preserve_metadata_and_creation_policy(
         }
         format::DenseLinkImage {
             bytes,
-            info: placement.link_info().clone(),
+            info: *placement.link_info(),
         }
     } else {
         plan.serialize(StoredAddress::new(0)).unwrap()
@@ -314,10 +311,10 @@ fn rebuilt_libhdf5_dense_links_preserve_metadata_and_creation_policy(
     rebuilt.sort_by(|a, b| a.name().cmp(b.name()));
     original.sort_by(|a, b| a.name().cmp(b.name()));
     assert_eq!(rebuilt, original);
-    assert_eq!(image.info.max_creation_order, info.max_creation_order);
+    assert_eq!(image.info.max_creation_order(), info.max_creation_order());
     assert_eq!(
-        image.info.btree_creation_order_address.is_some(),
-        info.btree_creation_order_address.is_some()
+        image.info.indexes_creation_order(),
+        info.indexes_creation_order()
     );
 }
 
@@ -364,7 +361,7 @@ fn libhdf5_reads_independently_placed_btree_nodes(
         .unwrap();
     let info =
         LinkInfoMessage::parse_with_offset_width(&info.data, superblock.offset_size).unwrap();
-    let at = usize::try_from(info.btree_name_index_address.unwrap().get() + userblock).unwrap();
+    let at = usize::try_from(info.btree_name_index_address().unwrap().get() + userblock).unwrap();
     let header = BTreeV2Header::parse(
         &bytes,
         at,
@@ -504,12 +501,11 @@ fn planned_storage(
     maximum_object: bool,
 ) -> GroupLinkStorage {
     let tracked = policy != LinkCreationOrder::Untracked;
-    let info = LinkInfoMessage {
-        max_creation_order: tracked.then_some(CREATION_BASE + count as u64 * 3 + 7),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: (policy == LinkCreationOrder::Indexed).then_some(None),
-    };
+    let info = LinkInfoMessage::compact(
+        offsets,
+        tracked.then_some(CREATION_BASE + count as u64 * 3 + 7),
+        policy == LinkCreationOrder::Indexed,
+    );
     let links = (0..count)
         .rev()
         .map(|index| {
@@ -560,7 +556,7 @@ fn planned_storage(
             link
         })
         .collect();
-    GroupLinkStorage::new(&info, links, offsets).unwrap()
+    GroupLinkStorage::new(&info, links).unwrap()
 }
 
 fn dense_links(
@@ -569,7 +565,7 @@ fn dense_links(
     offsets: OffsetWidth,
     lengths: LengthWidth,
 ) -> Vec<OwnedLink> {
-    let owner = info.fractal_heap_address.unwrap();
+    let owner = info.fractal_heap_address().unwrap();
     let header = FractalHeapHeader::parse(
         bytes,
         usize::try_from(owner.get()).unwrap(),
@@ -611,7 +607,7 @@ fn dense_links(
     }
     let index = BTreeV2Header::parse(
         bytes,
-        usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+        usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
         offsets.get(),
         lengths.get(),
     )

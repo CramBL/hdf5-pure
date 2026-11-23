@@ -171,14 +171,7 @@ fn hard_link_messages_match_recorded_figures(profiler: &heapscope::Profiler) {
         expected.push((name.into_bytes(), StoredAddress::new(address)));
     }
 
-    let info_bytes = LinkInfoMessage {
-        max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    }
-    .serialize(OffsetWidth::Eight)
-    .unwrap();
+    let info_bytes = LinkInfoMessage::compact(OffsetWidth::Eight, None, false).to_bytes();
 
     let (storage, measured) = allocation::measure_with_profiler(
         profiler,

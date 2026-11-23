@@ -76,9 +76,7 @@ fn group_storage_excludes_children_and_aliases_prevent_retirement() {
     let owner = fixture.append_header(vec![
         Message::new(
             MessageType::LINK_INFO,
-            &file_writer::COMPACT_LINK_INFO
-                .serialize(file_writer::OFFSET_WIDTH)
-                .unwrap(),
+            &crate::file_writer::compact_link_info(file_writer::OFFSET_WIDTH).to_bytes(),
         ),
         Message::new(MessageType::GROUP_INFO, &group::GROUP_INFO_BODY),
         global_heap_fixture::hard_link("value", value),
