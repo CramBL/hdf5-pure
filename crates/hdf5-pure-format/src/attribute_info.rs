@@ -504,6 +504,16 @@ impl fmt::Display for AttributeInfoOutputTooSmall {
 
 impl core::error::Error for AttributeInfoOutputTooSmall {}
 
+impl From<AttributeInfoOutputTooSmall> for FormatError {
+    /// Reports a short destination as [`FormatError::UnexpectedEof`], preserving both lengths.
+    fn from(error: AttributeInfoOutputTooSmall) -> Self {
+        Self::UnexpectedEof {
+            expected: error.required,
+            available: error.available,
+        }
+    }
+}
+
 /// The size of either prefix field in "The Attribute Info Message" of the
 /// [format specification, version 4.0][spec].
 ///

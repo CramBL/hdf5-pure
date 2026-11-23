@@ -30,6 +30,7 @@ pub use reference_count::ObjectReferenceCountUpdate;
 pub use reference_count::ObjectReferenceCountUpdateError;
 
 pub use v2::AttributePhaseChange;
+pub use v2::MessageBody;
 pub use v2::MessageRecord;
 pub use v2::MessageRecordLayout;
 pub use v2::OBJECT_HEADER_PREFIX_MAX_LEN;
@@ -40,6 +41,7 @@ pub use v2::ObjectHeaderPrefix;
 pub use v2::ObjectTimes;
 pub use v2::ParsedObjectHeaderPrefix;
 pub use v2::PreparedLinkRecord;
+pub use v2::PreparedMessageRecord;
 pub use v2::RecordSplice;
 pub use v2::continuation_block_messages;
 

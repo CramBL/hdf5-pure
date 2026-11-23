@@ -392,6 +392,16 @@ impl fmt::Display for FilterPipelineOutputTooSmall {
 
 impl Error for FilterPipelineOutputTooSmall {}
 
+impl From<FilterPipelineOutputTooSmall> for FormatError {
+    /// Reports a short destination as [`FormatError::UnexpectedEof`], preserving both lengths.
+    fn from(error: FilterPipelineOutputTooSmall) -> Self {
+        Self::UnexpectedEof {
+            expected: error.required,
+            available: error.available,
+        }
+    }
+}
+
 fn retain_extent(encoded_len: usize) -> u32 {
     #[expect(
         clippy::cast_possible_truncation,
