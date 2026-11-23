@@ -7,6 +7,7 @@ use hdf5_pure_format::__private::ObjectReferenceCountIssue;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 
 use crate::error::FormatError;
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 
 use super::OhRegion;
@@ -84,7 +85,8 @@ impl HeaderCount<'_> {
     /// # Errors
     ///
     /// Returns [`HeaderCountError::Framing`] with [`FormatError::Internal`] if the checked count
-    /// location lies outside the borrowed region.
+    /// location lies outside the borrowed region, or with [`FormatError::AllocationFailed`]
+    /// if allocating an encoded count record fails.
     pub(in crate::edit) fn set(self, count: u32) -> Result<(), HeaderCountError> {
         let Self {
             region,
@@ -105,7 +107,13 @@ impl HeaderCount<'_> {
                 }
                 let record = region
                     .layout()
-                    .record(MessageType::OBJECT_REFERENCE_COUNT, &body);
+                    .prepare_raw_record(
+                        MessageType::OBJECT_REFERENCE_COUNT,
+                        MessageFlags::NONE,
+                        0,
+                        &body,
+                    )?
+                    .to_bytes()?;
                 region.bytes.splice(position..position, record);
             }
             CountPlace::Record(range) => {
@@ -135,7 +143,7 @@ impl HeaderCount<'_> {
 pub(in crate::edit) enum HeaderCountError {
     /// Multiple count messages in the record region.
     Ambiguous,
-    /// Invalid record framing or an inconsistent checked local count location.
+    /// Invalid record framing, an inconsistent count location, or a count record encoding error.
     Framing(FormatError),
     /// A count record that cannot be decoded as a supported inline message.
     Unsupported(ObjectReferenceCountIssue),

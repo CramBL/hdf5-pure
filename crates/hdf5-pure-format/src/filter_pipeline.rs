@@ -297,7 +297,7 @@ impl<'a> PreparedFilterPipeline<'a> {
     /// # Panics
     ///
     /// Panics if `body` is shorter than [`Self::encoded_size`].
-    pub(crate) fn write_body(&self, body: &mut [u8]) {
+    fn write_body(&self, body: &mut [u8]) {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the parsed or prepared filter count is at most 32"

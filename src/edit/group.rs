@@ -11,7 +11,6 @@ use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
-use hdf5_pure_format::__private::PreparedLinkRecord;
 use hdf5_pure_format::__private::{
     LinkMessageView, LinkProjectionError, LinkTargetView, LinkWireError,
 };
@@ -145,14 +144,16 @@ impl WriteEngine {
                 }
                 if m.flags.is_shared() {
                     // Re-encode the reference for the version 2 header before writing its record.
-                    region.push_shared(
+                    region.push_raw_record(
                         MessageType::ATTRIBUTE,
+                        MessageFlags::SHARED,
+                        0,
                         &object_header::modernize_shared_reference(&m.data, self.context.widths())?,
-                    );
+                    )?;
                     continue;
                 }
                 // Preserve the attribute body in the new record layout.
-                region.push(MessageType::ATTRIBUTE, &m.data);
+                region.push_raw_record(MessageType::ATTRIBUTE, MessageFlags::NONE, 0, &m.data)?;
             }
         }
         region.preserve_v1_count(&oh)?;
@@ -212,13 +213,14 @@ impl WriteEngine {
             let link = link
                 .prepare(widths.offsets)
                 .map_err(group_links::storage_error)?;
-            let record = PreparedLinkRecord::new(link).map_err(|error| match error {
-                FormatError::ObjectHeaderMessageTooLarge { .. } => Error::EditUnsupported(
-                    "a version 1 group's link is too large to convert in place",
-                ),
-                error => error.into(),
-            })?;
-            region.push_link_record(&record)?;
+            region
+                .push_message(link, MessageFlags::NONE, 0)
+                .map_err(|error| match error {
+                    FormatError::ObjectHeaderMessageTooLarge { .. } => Error::EditUnsupported(
+                        "a version 1 group's link is too large to convert in place",
+                    ),
+                    error => error.into(),
+                })?;
         }
         Ok(region)
     }
@@ -264,7 +266,7 @@ impl GroupInfo {
                 let link = link
                     .prepare(region.widths().offsets)
                     .map_err(group_links::storage_error)?;
-                region.push_link_record(&PreparedLinkRecord::new(link)?)?;
+                region.push_message(link, MessageFlags::NONE, 0)?;
             }
         }
         Ok((region, names))
@@ -416,17 +418,22 @@ fn dense_link_error(error: DenseLinkPlanError) -> Error {
 /// version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
+#[cfg(test)]
 pub(super) const GROUP_INFO_BODY: [u8; 2] = GroupInfoMessage::DEFAULT_BODY;
 
 /// Creates an empty compact-link region with Link Info and Group Info messages.
 ///
 /// # Errors
 ///
-/// Propagates errors from [`OhRegion::push_link_info`].
+/// Propagates errors from [`OhRegion::push_message`].
 pub(super) fn fresh_group_region(widths: FormatWidths) -> Result<OhRegion, FormatError> {
     let mut region = OhRegion::empty(widths, ObjectHeaderPrefix::PLAIN);
-    region.push_link_info(&crate::file_writer::compact_link_info(widths.offsets))?;
-    region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
+    region.push_message(
+        crate::file_writer::compact_link_info(widths.offsets),
+        MessageFlags::NONE,
+        0,
+    )?;
+    region.push_message(GroupInfoMessage::DEFAULT, MessageFlags::NONE, 0)?;
     Ok(region)
 }
 
@@ -459,18 +466,11 @@ pub(super) fn link_message_region(
         }
         if message.msg_type == MessageType::FILTER_PIPELINE {
             let pipeline = filter_pipeline::parse_filter_pipeline(&message.data)?;
-            region.push_filter_pipeline(message.flags == MessageFlags::CONSTANT, &pipeline)?;
+            region.push_message(pipeline.prepare(), message.flags, 0)?;
             continue;
         }
         let body = unpadded_body(message, widths.offsets)?;
-        // The unpadded body fits the two-byte version 2 size field because the padded body fits
-        // the two-byte version 1 size field (section `subsubsec_fmt4_dataobject_hdr_prefix_one`,
-        // version 4.0).
-        let record =
-            region
-                .layout()
-                .record_with_creation_index(message.msg_type, message.flags, 0, body);
-        region.push_bytes(&record);
+        region.push_raw_record(message.msg_type, message.flags, 0, body)?;
     }
     ensure_group_info(&mut region)?;
     Ok(region)
@@ -546,7 +546,7 @@ pub(super) fn ensure_group_info(region: &mut OhRegion) -> Result<(), Error> {
         }
         p = body_end;
     }
-    region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
+    region.push_message(GroupInfoMessage::DEFAULT, MessageFlags::NONE, 0)?;
     Ok(())
 }
 
@@ -795,9 +795,7 @@ impl OhRegion {
             .into());
         }
         let mut bytes = Vec::new();
-        splice.replace_body_with(&mut bytes, info.encoded_size(), |body| {
-            info.write_into(body).map(|_| ())
-        })?;
+        splice.replace_typed_body_into(&mut bytes, info)?;
         *self = self.with_bytes(bytes);
         Ok(())
     }
@@ -957,16 +955,21 @@ mod tests {
         let engine = edit_test_util::open_engine(&path);
         let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
         region
-            .push_link_info(&file_writer::compact_link_info(file_writer::OFFSET_WIDTH))
+            .push_message(
+                file_writer::compact_link_info(file_writer::OFFSET_WIDTH),
+                MessageFlags::NONE,
+                0,
+            )
             .unwrap();
-        region.push(
+        region.push_fixture_message(
             MessageType::GROUP_INFO,
             &LinkPhaseChange::AlwaysDense.group_info().serialize(),
         );
         region
             .push_link("child", StoredAddress::new(100), None)
             .unwrap();
-        let record = region.layout().record_with_creation_index(
+        let record = edit_test_util::fixture_record(
+            region.layout(),
             MessageType::FILTER_PIPELINE,
             flags,
             0,

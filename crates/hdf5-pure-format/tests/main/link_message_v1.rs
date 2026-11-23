@@ -2,8 +2,9 @@ use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{CharacterSet, FormatError, OffsetWidth, StoredAddress};
 use hdf5_pure_format::__private::{
     LinkMessage, LinkMessageV1, LinkMessageView, LinkName, LinkOutputTooSmall, LinkProjectionError,
-    LinkStorageError, LinkTarget, LinkTargetV1, LinkTargetView, LinkWireError, MessageRecordLayout,
-    OwnedLink, PreparedLink, PreparedLinkRecord, UintWidth, UserLinkKind, UserLinkValue,
+    LinkStorageError, LinkTarget, LinkTargetV1, LinkTargetView, LinkWireError,
+    MessageFlags as RecordFlags, MessageRecordLayout, OwnedLink, PreparedLink, UintWidth,
+    UserLinkKind, UserLinkValue,
 };
 use rstest::rstest;
 use test_util::link_message::{HardLink, SymbolicLink, UserDefinedLink};
@@ -687,7 +688,9 @@ fn prepared_link_records_reject_bodies_larger_than_the_record_size_field() {
     let view = LinkMessageView::parse_prefix(&bytes, OffsetWidth::Two).unwrap();
     let link = view.prepare(OffsetWidth::Two).unwrap();
     assert_eq!(
-        PreparedLinkRecord::new(link).unwrap_err(),
+        MessageRecordLayout::PLAIN
+            .prepare_record(RecordFlags::NONE, 0, link)
+            .unwrap_err(),
         FormatError::ObjectHeaderMessageTooLarge {
             message_type: 0x0006,
             size: 65_542,
@@ -701,11 +704,16 @@ fn prepared_link_records_reject_bodies_larger_than_the_record_size_field() {
 fn prepared_link_records_append_after_existing_bytes(#[case] flags: HeaderFlags) {
     let body = HardLink::new("child", 0x1234).build(Widths::new(2, 8));
     let link = LinkMessageView::parse(&body, OffsetWidth::Two).unwrap();
-    let record = PreparedLinkRecord::new(link.prepare(OffsetWidth::Two).unwrap()).unwrap();
-    let mut output = vec![0x3e; 7];
-    record
-        .append_to(MessageRecordLayout::from_header_flags(flags.0), &mut output)
+    let layout = MessageRecordLayout::from_header_flags(flags.0);
+    let record = layout
+        .prepare_record(
+            RecordFlags::NONE,
+            0,
+            link.prepare(OffsetWidth::Two).unwrap(),
+        )
         .unwrap();
+    let mut output = vec![0x3e; 7];
+    record.append_to(&mut output).unwrap();
 
     let mut expected = vec![0x3e; 7];
     expected.extend_from_slice(&v2::message_record(

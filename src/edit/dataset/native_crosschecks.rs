@@ -18,6 +18,7 @@ use crate::edit::object_header;
 use crate::error::Error;
 use crate::file_writer;
 use crate::link_message::{LinkMessage, LinkTarget};
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::ObjectId;
 use crate::object_path::LinkNameBuf;
@@ -505,12 +506,14 @@ fn staged_variable_length_storage_is_native_readable_at_independent_widths(
     )
     .unwrap();
     let dataset_addr = append_checked(&mut bytes, widths, addresses, &header);
-    root.push(
-        MessageType::LINK,
+    root.push_message(
         &file_writer::make_link("values", dataset_addr)
-            .serialize(offsets)
+            .prepare(offsets)
             .unwrap(),
-    );
+        MessageFlags::NONE,
+        0,
+    )
+    .unwrap();
     let root_header = object_header::build_v2_object_header(&root).unwrap();
     let mut block = located.superblock;
     block.root_group_address = append_checked(&mut bytes, widths, addresses, &root_header);

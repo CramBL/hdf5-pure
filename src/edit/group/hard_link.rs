@@ -2,14 +2,13 @@
 
 use core::ops::Range;
 
-use hdf5_pure_format::__private::{MessageRecordLayout, PreparedLink, PreparedLinkRecord};
+use hdf5_pure_format::__private::{MessageFlags, MessageRecordLayout, PreparedLink};
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::datatype::CharacterSet;
 use crate::error::Error;
 use crate::error::FormatError;
-use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::link_message::LinkMessage;
 use crate::object_path::LinkNameBuf;
 use crate::width::OffsetWidth;
@@ -35,8 +34,11 @@ impl PreparedHardLinkRecord {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the encoded body exceeds
-    /// [`OBJECT_HEADER_MESSAGE_MAX`]. Returns [`Error::Format`] if the encoded target-address
-    /// range cannot be read.
+    /// [`crate::error::OBJECT_HEADER_MESSAGE_MAX`]. Returns [`Error::Format`] with
+    /// [`FormatError::Internal`] if the prepared record has no target address range. Propagates
+    /// errors from [`PreparedLink::hard`] and [owned record encoding].
+    ///
+    /// [owned record encoding]: hdf5_pure_format::__private::PreparedMessageRecord::to_bytes
     pub(in crate::edit) fn new(
         offsets: OffsetWidth,
         layout: MessageRecordLayout,
@@ -50,18 +52,21 @@ impl PreparedHardLinkRecord {
             creation_order,
             CharacterSet::Ascii,
         )?;
-        if link.encoded_size() > OBJECT_HEADER_MESSAGE_MAX {
-            return Err(Error::EditUnsupported(
-                "a new hard link message exceeds the object-header message size limit",
-            ));
-        }
-        let record = PreparedLinkRecord::new(link)?;
-        let target = record.hard_link_address_range(layout).ok_or_else(|| {
+        let record =
+            layout
+                .prepare_record(MessageFlags::NONE, 0, link)
+                .map_err(|error| match error {
+                    FormatError::ObjectHeaderMessageTooLarge { .. } => Error::EditUnsupported(
+                        "a new hard link message exceeds the object-header message size limit",
+                    ),
+                    error => error.into(),
+                })?;
+        let target = record.hard_link_address_range().ok_or_else(|| {
             FormatError::Internal("a prepared hard link has no target address".into())
         })?;
         Ok(Self {
             offsets,
-            record: record.to_bytes(layout),
+            record: record.to_bytes()?,
             target,
             layout,
         })

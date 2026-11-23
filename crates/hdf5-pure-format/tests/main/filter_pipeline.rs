@@ -1,3 +1,4 @@
+use hdf5_pure_format::__private::MessageFlags;
 use hdf5_pure_format::__private::{
     FilterDescription, FilterPipeline, FilterPipelineError, FilterPipelineOutputTooSmall,
     MessageRecordLayout, PreparedFilterPipeline,
@@ -376,7 +377,8 @@ fn record_writer_preserves_the_destination_when_the_pipeline_body_exceeds_its_li
 
     assert_eq!(
         MessageRecordLayout::PLAIN
-            .write_filter_pipeline(&mut destination, false, &pipeline)
+            .prepare_record(MessageFlags::NONE, 0, pipeline.prepare())
+            .and_then(|record| record.append_to(&mut destination))
             .unwrap_err(),
         FormatError::ObjectHeaderMessageTooLarge {
             message_type: FixtureMessageType::FILTER_PIPELINE.0,

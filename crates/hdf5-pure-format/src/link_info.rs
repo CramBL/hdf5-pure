@@ -258,12 +258,12 @@ impl LinkInfoMessage {
     }
 
     /// Returns the encoded body length for the message record's length field.
-    pub(crate) fn body_size(&self) -> u8 {
+    fn body_size(&self) -> u8 {
         body_size(self.flags, self.offset_width)
     }
 
     /// Writes the body into a slice of exactly [`Self::encoded_size`] bytes.
-    pub(crate) fn write_body(&self, output: &mut [u8]) {
+    fn write_body(&self, output: &mut [u8]) {
         let (prefix, body) = output.split_at_mut(usize::from(PREFIX_SIZE));
         prefix.copy_from_slice(&[LINK_INFO_VERSION, self.flags]);
         let addresses = if let Some(maximum) = self.max_creation_order() {
