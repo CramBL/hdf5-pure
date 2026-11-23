@@ -2,11 +2,12 @@ use core::cmp::Ordering;
 use core::ops::Range;
 use std::vec;
 
+use hdf5_pure_format::__private::{LinkMessageView, LinkTargetView};
+
 use crate::address::StoredAddress;
 use crate::edit::object_header::OhRegion;
 use crate::error::Error;
 use crate::error::FormatError;
-use crate::link_message::LinkMessage;
 use crate::message_type::MessageType;
 
 /// Hard-link address fields prepared for one borrowed working header.
@@ -26,7 +27,7 @@ impl<'a> LinkPatches<'a> {
     ///
     /// Defers patch failures to [`Self::patch_next`]. Empty requests skip the scan, and a
     /// single request uses inline storage. Names are compared with replacement characters for
-    /// invalid UTF-8, as in [`LinkMessage::parse`].
+    /// invalid UTF-8, as in [`LinkMessage::parse`](crate::link_message::LinkMessage::parse).
     pub(in crate::edit) fn new<'name>(
         region: &'a mut OhRegion,
         names: impl IntoIterator<Item = &'name str>,
@@ -90,26 +91,20 @@ impl<'a> LinkPatches<'a> {
                 }
             };
             if kind == MessageType::LINK
-                && let Ok(name) =
-                    LinkMessage::parsed_name_bytes(&region[body..end], region.widths().offsets)
+                && let Ok(link) =
+                    LinkMessageView::parse_prefix(&region[body..end], region.widths().offsets)
+                && !matches!(link.target(), LinkTargetView::UserDefined { .. })
             {
-                let name = LossyName(name);
+                let name = LossyName(link.name_bytes());
                 let first = requests.partition_point(|request| request.0 < name);
                 let last = requests.partition_point(|request| request.0 <= name);
                 if first != last && matches!(fields[requests[first].1], PatchField::Missing) {
-                    let field = match LinkMessage::hard_link_address_range(
-                        &region[body..end],
-                        region.widths().offsets,
-                    ) {
-                        Ok(Some(address)) if body + address.end == end => {
+                    let field = match link.hard_link_address_range() {
+                        Some(address) if body + address.end == end => {
                             PatchField::Address(body + address.start..end)
                         }
-                        Ok(Some(_)) => PatchField::Trailing,
-                        Ok(None) => PatchField::Symbolic,
-                        Err(_) => {
-                            start = end;
-                            continue;
-                        }
+                        Some(_) => PatchField::Trailing,
+                        None => PatchField::Symbolic,
                     };
                     for &(_, index) in &requests[first..last] {
                         if matches!(fields[index], PatchField::Missing) {

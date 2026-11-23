@@ -2162,20 +2162,30 @@ impl FileInner {
     ///
     /// Returns [`Error::Format`] for malformed group metadata, a non-group header, address
     /// resolution errors, or source metadata read errors.
-    fn group_children(&self, hdr: &ObjectHeader) -> Result<Vec<GroupEntry>, Error> {
+    fn group_children(
+        &self,
+        hdr: &ObjectHeader,
+        projection: group_v2::GroupEntryProjection,
+    ) -> Result<Vec<GroupEntry>, Error> {
         let k = group_v1::group_leaf_node_k(&self.superblock);
         self.with_opened_source(|source| {
             let physical = PhysicalSource::new(source);
             match physical.resident() {
-                Some(bytes) => {
-                    group_v2::resolve_group_entries(bytes, self.access_mode, hdr, self.widths, k)
-                }
+                Some(bytes) => group_v2::resolve_group_entries(
+                    bytes,
+                    self.access_mode,
+                    hdr,
+                    self.widths,
+                    k,
+                    projection,
+                ),
                 None => group_v2::resolve_group_entries_from_source(
                     source,
                     self.access_mode,
                     hdr,
                     self.widths,
                     k,
+                    projection,
                 ),
             }
         })
@@ -4232,12 +4242,13 @@ impl File {
     /// Returns the class of the object whose header is at `header`, and the hard links of the
     /// object if it is a group.
     ///
-    /// The result includes the parsed header for later reuse.
+    /// The result includes the parsed header for later reuse. In a version 2 group,
+    /// discovery reads hard-link addresses and skips soft and external target values.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the object header does not parse, or if the object is a group
-    /// whose link storage does not parse.
+    /// Returns [`Error::Format`] for a malformed object header or a link-storage format error
+    /// encountered during discovery.
     pub(crate) fn hard_links_at(
         &self,
         header: PhysicalAddress,
@@ -4246,7 +4257,9 @@ impl File {
         let parsed = self.inner.parse_header(header.get())?;
         let class = ObjectClass::of(&parsed);
         let links = match class {
-            ObjectClass::Group => self.inner.group_children(&parsed)?,
+            ObjectClass::Group => self
+                .inner
+                .group_children(&parsed, group_v2::GroupEntryProjection::Discovery)?,
             ObjectClass::Dataset | ObjectClass::NamedDatatype | ObjectClass::Unknown => Vec::new(),
         };
         Ok((
@@ -5681,7 +5694,8 @@ impl Group {
 
     fn children(&self) -> Result<Vec<GroupEntry>, Error> {
         let hdr = self.file.parse_header(self.header_address()?)?;
-        self.file.group_children(&hdr)
+        self.file
+            .group_children(&hdr, group_v2::GroupEntryProjection::Text)
     }
 
     /// This group's on-disk children, paired with the children the session has

@@ -7,9 +7,12 @@ use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_message::{
-    EXTERNAL_LINK, HARD_LINK, LinkMessage, LinkPrefix, LinkTarget, SOFT_LINK,
+use crate::link_message::{EXTERNAL_LINK, HARD_LINK, LinkMessage, LinkTarget, SOFT_LINK};
+use crate::link_message_read::{
+    ASCII, CHARSET_PRESENT, CREATION_ORDER_LEN, CREATION_ORDER_PRESENT, EXTERNAL_VERSION_FLAGS,
+    PREFIX_LEN, TYPE_PRESENT, USER_LINK_MIN, UTF8, VERSION,
 };
+use crate::link_message_read::{LinkMessageView, LinkTargetView};
 use crate::link_storage::LinkStorageError;
 use crate::width::{self, OffsetWidth, UintWidth};
 
@@ -48,21 +51,24 @@ pub struct LinkMessageV1 {
 impl LinkMessageV1 {
     /// Parses one complete message, rejecting bytes after its target.
     ///
+    /// Copies the name and target bytes after checking the complete body.
+    ///
     /// # Errors
     ///
     /// Returns the errors of [`Self::parse_prefix`], or [`LinkStorageError::TrailingBytes`]
     /// wrapped in [`LinkWireError::Storage`] if bytes follow the target.
     pub fn parse(data: &[u8], offset_width: OffsetWidth) -> Result<Self, LinkWireError> {
-        let (link, len) = Self::parse_prefix(data, offset_width)?;
-        if len != data.len() {
+        let link = LinkMessageView::parse_prefix(data, offset_width).map_err(decoded_link_error)?;
+        if link.consumed() != data.len() {
             return Err(LinkStorageError::TrailingBytes.into());
         }
-        Ok(link)
+        Ok(Self::from_view(&link))
     }
 
     /// Parses the message at the start of `data` and returns its consumed length.
     ///
-    /// Object-header padding and other bytes after the target are left unread.
+    /// Uses [`LinkMessageView::parse_prefix`] to check the message before copying its name and
+    /// target. The returned length ends at the target, excluding object header padding.
     ///
     /// # Errors
     ///
@@ -74,62 +80,8 @@ impl LinkMessageV1 {
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<(Self, usize), LinkWireError> {
-        let prefix = LinkPrefix::parse(data)?;
-        let flags = data
-            .get(1)
-            .copied()
-            .ok_or(LinkStorageError::TrailingBytes)?;
-        if flags & RESERVED_FLAGS != 0 {
-            return Err(LinkStorageError::Flags(flags).into());
-        }
-        let name = LinkName::with_width(prefix.name.to_vec(), prefix.name_width)?;
-        let mut cursor =
-            bytes::ByteCursor::with_position(data, prefix.target_pos).map_err(FormatError::from)?;
-        let (target, end) = if prefix.link_type_code == HARD_LINK {
-            let object_header_address = match cursor
-                .decoded_address(offset_width)
-                .map_err(FormatError::from)?
-            {
-                DecodedStoredAddress::Defined(address) => address,
-                DecodedStoredAddress::Undefined => {
-                    return Err(LinkStorageError::UndefinedAddress.into());
-                }
-            };
-            (
-                LinkTargetV1::Hard {
-                    object_header_address,
-                    explicit_type: prefix.has_link_type,
-                },
-                cursor.position(),
-            )
-        } else {
-            if !matches!(
-                prefix.link_type_code,
-                SOFT_LINK | EXTERNAL_LINK | USER_LINK_MIN..=u8::MAX
-            ) {
-                return Err(FormatError::InvalidLinkType(prefix.link_type_code).into());
-            }
-            let len = usize::from(cursor.u16().map_err(FormatError::from)?);
-            let value = cursor.take(len).map_err(FormatError::from)?;
-            let target = match prefix.link_type_code {
-                SOFT_LINK => LinkTargetV1::Soft {
-                    target_path: value.to_vec(),
-                },
-                EXTERNAL_LINK => LinkTargetV1::parse_external(value)?,
-                kind => LinkTargetV1::UserDefined {
-                    kind: UserLinkKind::new(kind)?,
-                    value: UserLinkValue::new(value.to_vec())?,
-                },
-            };
-            (target, cursor.position())
-        };
-        let link = Self::new(
-            name,
-            target,
-            prefix.creation_order,
-            prefix.has_charset.then_some(prefix.charset),
-        )?;
-        Ok((link, end))
+        let link = LinkMessageView::parse_prefix(data, offset_width).map_err(decoded_link_error)?;
+        Ok((Self::from_view(&link), link.consumed()))
     }
 
     /// Creates a message from checked name bytes and a target.
@@ -250,6 +202,41 @@ impl LinkMessageV1 {
         Ok(out)
     }
 
+    fn from_view(link: &LinkMessageView<'_>) -> Self {
+        let target = match link.target() {
+            LinkTargetView::Hard {
+                object_header_address,
+                explicit_type,
+            } => LinkTargetV1::Hard {
+                object_header_address,
+                explicit_type,
+            },
+            LinkTargetView::Soft { target_path } => LinkTargetV1::Soft {
+                target_path: target_path.to_vec(),
+            },
+            LinkTargetView::External {
+                filename,
+                object_path,
+            } => LinkTargetV1::External {
+                filename: filename.to_vec(),
+                object_path: object_path.to_vec(),
+            },
+            LinkTargetView::UserDefined { kind, value } => LinkTargetV1::UserDefined {
+                kind,
+                value: UserLinkValue(value.to_vec()),
+            },
+        };
+        Self {
+            target,
+            creation_order: link.creation_order(),
+            charset: link.charset(),
+            name: LinkName {
+                width: link.name_width(),
+                bytes: link.name_bytes().to_vec(),
+            },
+        }
+    }
+
     pub(crate) fn into_parts(self) -> (LinkTargetV1, Option<u64>, Option<CharacterSet>, LinkName) {
         let Self {
             target,
@@ -365,7 +352,7 @@ impl LinkName {
     /// # Ok::<(), LinkWireError>(())
     /// ```
     pub fn with_width(bytes: Vec<u8>, width: UintWidth) -> Result<Self, LinkWireError> {
-        if bytes.is_empty() || bytes == b"." || bytes.contains(&0) || bytes.contains(&b'/') {
+        if !Self::is_valid(&bytes) {
             return Err(LinkStorageError::InvalidName(bytes).into());
         }
         if UintWidth::smallest_for_len(bytes.len()).get() > width.get() {
@@ -385,6 +372,10 @@ impl LinkName {
     /// Returns the name bytes without text conversion.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn is_valid(bytes: &[u8]) -> bool {
+        !bytes.is_empty() && bytes != b"." && !bytes.contains(&0) && !bytes.contains(&b'/')
     }
 
     pub(crate) fn into_bytes(self) -> Vec<u8> {
@@ -422,27 +413,6 @@ pub enum LinkTargetV1 {
 }
 
 impl LinkTargetV1 {
-    fn parse_external(value: &[u8]) -> Result<Self, LinkStorageError> {
-        let (&version_flags, strings) =
-            value.split_first().ok_or(LinkStorageError::ExternalValue)?;
-        if version_flags != EXTERNAL_VERSION_FLAGS {
-            return Err(LinkStorageError::ExternalVersionFlags(version_flags));
-        }
-        let separator = strings
-            .iter()
-            .position(|&byte| byte == 0)
-            .ok_or(LinkStorageError::ExternalValue)?;
-        let (filename, rest) = strings.split_at(separator);
-        let object_path = rest
-            .get(1..)
-            .and_then(|rest| rest.strip_suffix(&[0]))
-            .ok_or(LinkStorageError::ExternalValue)?;
-        Ok(Self::External {
-            filename: filename.to_vec(),
-            object_path: object_path.to_vec(),
-        })
-    }
-
     fn stores_type(&self) -> bool {
         !matches!(
             self,
@@ -541,11 +511,15 @@ impl LinkTargetV1 {
     }
 
     fn path(path: &[u8]) -> Result<(), LinkStorageError> {
-        if path.is_empty() || path.contains(&0) {
+        if !is_symbolic_path(path) {
             return Err(LinkStorageError::InvalidTarget);
         }
         Ok(())
     }
+}
+
+pub(crate) fn is_symbolic_path(path: &[u8]) -> bool {
+    !path.is_empty() && !path.contains(&0)
 }
 
 /// A user-defined Link-message kind in `65..=255`.
@@ -608,6 +582,15 @@ pub enum LinkProjectionError {
     UnsupportedKind(UserLinkKind),
 }
 
+impl LinkProjectionError {
+    pub(crate) fn into_format(self) -> FormatError {
+        match self {
+            Self::Format(error) => error,
+            Self::UnsupportedKind(kind) => FormatError::InvalidLinkType(kind.get()),
+        }
+    }
+}
+
 /// An error constructing, decoding, or encoding a version 1 Link message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkWireError {
@@ -629,16 +612,20 @@ impl From<FormatError> for LinkWireError {
     }
 }
 
-const VERSION: u8 = 1;
-const PREFIX_LEN: usize = 2;
-const CREATION_ORDER_PRESENT: u8 = 0x04;
-const TYPE_PRESENT: u8 = 0x08;
-const CHARSET_PRESENT: u8 = 0x10;
-const RESERVED_FLAGS: u8 = 0xe0;
-const CREATION_ORDER_LEN: usize = 8;
+fn decoded_link_error(error: FormatError) -> LinkWireError {
+    match error {
+        FormatError::InvalidLinkFlags(flags) => LinkStorageError::Flags(flags),
+        FormatError::InvalidLinkNameBytes(name) => LinkStorageError::InvalidName(name),
+        FormatError::DefinedAddressIsUndefined { .. } => LinkStorageError::UndefinedAddress,
+        FormatError::InvalidLinkTarget => LinkStorageError::InvalidTarget,
+        FormatError::InvalidExternalLinkValue => LinkStorageError::ExternalValue,
+        FormatError::InvalidExternalLinkVersionFlags(flags) => {
+            LinkStorageError::ExternalVersionFlags(flags)
+        }
+        error => LinkStorageError::Format(error),
+    }
+    .into()
+}
+
 const VALUE_LENGTH_LEN: usize = 2;
 const EXTERNAL_FRAMING_LEN: usize = 3;
-const EXTERNAL_VERSION_FLAGS: u8 = 0;
-const USER_LINK_MIN: u8 = 65;
-const ASCII: u8 = 0;
-const UTF8: u8 = 1;

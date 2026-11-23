@@ -58,6 +58,7 @@ fn dense_group_lookup_and_listing_use_the_captured_frame(
             &header,
             widths,
             None,
+            group_v2::GroupEntryProjection::Text,
         )
     } else {
         group_v2::resolve_group_entries_from_source(
@@ -66,6 +67,7 @@ fn dense_group_lookup_and_listing_use_the_captured_frame(
             &header,
             widths,
             None,
+            group_v2::GroupEntryProjection::Text,
         )
     }
     .unwrap();
@@ -171,6 +173,7 @@ fn dense_group_walks_preserve_storage_error_precedence(
             &info,
             heap_address,
             widths,
+            group_v2::GroupEntryProjection::Text,
         )
     } else {
         group_v2::resolve_dense_entries_from_source(
@@ -179,6 +182,7 @@ fn dense_group_walks_preserve_storage_error_precedence(
             &info,
             heap_address,
             widths,
+            group_v2::GroupEntryProjection::Text,
         )
     }
     .unwrap_err();
@@ -227,6 +231,7 @@ fn dense_group_heap_bounds_preserve_reader_errors(
                 &info,
                 heap_address,
                 widths,
+                group_v2::GroupEntryProjection::Text,
             ),
             FormatError::InsufficientRegion {
                 required_start: prefix.start().get(),
@@ -243,6 +248,7 @@ fn dense_group_heap_bounds_preserve_reader_errors(
                 &info,
                 heap_address,
                 widths,
+                group_v2::GroupEntryProjection::Text,
             ),
             FormatError::UnexpectedSourceEof {
                 expected: prefix.end().get(),
@@ -280,6 +286,7 @@ fn dense_group_reads_preserve_metadata_ownership_and_cache_admission(
         &info,
         info.fractal_heap_address().unwrap(),
         widths,
+        group_v2::GroupEntryProjection::Text,
     )
     .unwrap();
     let before = cached.metadata_cache_stats().unwrap();
@@ -290,6 +297,7 @@ fn dense_group_reads_preserve_metadata_ownership_and_cache_admission(
         &info,
         info.fractal_heap_address().unwrap(),
         widths,
+        group_v2::GroupEntryProjection::Text,
     )
     .unwrap();
     assert_eq!(

@@ -1918,6 +1918,7 @@ fn disabled_override_suppresses_live_cache_over_enabled_file_default() {
 #[test]
 fn group_child_address_base_overflow_is_rejected() {
     const UB: u64 = 512;
+    const TARGET: u64 = u64::MAX - 1;
     let mut b = FileBuilder::new();
     b.with_userblock(UserblockSize::try_from(UB).unwrap());
     let mut child = b.create_group("child");
@@ -1952,7 +1953,7 @@ fn group_child_address_base_overflow_is_rejected() {
         1,
         "stored child address {stored:#x} was not uniquely locatable: {matches:?}"
     );
-    bytes[matches[0]..matches[0] + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    bytes[matches[0]..matches[0] + 8].copy_from_slice(&TARGET.to_le_bytes());
 
     // Refresh the checksum so address conversion checks the edited link field.
     #[cfg(feature = "checksum")]
@@ -1984,7 +1985,7 @@ fn group_child_address_base_overflow_is_rejected() {
     let file = File::from_bytes(bytes).unwrap();
     match file.root().groups() {
         Err(Error::Format(FormatError::OffsetOverflow { offset, length })) => {
-            assert_eq!(offset, u64::MAX);
+            assert_eq!(offset, TARGET);
             assert_eq!(length, UB);
         }
         other => panic!("expected group-child address overflow, got {other:?}"),

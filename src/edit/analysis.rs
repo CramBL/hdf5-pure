@@ -853,6 +853,7 @@ impl ObjectLinks {
                 header,
                 engine.widths(),
                 group_v1::group_leaf_node_k(engine.superblock()),
+                group_v2::GroupEntryProjection::Text,
             )? {
                 if entry
                     .object_header_address

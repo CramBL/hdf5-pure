@@ -1289,6 +1289,7 @@ impl WriteEngine {
                     &info,
                     heap,
                     self.widths(),
+                    crate::group::v2::GroupEntryProjection::Text,
                 )?;
                 for entry in entries {
                     child(ObjectId::resolve(

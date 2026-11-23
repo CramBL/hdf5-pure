@@ -676,6 +676,7 @@ mod tests {
     use crate::FileBuilder;
     use crate::GroupBuilder;
     use crate::UserblockSize;
+    use crate::address::StoredAddressExt;
 
     #[rstest]
     #[case::raw_and_utf8(NameCollision::Utf8AndRaw, false)]
@@ -899,5 +900,47 @@ mod tests {
                 "{owner}: the link {invalid:?} has a name that is not a component of an object path, so the object it identifies has no path in the output"
             )
         );
+    }
+
+    #[test]
+    fn discovery_can_drop_a_group_with_a_malformed_symbolic_value() {
+        let mut image = Image::starting_with(&[0; 64]);
+        let child = image.append(
+            &Header::new()
+                .message(Message::new(
+                    MessageType::LINK,
+                    b"\x01\x08\x40\x01x\x00\x00",
+                ))
+                .build(),
+        );
+        let root = image.append(
+            &Header::new()
+                .message(Message::new(
+                    MessageType::LINK,
+                    &HardLink::new("drop", child as u64).build(Widths::EIGHT),
+                ))
+                .build(),
+        );
+        image.place(
+            0,
+            &Superblock::new(Widths::EIGHT)
+                .root_header_address(root as u64)
+                .eof_address(image.as_bytes().len() as u64)
+                .build(),
+        );
+        let source = File::from_bytes(image.build()).unwrap();
+        let path = ObjectPathBuf::parse("drop");
+        let objects = SourceObjects::discover(
+            &source,
+            &BTreeSet::from([path.clone()]),
+            TraversalBudget::new(2, 1),
+        )
+        .unwrap();
+        assert_eq!(objects.len(), 1);
+        let placement = objects.placement(StoredAddress::new(child as u64)).unwrap();
+        let Some(Placement::Dropped(actual)) = placement else {
+            panic!("expected the group to be dropped");
+        };
+        assert_eq!(actual, Some(path));
     }
 }

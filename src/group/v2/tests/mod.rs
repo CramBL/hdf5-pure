@@ -444,6 +444,7 @@ fn compact_storage_link_messages() {
         AccessMode::ReadOnly,
         &oh,
         FormatWidths::from_sizes(8, 8).unwrap(),
+        GroupEntryProjection::Text,
     )
     .unwrap();
     assert_eq!(entries.len(), 1);
@@ -794,6 +795,7 @@ fn path_not_found_v2() {
 #[test]
 fn a_link_target_that_overflows_the_base_address_is_refused() {
     const UB: u64 = 512;
+    const TARGET: u64 = u64::MAX - 1;
 
     let mut b = crate::writer::FileBuilder::new();
     b.with_userblock(UserblockSize::try_from(UB).unwrap());
@@ -849,7 +851,7 @@ fn a_link_target_that_overflows_the_base_address_is_refused() {
         .span;
     let chunk_at = chunk.start().get();
     let end = chunk.end().get().to_usize().unwrap() - 4;
-    bytes[target..target + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    bytes[target..target + 8].copy_from_slice(&TARGET.to_le_bytes());
     let repaired = crate::checksum::jenkins_lookup3(&bytes[chunk_at.to_usize().unwrap()..end]);
     bytes[end..end + 4].copy_from_slice(&repaired.to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
@@ -869,7 +871,7 @@ fn a_link_target_that_overflows_the_base_address_is_refused() {
             matches!(
                 err,
                 crate::Error::Format(FormatError::OffsetOverflow {
-                    offset: u64::MAX,
+                    offset: TARGET,
                     length: UB,
                 })
             ),

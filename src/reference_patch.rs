@@ -334,6 +334,7 @@ fn walk(
             &header,
             widths,
             group_v1::group_leaf_node_k(superblock),
+            group_v2::GroupEntryProjection::Text,
         ) {
             Ok(entries) => entries,
             Err(error) if widths.offsets != OffsetWidth::Eight => return Err(error.into()),

@@ -49,6 +49,7 @@ pub(super) fn assert_dense_walk(bytes: Vec<u8>, region: &str) {
             &link_info,
             fh_addr,
             widths,
+            group_v2::GroupEntryProjection::Text,
         )
         .unwrap()
     };
@@ -77,6 +78,7 @@ pub(super) fn assert_dense_walk(bytes: Vec<u8>, region: &str) {
         &link_info,
         fh_addr,
         widths,
+        group_v2::GroupEntryProjection::Text,
     )
     .unwrap();
     assert_eq!(streamed.len(), COUNT);
