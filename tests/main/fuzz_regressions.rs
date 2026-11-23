@@ -66,15 +66,9 @@ fn oom_chunked_string_huge_elem_is_refused() {
     }
 }
 
-/// A chunked fixed-length **string** dataset whose datatype declares a per-element
-/// size of zero. Nothing in HDF5 occupies zero bytes per element, but the readers
-/// divide a chunk's byte count by that size to hold a copy on an element boundary,
-/// so a zero reached a division and panicked with "attempt to calculate the
-/// remainder with a divisor of zero" (issue #268). The zero-width type is now
-/// refused when the datatype message is parsed, so every path that needs the
-/// element type reports it and none of them divides.
 #[test]
-fn zero_width_element_type_is_refused_not_divided_by() {
+fn zero_width_fuzz_fixture_reports_invalid_datatype_version() {
+    // The fixture declares a zero-byte string element and uses datatype message version 0.
     let bytes = fuzz::fixture_with_recorded_extent("zero_width_elem_chunked_string.h5");
 
     let file = File::from_bytes(bytes).expect("file parses; only the datatype is malformed");
@@ -84,12 +78,9 @@ fn zero_width_element_type_is_refused_not_divided_by() {
 
     let dataset = find_first_dataset(&file, &root).expect("fixture has a dataset");
 
-    // Metadata that does not depend on the element type still reads: the refusal
-    // is scoped to the malformed message, not to the whole object.
     assert_eq!(dataset.shape().unwrap(), vec![50]);
     assert_eq!(dataset.attrs().unwrap().len(), 0);
 
-    // Every entry point that needs the element width refuses with the same error.
     for (name, result) in [
         ("element_size", dataset.element_size().map(|_| ())),
         ("dtype", dataset.dtype().map(|_| ())),
@@ -97,8 +88,8 @@ fn zero_width_element_type_is_refused_not_divided_by() {
         ("read_string", dataset.read_string().map(|_| ())),
     ] {
         match result {
-            Err(Error::Format(FormatError::ZeroSizedDatatype { class: 3 })) => {}
-            other => panic!("{name}: expected ZeroSizedDatatype for class 3, got {other:?}"),
+            Err(Error::Format(FormatError::InvalidDatatypeMessageVersion(0))) => {}
+            other => panic!("{name}: expected InvalidDatatypeMessageVersion(0), got {other:?}"),
         }
     }
 }

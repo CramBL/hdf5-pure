@@ -27,6 +27,7 @@ mod copy_symbolic_links;
 mod csr_multi_dataset;
 mod dataset_access_properties;
 mod dataset_create_properties;
+mod datatype_decoding;
 mod decoded_chunk_size;
 mod dense_attr_limits;
 mod dense_attr_vlen;

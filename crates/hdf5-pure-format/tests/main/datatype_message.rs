@@ -3,12 +3,15 @@ use hdf5_pure_core::{
     BitFieldType, CharacterSet, Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType,
     FormatError, StringPadding, TimeType, VariableLengthType,
 };
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     FloatingPointByteOrder, OffsetWidth,
 };
 use rstest::rstest;
+use test_util::datatype::float_context::Context;
 use test_util::datatype::leaf::{Leaf, Version};
+use test_util::datatype::{self, Class};
 
 #[rstest]
 #[case::one(1, DatatypeVersion::One)]
@@ -31,6 +34,82 @@ fn invalid_message_versions_return_the_original_value(#[case] raw: u8) {
         DatatypeVersion::try_from(raw).unwrap_err(),
         FormatError::InvalidDatatypeMessageVersion(raw),
     );
+}
+
+#[rstest]
+#[case::unsupported_version(Class::FIXED_POINT, 15)]
+#[case::unknown_class(Class(13), Version::One.get())]
+fn incomplete_datatype_headers_precede_version_and_class_errors(
+    #[case] class: Class,
+    #[case] version: u8,
+    #[values(0, 1, 4, 7)] available: usize,
+) {
+    let header = datatype::header(class, version, [0; 3], 4);
+    assert_decode_error(
+        &header[..available],
+        FormatError::UnexpectedEof {
+            expected: header.len(),
+            available,
+        },
+    );
+}
+
+#[rstest]
+#[case::valid_version(Version::One.get(), FormatError::InvalidDatatypeClass(13))]
+#[case::unsupported_version(15, FormatError::InvalidDatatypeMessageVersion(15))]
+fn datatype_header_checks_version_before_unknown_class(
+    #[case] version: u8,
+    #[case] error: FormatError,
+) {
+    assert_decode_error(&datatype::header(Class(13), version, [0; 3], 4), error);
+}
+
+#[rstest]
+#[case::zero(0)]
+#[case::six(6)]
+#[case::fifteen(15)]
+fn complete_complex_headers_reject_unsupported_message_versions(#[case] version: u8) {
+    let bytes = datatype::header(Class::COMPLEX, version, [0; 3], 16);
+    assert_decode_error(&bytes, FormatError::InvalidDatatypeMessageVersion(version));
+}
+
+#[rstest]
+#[case::unsupported_version(Class::FLOATING_POINT, 15)]
+#[case::wrong_class(Class::FIXED_POINT, Version::One.get())]
+fn incomplete_complex_parent_headers_precede_version_and_class_errors(
+    #[case] class: Class,
+    #[case] version: u8,
+    #[values(1, 7)] available: usize,
+) {
+    let parent = datatype::header(class, version, [0; 3], 8);
+    let bytes = Context::Complex.bytes(&parent[..available]);
+    assert_decode_error(
+        &bytes,
+        FormatError::UnexpectedEof {
+            expected: bytes.len() - available + parent.len(),
+            available: bytes.len(),
+        },
+    );
+}
+
+#[rstest]
+#[case::unsupported_parent_version(Class::FLOATING_POINT, 15, FormatError::InvalidDatatypeVersion { class: Class::FLOATING_POINT.0, version: 15 })]
+#[case::wrong_parent_class(Class::FIXED_POINT, Version::One.get(), FormatError::InvalidComplexParent { class: Class::FIXED_POINT.0 })]
+#[case::wrong_parent_class_and_version(Class::FIXED_POINT, 15, FormatError::InvalidComplexParent { class: Class::FIXED_POINT.0 })]
+fn complex_parent_header_checks_class_before_version(
+    #[case] class: Class,
+    #[case] version: u8,
+    #[case] error: FormatError,
+) {
+    assert_decode_error(
+        &Context::Complex.bytes(&datatype::header(class, version, [0; 3], 8)),
+        error,
+    );
+}
+
+fn assert_decode_error(bytes: &[u8], expected: FormatError) {
+    assert_eq!(format::parse_datatype(bytes).unwrap_err(), expected);
+    assert_eq!(DatatypeMessage::parse(bytes).unwrap_err(), expected);
 }
 
 #[rstest]

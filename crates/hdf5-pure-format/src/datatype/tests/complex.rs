@@ -78,13 +78,10 @@ fn native_complex_rejects_unsupported_flags(#[case] flags: [u8; 3], #[case] erro
 }
 
 #[rstest]
-#[case::zero(0)]
 #[case::one(1)]
 #[case::two(2)]
 #[case::three(3)]
 #[case::four(4)]
-#[case::six(6)]
-#[case::fifteen(15)]
 fn native_complex_rejects_other_message_versions(#[case] version: u8) {
     let encoded = build_dt_header(COMPLEX_CLASS, version, [1, 0, 0], 8);
     assert_eq!(

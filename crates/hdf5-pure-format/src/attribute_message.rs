@@ -1395,15 +1395,11 @@ mod tests {
     }
 
     #[test]
-    fn the_same_bytes_without_the_flag_are_rejected_as_a_zero_width_type() {
+    fn an_unflagged_reference_reports_datatype_version_zero() {
         let data = attr_with_committed_reference(0);
         let err = AttributeMessage::parse(&data, 8).unwrap_err();
 
-        assert_eq!(
-            err,
-            FormatError::ZeroSizedDatatype { class: 2 },
-            "the reference bytes decode as a class 2 (time) type of zero width"
-        );
+        assert_eq!(err, FormatError::InvalidDatatypeMessageVersion(0));
     }
 
     #[test]

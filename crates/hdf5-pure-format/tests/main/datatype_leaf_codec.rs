@@ -1,6 +1,6 @@
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, DatatypeByteOrder, FixedPointType, FloatingPointType, FormatError,
-    MantissaNormalization, StringPadding, TimeType,
+    BitFieldType, CharacterSet, Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType,
+    FormatError, MantissaNormalization, ReferenceType, StringPadding, TimeType,
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -74,10 +74,9 @@ fn datatype_leaf_codecs_preserve_vax_metadata(
 fn datatype_leaf_parser_rejects_unsupported_versions(#[case] version: u8) {
     let mut bytes = Leaf::Integer.bytes(Version::One);
     bytes[0] = version << 4;
-    assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
-        FormatError::InvalidDatatypeMessageVersion(version)
-    );
+    let expected = FormatError::InvalidDatatypeMessageVersion(version);
+    assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -155,9 +154,9 @@ fn datatype_leaf_parser_preserves_property_errors(
 }
 
 #[rstest]
-#[case::class(0, 1)]
-#[case::flags(1, 4)]
-#[case::flags_end(3, 4)]
+#[case::class(0, 8)]
+#[case::flags(1, 8)]
+#[case::flags_end(3, 8)]
 #[case::size(4, 8)]
 #[case::size_end(7, 8)]
 #[case::offset(8, 10)]
@@ -225,17 +224,21 @@ fn datatype_leaf_parser_rejects_nonzero_opaque_padding() {
 }
 
 #[test]
-fn datatype_leaf_parser_rejects_reference_descriptions() {
-    let bytes = datatype::header(Class::REFERENCE, 1, [0; 3], 8);
+fn semantic_parser_accepts_and_retained_parser_rejects_an_object_reference() {
+    let bytes = datatype::object_reference(8);
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap_err(),
         FormatError::InvalidDatatypeClass(7)
     );
     assert_eq!(
-        hdf5_pure_format::__private::parse_datatype(&bytes)
-            .unwrap()
-            .1,
-        8
+        format::parse_datatype(&bytes).unwrap(),
+        (
+            Datatype::Reference {
+                size: 8,
+                ref_type: ReferenceType::Object,
+            },
+            bytes.len(),
+        )
     );
 }
 

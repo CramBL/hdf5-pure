@@ -28,14 +28,14 @@ use super::{
 use crate::bytes::{self, ByteCursor};
 use crate::codec::Encode;
 use crate::convert::Narrow;
+use crate::datatype::header::{Context, DatatypeClass, Header};
 use crate::datatype::{
-    self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
+    self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
     COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
-    DATATYPE_CLASS_MASK, DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS,
-    FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
-    FLOAT_NORMALIZATION_LEADING_ONE, FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT,
-    FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT,
-    OPAQUE_CLASS, OpaqueTagWire, REFERENCE_CLASS, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
+    DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, FLOAT_INTERNAL_PADDING_BIT,
+    FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE, FLOAT_NORMALIZATION_LEADING_ONE,
+    FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
+    HIGH_PADDING_BIT, LOW_PADDING_BIT, OpaqueTagWire, REFERENCE_CLASS, VARIABLE_LENGTH_CLASS,
     VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING,
     VariableLengthMetadata,
 };
@@ -43,6 +43,9 @@ use crate::width::OffsetWidth;
 
 impl DatatypeMessage {
     /// Parses a datatype message and returns the number of bytes consumed.
+    ///
+    /// Reads each complete eight-byte header before checking its version or class. Checks version
+    /// before class, except in a complex datatype's parent, where it checks class first.
     ///
     /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
     /// descriptions at versions 1 through 5, compounds, enumerations, and arrays at versions
@@ -69,9 +72,9 @@ impl DatatypeMessage {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete,
-    /// [`FormatError::InvalidDatatypeMessageVersion`] if the version is outside `1..=5`, and
-    /// [`FormatError::InvalidDatatypeClass`] for a class outside the supported descriptions.
+    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. Returns
+    /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
+    /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
     /// Returns [`FormatError::InvalidDatatypeFlags`] or [`FormatError::InvalidOpaqueReservedBits`]
     /// if reserved atomic, compound, enumeration, or array class bits are set. Returns
     /// [`FormatError::InvalidDatatypeVersion`] for compound, enumeration, or array versions 1 or 2,
@@ -152,7 +155,7 @@ impl DatatypeMessage {
         let mut cursor = ByteCursor::with_position(data, position)?;
         let header = Header::parse(&mut cursor, context)?;
         let (properties, consumed) = match header.class {
-            FIXED_POINT_CLASS => {
+            DatatypeClass::FixedPoint => {
                 header.reserved(FIXED_RESERVED)?;
                 let datatype = FixedPointType::new(
                     header.size,
@@ -167,9 +170,9 @@ impl DatatypeMessage {
                 );
                 (DatatypeProperties::FixedPoint(datatype), cursor.position())
             }
-            FLOATING_POINT_CLASS => {
+            DatatypeClass::FloatingPoint => {
                 let order = FloatingPointByteOrder::parse(header.version, header.flags)
-                    .map_err(|error| context.float_error(&header, error))?;
+                    .map_err(|error| context.map_floating_point_flags_error(&header, error))?;
                 let normalization = match (header.flags[0] >> FLOAT_NORMALIZATION_SHIFT)
                     & FLOAT_NORMALIZATION_MASK
                 {
@@ -203,7 +206,7 @@ impl DatatypeMessage {
                     cursor.position(),
                 )
             }
-            TIME_CLASS => {
+            DatatypeClass::Time => {
                 header.reserved(TIME_RESERVED)?;
                 (
                     DatatypeProperties::Time(TimeType::new(
@@ -214,7 +217,7 @@ impl DatatypeMessage {
                     cursor.position(),
                 )
             }
-            STRING_CLASS => {
+            DatatypeClass::String => {
                 header.reserved(STRING_RESERVED)?;
                 (
                     DatatypeProperties::String {
@@ -227,7 +230,7 @@ impl DatatypeMessage {
                     cursor.position(),
                 )
             }
-            BIT_FIELD_CLASS => {
+            DatatypeClass::BitField => {
                 header.reserved(BITFIELD_RESERVED)?;
                 let datatype = BitFieldType::new(
                     header.size,
@@ -241,7 +244,7 @@ impl DatatypeMessage {
                 );
                 (DatatypeProperties::BitField(datatype), cursor.position())
             }
-            OPAQUE_CLASS => {
+            DatatypeClass::Opaque => {
                 let reserved = u16::from_le_bytes([header.flags[1], header.flags[2]]);
                 if reserved != 0 {
                     return Err(FormatError::InvalidOpaqueReservedBits { bits: reserved });
@@ -255,7 +258,7 @@ impl DatatypeMessage {
                     cursor.position() + usize::from(tag.encoded_len),
                 )
             }
-            COMPOUND_CLASS => {
+            DatatypeClass::Compound => {
                 let count = header.modern_member_count()?;
                 super::positive_size(COMPOUND_CLASS, header.size)?;
                 let offset_bytes = datatype::offset_bytes_for_size(header.size);
@@ -283,7 +286,10 @@ impl DatatypeMessage {
                     cursor.position(),
                 )
             }
-            ENUMERATION_CLASS => {
+            DatatypeClass::Reference => {
+                return Err(FormatError::InvalidDatatypeClass(REFERENCE_CLASS));
+            }
+            DatatypeClass::Enumeration => {
                 let count = header.modern_member_count()?;
                 let Parsed {
                     message: base_type,
@@ -324,7 +330,7 @@ impl DatatypeMessage {
                     cursor.position(),
                 )
             }
-            VARIABLE_LENGTH_CLASS => {
+            DatatypeClass::VariableLength => {
                 let metadata = datatype::parse_variable_length_metadata(header.flags)?;
                 descriptor_width(header.size)?;
                 let Parsed {
@@ -347,7 +353,7 @@ impl DatatypeMessage {
                 };
                 (properties, consumed)
             }
-            ARRAY_CLASS => {
+            DatatypeClass::Array => {
                 header
                     .version
                     .for_class(ARRAY_CLASS, DatatypeVersion::Three)?;
@@ -377,7 +383,7 @@ impl DatatypeMessage {
                     end,
                 )
             }
-            COMPLEX_CLASS => {
+            DatatypeClass::Complex => {
                 header
                     .version
                     .for_class(COMPLEX_CLASS, DatatypeVersion::Five)?;
@@ -414,7 +420,6 @@ impl DatatypeMessage {
                     end,
                 )
             }
-            class => return Err(FormatError::InvalidDatatypeClass(class)),
         };
         Ok(Parsed {
             message: Self::new(header.version, properties)?,
@@ -1382,42 +1387,7 @@ impl MessageDepth {
     const ROOT: Self = Self(0);
 }
 
-/// The common datatype header with a checked message version.
-struct Header {
-    class: u8,
-    version: DatatypeVersion,
-    flags: [u8; 3],
-    size: u32,
-}
-
 impl Header {
-    /// Parses the common header and checks its message version.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete, or
-    /// [`FormatError::InvalidDatatypeMessageVersion`] if the version is outside `1..=5`.
-    /// In [`Context::ComplexParent`], returns [`FormatError::InvalidComplexParent`] for a
-    /// non-floating class and [`FormatError::InvalidDatatypeVersion`] for an unsupported version.
-    fn parse(cursor: &mut ByteCursor<'_>, context: Context) -> Result<Self, FormatError> {
-        let class_and_version = cursor.u8()?;
-        let class = class_and_version & DATATYPE_CLASS_MASK;
-        if context == Context::ComplexParent && class != FLOATING_POINT_CLASS {
-            return Err(FormatError::InvalidComplexParent { class });
-        }
-        let version = class_and_version >> DATATYPE_VERSION_SHIFT;
-        let version = DatatypeVersion::try_from(version).map_err(|error| match context {
-            Context::ComplexParent => FormatError::InvalidDatatypeVersion { class, version },
-            Context::Description => error,
-        })?;
-        Ok(Self {
-            class,
-            version,
-            flags: cursor.array()?,
-            size: cursor.u32()?,
-        })
-    }
-
     /// Checks the class flags against a mask of reserved bits.
     ///
     /// # Errors
@@ -1427,7 +1397,7 @@ impl Header {
         let flags = self.flag_bits();
         if flags & mask != 0 {
             return Err(FormatError::InvalidDatatypeFlags {
-                class: self.class,
+                class: self.class.code(),
                 version: self.version.get(),
                 flags,
             });
@@ -1453,14 +1423,9 @@ impl Header {
             flags,
             size: _,
         } = self;
-        version.for_class(*class, DatatypeVersion::Three)?;
+        version.for_class(class.code(), DatatypeVersion::Three)?;
         self.reserved(MEMBER_COUNT_RESERVED)?;
         Ok(u16::from_le_bytes([flags[0], flags[1]]))
-    }
-
-    /// Returns the complete 24-bit class bit field.
-    fn flag_bits(&self) -> u32 {
-        u32::from_le_bytes([self.flags[0], self.flags[1], self.flags[2], 0])
     }
 }
 
@@ -1472,31 +1437,6 @@ struct Parsed {
     end: usize,
     /// The element size from the source header, in bytes.
     size: u32,
-}
-
-/// The role of a description in a recursive parse.
-#[derive(Clone, Copy, PartialEq)]
-enum Context {
-    /// A floating-point parent within a complex description.
-    ComplexParent,
-    /// A description without a required parent class.
-    Description,
-}
-
-impl Context {
-    /// Maps a floating-point flag error to the diagnostic for this context.
-    ///
-    /// Returns [`FormatError::InvalidComplexParentFlags`] for [`Self::ComplexParent`],
-    /// using the header's version and flags. Returns `error` for [`Self::Description`].
-    fn float_error(self, header: &Header, error: FormatError) -> FormatError {
-        match self {
-            Self::ComplexParent => FormatError::InvalidComplexParentFlags {
-                version: header.version.get(),
-                flags: header.flag_bits(),
-            },
-            Self::Description => error,
-        }
-    }
 }
 
 /// Encodes a checked member count in the low two class flag bytes.

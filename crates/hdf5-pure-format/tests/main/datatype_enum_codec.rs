@@ -308,7 +308,7 @@ fn datatype_enum_parser_reports_non_utf8_names() {
 }
 
 #[rstest]
-#[case::parent(8, 9)]
+#[case::parent(8, 16)]
 #[case::name(20, 21)]
 #[case::unterminated_name(21, 22)]
 #[case::value(25, 26)]
