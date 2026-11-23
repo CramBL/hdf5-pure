@@ -14,6 +14,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree::v2::HugeObjectDirectRecord;
 use crate::bytes;
+use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::FilterPipeline;
@@ -41,21 +42,16 @@ enum FractalHeapIdType {
 }
 
 impl FractalHeapIdType {
-    /// Returns the type of the heap ID `id_bytes`, from bits 4 and 5 of its first byte.
+    /// Returns the type of the heap ID from bits 4 and 5 of its first byte.
     ///
     /// Bits 6 and 7 hold the version of the heap ID format, which the specification defines as 0,
     /// and the function reads the type whatever they hold.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `id_bytes` is empty, and
-    /// [`FormatError::InvalidHeapIdType`] if the type bits hold 3, a type the format does not
-    /// define.
-    fn from_heap_id(id_bytes: &[u8]) -> Result<Self, FormatError> {
-        let byte0 = *id_bytes.first().ok_or(FormatError::UnexpectedEof {
-            expected: 1,
-            available: 0,
-        })?;
+    /// Returns [`FormatError::InvalidHeapIdType`] if the type bits hold 3, a type the format does
+    /// not define.
+    fn from_first_byte(byte0: u8) -> Result<Self, FormatError> {
         match (byte0 >> HEAP_ID_TYPE_SHIFT) & HEAP_ID_TYPE_MASK {
             HEAP_ID_TYPE_MANAGED => Ok(FractalHeapIdType::Managed),
             HEAP_ID_TYPE_HUGE => Ok(FractalHeapIdType::Huge),
@@ -1329,7 +1325,6 @@ impl FractalHeapHeaderFrame {
 pub struct FractalHeapIdLayout {
     encoded_len: usize,
     managed: Option<ManagedHeapIdLayout>,
-    tiny_extended: bool,
     huge: HugeIdLayout,
 }
 
@@ -1407,7 +1402,6 @@ impl FractalHeapIdLayout {
         Self {
             encoded_len,
             managed: ManagedHeapIdLayout::new(header),
-            tiny_extended: header.heap_id_length > TINY_SHORT_ID_MAX_LEN,
             huge,
         }
     }
@@ -1415,17 +1409,21 @@ impl FractalHeapIdLayout {
     /// Parses a complete heap ID using this heap's decoding parameters.
     ///
     /// Reads the managed object's heap offset and length, the huge object's location, or the
-    /// tiny object's bytes. For a tiny object, the caller receives a slice borrowed from `bytes`.
-    /// Filtered huge IDs require version 0 and zero reserved bits. Managed offset and length
-    /// fields are byte-aligned, and trailing padding is ignored. Tiny-object bytes begin at
-    /// offset 1 for fixed IDs of at most 18 bytes, and at offset 2 for longer IDs.
+    /// tiny object's bytes. Managed offset and length fields are byte-aligned. The reader ignores
+    /// any padding after them. Filtered huge IDs require version 0 and zero reserved bits.
+    ///
+    /// For a tiny ID, returns the object as a slice borrowed from `bytes`. The object starts
+    /// after a one-byte prefix for ID widths of at most 18 bytes, and a two-byte prefix for
+    /// larger widths. Ignores the tiny ID's version bits and any bytes after the object.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidFractalHeapIdLength`] if `bytes` has a different length
-    /// from [`encoded_len`](Self::encoded_len), [`FormatError::InvalidHeapIdType`] if its type
-    /// bits hold 3, and [`FormatError::UnexpectedEof`] if the declared ID length is zero or a tiny
-    /// object's declared length exceeds the available bytes.
+    /// from [`encoded_len`](Self::encoded_len), before reading its contents. Returns
+    /// [`FormatError::InvalidHeapIdType`] if its type bits hold 3, or
+    /// [`FormatError::UnexpectedEof`] if the declared ID length is zero or a tiny object's
+    /// length extends past the ID. For a truncated tiny object, the error reports the
+    /// required object end relative to the start of `bytes` and the supplied ID length.
     ///
     /// Returns [`FormatError::InvalidFractalHeapGeometry`] for a managed ID if its header cannot
     /// describe the required fields, or its offset requires more bits than the heap permits.
@@ -1449,22 +1447,19 @@ impl FractalHeapIdLayout {
                 actual: bytes.len(),
             });
         }
-        let kind = FractalHeapIdType::from_heap_id(bytes)?;
-        let (&first, payload) = bytes.split_first().ok_or(FormatError::UnexpectedEof {
-            expected: 1,
-            available: bytes.len(),
-        })?;
+        let mut cursor = bytes::ByteCursor::new(bytes);
+        let first = cursor.u8()?;
         Ok(FractalHeapIdView {
-            kind: match kind {
+            kind: match FractalHeapIdType::from_first_byte(first)? {
                 FractalHeapIdType::Managed => self
                     .managed
                     .ok_or(FormatError::InvalidFractalHeapGeometry)?
-                    .parse(payload)?,
+                    .parse(cursor.remaining())?,
                 FractalHeapIdType::Huge => {
-                    FractalHeapIdKind::Huge(self.parse_huge(first, payload)?)
+                    FractalHeapIdKind::Huge(self.parse_huge(first, cursor.remaining())?)
                 }
                 FractalHeapIdType::Tiny => FractalHeapIdKind::Tiny {
-                    bytes: self.parse_tiny(first, bytes)?,
+                    bytes: TinyIdForm::for_width(self.encoded_len).parse(first, &mut cursor)?,
                 },
             },
         })
@@ -1545,26 +1540,174 @@ impl FractalHeapIdLayout {
             }
         })
     }
+}
 
-    fn parse_tiny<'a>(&self, first: u8, bytes: &'a [u8]) -> Result<&'a [u8], FormatError> {
-        let (len, start) = if self.tiny_extended {
-            let second = bytes.get(1).ok_or(FormatError::UnexpectedEof {
-                expected: 2,
-                available: bytes.len(),
-            })?;
-            (
-                (((usize::from(first & TINY_LENGTH_MASK)) << 8) | usize::from(*second)) + 1,
-                2,
-            )
+/// A checked version 0 tiny fractal-heap ID encoding that borrows the object's bytes.
+///
+/// Both forms store the object length minus one. At ID widths up to 18 bytes, the normal
+/// form stores it in the first byte's low four bits. At larger ID widths, the extended
+/// form stores the high four bits there and the low eight bits in the second byte.
+/// The object immediately follows the prefix.
+///
+/// The forms are defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+#[derive(Clone, Copy, Debug)]
+pub struct TinyHeapIdEncoding<'a> {
+    payload: &'a [u8],
+    id_width: u16,
+}
+
+impl<'a> TinyHeapIdEncoding<'a> {
+    /// Prepares a tiny ID at the heap's declared ID width using a borrowed payload.
+    ///
+    /// The normal form can represent up to 16 payload bytes. The extended form can
+    /// represent up to 4096. The payload must also fit the bytes after the prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TinyHeapIdWidthTooSmall`] if `id_width` is 0 or 1,
+    /// [`FormatError::EmptyTinyHeapIdPayload`] if `payload` is empty,
+    /// [`FormatError::TinyHeapIdPayloadLengthTooLarge`] if the length exceeds the form's
+    /// length field limit, or [`FormatError::TinyHeapIdPayloadExceedsCapacity`] if the
+    /// payload exceeds the space after the prefix. Checks these conditions in that order.
+    pub fn new(id_width: u16, payload: &'a [u8]) -> Result<Self, FormatError> {
+        let width = usize::from(id_width);
+        let form = TinyIdForm::for_width(width);
+        let capacity = width.saturating_sub(form.prefix_len());
+        if capacity == 0 {
+            return Err(FormatError::TinyHeapIdWidthTooSmall(id_width));
+        }
+        let length = payload.len();
+        if length == 0 {
+            return Err(FormatError::EmptyTinyHeapIdPayload);
+        }
+        let maximum = form.max_payload_len();
+        if length > maximum {
+            return Err(FormatError::TinyHeapIdPayloadLengthTooLarge { length, maximum });
+        }
+        if length > capacity {
+            return Err(FormatError::TinyHeapIdPayloadExceedsCapacity { length, capacity });
+        }
+        Ok(Self { payload, id_width })
+    }
+
+    /// Returns the declared ID width in bytes, including padding after the object.
+    pub fn encoded_size(&self) -> usize {
+        self.encoded_len()
+    }
+
+    /// Writes one complete tiny ID to the start of `output` and returns its byte count.
+    ///
+    /// Writes zeros after the payload through the declared ID width and leaves any
+    /// output suffix unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] with the required ID width and available
+    /// bytes if `output` is too short. Leaves all of `output` unchanged on error.
+    ///
+    /// # Examples
+    ///
+    /// A 19-byte ID uses the extended form for a two-byte payload.
+    ///
+    /// ```
+    /// use hdf5_pure_format::__private::TinyHeapIdEncoding;
+    ///
+    /// let id = TinyHeapIdEncoding::new(19, b"hi")?;
+    /// let mut output = [0xa5; 20];
+    /// assert_eq!(id.encoded_size(), 19);
+    /// assert_eq!(id.write_into(&mut output)?, 19);
+    /// assert_eq!(&output[..4], &[0x20, 1, b'h', b'i']);
+    /// assert_eq!(&output[4..19], &[0; 15]);
+    /// assert_eq!(output[19], 0xa5);
+    /// # Ok::<(), hdf5_pure_format::FormatError>(())
+    /// ```
+    pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        Ok(self.encode_into(output)?)
+    }
+}
+
+impl Encode for TinyHeapIdEncoding<'_> {
+    type Error = bytes::UnexpectedEof;
+
+    fn encoded_len(&self) -> usize {
+        usize::from(self.id_width)
+    }
+
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let width = self.encoded_len();
+        let available = output.len();
+        let id = output
+            .get_mut(..width)
+            .ok_or_else(|| bytes::UnexpectedEof::new(width, available))?;
+        let form = TinyIdForm::for_width(width);
+        let (prefix, body) = id.split_at_mut(form.prefix_len());
+        let (payload, padding) = body.split_at_mut(self.payload.len());
+        form.write_prefix(prefix, self.payload.len());
+        payload.copy_from_slice(self.payload);
+        // `H5HF__tiny_insert` in `H5HFtiny.c`, HDF5 2.2.0, fills the remaining ID bytes with zeros.
+        padding.fill(0);
+        Ok(width)
+    }
+}
+
+enum TinyIdForm {
+    Extended,
+    Normal,
+}
+
+impl TinyIdForm {
+    fn for_width(width: usize) -> Self {
+        if width <= TINY_NORMAL_ID_MAX_LEN {
+            Self::Normal
         } else {
-            (usize::from(first & TINY_LENGTH_MASK) + 1, 1)
+            Self::Extended
+        }
+    }
+
+    fn prefix_len(&self) -> usize {
+        match self {
+            Self::Normal => 1,
+            Self::Extended => 2,
+        }
+    }
+
+    fn max_payload_len(&self) -> usize {
+        match self {
+            Self::Normal => TINY_NORMAL_PAYLOAD_MAX_LEN,
+            Self::Extended => TINY_EXTENDED_PAYLOAD_MAX_LEN,
+        }
+    }
+
+    /// Reads the object with `cursor` positioned immediately after `first` in the ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bytes::UnexpectedEof`] if the extended length byte or the object is incomplete.
+    fn parse<'a>(
+        &self,
+        first: u8,
+        cursor: &mut bytes::ByteCursor<'a>,
+    ) -> Result<&'a [u8], bytes::UnexpectedEof> {
+        let length_bits = usize::from(first & TINY_LENGTH_MASK);
+        let encoded_length = match self {
+            Self::Normal => length_bits,
+            Self::Extended => (length_bits << u8::BITS) | usize::from(cursor.u8()?),
         };
-        bytes
-            .get(start..start + len)
-            .ok_or(FormatError::UnexpectedEof {
-                expected: start + len,
-                available: bytes.len(),
-            })
+        cursor.take(encoded_length + 1)
+    }
+
+    /// Writes the version, type, and length into exactly [`Self::prefix_len`] bytes.
+    ///
+    /// The caller checks that `payload_len` is positive and fits the form's length field.
+    fn write_prefix(&self, prefix: &mut [u8], payload_len: usize) {
+        let [low, high, ..] = (payload_len - 1).to_le_bytes();
+        let tag = FractalHeapIdType::Tiny.first_byte();
+        match self {
+            Self::Normal => prefix.copy_from_slice(&[tag | low]),
+            Self::Extended => prefix.copy_from_slice(&[tag | high, low]),
+        }
     }
 }
 
@@ -1748,17 +1891,19 @@ const HEAP_ID_TYPE_HUGE: u8 = 1;
 /// The type of the heap ID of a tiny object, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
 const HEAP_ID_TYPE_TINY: u8 = 2;
 
-/// The largest fixed heap ID length in bytes that uses the short tiny-object length form.
+/// The largest heap ID width in bytes that uses the normal tiny ID form.
 ///
-/// Short-form objects contain at most 16 bytes, as defined in "Fractal Heap" of the
+/// The normal form represents objects of up to 16 bytes, as defined in "Fractal Heap" of the
 /// [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
-const TINY_SHORT_ID_MAX_LEN: u16 = 18;
+const TINY_NORMAL_ID_MAX_LEN: usize = 18;
 
 // The low four bits hold the length less one in the normal form and its high four bits in the
 // extended form ("Fractal Heap", specification 4.0).
 const TINY_LENGTH_MASK: u8 = 0x0F;
+const TINY_NORMAL_PAYLOAD_MAX_LEN: usize = TINY_LENGTH_MASK as usize + 1;
+const TINY_EXTENDED_PAYLOAD_MAX_LEN: usize = TINY_NORMAL_PAYLOAD_MAX_LEN << u8::BITS;
 
 // The unfiltered version 0 header stores 26 fixed bytes, twelve length fields, and three addresses
 // ("Fractal Heap", format specification version 4.0).
@@ -2712,23 +2857,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tiny_id_borrows_its_payload() {
-        let bytes = [0x22, b'a', b'b', b'c', 0, 0, 0, 0];
-        let FractalHeapIdKind::Tiny { bytes: object } = FractalHeapIdLayout::new(
-            &attribute_heap_header(),
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-        )
-        .parse(&bytes)
-        .unwrap()
-        .kind() else {
-            panic!("expected tiny ID")
-        };
-        assert_eq!(object, b"abc");
-        assert_eq!(object.as_ptr(), bytes[1..].as_ptr());
-    }
-
-    #[test]
     fn a_header_without_frhp_is_an_invalid_signature() {
         let mut data = vec![0u8; 128];
         data[0..4].copy_from_slice(b"XXXX");
@@ -2800,7 +2928,7 @@ mod tests {
             vec![first, 5, 0, 0, 0, 0, 0, 0]
         };
         assert_eq!(
-            FractalHeapIdType::from_heap_id(&id).unwrap(),
+            FractalHeapIdType::from_first_byte(id[0]).unwrap(),
             FractalHeapIdType::Huge
         );
         assert_eq!(
@@ -2845,58 +2973,6 @@ mod tests {
         assert_eq!(
             layout.find_child_for_offset(&block, 2, 0, u64::MAX),
             Ok(None)
-        );
-    }
-
-    #[rstest]
-    #[case::short(7, vec![0x23, b'a', b'b', b'c', b'd'], b"abcd".as_slice(), 1)]
-    #[case::seventeen(17, vec![0x24, b'w', b'o', b'r', b'l', b'd'], b"world".as_slice(), 1)]
-    #[case::eighteen(18, vec![0x20, 0x03, 0xAA, 0xBB, 0xCC, 0xDD], &[0x03], 1)]
-    #[case::full_short(18, [vec![0x2F], (0..16).collect()].concat(), &(0..16).collect::<Vec<_>>(), 1)]
-    #[case::nineteen(19, vec![0x20, 0x04, b'h', b'e', b'l', b'l', b'o'], b"hello".as_slice(), 2)]
-    #[case::extended(20, vec![0x20, 0x04, b'h', b'e', b'l', b'l', b'o'], b"hello".as_slice(), 2)]
-    fn a_tiny_id_parses_its_short_or_extended_length(
-        #[case] declared: u16,
-        #[case] mut bytes: Vec<u8>,
-        #[case] object: &[u8],
-        #[case] payload_offset: usize,
-    ) {
-        let header = FractalHeapHeader {
-            heap_id_length: declared,
-            ..attribute_heap_header()
-        };
-        bytes.resize(usize::from(declared), 0);
-        let view = FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-            .parse(&bytes)
-            .unwrap();
-        let FractalHeapIdKind::Tiny { bytes: payload } = view.kind() else {
-            panic!("expected a tiny ID, got {:?}", view.kind());
-        };
-        assert_eq!(payload, object);
-        assert_eq!(payload.as_ptr(), bytes[payload_offset..].as_ptr());
-    }
-
-    #[rstest]
-    #[case::extended(19, vec![0x20, 17], 20)]
-    #[case::extended_high_bits(19, vec![0x21, 0], 259)]
-    fn a_tiny_id_rejects_an_object_longer_than_its_bytes(
-        #[case] declared: u16,
-        #[case] mut bytes: Vec<u8>,
-        #[case] expected: usize,
-    ) {
-        let header = FractalHeapHeader {
-            heap_id_length: declared,
-            ..attribute_heap_header()
-        };
-        bytes.resize(usize::from(declared), 0);
-        assert_eq!(
-            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                .parse(&bytes)
-                .unwrap_err(),
-            FormatError::UnexpectedEof {
-                expected,
-                available: usize::from(declared),
-            }
         );
     }
 

@@ -310,6 +310,8 @@ pub enum FormatError {
         /// The zero-based member index in declaration order.
         index: usize,
     },
+    /// A tiny heap ID needs a nonempty payload.
+    EmptyTinyHeapIdPayload,
     /// An enumeration datatype was built over a base type that is not an
     /// integer. HDF5 enumerations must have a fixed-point base.
     EnumBaseNotInteger,
@@ -1390,6 +1392,22 @@ pub enum FormatError {
         /// The flags that exceed the field width.
         bits: u32,
     },
+    /// A tiny object's payload exceeds the space after the ID prefix.
+    TinyHeapIdPayloadExceedsCapacity {
+        /// The supplied payload length in bytes.
+        length: usize,
+        /// The space after the ID prefix in bytes.
+        capacity: usize,
+    },
+    /// A tiny object's payload exceeds the length field's limit.
+    TinyHeapIdPayloadLengthTooLarge {
+        /// The supplied payload length in bytes.
+        length: usize,
+        /// The maximum payload length representable by the length field, in bytes.
+        maximum: usize,
+    },
+    /// The declared heap ID width is less than two bytes, the minimum for a tiny object.
+    TinyHeapIdWidthTooSmall(u16),
     /// The physical file is shorter than its recorded end-of-file position after relocation.
     TruncatedFile {
         /// The physical end-of-file position derived from the superblock and signature location.
@@ -2401,6 +2419,22 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidHeapIdType(t) => {
                 write!(f, "invalid heap ID type: {t}")
+            }
+            Self::EmptyTinyHeapIdPayload => f.write_str("a tiny heap ID requires a payload"),
+            Self::TinyHeapIdPayloadExceedsCapacity { length, capacity } => {
+                write!(
+                    f,
+                    "a {length}-byte payload exceeds the tiny heap ID's {capacity}-byte capacity"
+                )
+            }
+            Self::TinyHeapIdPayloadLengthTooLarge { length, maximum } => {
+                write!(
+                    f,
+                    "a {length}-byte payload exceeds the {maximum}-byte limit of the tiny heap ID length field"
+                )
+            }
+            Self::TinyHeapIdWidthTooSmall(width) => {
+                write!(f, "a {width}-byte heap ID cannot store a tiny object")
             }
             Self::HugeObjectNotFound(id) => {
                 write!(f, "fractal-heap huge object {id} not found in B-tree")
