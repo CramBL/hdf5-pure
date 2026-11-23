@@ -188,6 +188,63 @@ impl Header {
     }
 }
 
+/// A normal or extended tiny fractal-heap ID fixture with a borrowed payload.
+#[derive(Clone, Copy, Debug)]
+pub struct TinyId<'a> {
+    id_width: usize,
+    prefix: [u8; 2],
+    prefix_len: usize,
+    payload: &'a [u8],
+}
+
+impl<'a> TinyId<'a> {
+    /// Prepares a fixture with a nonempty payload at `id_width` bytes.
+    ///
+    /// Returns [`None`] if the payload is empty or exceeds the selected form's length
+    /// field or the space after its prefix.
+    pub fn new(id_width: u16, payload: &'a [u8]) -> Option<Self> {
+        let id_width = usize::from(id_width);
+        let encoded_length = payload.len().checked_sub(1)?;
+        let (prefix, prefix_len) = if id_width <= NORMAL_TINY_ID_MAX_LEN {
+            if encoded_length >= NORMAL_TINY_LENGTH_VALUES {
+                return None;
+            }
+            ([TINY_ID_TAG + u8::try_from(encoded_length).ok()?, 0], 1)
+        } else {
+            let high = encoded_length / EXTENDED_TINY_LOW_BYTE_VALUES;
+            if high >= NORMAL_TINY_LENGTH_VALUES {
+                return None;
+            }
+            let low = encoded_length % EXTENDED_TINY_LOW_BYTE_VALUES;
+            (
+                [
+                    TINY_ID_TAG + u8::try_from(high).ok()?,
+                    u8::try_from(low).ok()?,
+                ],
+                2,
+            )
+        };
+        if prefix_len + payload.len() > id_width {
+            return None;
+        }
+        Some(Self {
+            id_width,
+            prefix,
+            prefix_len,
+            payload,
+        })
+    }
+
+    /// Builds the exact-width ID with zero padding after the payload.
+    pub fn build(&self) -> Vec<u8> {
+        let mut id = Vec::with_capacity(self.id_width);
+        id.extend_from_slice(&self.prefix[..self.prefix_len]);
+        id.extend_from_slice(self.payload);
+        id.resize(self.id_width, 0);
+        id
+    }
+}
+
 /// Returns the fractal-heap header from a dense-link deletion fixture.
 ///
 /// The fixture uses 8-byte offsets and lengths. The crosscheck generates the metadata with
@@ -474,3 +531,10 @@ const FILTER_MASK_LEN: usize = 4;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
 const MANAGED_ID: u8 = 0;
+
+// "Fractal Heap" of the format specification, version 4.0, defines the normal width limit,
+// four length bits in the first byte, eight more in the extended form, and type 2 in bits 4 and 5.
+const NORMAL_TINY_ID_MAX_LEN: usize = 18;
+const NORMAL_TINY_LENGTH_VALUES: usize = 16;
+const EXTENDED_TINY_LOW_BYTE_VALUES: usize = 256;
+const TINY_ID_TAG: u8 = 0x20;

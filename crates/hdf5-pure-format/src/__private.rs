@@ -210,6 +210,7 @@ pub use crate::fractal_heap::FractalHeapLayoutError;
 pub use crate::fractal_heap::HugeIndirectKey;
 pub use crate::fractal_heap::HugeIndirectKeyEncoding;
 pub use crate::fractal_heap::HugeObjectReference;
+pub use crate::fractal_heap::TinyHeapIdEncoding;
 pub use crate::fractal_heap_block::FractalHeapBlock;
 pub use crate::fractal_heap_block::FractalHeapBlockFilters;
 pub use crate::fractal_heap_block::FractalHeapBlockLayout;
