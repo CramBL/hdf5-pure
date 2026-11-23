@@ -694,7 +694,12 @@ impl<'a> PreparedDatatype<'a> {
         bytes
     }
 
-    fn write_body(&self, bytes: &mut [u8]) {
+    /// Writes the checked datatype into a body of exactly [`Self::encoded_size`] bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bytes` is shorter than the encoded body.
+    pub(crate) fn write_body(&self, bytes: &mut [u8]) {
         let Self {
             description,
             offset_width,

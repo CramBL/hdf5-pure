@@ -488,7 +488,12 @@ impl PreparedDataspace<'_> {
         output
     }
 
-    fn write_body(&self, body: &mut [u8]) {
+    /// Writes the checked dataspace into a body of exactly [`Self::encoded_size`] bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `body` is too short to hold the four-byte prefix.
+    pub(crate) fn write_body(&self, body: &mut [u8]) {
         let (header, fields) = body.split_at_mut(V2_HEADER_SIZE);
         let flags = if self.dataspace.max_dimensions.is_some() {
             MAX_DIMENSIONS_FLAG

@@ -6,19 +6,22 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attribute
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::ElementSize;
 
 use crate::bytes;
-use crate::codec::Decode;
+use crate::codec::{Decode, Encode};
 use crate::convert::Narrow;
-use crate::dataspace::Dataspace;
+use crate::dataspace::{Dataspace, PreparedDataspace};
 use crate::datatype;
 use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
+use crate::datatype::message::PreparedDatatype;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
+use crate::shared_message::CommittedDatatypeReference;
 use crate::shared_message::DatatypeLocation;
 use crate::shared_message::SharedResolver;
 use crate::shared_message::Unresolvable;
@@ -26,10 +29,10 @@ use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// An Attribute message: the name, datatype, dataspace, and data of one attribute.
 ///
-/// The parsers read message versions 1, 2, and 3. [`serialize`](Self::serialize) writes version 2
-/// for ASCII names and version 3 for non-ASCII names. [`serialize_v3`](Self::serialize_v3) writes
-/// version 3 for either character set. The message is defined in "The Attribute Message" of the
-/// [format specification, version 4.0][spec].
+/// The parsers read message versions 1, 2, and 3. [`Self::prepare`] and [`Self::serialize`]
+/// select version 2 for ASCII names and version 3 for non-ASCII names. [`Self::prepare_v3`]
+/// and [`Self::serialize_v3`] select version 3 for either character set. The message is defined
+/// in "The Attribute Message" of the [format specification, version 4.0][spec].
 ///
 /// Two messages are equal when every field is equal, so a message that refers to a committed
 /// datatype is not equal to one that encodes the same datatype.
@@ -43,9 +46,9 @@ pub struct AttributeMessage {
     pub datatype: Datatype,
     /// The attribute's dataspace.
     pub dataspace: Dataspace,
-    /// The attribute's element bytes as the message stores them, the number of elements times the
-    /// stored element size. Variable-length references and arrays of them occupy a size that
-    /// depends on the file's address width.
+    /// The attribute's element bytes in their stored representation.
+    /// The caller supplies the number of elements times the stored element size. That size
+    /// depends on the file's offset width for variable-length descriptors and arrays of them.
     pub raw_data: Vec<u8>,
     /// Whether the message refers to a committed datatype for [`datatype`](Self::datatype).
     pub datatype_location: DatatypeLocation,
@@ -450,136 +453,330 @@ impl AttributeMessage {
 
     /// Serializes the message as version 2 for an ASCII name or version 3 otherwise.
     ///
-    /// Writes the UTF-8 character-set declaration for a non-ASCII name.
-    ///
-    /// `offset_width` is the width of the address in a reference to a committed datatype, and
-    /// `length_size` the width of a length, both as the superblock of the file the message goes
-    /// into stores them. The message refers to a committed datatype where
-    /// [`datatype_location`](Self::datatype_location) is committed, and encodes its dataspace in
-    /// every case.
+    /// Uses the file widths and field layout described in [`Self::prepare`].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::AttributeFieldTooLong`] if the name with its null terminator, the
-    /// datatype, or the dataspace is longer than the 65,535 bytes its 2-byte size field can
-    /// hold. Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque
-    /// tag longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains
-    /// a NUL byte. Returns the errors of [`Dataspace::serialize`] for dimensions that do not fit
-    /// `length_size` bytes or an unsupported `length_size`, and the errors of
-    /// [`DatatypeLocation::reference_bytes`] for a committed-datatype address that does not fit
-    /// `offset_width` or equals its undefined marker.
+    /// Returns the errors of [`Self::prepare`]. Returns [`FormatError::InvalidLengthSize`] if
+    /// `length_size` is other than 2, 4, or 8. Checks the datatype before the length width, then
+    /// checks the dataspace and field sizes.
     pub fn serialize(
         &self,
         offset_width: OffsetWidth,
         length_size: u8,
     ) -> Result<Vec<u8>, FormatError> {
-        self.serialize_version(VERSION_TWO, offset_width, length_size)
+        self.serialize_version(false, offset_width, length_size)
     }
 
     /// Serializes the message as version 3 with its name's character set.
     ///
-    /// Writes ASCII for an ASCII name and UTF-8 otherwise. The widths and the fields are the same
-    /// as for [`serialize`](Self::serialize).
+    /// Writes ASCII for an ASCII name and UTF-8 otherwise. Uses the file widths and field layout
+    /// described in [`Self::prepare_v3`].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::AttributeFieldTooLong`] if the name with its null terminator, the
-    /// datatype, or the dataspace is longer than the 65,535 bytes its 2-byte size field can
-    /// hold. Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque
-    /// tag longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains
-    /// a NUL byte. Returns the errors of [`Dataspace::serialize`] for dimensions that do not fit
-    /// `length_size` bytes or an unsupported `length_size`, and the errors of
-    /// [`DatatypeLocation::reference_bytes`] for a committed-datatype address that does not fit
-    /// `offset_width` or equals its undefined marker.
+    /// Returns the errors of [`Self::serialize`] in the same order.
     pub fn serialize_v3(
         &self,
         offset_width: OffsetWidth,
         length_size: u8,
     ) -> Result<Vec<u8>, FormatError> {
-        self.serialize_version(VERSION_THREE, offset_width, length_size)
+        self.serialize_version(true, offset_width, length_size)
     }
 
-    /// Returns the bytes of the message's datatype field: the encoding itself, or the
-    /// reference standing in for it when the type is committed.
+    /// Prepares version 2 encoding for an ASCII name or version 3 for a non-ASCII name.
     ///
-    /// A reference is written in `offset_width`, the width of the file the bytes
-    /// are going into, and not in the width of whatever file the message was read
-    /// from. Re-serializing a message parsed from a file with a different width is
-    /// therefore a re-encoding, not a copy.
+    /// Uses `widths.offsets` for a committed datatype address or for sizing variable-length
+    /// descriptors in an inline datatype. Uses `widths.lengths` for the inline dataspace.
+    /// The caller supplies [`Self::raw_data`] in the file's stored representation. The writer
+    /// copies those bytes verbatim.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque tag
-    /// longer than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL.
-    /// Returns the errors of [`DatatypeLocation::reference_bytes`] for a committed-datatype
-    /// address that exceeds `offset_width` or equals its undefined marker.
-    fn datatype_field(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
-        match self.datatype_location.reference_bytes(offset_width)? {
-            Some(reference) => Ok(reference),
-            None => datatype::serialize_datatype_with_offset_width(&self.datatype, offset_width),
-        }
+    /// Returns the errors of [`PreparedDatatype::new`] for an inline datatype, or
+    /// [`FormatError::AddressTooLarge`] or [`FormatError::DefinedAddressIsUndefined`] for a
+    /// committed datatype address that exceeds the range of the offset width or equals its
+    /// undefined marker.
+    /// Propagates errors from [`Dataspace::prepare`] after checking the datatype.
+    ///
+    /// Returns [`FormatError::AttributeFieldTooLong`] if the name with its NUL terminator, the
+    /// datatype field, or the dataspace field exceeds [`u16::MAX`] bytes, checking in that order.
+    /// Returns [`FormatError::OffsetOverflow`] if the complete body exceeds [`isize::MAX`] bytes.
+    pub fn prepare(&self, widths: FormatWidths) -> Result<PreparedAttributeBody<'_>, FormatError> {
+        self.prepare_body(
+            self.prepare_datatype(widths.offsets)?,
+            widths.lengths,
+            false,
+        )
+    }
+
+    /// Borrows the message for version 3 encoding with an ASCII or UTF-8 name declaration.
+    ///
+    /// Uses the same widths and fields as [`Self::prepare`], with a character-set byte for
+    /// either kind of name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::prepare`] in the same order.
+    pub fn prepare_v3(
+        &self,
+        widths: FormatWidths,
+    ) -> Result<PreparedAttributeBody<'_>, FormatError> {
+        self.prepare_body(self.prepare_datatype(widths.offsets)?, widths.lengths, true)
+    }
+
+    fn prepare_datatype(
+        &self,
+        offset_width: OffsetWidth,
+    ) -> Result<AttributeDatatype<'_>, FormatError> {
+        Ok(match self.datatype_location {
+            DatatypeLocation::Inline => {
+                AttributeDatatype::Inline(PreparedDatatype::new(&self.datatype, offset_width)?)
+            }
+            DatatypeLocation::Committed(address) => AttributeDatatype::Committed(
+                CommittedDatatypeReference::new(address, offset_width)?,
+            ),
+        })
     }
 
     fn serialize_version(
         &self,
-        version: u8,
+        version_three: bool,
         offset_width: OffsetWidth,
         length_size: u8,
     ) -> Result<Vec<u8>, FormatError> {
-        let charset = if self.name.is_ascii() {
-            CharacterSet::Ascii
-        } else {
-            CharacterSet::Utf8
-        };
-        let version = if charset == CharacterSet::Utf8 {
-            VERSION_THREE
-        } else {
-            version
-        };
-        let name_bytes = {
-            let mut n = self.name.as_bytes().to_vec();
-            n.push(0); // null terminator
-            n
-        };
-        let dt_bytes = self.datatype_field(offset_width)?;
-        let ds_bytes = self.dataspace.serialize(length_size)?;
-        let name_size = self.field_size("name", &name_bytes)?;
-        let datatype_size = self.field_size("datatype", &dt_bytes)?;
-        let dataspace_size = self.field_size("dataspace", &ds_bytes)?;
-
-        let mut buf = Vec::new();
-        buf.push(version);
-        // Version 1 has no flags byte, but nothing serializes one: both callers
-        // request version 2 or 3, whose second byte says which fields are
-        // references. Only the datatype is ever one here, since this crate does
-        // not write a shared dataspace.
-        buf.push(if self.datatype_location.is_committed() {
-            FLAG_SHARED_DATATYPE
-        } else {
-            0
-        });
-        buf.extend_from_slice(&name_size.to_le_bytes());
-        buf.extend_from_slice(&datatype_size.to_le_bytes());
-        buf.extend_from_slice(&dataspace_size.to_le_bytes());
-        if version >= VERSION_THREE {
-            buf.push(name_character_set(charset));
-        }
-        buf.extend_from_slice(&name_bytes);
-        buf.extend_from_slice(&dt_bytes);
-        buf.extend_from_slice(&ds_bytes);
-        buf.extend_from_slice(&self.raw_data);
-        Ok(buf)
+        let datatype = self.prepare_datatype(offset_width)?;
+        let length_width = LengthWidth::try_from(length_size)?;
+        Ok(self
+            .prepare_body(datatype, length_width, version_three)?
+            .to_bytes())
     }
 
-    fn field_size(&self, field: &'static str, encoded: &[u8]) -> Result<u16, FormatError> {
-        encoded
-            .len()
-            .narrow_or_else(|| FormatError::AttributeFieldTooLong {
-                name: self.name.clone(),
-                field,
-                size: encoded.len(),
-                limit: usize::from(u16::MAX),
-            })
+    fn prepare_body<'a>(
+        &'a self,
+        datatype: AttributeDatatype<'a>,
+        length_width: LengthWidth,
+        version_three: bool,
+    ) -> Result<PreparedAttributeBody<'a>, FormatError> {
+        let dataspace = self.dataspace.prepare(length_width)?;
+        let name_size = self.field_size("name", self.name.len() + 1)?;
+        let datatype_size = self.field_size("datatype", datatype.encoded_size())?;
+        let dataspace_size = self.field_size("dataspace", dataspace.encoded_size())?;
+        let charset = if self.name.is_ascii() {
+            version_three.then(|| name_character_set(CharacterSet::Ascii))
+        } else {
+            Some(name_character_set(CharacterSet::Utf8))
+        };
+        const { assert!(usize::BITS >= 32) };
+        let data_at = attribute_prefix_size(charset)
+            + usize::from(name_size)
+            + usize::from(datatype_size)
+            + usize::from(dataspace_size);
+        let len = data_at
+            .checked_add(self.raw_data.len())
+            .filter(|&len| len <= isize::MAX.cast_unsigned())
+            .ok_or_else(|| FormatError::OffsetOverflow {
+                offset: data_at.to_u64(),
+                length: self.raw_data.len().to_u64(),
+            })?;
+        Ok(PreparedAttributeBody {
+            message: self,
+            datatype,
+            dataspace,
+            charset,
+            name_size,
+            datatype_size,
+            dataspace_size,
+            len,
+        })
+    }
+
+    fn field_size(&self, field: &'static str, size: usize) -> Result<u16, FormatError> {
+        size.narrow_or_else(|| FormatError::AttributeFieldTooLong {
+            name: self.name.clone(),
+            field,
+            size,
+            limit: usize::from(u16::MAX),
+        })
+    }
+}
+
+/// An Attribute message borrowed for encoding at the selected file widths.
+///
+/// The writer writes the fixed prefix, the name with its terminator, the datatype field, the
+/// inline dataspace, and the element bytes in that order. The datatype field is either an inline
+/// description or a reference to a committed datatype. The fields have no alignment padding.
+/// Use [`MessageRecordLayout::prepare_record`][record] to write the body in a version 2 object
+/// header record.
+///
+/// [record]: crate::object_header::MessageRecordLayout::prepare_record
+#[derive(Debug)]
+pub struct PreparedAttributeBody<'a> {
+    message: &'a AttributeMessage,
+    datatype: AttributeDatatype<'a>,
+    dataspace: PreparedDataspace<'a>,
+    charset: Option<u8>,
+    name_size: u16,
+    datatype_size: u16,
+    dataspace_size: u16,
+    len: usize,
+}
+
+impl PreparedAttributeBody<'_> {
+    /// Returns the exact length of the complete body in bytes.
+    pub fn encoded_size(&self) -> usize {
+        self.encoded_len()
+    }
+
+    /// Writes the body to the start of `output` and returns the number of bytes written.
+    ///
+    /// Leaves bytes after the body untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`],
+    /// leaving the entire slice untouched.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private as format, Datatype, FormatError, LengthWidth, OffsetWidth};
+    ///
+    /// let message = format::AttributeMessage {
+    ///     name: "é".into(),
+    ///     datatype: Datatype::Opaque { size: 1, tag: vec![] },
+    ///     dataspace: format::Dataspace {
+    ///         space_type: format::DataspaceType::Scalar,
+    ///         rank: 0,
+    ///         dimensions: vec![],
+    ///         max_dimensions: None,
+    ///     },
+    ///     raw_data: vec![7],
+    ///     datatype_location: format::DatatypeLocation::Inline,
+    /// };
+    /// let prepared = message.prepare(format::FormatWidths {
+    ///     offsets: OffsetWidth::Two,
+    ///     lengths: LengthWidth::Four,
+    /// })?;
+    /// let mut output = [0xff; 26];
+    /// assert_eq!(prepared.write_into(&mut output)?, prepared.encoded_size());
+    /// assert_eq!(output, [
+    ///     3, 0, 3, 0, 8, 0, 4, 0, 1,
+    ///     0xc3, 0xa9, 0,
+    ///     0x15, 0, 0, 0, 1, 0, 0, 0,
+    ///     2, 0, 0, 0,
+    ///     7, 0xff,
+    /// ]);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        Ok(self.encode_into(output)?)
+    }
+
+    /// Writes the body to a newly allocated vector of [`Self::encoded_size`] bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0; self.len];
+        self.write_body(&mut bytes);
+        bytes
+    }
+
+    fn write_body(&self, body: &mut [u8]) {
+        let Self {
+            message,
+            datatype,
+            dataspace,
+            charset,
+            name_size,
+            datatype_size,
+            dataspace_size,
+            len: _,
+        } = self;
+        let (prefix, fields) = body.split_at_mut(attribute_prefix_size(*charset));
+        let (name, fields) = fields.split_at_mut(usize::from(*name_size));
+        let (datatype_field, fields) = fields.split_at_mut(usize::from(*datatype_size));
+        let (dataspace_field, data) = fields.split_at_mut(usize::from(*dataspace_size));
+
+        let version = if charset.is_some() {
+            VERSION_THREE
+        } else {
+            VERSION_TWO
+        };
+        let [name_low, name_high] = name_size.to_le_bytes();
+        let [datatype_low, datatype_high] = datatype_size.to_le_bytes();
+        let [dataspace_low, dataspace_high] = dataspace_size.to_le_bytes();
+        prefix[..V1_V2_PREFIX_SIZE].copy_from_slice(&[
+            version,
+            datatype.flag(),
+            name_low,
+            name_high,
+            datatype_low,
+            datatype_high,
+            dataspace_low,
+            dataspace_high,
+        ]);
+        if let Some(charset) = charset {
+            prefix[V1_V2_PREFIX_SIZE] = *charset;
+        }
+        let (name, terminator) = name.split_at_mut(message.name.len());
+        name.copy_from_slice(message.name.as_bytes());
+        terminator.copy_from_slice(&[0]);
+        datatype.write_body(datatype_field);
+        dataspace.write_body(dataspace_field);
+        data.copy_from_slice(&message.raw_data);
+    }
+}
+
+impl Encode for PreparedAttributeBody<'_> {
+    type Error = bytes::UnexpectedEof;
+
+    fn encoded_len(&self) -> usize {
+        self.len
+    }
+
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let available = output.len();
+        let body = output
+            .get_mut(..self.len)
+            .ok_or_else(|| bytes::UnexpectedEof::new(self.len, available))?;
+        self.write_body(body);
+        Ok(self.len)
+    }
+}
+
+#[derive(Debug)]
+enum AttributeDatatype<'a> {
+    Inline(PreparedDatatype<'a>),
+    Committed(CommittedDatatypeReference),
+}
+
+impl AttributeDatatype<'_> {
+    fn encoded_size(&self) -> usize {
+        match self {
+            Self::Inline(datatype) => datatype.encoded_size(),
+            Self::Committed(reference) => reference.encoded_size(),
+        }
+    }
+
+    fn flag(&self) -> u8 {
+        match self {
+            Self::Inline(_) => 0,
+            Self::Committed(_) => FLAG_SHARED_DATATYPE,
+        }
+    }
+
+    fn write_body(&self, output: &mut [u8]) {
+        match self {
+            Self::Inline(datatype) => datatype.write_body(output),
+            Self::Committed(reference) => reference.write_body(output),
+        }
+    }
+}
+
+fn attribute_prefix_size(charset: Option<u8>) -> usize {
+    if charset.is_some() {
+        V3_PREFIX_SIZE
+    } else {
+        V1_V2_PREFIX_SIZE
     }
 }
 
@@ -602,7 +799,7 @@ impl PreparedAttributeMessage {
     ///
     /// # Errors
     ///
-    /// Returns the encoding errors documented by [`AttributeMessage::serialize`].
+    /// Returns the errors of [`AttributeMessage::prepare`].
     pub fn new(message: AttributeMessage) -> Result<Self, FormatError> {
         Self::with_widths(
             FormatWidths {
@@ -620,7 +817,7 @@ impl PreparedAttributeMessage {
     ///
     /// # Errors
     ///
-    /// Returns the encoding errors of [`AttributeMessage::serialize`].
+    /// Returns the errors of [`AttributeMessage::prepare`].
     ///
     /// # Examples
     ///
@@ -657,7 +854,7 @@ impl PreparedAttributeMessage {
         widths: FormatWidths,
         message: AttributeMessage,
     ) -> Result<Self, FormatError> {
-        let body = message.serialize(widths.offsets, widths.lengths.get())?;
+        let body = message.prepare(widths)?.to_bytes();
         Ok(Self {
             widths,
             message,
@@ -675,7 +872,7 @@ impl PreparedAttributeMessage {
         &self.message
     }
 
-    /// Returns the body encoded by [`AttributeMessage::serialize`].
+    /// Returns the body encoded at the retained file widths.
     pub fn body(&self) -> &[u8] {
         &self.body
     }

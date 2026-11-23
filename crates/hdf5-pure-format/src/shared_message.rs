@@ -5,6 +5,7 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_dataobject_hdr_msg
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::address::DecodedStoredAddress;
@@ -78,8 +79,9 @@ impl DatatypeLocation {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::AddressTooLarge`] if a defined address exceeds `offset_width`, or
-    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+    /// Returns [`FormatError::AddressTooLarge`] if a defined address exceeds the range of
+    /// `offset_width`, or [`FormatError::DefinedAddressIsUndefined`] if it equals that width's
+    /// undefined marker.
     pub fn reference_bytes(
         &self,
         offset_width: OffsetWidth,
@@ -189,22 +191,66 @@ const WRITE_REF_VERSION: u8 = 2;
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::AddressTooLarge`] if `address` exceeds `offset_width`, or
+/// Returns [`FormatError::AddressTooLarge`] if `address` exceeds the range of `offset_width`, or
 /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
 pub fn encode_committed_ref(
     address: StoredAddress,
     offset_width: OffsetWidth,
 ) -> Result<Vec<u8>, FormatError> {
-    let mut buf = Vec::with_capacity(2 + usize::from(offset_width.get()));
-    buf.push(WRITE_REF_VERSION);
-    buf.push(REF_TYPE_COMMITTED);
-    bytes::try_write_decoded_address(
-        &mut buf,
-        DecodedStoredAddress::Defined(address),
-        offset_width,
-    )?;
-    Ok(buf)
+    let reference = CommittedDatatypeReference::new(address, offset_width)?;
+    let mut output = vec![0; reference.encoded_size()];
+    reference.write_body(&mut output);
+    Ok(output)
 }
+
+/// A version 2 committed datatype reference with a defined address at the selected offset width.
+#[derive(Debug)]
+pub(crate) struct CommittedDatatypeReference {
+    address: StoredAddress,
+    offset_width: OffsetWidth,
+}
+
+impl CommittedDatatypeReference {
+    /// Checks the address at the destination file's offset width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if `address` exceeds the range of `offset_width`, or
+    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker.
+    pub(crate) fn new(
+        address: StoredAddress,
+        offset_width: OffsetWidth,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            address: DecodedStoredAddress::Defined(address).to_stored(offset_width)?,
+            offset_width,
+        })
+    }
+
+    /// Returns the byte count of the version, location type, and address fields.
+    pub(crate) fn encoded_size(&self) -> usize {
+        COMMITTED_PREFIX_SIZE + usize::from(self.offset_width.get())
+    }
+
+    /// Writes the reference into a slice of exactly [`Self::encoded_size`] bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `output` has a different length.
+    pub(crate) fn write_body(&self, output: &mut [u8]) {
+        let Self {
+            address,
+            offset_width,
+        } = self;
+        let (prefix, address_field) = output.split_at_mut(COMMITTED_PREFIX_SIZE);
+        prefix.copy_from_slice(&[WRITE_REF_VERSION, REF_TYPE_COMMITTED]);
+        let width = usize::from(offset_width.get());
+        address_field.copy_from_slice(&address.get().to_le_bytes()[..width]);
+    }
+}
+
+// "Data Object Header Messages" in version 4.0 defines the version and type bytes.
+const COMMITTED_PREFIX_SIZE: usize = 2;
 
 /// The shared-reference version that admits a heap ID.
 ///

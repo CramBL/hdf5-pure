@@ -23,6 +23,49 @@ pub fn variable_length(version: u8, flags: [u8; 3], size: u32, parent: &[u8]) ->
     bytes
 }
 
+/// A variable-length sequence body with a descriptor size derived from its offset width.
+pub struct VariableLengthSequence<'a> {
+    version: leaf::Version,
+    descriptor_size: u32,
+    parent: &'a [u8],
+}
+
+impl<'a> VariableLengthSequence<'a> {
+    /// Describes a sequence with the supplied encoded parent body.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `offset_width` is other than 2, 4, or 8.
+    #[track_caller]
+    pub fn new(version: leaf::Version, offset_width: usize, parent: &'a [u8]) -> Self {
+        assert!(
+            matches!(offset_width, 2 | 4 | 8),
+            "a sequence descriptor has a 2-, 4-, or 8-byte address"
+        );
+        let address_size = u32::try_from(offset_width).expect("the checked width fits u32");
+        Self {
+            version,
+            descriptor_size: SEQUENCE_COUNT_SIZE + address_size + HEAP_INDEX_SIZE,
+            parent,
+        }
+    }
+
+    /// Returns the stored byte size of one sequence descriptor.
+    pub fn descriptor_size(&self) -> u32 {
+        self.descriptor_size
+    }
+
+    /// Writes the sequence's datatype header followed by its parent body.
+    pub fn build(self) -> Vec<u8> {
+        let Self {
+            version,
+            descriptor_size,
+            parent,
+        } = self;
+        variable_length(version.get(), SEQUENCE_FLAGS, descriptor_size, parent)
+    }
+}
+
 /// Builds an array message using the property layout of versions 3 through 5.
 ///
 /// Accepts unchecked header and parent encodings. `rank` and `dimensions` are independent
@@ -130,6 +173,15 @@ const COMMITTED: u8 = 2;
 
 // Section `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
 const DATATYPE_VERSION: u8 = 1;
+
+// `H5T__vlen_disk_write` writes a four-byte sequence count (H5Tvlen.c, HDF5 2.2.0).
+const SEQUENCE_COUNT_SIZE: u32 = 4;
+
+// "Global Heap" in version 4.0 defines the object index in a global heap ID.
+const HEAP_INDEX_SIZE: u32 = 4;
+
+// "The Datatype Message" in version 4.0 defines the sequence subtype and its reserved bits.
+const SEQUENCE_FLAGS: [u8; 3] = [0; 3];
 
 /// The class bit fields for little-endian IEEE 754 binary64.
 ///

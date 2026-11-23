@@ -2552,6 +2552,92 @@ fn writing_attributed_headers_has_bounded_allocations() {
     );
 }
 
+#[rstest]
+#[case::inline(None, "inline_attribute_body")]
+#[case::committed(Some(0x1234), "committed_attribute_body")]
+fn prepared_attribute_body_allocates_only_for_owned_output(
+    #[case] address: Option<u64>,
+    #[case] region: &str,
+) {
+    use hdf5_pure_core::StoredAddress;
+    use hdf5_pure_format::__private::{
+        AttributeMessage, Dataspace, DataspaceType, DatatypeLocation,
+    };
+    use hdf5_pure_format::LengthWidth;
+    use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
+    use test_util::datatype::leaf::{Leaf, Version};
+
+    let dimensions = [1024];
+    let raw_data = vec![0x17; usize::try_from(dimensions[0]).unwrap() * 4];
+    let datatype_bytes = Leaf::LittleInteger.bytes(Version::One);
+    let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&datatype_bytes).unwrap();
+    let message = AttributeMessage {
+        name: "array".into(),
+        datatype,
+        dataspace: Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: dimensions.to_vec(),
+            max_dimensions: None,
+        },
+        raw_data,
+        datatype_location: address.map_or(DatatypeLocation::Inline, |address| {
+            DatatypeLocation::Committed(StoredAddress::new(address))
+        }),
+    };
+    let widths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Two,
+    };
+    let wire_widths = Widths::new(8, 2);
+    let dataspace = dataspace::VersionTwo::simple(wire_widths, &dimensions, None).build();
+    let expected = match address {
+        None => UnpaddedAttribute::inline(
+            UnpaddedVersion::Two,
+            &message.name,
+            &datatype_bytes,
+            &dataspace,
+            &message.raw_data,
+        ),
+        Some(address) => UnpaddedAttribute::committed(
+            UnpaddedVersion::Two,
+            &message.name,
+            address,
+            wire_widths,
+            &dataspace,
+            &message.raw_data,
+        ),
+    }
+    .build();
+
+    let (owned, measured) = allocation::measure(&format!("{region}_owned"), || {
+        message
+            .serialize(widths.offsets, widths.lengths.get())
+            .unwrap()
+    });
+    assert_eq!(measured.blocks, 1, "{measured}");
+    assert_eq!(
+        measured.bytes,
+        u64::try_from(expected.len()).unwrap(),
+        "{measured}"
+    );
+    assert_eq!(measured.live_bytes, measured.bytes, "{measured}");
+    assert_eq!(owned, expected);
+
+    let mut output = vec![0xa5; expected.len()];
+    let (written, measured) = allocation::measure(&format!("{region}_bounded"), || {
+        message
+            .prepare(widths)
+            .unwrap()
+            .write_into(&mut output)
+            .unwrap()
+    });
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
 #[test]
 fn writing_a_large_referenced_datatype_has_bounded_allocations() {
     const MEMBER_COUNT: u32 = 512;
