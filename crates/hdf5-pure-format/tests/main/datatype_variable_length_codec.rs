@@ -242,11 +242,11 @@ fn datatype_variable_length_parser_rejects_invalid_float_parent(
 }
 
 #[rstest]
-#[case::empty(0, 1)]
+#[case::empty(0, 8)]
 #[case::outer_header(7, 8)]
-#[case::missing_parent(8, 9)]
+#[case::missing_parent(8, 16)]
 #[case::inner_header(15, 16)]
-#[case::missing_leaf(16, 17)]
+#[case::missing_leaf(16, 24)]
 #[case::leaf_precision(27, 28)]
 fn datatype_variable_length_parser_reports_incomplete_nested_fields(
     #[case] available: usize,

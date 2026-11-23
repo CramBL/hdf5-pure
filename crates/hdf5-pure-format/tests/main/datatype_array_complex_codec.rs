@@ -328,7 +328,7 @@ fn datatype_array_complex_parser_rejects_complex_size_overflow() {
 }
 
 #[rstest]
-#[case::missing_parent(8, 9)]
+#[case::missing_parent(8, 16)]
 #[case::parent_header(15, 16)]
 #[case::parent_properties(27, 28)]
 fn datatype_array_complex_parser_reports_incomplete_complex_fields(
@@ -375,7 +375,7 @@ fn datatype_array_complex_codecs_bound_array_recursion() {
 #[rstest]
 #[case::missing_rank(8, 9)]
 #[case::dimension(12, 13)]
-#[case::parent_header(13, 14)]
+#[case::parent_header(13, 21)]
 #[case::parent_properties(24, 25)]
 fn datatype_array_complex_parser_reports_incomplete_array_fields(
     #[case] available: usize,

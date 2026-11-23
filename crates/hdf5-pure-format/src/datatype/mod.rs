@@ -26,14 +26,16 @@ use hdf5_pure_core::VariableLengthStringType;
 use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
+use self::header::{Context, DatatypeClass, Header};
 use self::message::DatatypeVersion;
 use self::message::FloatingPointByteOrder;
-use crate::bytes;
+use crate::bytes::{self, ByteCursor};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
 pub(crate) mod byte_order;
+mod header;
 pub(crate) mod layout;
 mod legacy_member;
 pub(crate) mod message;
@@ -131,6 +133,9 @@ pub fn stored_element_size_usize(
 
 /// Parses a datatype message body and returns the type and the number of bytes read.
 ///
+/// Reads each complete eight-byte header before checking its version or class. Checks version
+/// before class, except in a complex datatype's parent, where it checks class first.
+///
 /// Reads an opaque tag's complete recorded property and copies its logical bytes into
 /// [`Datatype::Opaque`]. Reads a zero-length property as an absent tag and strips the first NUL
 /// and its zero padding from a tagged property. Also accepts aligned properties filled entirely
@@ -144,10 +149,11 @@ pub fn stored_element_size_usize(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the body ends within a field,
-/// [`FormatError::InvalidDatatypeClass`] if the class is unsupported, or
-/// [`FormatError::InvalidDatatypeVersion`] if a compound, array, complex datatype, or complex
-/// parent has an unsupported version. Returns
+/// Returns [`FormatError::UnexpectedEof`] if the body ends within a field. Returns
+/// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
+/// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
+/// Returns [`FormatError::InvalidDatatypeVersion`] for a version unsupported by an array,
+/// complex datatype, or its parent. Returns
 /// [`FormatError::InvalidReferenceType`] for an unknown reference kind,
 /// [`FormatError::InvalidStringPadding`] for an unknown string padding code, or
 /// [`FormatError::InvalidCharacterSet`] for an unknown character set code. Returns
@@ -159,7 +165,6 @@ pub fn stored_element_size_usize(
 /// [`FormatError::InvalidMantissaNormalization`] if the normalization code is reserved.
 ///
 /// For a floating-point description outside a complex parent, returns
-/// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`,
 /// [`FormatError::InvalidByteOrder`] for masked order bits `0x40`,
 /// [`FormatError::InvalidDatatypeVersion`] for VAX order in versions 1 or 2, or
 /// [`FormatError::InvalidDatatypeFlags`] for reserved class bits.
@@ -189,24 +194,28 @@ pub fn stored_element_size_usize(
 /// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
-    // Minimum header: 4 bytes (`class_and_version` + 3 bytes bit field) + 4 bytes size = 8
-    bytes::ensure_len(data, 0, 8)?;
+    let header = Header::parse(&mut ByteCursor::new(data), Context::Description)?;
+    parse_properties(data, header)
+}
 
-    let class_and_version = data[0];
-    let class_id = class_and_version & 0x0F;
-    let version = (class_and_version >> 4) & 0x0F;
+/// Parses the properties in `data` after the already parsed `header`.
+///
+/// Pass the slice starting at the beginning of the datatype message.
+///
+/// # Errors
+///
+/// Returns the property errors of [`parse_datatype`].
+fn parse_properties(data: &[u8], header: Header) -> Result<(Datatype, usize), FormatError> {
+    let Header {
+        class,
+        version,
+        flags: [bf0, bf1, bf2],
+        size,
+    } = header;
+    let mut pos = DATATYPE_HEADER_SIZE;
 
-    // 24-bit class bit field (little-endian)
-    let bf0 = data[1];
-    let bf1 = data[2];
-    let bf2 = data[3];
-    let _bit_field_24 = (bf0 as u32) | ((bf1 as u32) << 8) | ((bf2 as u32) << 16);
-
-    let size = LittleEndian::read_u32(&data[4..8]);
-    let mut pos = 8;
-
-    let parsed = match class_id {
-        FIXED_POINT_CLASS => {
+    let parsed = match class {
+        DatatypeClass::FixedPoint => {
             // Fixed-Point
             bytes::ensure_len(data, pos, 4)?;
             let byte_order = if bf0 & 0x01 == 0 {
@@ -226,14 +235,10 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 pos,
             ))
         }
-        FLOATING_POINT_CLASS => {
+        DatatypeClass::FloatingPoint => {
             // Floating-Point
             bytes::ensure_len(data, pos, 12)?;
-            let byte_order = FloatingPointByteOrder::parse(
-                DatatypeVersion::try_from(version)?,
-                [bf0, bf1, bf2],
-            )?
-            .order();
+            let byte_order = FloatingPointByteOrder::parse(version, [bf0, bf1, bf2])?.order();
             let mantissa_normalization = match (bf0 >> FLOAT_NORMALIZATION_SHIFT)
                 & FLOAT_NORMALIZATION_MASK
             {
@@ -275,7 +280,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 pos,
             ))
         }
-        TIME_CLASS => {
+        DatatypeClass::Time => {
             // Time
             bytes::ensure_len(data, pos, 2)?;
             let byte_order = if bf0 & 0x01 == 0 {
@@ -290,7 +295,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 pos,
             ))
         }
-        STRING_CLASS => {
+        DatatypeClass::String => {
             // String
             let padding_val = bf0 & 0x0F;
             let charset_val = (bf0 >> 4) & 0x0F;
@@ -305,7 +310,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 pos,
             ))
         }
-        BIT_FIELD_CLASS => {
+        DatatypeClass::BitField => {
             // Bit Field
             bytes::ensure_len(data, pos, 4)?;
             let byte_order = if bf0 & 0x01 == 0 {
@@ -324,7 +329,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 pos,
             ))
         }
-        OPAQUE_CLASS => {
+        DatatypeClass::Opaque => {
             let reserved = u16::from_le_bytes([bf1, bf2]);
             if reserved != 0 {
                 return Err(FormatError::InvalidOpaqueReservedBits { bits: reserved });
@@ -338,7 +343,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 pos + usize::from(tag.encoded_len),
             ))
         }
-        COMPOUND_CLASS => {
+        DatatypeClass::Compound => {
             // Compound
             let num_members = (bf0 as u16) | ((bf1 as u16) << 8);
             let mut members = Vec::with_capacity(num_members as usize);
@@ -347,7 +352,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             // reference types and version 5 the complex class, and neither
             // changed a compound. HDF5 2.0 writes version 5 for every
             // datatype under its latest library bounds.
-            if (DATATYPE_VERSION_THREE..=DATATYPE_VERSION_FIVE).contains(&version) {
+            if version >= DatatypeVersion::Three {
                 let ob = offset_bytes_for_size(size);
                 for _ in 0..num_members {
                     let (name, name_len) = read_null_terminated_string(data, pos)?;
@@ -358,7 +363,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                     pos += consumed;
                     members.push(__private::compound_member(name, byte_offset, member_dt));
                 }
-            } else if version == DATATYPE_VERSION_ONE || version == DATATYPE_VERSION_TWO {
+            } else {
                 // v1 and v2: the member name is NUL-terminated and padded with
                 // additional NULs to a multiple of 8 bytes, followed by a
                 // 4-byte member byte offset.
@@ -373,7 +378,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                     bytes::ensure_len(data, pos, 4)?;
                     let byte_offset = LittleEndian::read_u32(&data[pos..pos + 4]) as u64;
                     pos += 4;
-                    let shape = if version == DATATYPE_VERSION_ONE {
+                    let shape = if version == DatatypeVersion::One {
                         let (shape, consumed) = legacy_member::MemberShape::parse(data, pos)?;
                         pos += consumed;
                         Some(shape)
@@ -388,16 +393,11 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                     };
                     members.push(__private::compound_member(name, byte_offset, member_dt));
                 }
-            } else {
-                return Err(FormatError::InvalidDatatypeVersion {
-                    class: class_id,
-                    version,
-                });
             }
 
             Ok((Datatype::Compound { size, members }, pos))
         }
-        REFERENCE_CLASS => {
+        DatatypeClass::Reference => {
             // Reference
             let ref_type_val = bf0 & 0x0F;
             let ref_type = match ref_type_val {
@@ -407,7 +407,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             };
             Ok((Datatype::Reference { size, ref_type }, pos))
         }
-        ENUMERATION_CLASS => {
+        DatatypeClass::Enumeration => {
             // Enumeration
             let num_members = (bf0 as u16) | ((bf1 as u16) << 8);
             // Parse base type
@@ -421,7 +421,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let mut member_names = Vec::with_capacity(num_members as usize);
             for _ in 0..num_members {
                 let (name, name_len) = read_null_terminated_string(data, pos)?;
-                if version < DATATYPE_VERSION_THREE {
+                if version < DatatypeVersion::Three {
                     let padded = (name_len + 7) & !7;
                     pos += padded;
                 } else {
@@ -445,7 +445,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 pos,
             ))
         }
-        VARIABLE_LENGTH_CLASS => {
+        DatatypeClass::VariableLength => {
             let kind = parse_variable_length_metadata([bf0, bf1, bf2])?;
             let (base_type, consumed) = parse_datatype(&data[pos..])?;
             pos += consumed;
@@ -458,9 +458,9 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             Ok((Datatype::VariableLength(kind), pos))
         }
 
-        ARRAY_CLASS => {
+        DatatypeClass::Array => {
             // Array
-            if version == DATATYPE_VERSION_TWO {
+            if version == DatatypeVersion::Two {
                 bytes::ensure_len(data, pos, 4)?;
                 let ndims = data[pos] as usize;
                 pos += 4; // ndims(1) + reserved(3)
@@ -481,7 +481,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                     },
                     pos,
                 ))
-            } else if (DATATYPE_VERSION_THREE..=DATATYPE_VERSION_FIVE).contains(&version) {
+            } else if version >= DatatypeVersion::Three {
                 bytes::ensure_len(data, pos, 1)?;
                 let ndims = data[pos] as usize;
                 pos += 1;
@@ -502,13 +502,12 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 ))
             } else {
                 Err(FormatError::InvalidDatatypeVersion {
-                    class: class_id,
-                    version,
+                    class: class.code(),
+                    version: version.get(),
                 })
             }
         }
-        COMPLEX_CLASS => parse_complex(data, version, [bf0, bf1, bf2], size),
-        _ => Err(FormatError::InvalidDatatypeClass(class_id)),
+        DatatypeClass::Complex => parse_complex(data, version, [bf0, bf1, bf2], size),
     };
 
     // Array types compute their size from their base type and dimensions. A zero dimension
@@ -696,14 +695,14 @@ const OPAQUE_TAG_MAX_LEN: usize = 247;
 
 fn parse_complex(
     data: &[u8],
-    version: u8,
+    version: DatatypeVersion,
     flags: [u8; 3],
     size: u32,
 ) -> Result<(Datatype, usize), FormatError> {
-    if version != DATATYPE_VERSION_FIVE {
+    if version != DatatypeVersion::Five {
         return Err(FormatError::InvalidDatatypeVersion {
             class: COMPLEX_CLASS,
-            version,
+            version: version.get(),
         });
     }
     let homogeneous = flags[0] & COMPLEX_HOMOGENEOUS_BIT != 0;
@@ -715,20 +714,13 @@ fn parse_complex(
     if !homogeneous || form != COMPLEX_RECTANGULAR_FORM {
         return Err(FormatError::UnsupportedComplexForm { homogeneous, form });
     }
-    bytes::ensure_len(data, DATATYPE_HEADER_SIZE, DATATYPE_HEADER_SIZE)?;
-    let parent = &data[DATATYPE_HEADER_SIZE..];
-    let class = parent[0] & DATATYPE_CLASS_MASK;
-    if class != FLOATING_POINT_CLASS {
-        return Err(FormatError::InvalidComplexParent { class });
-    }
-    let version = parent[0] >> DATATYPE_VERSION_SHIFT;
-    let parent_version = DatatypeVersion::try_from(version)
-        .map_err(|_unsupported_version| FormatError::InvalidDatatypeVersion { class, version })?;
-    let flags = u32::from(parent[1]) | (u32::from(parent[2]) << 8) | (u32::from(parent[3]) << 16);
-    FloatingPointByteOrder::parse(parent_version, [parent[1], parent[2], parent[3]])
-        .map_err(|_invalid_flags| FormatError::InvalidComplexParentFlags { version, flags })?;
-    let (parent, consumed) = parse_datatype(parent)?;
-    bytes::ensure_len(data, DATATYPE_HEADER_SIZE, consumed)?;
+    let context = Context::ComplexParent;
+    let mut cursor = ByteCursor::with_position(data, DATATYPE_HEADER_SIZE)?;
+    let parent = Header::parse(&mut cursor, context)?;
+    FloatingPointByteOrder::parse(parent.version, parent.flags)
+        .map_err(|error| context.map_floating_point_flags_error(&parent, error))?;
+    let class = parent.class.code();
+    let (parent, consumed) = parse_properties(&data[DATATYPE_HEADER_SIZE..], parent)?;
     let Datatype::FloatingPoint(component) = parent else {
         return Err(FormatError::InvalidComplexParent { class });
     };

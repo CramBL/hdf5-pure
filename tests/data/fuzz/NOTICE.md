@@ -25,7 +25,7 @@ are unrecorded.
 |---|---|---|
 | `oom_chunked_string_huge_elem.h5` | A chunked string dataset has shape `[50]`, element size `0xAAAA_AAAA`, and an empty link name | The chunk-geometry check rejects string reads with `InvalidChunkGeometry` before payload allocation |
 | `sohm_heap_id_length.h5` | A shared-message heap ID has eight bytes where 96 are expected | Both shape and datatype reads on `d1` report `InvalidFractalHeapIdLength { expected: 96, actual: 8 }` through buffered and source readers |
-| `zero_width_elem_chunked_string.h5` | A chunked string datatype has zero element width | Shape `[50]` and empty attributes remain readable. Element-size, datatype, raw, and string reads report `ZeroSizedDatatype { class: 3 }` |
+| `zero_width_elem_chunked_string.h5` | A chunked string datatype uses message version 0 and has zero element width | Shape `[50]` and empty attributes remain readable. Element-size, datatype, raw, and string reads report `InvalidDatatypeMessageVersion(0)` |
 
 The huge-element input is also consumed by `tests/main/element_size.rs` for its
 declared width, `tests/main/object_path.rs` for unnamed-object lookup, and
