@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::{
-    DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, PreparedAttributeMessage, PreparedDenseAttrs,
+    DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, MessageRecordLayout, PreparedDenseAttrs,
 };
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
@@ -622,16 +622,16 @@ pub(super) fn plan_attr_ops_with_target(
     if policy.select(current, previous_count, set.len(), true) == AttributeStorage::Compact
         && set
             .values()
-            .all(|slot| slot.attribute.body().len() <= OBJECT_HEADER_MESSAGE_MAX)
+            .all(|slot| slot.attribute.encoded_size() <= OBJECT_HEADER_MESSAGE_MAX)
     {
         return prepare_compact_attrs(region, set, next_index, dense_now, predecessors);
     }
     prepare_dense_attrs(region, set, next_index, dense_now, predecessors)
 }
 
-/// An attribute body encoded at the destination widths with unresolved heap collections.
+/// A checked attribute value with any heap collections awaiting placement.
 struct PreparedAttributeValue {
-    attribute: PreparedAttributeMessage,
+    attribute: MeasuredAttribute,
     collections: Option<Vec<Vec<u8>>>,
 }
 
@@ -644,7 +644,7 @@ struct PreparedAttributeValue {
 /// Returns attribute-name and value-encoding errors, collection-size errors from
 /// [`crate::file_writer::validate_collections`], width-conversion errors from
 /// [`crate::file_writer::prepare_attribute_widths`], or errors from
-/// [`PreparedAttributeMessage::with_widths`].
+/// [`AttributeMessage::prepare`].
 fn prepare_attribute_value(
     widths: FormatWidths,
     name: &str,
@@ -664,16 +664,16 @@ fn prepare_attribute_value(
     }
     crate::file_writer::prepare_attribute_widths(widths, core::slice::from_mut(&mut message))?;
     Ok(PreparedAttributeValue {
-        attribute: PreparedAttributeMessage::with_widths(widths, message)?,
+        attribute: MeasuredAttribute::new(widths, message)?,
         collections,
     })
 }
 
-/// Prepares the complete dense set from stored or encoded attribute values.
+/// Prepares the complete dense set from stored or edited attribute values.
 ///
 /// # Errors
 ///
-/// Returns the metadata, geometry, and update errors of [`PreparedDenseAttrs::from_prepared`].
+/// Returns the metadata, geometry, and update errors of [`PreparedDenseAttrs::with_widths`].
 /// Propagates record parsing and attribute encoding errors.
 fn prepare_dense_attrs(
     original: &OhRegion,
@@ -698,7 +698,7 @@ fn prepare_dense_attrs(
             "a tracked object's attribute must carry a creation index"
         );
         indices.push(slot.creation_index.unwrap_or_default());
-        attrs.push(slot.attribute.into_prepared(original.widths())?);
+        attrs.push(slot.attribute.into_message());
     }
     let creation = if tracked {
         DenseAttrCreationOrder::Tracked {
@@ -709,7 +709,8 @@ fn prepare_dense_attrs(
     } else {
         DenseAttrCreationOrder::Untracked
     };
-    let (attrs, prepared) = PreparedDenseAttrs::from_prepared(
+    let set = DenseAttrSet::new(
+        original.widths(),
         attrs,
         creation,
         vl.iter().map(|(attribute, _)| DenseAttrFixup::GlobalHeap {
@@ -718,13 +719,7 @@ fn prepare_dense_attrs(
     )?;
     Ok(AttrEdits {
         region,
-        attrs: EditedAttrs::Dense(DenseAttrEdit {
-            set: DenseAttrSet {
-                attrs,
-                prepared: Some(prepared),
-            },
-            vl,
-        }),
+        attrs: EditedAttrs::Dense(DenseAttrEdit { set, vl }),
         predecessors,
         replaces_dense_storage,
     })
@@ -761,19 +756,9 @@ fn plan_compact_batch(
         batch.apply(op, order)?;
     }
     let predecessors = AttributePredecessors::compact(src, original, ops);
-    let compact = batch.slots.iter().all(|slot| match &slot.value {
-        CompactValue::Prepared { attribute, .. } => {
-            attribute.body().len() <= OBJECT_HEADER_MESSAGE_MAX
-        }
-        _ => true,
-    });
     if !batch.oversized
-        && policy.select(
-            AttributeStorage::Compact,
-            previous_count,
-            batch.count,
-            compact,
-        ) == AttributeStorage::Compact
+        && policy.select(AttributeStorage::Compact, previous_count, batch.count, true)
+            == AttributeStorage::Compact
     {
         return batch.into_compact(predecessors);
     }
@@ -910,7 +895,7 @@ impl<'a> CompactBatch<'a> {
                 attribute,
                 collections,
             }) => {
-                self.oversized |= attribute.body().len() > OBJECT_HEADER_MESSAGE_MAX;
+                self.oversized |= attribute.encoded_size > OBJECT_HEADER_MESSAGE_MAX;
                 if slot.count == 0 && self.original.layout().tracks_creation_order() {
                     let derived = self
                         .indices
@@ -1029,17 +1014,14 @@ impl<'a> CompactBatch<'a> {
                 )
                 .into());
             };
-            layout
-                .prepare_raw_record(
-                    MessageType::ATTRIBUTE,
-                    MessageFlags::NONE,
-                    slot.indices.first().copied().unwrap_or(0),
-                    attribute.body(),
-                )?
-                .append_to(&mut records)?;
+            attribute.append_record(
+                &mut records,
+                layout,
+                slot.indices.first().copied().unwrap_or(0),
+            )?;
             if let Some(collections) = collections {
                 let end = records.len();
-                let start = end - attribute.message().raw_data.len();
+                let start = end - attribute.message.raw_data.len();
                 fixups.push(CompactAttrFixup {
                     range: start..end,
                     collections,
@@ -1112,7 +1094,7 @@ impl<'a> CompactBatch<'a> {
             == AttributeStorage::Compact
             && set
                 .values()
-                .all(|slot| slot.attribute.body().len() <= OBJECT_HEADER_MESSAGE_MAX)
+                .all(|slot| slot.attribute.encoded_size() <= OBJECT_HEADER_MESSAGE_MAX)
         {
             return prepare_compact_attrs(self.original, set, next, false, predecessors);
         }
@@ -1152,7 +1134,7 @@ struct CompactSlot {
 enum CompactValue {
     Original,
     Prepared {
-        attribute: Box<PreparedAttributeMessage>,
+        attribute: Box<MeasuredAttribute>,
         collections: Option<Vec<Vec<u8>>>,
     },
     Removed,
@@ -1167,9 +1149,9 @@ struct AttributeSlot {
     creation_index: Option<u16>,
 }
 
-/// A decoded attribute paired with its stored or prepared body.
+/// An attribute with its stored body or its measured compact body length.
 enum SlotAttribute {
-    Prepared(PreparedAttributeMessage),
+    Prepared(MeasuredAttribute),
     Stored {
         message: AttributeMessage,
         body: Vec<u8>,
@@ -1179,35 +1161,97 @@ enum SlotAttribute {
 impl SlotAttribute {
     fn message(&self) -> &AttributeMessage {
         match self {
-            Self::Prepared(attribute) => attribute.message(),
+            Self::Prepared(attribute) => &attribute.message,
             Self::Stored { message, .. } => message,
         }
     }
 
-    fn body(&self) -> &[u8] {
+    fn encoded_size(&self) -> usize {
         match self {
-            Self::Prepared(attribute) => attribute.body(),
-            Self::Stored { body, .. } => body,
+            Self::Prepared(attribute) => attribute.encoded_size,
+            Self::Stored { body, .. } => body.len(),
         }
     }
 
     fn into_message(self) -> AttributeMessage {
         match self {
-            Self::Prepared(attribute) => attribute.into_parts().0,
+            Self::Prepared(attribute) => attribute.message,
             Self::Stored { message, .. } => message,
         }
     }
 
-    /// Returns the prepared encoding, serializing a stored message when needed.
+    /// Appends the record, copying a stored body byte for byte.
     ///
     /// # Errors
     ///
-    /// Returns the encoding errors documented by [`PreparedAttributeMessage::with_widths`].
-    fn into_prepared(self, widths: FormatWidths) -> Result<PreparedAttributeMessage, FormatError> {
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the body exceeds the record's
+    /// size field, or [`FormatError::AllocationFailed`] if reserving space for the record fails.
+    fn append_record(
+        &self,
+        records: &mut Vec<u8>,
+        layout: MessageRecordLayout,
+        creation_index: u16,
+    ) -> Result<(), FormatError> {
         match self {
-            Self::Prepared(attribute) => Ok(attribute),
-            Self::Stored { message, .. } => PreparedAttributeMessage::with_widths(widths, message),
+            Self::Prepared(attribute) => attribute.append_record(records, layout, creation_index),
+            Self::Stored { body, .. } => layout
+                .prepare_raw_record(
+                    MessageType::ATTRIBUTE,
+                    MessageFlags::NONE,
+                    creation_index,
+                    body,
+                )?
+                .append_to(records),
         }
+    }
+}
+
+/// An owned attribute with its compact body length at the destination file widths.
+struct MeasuredAttribute {
+    message: AttributeMessage,
+    encoded_size: usize,
+    widths: FormatWidths,
+}
+
+impl MeasuredAttribute {
+    /// Checks compact encoding and records the body size without allocating a buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`AttributeMessage::prepare`].
+    fn new(widths: FormatWidths, message: AttributeMessage) -> Result<Self, FormatError> {
+        let encoded_size = message.prepare(widths)?.encoded_size();
+        Ok(Self {
+            message,
+            encoded_size,
+            widths,
+        })
+    }
+
+    /// Encodes the attribute directly into an appended object header record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the body exceeds the record's
+    /// size field, or [`FormatError::AllocationFailed`] if reserving space for the record fails.
+    fn append_record(
+        &self,
+        records: &mut Vec<u8>,
+        layout: MessageRecordLayout,
+        creation_index: u16,
+    ) -> Result<(), FormatError> {
+        let Self {
+            message,
+            encoded_size: _,
+            widths,
+        } = self;
+        layout
+            .prepare_record(
+                MessageFlags::NONE,
+                creation_index,
+                message.prepare(*widths)?,
+            )?
+            .append_to(records)
     }
 }
 
@@ -1324,8 +1368,7 @@ fn prepare_compact_attrs(
     let mut fixups = Vec::new();
     let mut indices = BTreeSet::new();
     for slot in slots.into_values() {
-        let body = slot.attribute.body();
-        if body.len() > OBJECT_HEADER_MESSAGE_MAX {
+        if slot.attribute.encoded_size() > OBJECT_HEADER_MESSAGE_MAX {
             return Err(Error::EditUnsupported(
                 "attribute is too large to encode in place",
             ));
@@ -1344,14 +1387,8 @@ fn prepare_compact_attrs(
         } else {
             0
         };
-        layout
-            .prepare_raw_record(
-                MessageType::ATTRIBUTE,
-                MessageFlags::NONE,
-                creation_index,
-                body,
-            )?
-            .append_to(&mut records)?;
+        slot.attribute
+            .append_record(&mut records, layout, creation_index)?;
         if let Some(collections) = slot.collections {
             let end = records.len();
             let start = end

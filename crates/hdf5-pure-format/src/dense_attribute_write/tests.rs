@@ -3,6 +3,8 @@ use hdf5_pure_core::{
     VariableLengthType,
 };
 use rstest::rstest;
+use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
+use test_util::{dataspace, datatype};
 
 use crate::dataspace::Dataspace;
 use crate::dataspace::DataspaceType;
@@ -21,86 +23,17 @@ use super::*;
 #[case::eight_two(OffsetWidth::Eight, LengthWidth::Two)]
 #[case::eight_four(OffsetWidth::Eight, LengthWidth::Four)]
 #[case::eight_eight(OffsetWidth::Eight, LengthWidth::Eight)]
-fn prepared_attribute_widths_reach_dense_geometry(
+fn dense_preparation_retains_both_file_widths(
     #[case] offsets: OffsetWidth,
     #[case] lengths: LengthWidth,
 ) {
     let widths = FormatWidths { offsets, lengths };
     let attribute = canonical_attribute("label", 3);
-    let prepared = PreparedAttributeMessage::with_widths(widths, attribute.clone()).unwrap();
-    let expected = test_util::attribute::Attribute::new(
-        "label",
-        &test_util::datatype::fixed_string(3),
-        &test_util::dataspace::scalar(),
-        b"yyy",
-    )
-    .flags(test_util::attribute::Flags::NONE)
-    .build();
-    assert_eq!(prepared.body(), expected);
-    let (messages, dense) =
-        PreparedDenseAttrs::from_prepared(vec![prepared], DenseAttrCreationOrder::Untracked, [])
+    let attrs = [attribute];
+    let dense =
+        PreparedDenseAttrs::with_widths(widths, &attrs, DenseAttrCreationOrder::Untracked, [])
             .unwrap();
-    assert_eq!(messages, [attribute]);
     assert_eq!(dense.widths(), widths);
-}
-
-#[rstest]
-#[case::offsets(
-    OffsetWidth::Two,
-    LengthWidth::Eight,
-    OffsetWidth::Four,
-    LengthWidth::Eight
-)]
-#[case::lengths(
-    OffsetWidth::Eight,
-    LengthWidth::Two,
-    OffsetWidth::Eight,
-    LengthWidth::Four
-)]
-#[case::both(
-    OffsetWidth::Four,
-    LengthWidth::Two,
-    OffsetWidth::Two,
-    LengthWidth::Four
-)]
-fn prepared_attributes_reject_mixed_widths(
-    #[case] expected_offsets: OffsetWidth,
-    #[case] expected_lengths: LengthWidth,
-    #[case] actual_offsets: OffsetWidth,
-    #[case] actual_lengths: LengthWidth,
-) {
-    let first = PreparedAttributeMessage::with_widths(
-        FormatWidths {
-            offsets: expected_offsets,
-            lengths: expected_lengths,
-        },
-        canonical_attribute("first", 1),
-    )
-    .unwrap();
-    let second = PreparedAttributeMessage::with_widths(
-        FormatWidths {
-            offsets: actual_offsets,
-            lengths: actual_lengths,
-        },
-        canonical_attribute("second", 1),
-    )
-    .unwrap();
-    let Err(error) = PreparedDenseAttrs::from_prepared(
-        vec![first, second],
-        DenseAttrCreationOrder::Untracked,
-        [],
-    ) else {
-        panic!("expected AttributeWidthsMismatch");
-    };
-    assert_eq!(
-        error,
-        FormatError::AttributeWidthsMismatch {
-            expected_offset_size: expected_offsets.get(),
-            expected_length_size: expected_lengths.get(),
-            actual_offset_size: actual_offsets.get(),
-            actual_length_size: actual_lengths.get()
-        }
-    );
 }
 
 #[rstest]
@@ -110,24 +43,20 @@ fn prepared_attributes_reject_mixed_widths(
 #[case::unicode_managed("étiquette", 128)]
 #[case::ascii_huge("label", 70_000)]
 #[case::unicode_huge("étiquette", 70_000)]
-fn prepared_attribute_bodies_produce_canonical_dense_storage(#[case] name: &str, #[case] len: u32) {
+fn dense_storage_emits_the_version_three_attribute_body_once(#[case] name: &str, #[case] len: u32) {
     let attribute = canonical_attribute(name, len);
-    let expected = dense_attrs_plan(
-        core::slice::from_ref(&attribute),
-        DenseAttrCreationOrder::Untracked,
+    let expected = UnpaddedAttribute::inline(
+        UnpaddedVersion::Three,
+        name,
+        &datatype::fixed_string(len),
+        &dataspace::VersionTwo::scalar().build(),
+        &attribute.raw_data,
     )
-    .unwrap()
-    .build(StoredAddress::new(0x8000))
-    .unwrap();
-    let encoded = PreparedAttributeMessage::new(attribute.clone()).unwrap();
-    assert_eq!(
-        encoded.body(),
-        attribute.serialize(OffsetWidth::Eight, 8).unwrap()
-    );
-    let (messages, prepared) =
-        PreparedDenseAttrs::from_prepared(vec![encoded], DenseAttrCreationOrder::Untracked, [])
-            .unwrap();
-    assert_eq!(messages, vec![attribute]);
+    .build();
+    let prepared =
+        PreparedDenseAttrs::new(&[attribute], DenseAttrCreationOrder::Untracked, []).unwrap();
+    let body = &prepared.plan.attributes[0].bytes;
+    assert_eq!(body, &expected);
     let actual = prepared
         .finalize(
             |reference| panic!("unexpected reference {reference:?}"),
@@ -136,8 +65,14 @@ fn prepared_attribute_bodies_produce_canonical_dense_storage(#[case] name: &str,
         .unwrap()
         .build(StoredAddress::new(0x8000))
         .unwrap();
-    assert_eq!(actual.attribute_info, expected.attribute_info);
-    assert_eq!(actual.blob, expected.blob);
+    assert_eq!(
+        actual
+            .blob
+            .windows(expected.len())
+            .filter(|body| *body == expected)
+            .count(),
+        1
+    );
 }
 
 #[rstest]

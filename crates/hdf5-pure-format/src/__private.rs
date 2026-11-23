@@ -6,9 +6,7 @@ pub use crate::access_mode::AccessMode;
 pub use crate::attribute_info::{
     AttributeCreationOrderIndex, AttributeInfoMessage, AttributeInfoOutputTooSmall,
 };
-pub use crate::attribute_message::{
-    AttributeMessage, PreparedAttributeBody, PreparedAttributeMessage,
-};
+pub use crate::attribute_message::{AttributeMessage, PreparedAttributeBody};
 pub use crate::btree::v1::BTreeV1ChunkKey;
 pub use crate::btree::v1::BTreeV1ChunkNode;
 pub use crate::btree::v1::BTreeV1ChunkNodeBytes;

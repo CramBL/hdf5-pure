@@ -2,6 +2,7 @@ use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private as dense_attribute_write;
 use hdf5_pure_format::__private::BTreeV2Header;
 use rstest::rstest;
+use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
 
 use super::*;
 use crate::SuperblockVersion;
@@ -303,20 +304,46 @@ fn attribute_name_encoding_counts_toward_compact_storage_limit(
     #[case] dense: bool,
     #[values(false, true)] paged: bool,
 ) {
-    let probe =
-        type_builders::build_attr_message("xx", &AttrValue::AsciiString("y".into())).unwrap();
-    let overhead = probe.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 1;
-    let value = AttrValue::AsciiString("y".repeat(OBJECT_HEADER_MESSAGE_MAX - overhead - trim));
+    use test_util::{dataspace, datatype};
+
+    let dataspace = dataspace::VersionTwo::scalar().build();
+    let probe = UnpaddedAttribute::inline(
+        UnpaddedVersion::Two,
+        "xx",
+        &datatype::fixed_string(1),
+        &dataspace,
+        b"y",
+    )
+    .build();
+    let payload = "y".repeat(OBJECT_HEADER_MESSAGE_MAX - (probe.len() - 1) - trim);
+    let datatype = datatype::fixed_string(u32::try_from(payload.len()).unwrap());
+    let version = if name.is_ascii() {
+        UnpaddedVersion::Two
+    } else {
+        UnpaddedVersion::Three
+    };
+    let expected =
+        UnpaddedAttribute::inline(version, name, &datatype, &dataspace, payload.as_bytes()).build();
+    let value = AttrValue::AsciiString(payload);
     let message = type_builders::build_attr_message(name, &value).unwrap();
     assert_eq!(
-        message.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len(),
+        expected.len(),
         OBJECT_HEADER_MESSAGE_MAX + usize::from(!name.is_ascii()) - trim
     );
     assert_eq!(needs_dense_attrs(&[message]).unwrap(), dense);
     let mut writer = attribute_writer(paged);
     writer.set_root_attr(name, value.clone());
     let bytes = writer.finish().unwrap();
-    assert_eq!(test_util::fractal_heap::has_fractal_heap(&bytes), dense);
+    let storage = if dense {
+        AttributeStorage::Dense
+    } else {
+        AttributeStorage::Compact
+    };
+    let (superblock, root) = parse_file(&bytes);
+    assert_eq!(
+        root_attribute_body(&bytes, &superblock, root, storage, name),
+        expected
+    );
     let file = File::from_bytes(bytes).unwrap();
     assert_eq!(file.root().attrs().unwrap().get(name), Some(&value));
 }
@@ -715,6 +742,67 @@ fn the_reference_count_is_the_link_plus_every_user() {
     assert_eq!(committed_reference_count(&bytes, "mytype"), Some(4));
 }
 
+#[rstest]
+#[case::compact(UnpaddedVersion::Two, AttributeStorage::Compact, 0)]
+#[case::dense(
+    UnpaddedVersion::Three,
+    AttributeStorage::Dense,
+    crate::attribute_policy::DEFAULT_MAX_COMPACT
+)]
+fn writer_places_committed_attribute_bodies_with_resolved_addresses(
+    #[case] version: UnpaddedVersion,
+    #[case] storage: AttributeStorage,
+    #[case] fillers: u16,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+) {
+    use test_util::widths::Widths;
+
+    let widths = FormatWidths {
+        offsets,
+        lengths: LengthWidth::Four,
+    };
+    let mut writer = FileWriter::new();
+    writer
+        .with_offset_width(widths.offsets)
+        .with_length_width(widths.lengths);
+    writer.commit_datatype("schema", type_builders::make_i32_type());
+    for index in 0..fillers {
+        writer.set_root_attr(&format!("a{index}"), AttrValue::I32(i32::from(index)));
+    }
+    let value = 17_i32;
+    writer.set_root_attr_committed("label", AttrValue::I32(value), "schema");
+    let image = writer.finish().unwrap();
+
+    let (superblock, root) = parse_file(&image);
+    let address = group_v2::resolve_path_any(
+        PhysicalBytes::for_test(
+            &image,
+            AddressContext::from_effective_base(superblock.base_address),
+        ),
+        AccessMode::ReadOnly,
+        &superblock,
+        widths,
+        &ObjectPath::parse("schema"),
+    )
+    .unwrap();
+    let expected = UnpaddedAttribute::committed(
+        version,
+        "label",
+        address,
+        Widths::new(
+            usize::from(offsets.get()),
+            usize::from(widths.lengths.get()),
+        ),
+        &test_util::dataspace::VersionTwo::scalar().build(),
+        &value.to_le_bytes(),
+    )
+    .build();
+    assert_eq!(
+        root_attribute_body(&image, &superblock, root, storage, "label"),
+        expected
+    );
+}
+
 #[test]
 fn an_unreferenced_committed_type_stores_no_count() {
     let mut w = FileWriter::new();
@@ -827,6 +915,64 @@ fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
     )
     .unwrap();
     (sb, oh)
+}
+
+fn root_attribute_body(
+    bytes: &[u8],
+    superblock: &Superblock,
+    root: ObjectHeader,
+    storage: AttributeStorage,
+    name: &str,
+) -> Vec<u8> {
+    let widths = FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
+    let info = root
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::ATTRIBUTE_INFO)
+        .unwrap();
+    let info = AttributeInfoMessage::parse_with_offset_width(&info.data, widths.offsets).unwrap();
+    match storage {
+        AttributeStorage::Compact => {
+            assert_eq!(info.fractal_heap_address(), None);
+            let record = root
+                .messages
+                .into_iter()
+                .filter(|message| message.msg_type == MessageType::ATTRIBUTE)
+                .find(|message| AttributeMessage::parse_name(&message.data).unwrap() == name)
+                .unwrap();
+            assert_eq!(record.flags, MessageFlags::NONE);
+            record.data
+        }
+        AttributeStorage::Dense => {
+            let source = PhysicalBytes::for_test(
+                bytes,
+                AddressContext::from_effective_base(superblock.base_address),
+            )
+            .stored()
+            .unwrap();
+            let mut body = None;
+            crate::attribute::visit_dense_attribute_messages_from_source(
+                &source,
+                AccessMode::ReadOnly,
+                &info,
+                info.fractal_heap_address().unwrap(),
+                widths,
+                None,
+                |_| true,
+                |bytes, _| {
+                    if AttributeMessage::parse_name(bytes)? == name {
+                        assert!(body.replace(bytes.to_vec()).is_none());
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            body.unwrap()
+        }
+    }
 }
 
 fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {

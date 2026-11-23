@@ -13,7 +13,7 @@ use crate::__private as format_boundary;
 use crate::address::StoredAddressExt;
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
-use crate::attribute_message::{AttributeMessage, PreparedAttributeMessage};
+use crate::attribute_message::AttributeMessage;
 use crate::btree::v2::AttributeRecord;
 use crate::btree::v2::BTREE_V2_ATTRIBUTE_CREATION_ORDER;
 use crate::btree::v2::BTREE_V2_ATTRIBUTE_NAME;
@@ -160,7 +160,7 @@ impl PreparedDenseAttrs {
         )
     }
 
-    /// Encodes attributes and prepares deferred updates at independent file widths.
+    /// Encodes version 3 attribute bodies and prepares deferred updates at independent file widths.
     ///
     /// Variable-length raw values must already use `widths.offsets`-byte heap addresses. Fixup
     /// positions and requirements are the same as for [`Self::new`]. The managed-object limit
@@ -170,7 +170,7 @@ impl PreparedDenseAttrs {
     ///
     /// Returns the metadata, geometry, and deferred-update errors of [`Self::new`], or
     /// [`FormatError::LengthTooLarge`] if a huge-object total or count exceeds `widths.lengths`.
-    /// Propagates attribute serialization errors at `widths`.
+    /// Propagates errors from [`AttributeMessage::prepare_v3`].
     pub fn with_widths(
         widths: FormatWidths,
         attrs: &[AttributeMessage],
@@ -182,52 +182,6 @@ impl PreparedDenseAttrs {
             EncodedDenseAttrs::new(widths, attrs, creation)?.into_plan()?,
             fixups,
         )
-    }
-
-    /// Reuses encoded messages when preparing dense storage.
-    ///
-    /// Returns the original messages in input order alongside the prepared storage.
-    /// Converts version 2 bodies to version 3 by inserting the name character set. Other
-    /// encoded fields are reused. Attribute numbers in `fixups` refer to positions in
-    /// `prepared`, with the same requirements as [`Self::new`]. All messages must have been
-    /// prepared at the same file widths. Uses eight-byte addresses and lengths for an empty input.
-    ///
-    /// # Errors
-    ///
-    /// Returns the creation-metadata and geometry errors documented by [`dense_attrs_plan`]
-    /// and the update errors documented by [`Self::new`]. Returns
-    /// [`FormatError::AttributeWidthsMismatch`] if any message's widths differ from the first.
-    pub fn from_prepared(
-        prepared: Vec<PreparedAttributeMessage>,
-        creation: DenseAttrCreationOrder,
-        fixups: impl IntoIterator<Item = DenseAttrFixup>,
-    ) -> Result<(Vec<AttributeMessage>, Self), FormatError> {
-        let widths = prepared.first().map_or(
-            FormatWidths {
-                offsets: DENSE_ATTR_OFFSET_WIDTH,
-                lengths: DENSE_ATTR_LENGTH_WIDTH,
-            },
-            PreparedAttributeMessage::widths,
-        );
-        for attribute in &prepared {
-            let actual = attribute.widths();
-            if actual != widths {
-                return Err(FormatError::AttributeWidthsMismatch {
-                    expected_offset_size: widths.offsets.get(),
-                    expected_length_size: widths.lengths.get(),
-                    actual_offset_size: actual.offsets.get(),
-                    actual_length_size: actual.lengths.get(),
-                });
-            }
-        }
-        let (attrs, bodies): (Vec<_>, Vec<_>) = prepared
-            .into_iter()
-            .map(PreparedAttributeMessage::into_v3_parts)
-            .unzip();
-        let encoded = EncodedDenseAttrs::with_bodies(widths, &attrs, creation, bodies)?;
-        let plan = encoded.into_plan()?;
-        let prepared = Self::with_plan(&attrs, plan, fixups)?;
-        Ok((attrs, prepared))
     }
 
     /// Prepares deferred updates within the encoded plan.
@@ -333,7 +287,7 @@ impl PreparedDenseAttrs {
     /// use hdf5_pure_format::{CharacterSet, Datatype, FormatError, StringPadding};
     /// use hdf5_pure_format::__private::{
     ///     AttributeMessage, Dataspace, DataspaceType, DatatypeLocation,
-    ///     DenseAttrCreationOrder, DenseAttrFixup, PreparedAttributeMessage, PreparedDenseAttrs,
+    ///     DenseAttrCreationOrder, DenseAttrFixup, PreparedDenseAttrs,
     /// };
     ///
     /// let attribute = AttributeMessage {
@@ -352,13 +306,13 @@ impl PreparedDenseAttrs {
     ///     raw_data: b"a".to_vec(),
     ///     datatype_location: DatatypeLocation::Inline,
     /// };
-    /// let (attributes, prepared) = PreparedDenseAttrs::from_prepared(
-    ///     vec![PreparedAttributeMessage::new(attribute)?],
+    /// let prepared = PreparedDenseAttrs::new(
+    ///     core::slice::from_ref(&attribute),
     ///     DenseAttrCreationOrder::Untracked,
     ///     [DenseAttrFixup::Payload { attribute: 0 }],
     /// )?;
-    /// assert_eq!(attributes[0].name, "label");
-    /// assert_eq!(attributes[0].raw_data, b"a");
+    /// assert_eq!(attribute.name, "label");
+    /// assert_eq!(attribute.raw_data, b"a");
     /// let reserved = prepared.blob_len();
     /// let ready = prepared.finalize(
     ///     |attribute| panic!("unexpected committed datatype of attribute {attribute}"),
@@ -477,8 +431,8 @@ impl PreparedDenseAttrs {
 
 /// A deferred change to one attribute's encoded bytes.
 ///
-/// Attribute positions refer to the input order of [`PreparedDenseAttrs::new`] or
-/// [`PreparedDenseAttrs::from_prepared`].
+/// Attribute positions refer to the input order of [`PreparedDenseAttrs::new`] and
+/// [`PreparedDenseAttrs::with_widths`].
 #[derive(Clone, Copy, Debug)]
 pub enum DenseAttrFixup {
     /// Replaces the committed datatype's file address.
@@ -1025,7 +979,7 @@ struct EncodedDenseAttrs {
 }
 
 impl EncodedDenseAttrs {
-    /// Encodes attributes and pairs each message with its creation index.
+    /// Encodes version 3 attribute bodies and pairs each with its creation index.
     ///
     /// # Errors
     ///
@@ -1037,47 +991,6 @@ impl EncodedDenseAttrs {
         widths: FormatWidths,
         attrs: &[AttributeMessage],
         creation: DenseAttrCreationOrder,
-    ) -> Result<Self, FormatError> {
-        Self::encode(widths, attrs, creation, |attribute| {
-            Ok(attribute.prepare_v3(widths)?.to_bytes())
-        })
-    }
-
-    /// Pairs prepared version 3 bodies with their names and creation indexes.
-    ///
-    /// The caller supplies a matching body for each message in `attrs`, in the same order.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::Internal`] if an attribute has no corresponding body.
-    /// Returns the metadata and position-conversion errors of [`Self::encode`].
-    fn with_bodies(
-        widths: FormatWidths,
-        attrs: &[AttributeMessage],
-        creation: DenseAttrCreationOrder,
-        bodies: Vec<Vec<u8>>,
-    ) -> Result<Self, FormatError> {
-        let mut bodies = bodies.into_iter();
-        Self::encode(widths, attrs, creation, |_| {
-            bodies.next().ok_or_else(|| {
-                FormatError::Internal("a prepared dense attribute has no encoded body".into())
-            })
-        })
-    }
-
-    /// Assigns creation indexes and index order while obtaining each body's bytes through `body`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::Internal`] if the counts of attributes and tracked indexes differ.
-    /// Returns the metadata errors documented by [`dense_attrs_plan`] for repeated names or
-    /// indexes and inconsistent counters. Returns [`FormatError::ValueTooLargeForRepresentation`]
-    /// if an attribute count or position does not fit a [`u32`]. Propagates errors from `body`.
-    fn encode(
-        widths: FormatWidths,
-        attrs: &[AttributeMessage],
-        creation: DenseAttrCreationOrder,
-        mut body: impl FnMut(&AttributeMessage) -> Result<Vec<u8>, FormatError>,
     ) -> Result<Self, FormatError> {
         let (indices, next_index, indexed) = match creation {
             DenseAttrCreationOrder::Untracked => (None, None, false),
@@ -1114,7 +1027,7 @@ impl EncodedDenseAttrs {
                 None => position,
             };
             attributes.push(EncodedDenseAttribute {
-                bytes: body(attribute)?,
+                bytes: attribute.prepare_v3(widths)?.to_bytes(),
                 creation_index,
             });
             order.push((

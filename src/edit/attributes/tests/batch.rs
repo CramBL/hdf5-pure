@@ -2,9 +2,11 @@ use hdf5_pure_format::__private::AttributeInfoMessage;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use rstest::rstest;
+use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
 use test_util::attribute_info::{AttributeInfo, CreationOrderIndex, Width};
 use test_util::object_header::v2::{self, HeaderFlags};
 use test_util::object_header::{self, Message};
+use test_util::{dataspace, datatype};
 
 use super::super::AttrOp;
 use super::super::test_util::encode_attr_body;
@@ -51,7 +53,7 @@ fn compact_edits_preserve_the_attribute_info_record_metadata(#[case] width: Widt
         .apply(
             &AttrOp::Set {
                 name: "added".into(),
-                value: AttrValue::I64(7),
+                value: AttrValue::AsciiString("new".into()),
             },
             0,
         )
@@ -89,10 +91,20 @@ fn compact_edits_preserve_the_attribute_info_record_metadata(#[case] width: Widt
     let super::super::EditedAttrs::RebuildCompact(compact) = result.attrs else {
         panic!("expected compact storage");
     };
-    let added = layout.next_message(&compact.records, 0).unwrap().unwrap();
-    assert_eq!(added.msg_type, MessageType::ATTRIBUTE);
-    assert_eq!(added.creation_index, Some(4));
-    assert_eq!(&compact.records[added.body_range.end..], gap);
+    let body = UnpaddedAttribute::inline(
+        UnpaddedVersion::Two,
+        "added",
+        &datatype::fixed_string(3),
+        &dataspace::VersionTwo::scalar().build(),
+        b"new",
+    )
+    .build();
+    let mut records = v2::message_records(
+        &[Message::new(object_header::MessageType::ATTRIBUTE, &body).with_creation_order(4)],
+        flags,
+    );
+    records.extend_from_slice(&gap);
+    assert_eq!(compact.records, records);
 }
 
 #[rstest]

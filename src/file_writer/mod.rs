@@ -532,22 +532,15 @@ fn link_storage_error(error: LinkStorageError) -> FormatError {
 #[cfg(test)]
 const MAX_COMPACT_LINKS: usize = 8;
 
-/// Adds an object's attribute storage to its header: either the Attribute Info
-/// message naming a dense (fractal-heap) attribute store, or the inline
-/// Attribute messages preceded by the compact-storage Attribute Info message
-/// that lets the reference library count them (see
-/// [`compact_attribute_info`]).
+/// Appends Attribute Info and compact Attribute records to an object header.
 ///
-/// The dense case takes the Attribute Info message rather than the heap itself
-/// because that message is all a header needs. A sizing pass can therefore get
-/// its header size from a [`DenseAttrPlan`] without the heap's bytes existing.
-/// Compact records use the creation indexes from `header`. Tracked empty sets retain their
-/// Attribute Info metadata.
+/// For dense storage, writes only the supplied `attr_info`. For compact storage, prepares each
+/// body at the file widths and uses the creation indexes from `header`. Writes Attribute Info
+/// for tracked empty sets.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
-/// is longer than its 2-byte size field can hold.
+/// Returns the errors of [`AttributeMessage::prepare`] or [`ObjectHeaderWriter::append_message`].
 fn add_attributes(
     w: &mut ObjectHeaderWriter,
     attrs: &[AttributeMessage],
@@ -565,9 +558,8 @@ fn add_attributes(
         )?;
     }
     for (index, attr) in attrs.iter().enumerate() {
-        w.append_raw_record(
-            MessageType::ATTRIBUTE,
-            &attr.serialize(header.widths.offsets, header.widths.lengths.get())?,
+        w.append_message(
+            attr.prepare(header.widths)?,
             MessageFlags::NONE,
             header.creation.index_at(index).unwrap_or_default(),
         )?;
@@ -677,7 +669,7 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 ///
 /// # Errors
 ///
-/// Propagates attribute serialization errors from [`AttributeMessage::serialize`].
+/// Returns the errors of [`AttributeMessage::prepare`].
 pub(crate) fn needs_dense_attrs_with_widths(
     widths: FormatWidths,
     attrs: &[AttributeMessage],
@@ -711,7 +703,7 @@ fn select_attribute_storage(
         return Ok(AttributeStorage::Dense);
     }
     for attr in attrs {
-        if attr.serialize(widths.offsets, widths.lengths.get())?.len() > OBJECT_HEADER_MESSAGE_MAX {
+        if attr.prepare(widths)?.encoded_size() > OBJECT_HEADER_MESSAGE_MAX {
             return Ok(AttributeStorage::Dense);
         }
     }
@@ -1530,33 +1522,11 @@ impl FileWriter {
             .map(|d| needs_dense_attrs_with_widths(widths, &d.attrs))
             .collect::<Result<_, _>>()?;
 
-        /// Checks compact message lengths before chunk compression.
+        /// Prepares dense geometry and deferred updates.
         ///
         /// # Errors
         ///
-        /// Returns [`FormatError::AttributeMessageTooLarge`] if a compact message exceeds the
-        /// object-header size limit. Propagates attribute encoding errors.
-        fn check_compact_attrs(
-            widths: FormatWidths,
-            attrs: &[AttributeMessage],
-        ) -> Result<(), FormatError> {
-            for a in attrs {
-                let size = a.serialize(widths.offsets, widths.lengths.get())?.len();
-                if size > OBJECT_HEADER_MESSAGE_MAX {
-                    return Err(FormatError::AttributeMessageTooLarge {
-                        name: a.name.clone(),
-                        size,
-                    });
-                }
-            }
-            Ok(())
-        }
-        /// Prepares dense geometry and deferred updates, or checks compact message lengths.
-        ///
-        /// # Errors
-        ///
-        /// Propagates compact attribute encoding and size errors, or errors from
-        /// [`PreparedDenseAttrs::new`] for dense storage.
+        /// Propagates errors from [`PreparedDenseAttrs::with_widths`].
         fn prepare_dense(
             widths: FormatWidths,
             attrs: &[AttributeMessage],
@@ -1565,7 +1535,6 @@ impl FileWriter {
             payload: Option<usize>,
         ) -> Result<Option<PreparedDenseAttrs>, FormatError> {
             if !dense {
-                check_compact_attrs(widths, attrs)?;
                 return Ok(None);
             }
             let fixups = patches

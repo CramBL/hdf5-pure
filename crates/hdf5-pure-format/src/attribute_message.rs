@@ -502,6 +502,40 @@ impl AttributeMessage {
     /// Returns [`FormatError::AttributeFieldTooLong`] if the name with its NUL terminator, the
     /// datatype field, or the dataspace field exceeds [`u16::MAX`] bytes, checking in that order.
     /// Returns [`FormatError::OffsetOverflow`] if the complete body exceeds [`isize::MAX`] bytes.
+    ///
+    /// # Examples
+    ///
+    /// Prepares an attribute whose variable-length values use two-byte heap addresses.
+    ///
+    /// ```
+    /// use hdf5_pure_format::{
+    ///     __private as format, Datatype, FormatError, LengthWidth, OffsetWidth, VariableLengthType,
+    /// };
+    /// let widths = format::FormatWidths {
+    ///     offsets: OffsetWidth::Two,
+    ///     lengths: LengthWidth::Four,
+    /// };
+    /// let message = format::AttributeMessage {
+    ///     name: "empty".into(),
+    ///     datatype: Datatype::VariableLength(VariableLengthType::sequence(Datatype::Opaque {
+    ///         size: 1,
+    ///         tag: vec![],
+    ///     })),
+    ///     dataspace: format::Dataspace {
+    ///         space_type: format::DataspaceType::Scalar,
+    ///         rank: 0,
+    ///         dimensions: vec![],
+    ///         max_dimensions: None,
+    ///     },
+    ///     raw_data: vec![0; 10],
+    ///     datatype_location: format::DatatypeLocation::Inline,
+    /// };
+    /// let body = message.prepare(widths)?.to_bytes();
+    /// let parsed = format::AttributeMessage::parse_with_widths(&body, widths)?;
+    /// assert_eq!(parsed, message);
+    /// assert_eq!(parsed.raw_data.len(), 10);
+    /// # Ok::<(), FormatError>(())
+    /// ```
     pub fn prepare(&self, widths: FormatWidths) -> Result<PreparedAttributeBody<'_>, FormatError> {
         self.prepare_body(
             self.prepare_datatype(widths.offsets)?,
@@ -777,121 +811,6 @@ fn attribute_prefix_size(charset: Option<u8>) -> usize {
         V3_PREFIX_SIZE
     } else {
         V1_V2_PREFIX_SIZE
-    }
-}
-
-/// An [`AttributeMessage`] paired with its encoded body and file widths.
-///
-/// The message and body are immutable until consumed. Compact writers use the body directly.
-/// Dense writers use [`PreparedDenseAttrs::from_prepared`][dense] to prepare version 3 messages
-/// and heap geometry at the retained file widths. [`Self::new`] selects eight-byte addresses and
-/// lengths, and [`Self::with_widths`] accepts each width independently.
-///
-/// [dense]: crate::dense_attribute_write::PreparedDenseAttrs::from_prepared
-pub struct PreparedAttributeMessage {
-    widths: FormatWidths,
-    message: AttributeMessage,
-    body: Vec<u8>,
-}
-
-impl PreparedAttributeMessage {
-    /// Serializes `message` with eight-byte addresses and lengths.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`AttributeMessage::prepare`].
-    pub fn new(message: AttributeMessage) -> Result<Self, FormatError> {
-        Self::with_widths(
-            FormatWidths {
-                offsets: OffsetWidth::Eight,
-                lengths: LengthWidth::Eight,
-            },
-            message,
-        )
-    }
-
-    /// Serializes `message` and retains the selected widths for dense-storage planning.
-    ///
-    /// The caller supplies raw element bytes already encoded at `widths.offsets`. This operation
-    /// encodes metadata and copies those bytes into the message body.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`AttributeMessage::prepare`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hdf5_pure_format::{__private as format, Datatype, FormatError, LengthWidth,
-    ///     OffsetWidth, VariableLengthType};
-    ///
-    /// let widths = format::FormatWidths {
-    ///     offsets: OffsetWidth::Two,
-    ///     lengths: LengthWidth::Four,
-    /// };
-    /// let message = format::AttributeMessage {
-    ///     name: "empty".into(),
-    ///     datatype: Datatype::VariableLength(VariableLengthType::sequence(Datatype::Opaque {
-    ///         size: 1,
-    ///         tag: vec![],
-    ///     })),
-    ///     dataspace: format::Dataspace {
-    ///         space_type: format::DataspaceType::Scalar,
-    ///         rank: 0,
-    ///         dimensions: vec![],
-    ///         max_dimensions: None,
-    ///     },
-    ///     raw_data: vec![0; 10],
-    ///     datatype_location: format::DatatypeLocation::Inline,
-    /// };
-    /// let prepared = format::PreparedAttributeMessage::with_widths(widths, message.clone())?;
-    /// let parsed = format::AttributeMessage::parse_with_widths(prepared.body(), widths)?;
-    /// assert_eq!(parsed, message);
-    /// assert_eq!(parsed.raw_data.len(), 10);
-    /// # Ok::<(), FormatError>(())
-    /// ```
-    pub fn with_widths(
-        widths: FormatWidths,
-        message: AttributeMessage,
-    ) -> Result<Self, FormatError> {
-        let body = message.prepare(widths)?.to_bytes();
-        Ok(Self {
-            widths,
-            message,
-            body,
-        })
-    }
-
-    /// Returns the file widths used to serialize the retained body.
-    pub(crate) fn widths(&self) -> FormatWidths {
-        self.widths
-    }
-
-    /// Returns the message used to encode the body.
-    pub fn message(&self) -> &AttributeMessage {
-        &self.message
-    }
-
-    /// Returns the body encoded at the retained file widths.
-    pub fn body(&self) -> &[u8] {
-        &self.body
-    }
-
-    /// Returns the message and its encoded body, consuming the preparation.
-    pub fn into_parts(self) -> (AttributeMessage, Vec<u8>) {
-        (self.message, self.body)
-    }
-
-    /// Returns the message and its version 3 body, reusing the encoded fields.
-    pub(crate) fn into_v3_parts(mut self) -> (AttributeMessage, Vec<u8>) {
-        // Version 3 adds the name character set after the version 2 prefix, as defined in
-        // "The Attribute Message" of the format specification, version 4.0.
-        if self.body[0] == VERSION_TWO {
-            self.body[0] = VERSION_THREE;
-            self.body
-                .insert(V1_V2_PREFIX_SIZE, name_character_set(CharacterSet::Ascii));
-        }
-        (self.message, self.body)
     }
 }
 
