@@ -12,6 +12,9 @@ use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 use test_util::disk_log::DiskOp;
+use test_util::object_header::v2;
+use test_util::object_header::v2::HeaderFlags;
+use test_util::object_header::{Message, MessageFlags as FixtureFlags, MessageType as FixtureType};
 
 use crate::AttrValue;
 use crate::Datatype;
@@ -53,6 +56,7 @@ use crate::image::CountingImage;
 use crate::image::HandleImage;
 use crate::image::WriteBuffering;
 use crate::link_info::LinkInfoMessage;
+use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::ObjectId;
 use crate::object_header::ObjectHeader;
@@ -67,6 +71,55 @@ use crate::source::SourceMetadata;
 use crate::superblock;
 use crate::type_builders::DatasetBuilder;
 use crate::width::FormatWidths;
+
+/// Builds independent record bytes with empty flags and a tracked creation index of zero.
+///
+/// # Panics
+///
+/// Panics if the message type or body length exceeds the limits of [`fixture_record`].
+pub(in crate::edit) fn fixture_message(
+    layout: format::MessageRecordLayout,
+    message_type: MessageType,
+    body: &[u8],
+) -> Vec<u8> {
+    fixture_record(layout, message_type, MessageFlags::NONE, 0, body)
+}
+
+/// Builds independent record bytes at the selected layout, including the supplied flags.
+///
+/// # Panics
+///
+/// Panics if the message type exceeds [`u8::MAX`] or the body length exceeds [`u16::MAX`].
+pub(in crate::edit) fn fixture_record(
+    layout: format::MessageRecordLayout,
+    message_type: MessageType,
+    flags: MessageFlags,
+    creation_index: u16,
+    body: &[u8],
+) -> Vec<u8> {
+    let header_flags = if layout.tracks_creation_order() {
+        HeaderFlags::TRACKS_CREATION_ORDER
+    } else {
+        HeaderFlags::default()
+    };
+    v2::message_record(
+        &Message::new(FixtureType(message_type.to_u16()), body)
+            .with_flags(FixtureFlags(flags.get()))
+            .with_creation_order(creation_index),
+        header_flags,
+    )
+}
+
+impl object_header::OhRegion {
+    /// Appends an independent fixture record in this region's layout.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the message type or body length exceeds the limits of [`fixture_record`].
+    pub(in crate::edit) fn push_fixture_message(&mut self, message_type: MessageType, body: &[u8]) {
+        self.push_bytes(&fixture_message(self.layout(), message_type, body));
+    }
+}
 
 /// Decodes emitted manager sections in stored-address order and sums the used bytes.
 ///

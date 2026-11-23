@@ -10,6 +10,7 @@ use super::super::AttrOp;
 use super::super::test_util::encode_attr_body;
 use crate::attribute::AttributeMessage;
 use crate::edit::object_header::OhRegion;
+use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
@@ -106,7 +107,7 @@ fn compact_batches_assign_creation_indices_in_operation_order(#[case] variable: 
         ObjectHeaderPrefix::with_layout(layout),
     );
     let info = AttributeInfoMessage::compact(crate::file_writer::OFFSET_WIDTH, Some(4), true);
-    region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+    region.push_fixture_message(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
     let value = |number| {
         if variable {
             AttrValue::VarLenAsciiString(format!("value{number}"))
@@ -226,7 +227,8 @@ fn compact_batch_checks_creation_exhaustion_only_for_new_names(#[case] new_name:
         crate::file_writer::WIDTHS,
         ObjectHeaderPrefix::with_layout(layout),
     );
-    region.push_bytes(&layout.record_with_creation_index(
+    region.push_bytes(&edit_test_util::fixture_record(
+        layout,
         MessageType::ATTRIBUTE,
         MessageFlags::NONE,
         u16::MAX,
@@ -283,7 +285,7 @@ fn superseded_oversized_values_preserve_the_full_attribute_parsing_boundary(
             .flags(test_util::attribute::Flags::NONE)
             .build();
     body.truncate(13);
-    region.push(MessageType::ATTRIBUTE, &body);
+    region.push_fixture_message(MessageType::ATTRIBUTE, &body);
     let set = AttrOp::Set {
         name: "temporary".into(),
         value: if oversized {

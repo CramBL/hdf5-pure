@@ -1092,6 +1092,7 @@ mod tests {
 
     use crate::address::{BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt};
     use crate::attribute_request::AttributeName;
+    use crate::edit::test_util as edit_test_util;
     use crate::file_space_info::{self, FileSpacePageSize, FileSpaceStrategy};
     use crate::file_writer::WIDTHS;
     use crate::source::BytesSource;
@@ -1138,21 +1139,24 @@ mod tests {
         };
         let region_bytes = |body: &[u8]| {
             [
-                layout.record_with_creation_index(
+                edit_test_util::fixture_record(
+                    layout,
                     MessageType::DATATYPE,
                     MessageFlags::SHARED,
                     9,
                     &[0xAB; 7],
                 ),
-                layout.record_with_creation_index(
+                edit_test_util::fixture_record(
+                    layout,
                     MessageType::FILE_SPACE_INFO,
                     MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
                     3,
                     body,
                 ),
-                layout.record(MessageType::GROUP_INFO, &[0; 2]),
+                edit_test_util::fixture_message(layout, MessageType::GROUP_INFO, &[0; 2]),
                 if repeated {
-                    layout.record_with_creation_index(
+                    edit_test_util::fixture_record(
+                        layout,
                         MessageType::FILE_SPACE_INFO,
                         MessageFlags::CONSTANT,
                         11,
@@ -1224,7 +1228,8 @@ mod tests {
             .unwrap();
         let region = OhRegion::new(
             crate::file_writer::WIDTHS,
-            layout.record_with_creation_index(
+            edit_test_util::fixture_record(
+                layout,
                 MessageType::ATTRIBUTE,
                 MessageFlags::NONE,
                 17,
@@ -1289,8 +1294,8 @@ mod tests {
         let source = OhRegion::new(
             crate::file_writer::WIDTHS,
             [
-                layout.record(MessageType::FILE_SPACE_INFO, &old_body),
-                layout.record(MessageType::NIL, &[0; 2]),
+                edit_test_util::fixture_message(layout, MessageType::FILE_SPACE_INFO, &old_body),
+                edit_test_util::fixture_message(layout, MessageType::NIL, &[0; 2]),
             ]
             .concat(),
             ObjectHeaderPrefix::with_layout(layout),
@@ -1311,8 +1316,8 @@ mod tests {
         assert_eq!(
             &rewritten[..],
             &[
-                layout.record(MessageType::FILE_SPACE_INFO, &new_body),
-                layout.record(MessageType::NIL, &[0; 2]),
+                edit_test_util::fixture_message(layout, MessageType::FILE_SPACE_INFO, &new_body),
+                edit_test_util::fixture_message(layout, MessageType::NIL, &[0; 2]),
             ]
             .concat(),
         );
@@ -1331,11 +1336,12 @@ mod tests {
             FileSpacePageSize::DEFAULT,
         );
         let mut bytes = if after_replacement {
-            layout.record(MessageType::FILE_SPACE_INFO, &[1, 2])
+            edit_test_util::fixture_message(layout, MessageType::FILE_SPACE_INFO, &[1, 2])
         } else {
             Vec::new()
         };
-        let mut malformed = layout.record(MessageType::GROUP_INFO, &[0; 2]);
+        let mut malformed =
+            edit_test_util::fixture_message(layout, MessageType::GROUP_INFO, &[0; 2]);
         malformed.pop();
         bytes.extend_from_slice(&malformed);
         let source = OhRegion::new(
@@ -1363,7 +1369,7 @@ mod tests {
         );
         let source = OhRegion::new(
             crate::file_writer::WIDTHS,
-            layout.record(MessageType::GROUP_INFO, &[0; 2]),
+            edit_test_util::fixture_message(layout, MessageType::GROUP_INFO, &[0; 2]),
             ObjectHeaderPrefix::with_layout(layout),
         );
 

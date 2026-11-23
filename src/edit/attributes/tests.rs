@@ -87,12 +87,12 @@ fn compact_overwrite_preserves_storage_above_the_stored_maximum() {
             ..ObjectHeaderPrefix::PLAIN
         },
     );
-    region.push(
+    region.push_fixture_message(
         MessageType::ATTRIBUTE,
         &encode_attr_body("kept", &AttrValue::I64(2)).unwrap(),
     );
     let kept = region.to_vec();
-    region.push(
+    region.push_fixture_message(
         MessageType::ATTRIBUTE,
         &encode_attr_body("changed", &AttrValue::I64(3)).unwrap(),
     );
@@ -147,7 +147,7 @@ fn bulk_attribute_edits_preserve_metadata_parse_errors(
     FileBuilder::new().write(&path).unwrap();
     let engine = edit_test_util::open_engine(&path);
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-    region.push(MessageType::ATTRIBUTE_INFO, &body);
+    region.push_fixture_message(MessageType::ATTRIBUTE_INFO, &body);
     let operation = AttrOp::Remove {
         name: "absent".into(),
     };
@@ -224,9 +224,7 @@ fn bulk_attribute_edits_reject_unknown_required_messages(#[case] flags: MessageF
     let engine = edit_test_util::open_engine(&path);
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     let record =
-        region
-            .layout()
-            .record_with_creation_index(MessageType::from_u16(0xff), flags, 0, &[]);
+        edit_test_util::fixture_record(region.layout(), MessageType::from_u16(0xff), flags, 0, &[]);
     region.push_bytes(&record);
     let operation = AttrOp::Set {
         name: "large".into(),

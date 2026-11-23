@@ -85,14 +85,14 @@ fn link_inspection_classifies_user_links_and_malformed_records(
     let mut region = OhRegion::empty(widths(), ObjectHeaderPrefix::PLAIN);
     let bytes = if dense {
         let (bytes, info) = test_util::link_message::dense_storage(b"u", body);
-        region.push(MessageType::LINK_INFO, &info);
+        region.push_fixture_message(MessageType::LINK_INFO, &info);
         bytes
     } else {
-        region.push(
+        region.push_fixture_message(
             MessageType::LINK_INFO,
             &crate::file_writer::compact_link_info(widths().offsets).to_bytes(),
         );
-        region.push(MessageType::LINK, body);
+        region.push_fixture_message(MessageType::LINK, body);
         Vec::new()
     };
     let error = group_links::inspect(
@@ -480,9 +480,9 @@ fn dense_inspection_rejects_inconsistent_index_metadata(
 }
 
 #[rstest]
-#[case::duplicate_info(|region: &mut OhRegion| region.push(MessageType::LINK_INFO, &crate::file_writer::compact_link_info(OffsetWidth::Eight).to_bytes()), "a group has repeated link-info messages")]
-#[case::duplicate_group_info(|region: &mut OhRegion| region.push(MessageType::GROUP_INFO, &[0, 0]), "a group has repeated group-info messages")]
-#[case::symbol_table(|region: &mut OhRegion| region.push(MessageType::SYMBOL_TABLE, &[0; 16]), "a group mixes symbol-table storage with modern link storage")]
+#[case::duplicate_info(|region: &mut OhRegion| region.push_fixture_message(MessageType::LINK_INFO, &crate::file_writer::compact_link_info(OffsetWidth::Eight).to_bytes()), "a group has repeated link-info messages")]
+#[case::duplicate_group_info(|region: &mut OhRegion| region.push_fixture_message(MessageType::GROUP_INFO, &[0, 0]), "a group has repeated group-info messages")]
+#[case::symbol_table(|region: &mut OhRegion| region.push_fixture_message(MessageType::SYMBOL_TABLE, &[0; 16]), "a group mixes symbol-table storage with modern link storage")]
 #[case::group_info_flags(|region: &mut OhRegion| {
     let (_, body, _) = find_message(region, MessageType::GROUP_INFO);
     region.bytes_mut()[body + 1] = 0x80;
@@ -494,7 +494,7 @@ fn dense_inspection_rejects_inconsistent_index_metadata(
 #[case::duplicate_name(|region: &mut OhRegion| {
     let (_, body, end) = find_message(region, MessageType::LINK);
     let bytes = region[body..end].to_vec();
-    region.push(MessageType::LINK, &bytes);
+    region.push_fixture_message(MessageType::LINK, &bytes);
 }, "a group's links or link-info metadata cannot be reproduced")]
 #[case::creation_counter(|region: &mut OhRegion| {
     let (_, body, _) = find_message(region, MessageType::LINK_INFO);
@@ -754,17 +754,17 @@ fn fixture(storage: GroupLinkStorage, dense: bool) -> (Vec<u8>, OhRegion) {
             .serialize(StoredAddress::new(0))
             .unwrap();
         source.extend_from_slice(&image.bytes);
-        region.push(MessageType::LINK_INFO, &image.info.to_bytes());
+        region.push_fixture_message(MessageType::LINK_INFO, &image.info.to_bytes());
     } else {
-        region.push(MessageType::LINK_INFO, &storage.info().to_bytes());
+        region.push_fixture_message(MessageType::LINK_INFO, &storage.info().to_bytes());
         for link in storage.links() {
-            region.push(
+            region.push_fixture_message(
                 MessageType::LINK,
                 &link.serialize(storage.offset_width()).unwrap(),
             );
         }
     }
-    region.push(MessageType::GROUP_INFO, &[0, 3, 12, 0, 4, 0, 7, 0, 20, 0]);
+    region.push_fixture_message(MessageType::GROUP_INFO, &[0, 3, 12, 0, 4, 0, 7, 0, 20, 0]);
     (source, region)
 }
 

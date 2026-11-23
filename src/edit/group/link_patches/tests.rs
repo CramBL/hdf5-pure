@@ -14,6 +14,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::edit::group;
 use crate::edit::object_header::OhRegion;
+use crate::edit::test_util as edit_test_util;
 use crate::error::{Error, FormatError};
 use crate::message_type::MessageType;
 use crate::object_path::LinkNameBuf;
@@ -40,9 +41,9 @@ fn link_batches_keep_region_widths_and_reject_undefined_targets(
         widths,
         ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
     );
-    region.push(MessageType::LINK, &HardLink::new("changed", 7).build(wire));
+    region.push_fixture_message(MessageType::LINK, &HardLink::new("changed", 7).build(wire));
     let mut expected = region.with_bytes(Vec::new());
-    expected.push(MessageType::LINK, &HardLink::new("changed", 29).build(wire));
+    expected.push_fixture_message(MessageType::LINK, &HardLink::new("changed", 29).build(wire));
     let mut patches = LinkPatches::new(&mut region, ["changed", "changed"]);
     patches.patch_next(StoredAddress::new(29)).unwrap();
     let address = StoredAddress::undefined(offsets);
@@ -90,8 +91,8 @@ fn link_batches_report_existing_target_errors_at_the_requested_operation(
     #[values(false, true)] batch: bool,
 ) {
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-    region.push(MessageType::LINK, &body);
-    region.push(
+    region.push_fixture_message(MessageType::LINK, &body);
+    region.push_fixture_message(
         MessageType::LINK,
         &HardLink::new("good", 1).build(Widths::EIGHT),
     );
@@ -114,7 +115,7 @@ fn link_batches_report_existing_target_errors_at_the_requested_operation(
 #[test]
 fn link_batches_defer_later_framing_errors_until_the_requested_operation() {
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-    region.push(
+    region.push_fixture_message(
         MessageType::LINK,
         &HardLink::new("good", 1).build(Widths::EIGHT),
     );
@@ -140,7 +141,8 @@ fn link_batches_resolve_after_deletion_and_preserve_fields_across_appends() {
     expected =
         group::remove_links_from_region(&expected, [&LinkNameBuf::new("untouched").unwrap()])
             .unwrap();
-    let appended = region.layout().record(
+    let appended = edit_test_util::fixture_message(
+        region.layout(),
         MessageType::LINK,
         &HardLink::new("added", 37).build(Widths::EIGHT),
     );
@@ -156,11 +158,11 @@ fn link_batches_resolve_after_deletion_and_preserve_fields_across_appends() {
 #[test]
 fn link_batches_match_lossy_names_and_preserve_symbolic_targets() {
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-    region.push(
+    region.push_fixture_message(
         MessageType::LINK,
         &SymbolicLink::external("skipped", "file.h5", "/target").build(),
     );
-    region.push(
+    region.push_fixture_message(
         MessageType::LINK,
         &HardLink::from_bytes(b"a\xff\xfez", 1).build(Widths::EIGHT),
     );
@@ -183,11 +185,11 @@ fn link_batches_match_lossy_names_and_preserve_symbolic_targets() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     assert_eq!(measured.blocks, 0, "{measured}");
     let mut expected = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-    expected.push(
+    expected.push_fixture_message(
         MessageType::LINK,
         &SymbolicLink::external("skipped", "file.h5", "/target").build(),
     );
-    expected.push(
+    expected.push_fixture_message(
         MessageType::LINK,
         &HardLink::from_bytes(b"a\xff\xfez", 17).build(Widths::EIGHT),
     );
@@ -257,11 +259,11 @@ fn link_patch_batches_preserve_records_with_bounded_allocations(
         .map(|index| format!("{index:04}_{}", "x".repeat(128)))
         .collect();
     for (index, name) in names.iter().enumerate() {
-        region.push(
+        region.push_fixture_message(
             MessageType::LINK,
             &HardLink::new(name, 1).build(Widths::EIGHT),
         );
-        expected.push(
+        expected.push_fixture_message(
             MessageType::LINK,
             &HardLink::new(name, u64::try_from(index + 11).unwrap()).build(Widths::EIGHT),
         );
@@ -302,19 +304,19 @@ fn mixed_region(flags: HeaderFlags, address: u64) -> OhRegion {
         crate::file_writer::WIDTHS,
         ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
     );
-    region.push(
+    region.push_fixture_message(
         MessageType::LINK,
         &HardLink::new("untouched", 5).build(Widths::EIGHT),
     );
-    region.push(
+    region.push_fixture_message(
         MessageType::LINK,
         &SymbolicLink::soft("soft", "/target").build(),
     );
-    region.push(
+    region.push_fixture_message(
         MessageType::LINK,
         &SymbolicLink::external("external", "file.h5", "/target").build(),
     );
-    region.push(
+    region.push_fixture_message(
         MessageType::LINK,
         &HardLink::new("changed", address)
             .creation_order(7)
