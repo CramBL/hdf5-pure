@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::filter_pipeline` accepting set bits in positions 8 through 15 of the filter
+  flags, nonzero version 1 reserved header bytes, and nonzero version 1 client data padding.
 - Fixed `Group::groups` accepting malformed external-link targets in version 1 Link messages ([#1329](https://github.com/CramBL/hdf5-pure/pull/1329)).
 - Fixed `Group::groups` and related group operations accepting Link Info messages with reserved flag bits set ([#1328](https://github.com/CramBL/hdf5-pure/pull/1328)).
 - Fixed `repack` dropping explicitly stored default link thresholds from Group Info messages ([#1320](https://github.com/CramBL/hdf5-pure/pull/1320)).

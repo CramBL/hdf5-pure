@@ -75,6 +75,7 @@ mod file_space_oracle;
 mod file_space_properties;
 mod file_writer_dense_links;
 mod fill_value;
+mod filter_pipeline_codec;
 mod fixed_array;
 mod fixed_ascii;
 mod fixed_byte_arrays;

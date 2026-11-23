@@ -15,6 +15,7 @@ mod dense_attribute_placement;
 mod dense_link_placement;
 mod extensible_array_creation;
 mod extensible_array_header_statistics;
+mod filter_pipeline;
 mod fractal_heap_huge;
 mod fractal_heap_placement;
 mod fractal_heap_tiny;
