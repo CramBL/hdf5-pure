@@ -14,17 +14,13 @@ use core::str;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, CompoundMember, Datatype, DatatypeByteOrder,
-    EnumMember, FixedPointType, FloatingPointType, FormatError, MantissaNormalization,
-    ReferenceType, StringPadding, TimeType, VariableLengthType,
+    CharacterSet, ComplexType, CompoundMember, Datatype, DatatypeByteOrder, EnumMember,
+    FloatingPointType, FormatError, ReferenceType, StringPadding, VariableLengthType,
 };
 
-use super::atomic::AtomicProperties;
+use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
 use super::compound_layout::CompoundLayout;
-use super::{
-    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
-    FloatingPointByteOrder,
-};
+use super::{DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion};
 use crate::bytes::{self, ByteCursor};
 use crate::codec::Encode;
 use crate::convert::Narrow;
@@ -32,12 +28,9 @@ use crate::datatype::header::{Context, DatatypeClass, Header};
 use crate::datatype::{
     self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
     COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
-    DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, FLOAT_INTERNAL_PADDING_BIT,
-    FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE, FLOAT_NORMALIZATION_LEADING_ONE,
-    FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
-    HIGH_PADDING_BIT, LOW_PADDING_BIT, OpaqueTagWire, REFERENCE_CLASS, VARIABLE_LENGTH_CLASS,
-    VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING,
-    VariableLengthMetadata,
+    DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, REFERENCE_CLASS,
+    VARIABLE_LENGTH_CLASS, VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE,
+    VARIABLE_LENGTH_STRING, VariableLengthMetadata,
 };
 use crate::width::OffsetWidth;
 
@@ -46,6 +39,7 @@ impl DatatypeMessage {
     ///
     /// Reads each complete eight-byte header before checking its version or class. Checks version
     /// before class, except in a complex datatype's parent, where it checks class first.
+    /// Reads fixed-size atomic property blocks in full before checking class flags.
     ///
     /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
     /// descriptions at versions 1 through 5, compounds, enumerations, and arrays at versions
@@ -53,7 +47,7 @@ impl DatatypeMessage {
     /// description retains its own version, at most the containing description's version.
     /// Complex parents are floating-point descriptions. VAX order requires version 3 or later.
     /// Floating-point order and reserved bits are checked through
-    /// [`FloatingPointByteOrder::parse`].
+    /// [`super::FloatingPointByteOrder::parse`].
     ///
     /// Variable-length descriptor sizes must be 10, 12, or 16 bytes, corresponding to heap
     /// address widths of 2, 4, or 8 bytes. The parser checks array element sizes against the
@@ -74,7 +68,8 @@ impl DatatypeMessage {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. Returns
     /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
-    /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
+    /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported
+    /// class, including references.
     /// Returns [`FormatError::InvalidDatatypeFlags`] or [`FormatError::InvalidOpaqueReservedBits`]
     /// if reserved atomic, compound, enumeration, or array class bits are set. Returns
     /// [`FormatError::InvalidDatatypeVersion`] for compound, enumeration, or array versions 1 or 2,
@@ -155,108 +150,23 @@ impl DatatypeMessage {
         let mut cursor = ByteCursor::with_position(data, position)?;
         let header = Header::parse(&mut cursor, context)?;
         let (properties, consumed) = match header.class {
-            DatatypeClass::FixedPoint => {
-                header.reserved(FIXED_RESERVED)?;
-                let datatype = FixedPointType::new(
-                    header.size,
-                    binary_order(header.flags[0]),
-                    header.flags[0] & SIGNED_BIT != 0,
-                    cursor.u16()?,
-                    cursor.u16()?,
-                )?
-                .with_padding(
-                    header.flags[0] & LOW_PADDING_BIT != 0,
-                    header.flags[0] & HIGH_PADDING_BIT != 0,
-                );
-                (DatatypeProperties::FixedPoint(datatype), cursor.position())
-            }
-            DatatypeClass::FloatingPoint => {
-                let order = FloatingPointByteOrder::parse(header.version, header.flags)
-                    .map_err(|error| context.map_floating_point_flags_error(&header, error))?;
-                let normalization = match (header.flags[0] >> FLOAT_NORMALIZATION_SHIFT)
-                    & FLOAT_NORMALIZATION_MASK
-                {
-                    FLOAT_NORMALIZATION_UNNORMALIZED => MantissaNormalization::Unnormalized,
-                    FLOAT_NORMALIZATION_LEADING_ONE => MantissaNormalization::LeadingOne,
-                    FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE => {
-                        MantissaNormalization::ImpliedLeadingOne
-                    }
-                    value => return Err(FormatError::InvalidMantissaNormalization(value)),
-                };
-                let datatype = FloatingPointType::new(
-                    header.size,
-                    order.order(),
-                    normalization,
-                    header.flags[1],
-                    cursor.u16()?,
-                    cursor.u16()?,
-                    cursor.u8()?,
-                    cursor.u8()?,
-                    cursor.u8()?,
-                    cursor.u8()?,
-                    cursor.u32()?,
-                )?
-                .with_padding(
-                    header.flags[0] & LOW_PADDING_BIT != 0,
-                    header.flags[0] & HIGH_PADDING_BIT != 0,
-                    header.flags[0] & FLOAT_INTERNAL_PADDING_BIT != 0,
-                );
-                (
-                    DatatypeProperties::FloatingPoint(datatype),
-                    cursor.position(),
-                )
-            }
-            DatatypeClass::Time => {
-                header.reserved(TIME_RESERVED)?;
-                (
-                    DatatypeProperties::Time(TimeType::new(
-                        header.size,
-                        binary_order(header.flags[0]),
-                        cursor.u16()?,
-                    )?),
-                    cursor.position(),
-                )
-            }
-            DatatypeClass::String => {
-                header.reserved(STRING_RESERVED)?;
-                (
-                    DatatypeProperties::String {
-                        size: header.size,
-                        padding: datatype::parse_string_padding(
-                            header.flags[0] & STRING_PADDING_MASK,
-                        )?,
-                        charset: datatype::parse_charset(header.flags[0] >> STRING_CHARSET_SHIFT)?,
+            DatatypeClass::Atomic(class) => {
+                let properties = class
+                    .decode(
+                        &mut cursor,
+                        header.fields(),
+                        context,
+                        AtomicReservedFlagPolicy::Reject,
+                    )?
+                    .into_properties();
+                return Ok(Parsed {
+                    message: Self {
+                        version: header.version,
+                        properties,
                     },
-                    cursor.position(),
-                )
-            }
-            DatatypeClass::BitField => {
-                header.reserved(BITFIELD_RESERVED)?;
-                let datatype = BitFieldType::new(
-                    header.size,
-                    binary_order(header.flags[0]),
-                    cursor.u16()?,
-                    cursor.u16()?,
-                )?
-                .with_padding(
-                    header.flags[0] & LOW_PADDING_BIT != 0,
-                    header.flags[0] & HIGH_PADDING_BIT != 0,
-                );
-                (DatatypeProperties::BitField(datatype), cursor.position())
-            }
-            DatatypeClass::Opaque => {
-                let reserved = u16::from_le_bytes([header.flags[1], header.flags[2]]);
-                if reserved != 0 {
-                    return Err(FormatError::InvalidOpaqueReservedBits { bits: reserved });
-                }
-                let tag = OpaqueTagWire::parse(header.flags[0], &data[cursor.position()..])?;
-                (
-                    DatatypeProperties::Opaque {
-                        size: header.size,
-                        tag: tag.logical.to_vec(),
-                    },
-                    cursor.position() + usize::from(tag.encoded_len),
-                )
+                    end: cursor.position(),
+                    size: header.size,
+                });
             }
             DatatypeClass::Compound => {
                 let count = header.modern_member_count()?;
@@ -1394,15 +1304,7 @@ impl Header {
     ///
     /// Returns [`FormatError::InvalidDatatypeFlags`] if any masked bit is set.
     fn reserved(&self, mask: u32) -> Result<(), FormatError> {
-        let flags = self.flag_bits();
-        if flags & mask != 0 {
-            return Err(FormatError::InvalidDatatypeFlags {
-                class: self.class.code(),
-                version: self.version.get(),
-                flags,
-            });
-        }
-        Ok(())
+        self.fields().reject_reserved_flags(self.class.code(), mask)
     }
 
     /// Parses the member count for the property layouts of versions 3 through 5.
@@ -1543,14 +1445,6 @@ pub(super) fn charset_code(charset: &CharacterSet) -> u8 {
     }
 }
 
-fn binary_order(flags: u8) -> DatatypeByteOrder {
-    if flags & BINARY_ORDER_BIT == 0 {
-        DatatypeByteOrder::LittleEndian
-    } else {
-        DatatypeByteOrder::BigEndian
-    }
-}
-
 /// Encodes bit 0 for fixed-point, time, and bitfield byte order.
 ///
 /// Callers pass [`DatatypeByteOrder::LittleEndian`] or [`DatatypeByteOrder::BigEndian`]
@@ -1572,35 +1466,35 @@ pub(super) fn binary_order_bit(order: DatatypeByteOrder) -> u8 {
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const FIXED_RESERVED: u32 = 0xff_fff0;
+pub(super) const FIXED_RESERVED: u32 = 0xff_fff0;
 /// The mask for reserved time class bits 1 through 23.
 ///
 /// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const TIME_RESERVED: u32 = 0xff_fffe;
+pub(super) const TIME_RESERVED: u32 = 0xff_fffe;
 /// The mask for reserved string class bits 8 through 23.
 ///
 /// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const STRING_RESERVED: u32 = 0xff_ff00;
+pub(super) const STRING_RESERVED: u32 = 0xff_ff00;
 /// The mask for reserved bitfield class bits 3 through 23.
 ///
 /// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const BITFIELD_RESERVED: u32 = 0xff_fff8;
+pub(super) const BITFIELD_RESERVED: u32 = 0xff_fff8;
 /// Bit 0, the byte-order bit for fixed-point, time, and bitfield descriptions.
 ///
 /// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const BINARY_ORDER_BIT: u8 = 0x01;
+pub(super) const BINARY_ORDER_BIT: u8 = 0x01;
 /// Bit 3, the signed-integer flag for fixed-point descriptions.
 ///
 /// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
@@ -1614,7 +1508,7 @@ pub(super) const SIGNED_BIT: u8 = 0x08;
 /// of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const STRING_PADDING_MASK: u8 = 0x0f;
+pub(super) const STRING_PADDING_MASK: u8 = 0x0f;
 /// The position of the string character-set field at bit 4.
 ///
 /// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
@@ -1683,10 +1577,10 @@ const MEMBER_COUNT_RESERVED: u32 = 0xff_0000;
 /// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const OBJECT_REFERENCE_KIND: u8 = 0;
+pub(super) const OBJECT_REFERENCE_KIND: u8 = 0;
 /// The dataset-region reference kind for datatype message versions 1 through 3.
 ///
 /// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const REGION_REFERENCE_KIND: u8 = 1;
+pub(super) const REGION_REFERENCE_KIND: u8 = 1;

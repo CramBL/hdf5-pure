@@ -28,7 +28,7 @@ use crate::width::OffsetWidth;
 
 pub use self::codec::PreparedDatatype;
 
-mod atomic;
+pub(super) mod atomic;
 mod codec;
 mod compound_layout;
 
@@ -743,4 +743,4 @@ fn member_name(class: u8, name: &str) -> Result<(), FormatError> {
 /// Datatype Message" of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const MAX_OPAQUE_TAG_LEN: usize = 248;
+const MAX_OPAQUE_TAG_LEN: usize = (u8::MAX - u8::MAX % super::OPAQUE_TAG_ALIGNMENT) as usize;
