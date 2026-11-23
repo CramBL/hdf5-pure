@@ -138,6 +138,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^extensible_array::/) |
     test(/^external_storage::/) |
     test(/^fill_value::/) |
+    test(/^filter_pipeline_codec::/) |
     test(/^fractal_heap_dense_links::/) |
     test(/^global_heap_length_width::/) |
     test(/^layout_introspection::/) |

@@ -756,6 +756,20 @@ pub enum FormatError {
     InvalidFillValueFlags(u8),
     /// An object header message type that is not a fill value message type.
     InvalidFillValueMessageType(u16),
+    /// A version 1 filter has nonzero bytes after an odd number of client data values.
+    InvalidFilterClientDataPadding {
+        /// The identifier of the filter with nonzero padding.
+        filter_id: u16,
+        /// The four padding bytes.
+        padding: [u8; 4],
+    },
+    /// A filter has a flag set in bits 8 through 15.
+    InvalidFilterFlags {
+        /// The identifier of the filter with the invalid flags.
+        filter_id: u16,
+        /// The complete flags field.
+        flags: u16,
+    },
     /// The filter identifier is zero, which is reserved.
     InvalidFilterId {
         /// The reserved identifier.
@@ -787,6 +801,8 @@ pub enum FormatError {
         /// The largest value the format permits for the field.
         maximum: usize,
     },
+    /// The six reserved bytes in a version 1 Filter Pipeline header include a nonzero byte.
+    InvalidFilterPipelineReservedBytes([u8; 6]),
     /// Invalid filter pipeline version.
     InvalidFilterPipelineVersion(u8),
     /// A Fixed Array data block's client ID differs from its header's.
@@ -2842,6 +2858,15 @@ impl fmt::Display for FormatError {
             Self::InvalidDeflateLevel { level } => {
                 write!(f, "deflate level {level} is outside 0..=9")
             }
+            Self::InvalidFilterClientDataPadding { filter_id, padding } => {
+                write!(
+                    f,
+                    "nonzero client data padding for filter {filter_id}: {padding:02x?}"
+                )
+            }
+            Self::InvalidFilterFlags { filter_id, flags } => {
+                write!(f, "invalid flags {flags:#06x} for filter {filter_id}")
+            }
             Self::InvalidFilterId { id } => write!(f, "reserved filter identifier {id}"),
             Self::InvalidCustomFilterId { id } => {
                 write!(f, "filter identifier {id} has a named variant")
@@ -2894,6 +2919,12 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "filter pipeline {field:?} is {value}, above maximum {maximum}"
+                )
+            }
+            Self::InvalidFilterPipelineReservedBytes(bytes) => {
+                write!(
+                    f,
+                    "nonzero reserved filter pipeline header bytes: {bytes:02x?}"
                 )
             }
             Self::InvalidFilterPipelineVersion(v) => {
