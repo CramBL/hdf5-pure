@@ -15,6 +15,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::width::{self, FormatWidths, UintWidth};
 
+use super::record::RecordPrefix;
 use super::worklist;
 use super::{CHECKSUM_LEN, MessageRecordLayout, OCHK_SIGNATURE, ObjectHeaderPrefix};
 
@@ -158,16 +159,15 @@ impl<'a> ObjectHeaderAllocation<'a> {
             self.write_padding(out, chunk.padding);
         }
         if let Some((address, len)) = chunk.next {
-            self.geometry.prefix.layout.write_record_prefix(
-                out,
-                MessageType::OBJECT_HEADER_CONTINUATION
-                    .to_u16()
-                    .to_le_bytes()[0],
+            RecordPrefix::from_fields(
+                self.geometry.prefix.layout,
+                const { RecordPrefix::type_byte(MessageType::OBJECT_HEADER_CONTINUATION) },
                 MessageFlags::NONE,
                 0,
                 u16::from(self.geometry.widths.offsets.get())
                     + u16::from(self.geometry.widths.lengths.get()),
-            );
+            )
+            .append(out);
             bytes::write_offset(out, address.get(), self.geometry.widths.offsets);
             bytes::write_length(out, len.to_u64(), self.geometry.widths.lengths);
         }
@@ -189,13 +189,14 @@ impl<'a> ObjectHeaderAllocation<'a> {
         let len = match padding {
             ChunkPadding::Gap(len) => len,
             ChunkPadding::Nil(body) => {
-                self.geometry.prefix.layout.write_record_prefix(
-                    out,
-                    MessageType::NIL.to_u16().to_le_bytes()[0],
+                RecordPrefix::from_fields(
+                    self.geometry.prefix.layout,
+                    const { RecordPrefix::type_byte(MessageType::NIL) },
                     MessageFlags::NONE,
                     0,
                     body,
-                );
+                )
+                .append(out);
                 body
             }
         };

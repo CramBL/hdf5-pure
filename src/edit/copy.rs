@@ -792,10 +792,7 @@ impl CopyNode {
         };
         count.apply(&mut region)?;
         if let Some(plan) = self.dense_attrs().clone().into_plan()? {
-            region.push(
-                MessageType::ATTRIBUTE_INFO,
-                &engine.place_dense_attrs(plan)?.to_bytes(),
-            );
+            region.push_message(engine.place_dense_attrs(plan)?, MessageFlags::NONE, 0)?;
         }
         let header = super::object_header::build_v2_object_header(&region)?;
         let address = engine.place_object_header(&header)?;

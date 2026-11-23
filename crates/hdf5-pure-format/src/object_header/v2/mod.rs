@@ -16,10 +16,6 @@ use crate::bytes;
 use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::error::OBJECT_HEADER_MESSAGE_MAX;
-use crate::filter_pipeline::FilterPipeline;
-use crate::link_info::LinkInfoMessage;
-use crate::link_message_write::PreparedLink;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::metadata_source;
@@ -576,21 +572,6 @@ impl MessageRecordLayout {
         region: &'a [u8],
         msg_start: usize,
     ) -> Result<Option<MessageRecord<'a>>, FormatError> {
-        Ok(self
-            .next_message_with_type_byte(region, msg_start)?
-            .map(|(_, record)| record))
-    }
-
-    /// Reads the record and its original type byte, or returns `None` for a trailing gap.
-    ///
-    /// # Errors
-    ///
-    /// Returns the truncation error documented by [`Self::next_message`].
-    fn next_message_with_type_byte<'a>(
-        self,
-        region: &'a [u8],
-        msg_start: usize,
-    ) -> Result<Option<(u8, MessageRecord<'a>)>, FormatError> {
         let Some((&[type_byte, size_low, size_high, flags], rest)) = region
             .get(msg_start..)
             .and_then(|record| record.split_first_chunk::<4>())
@@ -613,14 +594,13 @@ impl MessageRecordLayout {
                 available: region.len(),
             });
         };
-        let record = MessageRecord {
+        Ok(Some(MessageRecord {
             msg_type: MessageType::from_u16(u16::from(type_byte)),
             flags: MessageFlags::new(flags),
             creation_index,
             body,
             body_range: body_start..body_start + body_len,
-        };
-        Ok(Some((type_byte, record)))
+        }))
     }
 
     /// Returns the creation index of the record at `msg_start` in `region`, or `None` where the
@@ -630,266 +610,6 @@ impl MessageRecordLayout {
             .then(|| region.get(msg_start + 4..)?.first_chunk().copied())
             .flatten()
             .map(u16::from_le_bytes)
-    }
-
-    /// Returns a message record of `msg_type` with `flags`, `creation_index`, and `body`.
-    ///
-    /// The record stores `creation_index` only where the layout tracks creation order. The
-    /// creation index of an Attribute message is the creation order of the attribute, and the C
-    /// library writes 0 for every other message type (`H5Omessage.c`, HDF5 2.2.0), which
-    /// [`record`](Self::record) passes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg_type` does not fit the 1-byte message type field, or if `body` is longer
-    /// than [`OBJECT_HEADER_MESSAGE_MAX`].
-    pub fn record_with_creation_index(
-        self,
-        msg_type: MessageType,
-        flags: MessageFlags,
-        creation_index: u16,
-        body: &[u8],
-    ) -> Vec<u8> {
-        let mut record = Vec::with_capacity(self.prefix_len() + body.len());
-        self.write_record(&mut record, msg_type, flags, creation_index, body);
-        record
-    }
-
-    /// Appends a message record of `msg_type` with `flags`, `creation_index`, and `body` to
-    /// `buf`, as [`record_with_creation_index`](Self::record_with_creation_index) returns it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg_type` does not fit the 1-byte message type field, or if `body` is longer
-    /// than [`OBJECT_HEADER_MESSAGE_MAX`].
-    pub fn write_record(
-        self,
-        buf: &mut Vec<u8>,
-        msg_type: MessageType,
-        flags: MessageFlags,
-        creation_index: u16,
-        body: &[u8],
-    ) {
-        assert!(
-            u8::try_from(msg_type.to_u16()).is_ok(),
-            "message type {:#06x} does not fit the 1-byte type field of a version 2 object header",
-            msg_type.to_u16()
-        );
-        assert!(
-            body.len() <= OBJECT_HEADER_MESSAGE_MAX,
-            "a {}-byte message body does not fit the 2-byte message size field",
-            body.len()
-        );
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the first assertion above admits only a type that fits the 1-byte field"
-        )]
-        let msg_type = msg_type.to_u16() as u8;
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the second assertion above bounds the body to the 2-byte size field"
-        )]
-        let body_len = body.len() as u16;
-        self.write_record_prefix(buf, msg_type, flags, creation_index, body_len);
-        buf.extend_from_slice(body);
-    }
-
-    /// Appends a Link Info record with empty flags and a creation index of zero when tracked.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AllocationFailed`] if reserving space fails. Leaves the buffer's
-    /// contents unchanged on error.
-    pub fn write_link_info(
-        self,
-        buf: &mut Vec<u8>,
-        info: &LinkInfoMessage,
-    ) -> Result<(), FormatError> {
-        let length = self.prefix_len() + info.encoded_size();
-        buf.try_reserve(length)
-            .map_err(|source| FormatError::AllocationFailed {
-                values: length,
-                source,
-            })?;
-        self.append_link_info(buf, info);
-        Ok(())
-    }
-
-    /// Appends a Filter Pipeline record with a creation index of zero when tracked.
-    ///
-    /// Sets [`MessageFlags::CONSTANT`] if `constant` is `true`. Writes the body directly
-    /// after the record prefix.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the body exceeds
-    /// [`OBJECT_HEADER_MESSAGE_MAX`], or [`FormatError::AllocationFailed`] if reserving space
-    /// fails. Leaves the buffer's contents unchanged on error.
-    pub fn write_filter_pipeline(
-        self,
-        buf: &mut Vec<u8>,
-        constant: bool,
-        pipeline: &FilterPipeline,
-    ) -> Result<(), FormatError> {
-        let pipeline = pipeline.prepare();
-        let size = pipeline.encoded_size();
-        let body_len =
-            u16::try_from(size).map_err(|_error| FormatError::ObjectHeaderMessageTooLarge {
-                message_type: MessageType::FILTER_PIPELINE.to_u16(),
-                size,
-            })?;
-        let extent = self.prefix_len() + size;
-        buf.try_reserve(extent)
-            .map_err(|source| FormatError::AllocationFailed {
-                values: extent,
-                source,
-            })?;
-        let type_byte = const {
-            let [low, high] = MessageType::FILTER_PIPELINE.to_u16().to_le_bytes();
-            assert!(high == 0);
-            low
-        };
-        let flags = if constant {
-            MessageFlags::CONSTANT
-        } else {
-            MessageFlags::NONE
-        };
-        self.write_record_prefix(buf, type_byte, flags, 0, body_len);
-        let start = buf.len();
-        buf.resize(start + size, 0);
-        pipeline.write_body(&mut buf[start..]);
-        Ok(())
-    }
-
-    /// Appends a Link Info record to a buffer with capacity for its prefix and body.
-    pub(crate) fn append_link_info(self, buf: &mut Vec<u8>, info: &LinkInfoMessage) {
-        let body_len = info.body_size();
-        let type_byte = const {
-            let [low, high] = MessageType::LINK_INFO.to_u16().to_le_bytes();
-            assert!(high == 0);
-            low
-        };
-        self.write_record_prefix(buf, type_byte, MessageFlags::NONE, 0, u16::from(body_len));
-        let start = buf.len();
-        buf.resize(start + usize::from(body_len), 0);
-        info.write_body(&mut buf[start..]);
-    }
-
-    /// Returns a message record of `msg_type` and `body` with no flag set, and with a creation
-    /// index of 0 where the layout tracks creation order.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg_type` does not fit the 1-byte message type field, or if `body` is longer
-    /// than [`OBJECT_HEADER_MESSAGE_MAX`].
-    pub fn record(self, msg_type: MessageType, body: &[u8]) -> Vec<u8> {
-        self.record_with_creation_index(msg_type, MessageFlags::NONE, 0, body)
-    }
-
-    /// Appends the fixed record fields and the optional creation index.
-    ///
-    /// The fields are defined in "Version 2 Data Object Header Prefix" of the
-    /// [format specification, version 4.0][spec].
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
-    fn write_record_prefix(
-        self,
-        buf: &mut Vec<u8>,
-        msg_type: u8,
-        flags: MessageFlags,
-        creation_index: u16,
-        body_len: u16,
-    ) {
-        buf.push(msg_type);
-        buf.extend_from_slice(&body_len.to_le_bytes());
-        buf.push(flags.get());
-        if self.tracks_creation_order() {
-            buf.extend_from_slice(&creation_index.to_le_bytes());
-        }
-    }
-}
-
-/// A Link body checked to fit the length field of a version 2 message record.
-///
-/// The writer uses empty record flags and writes a creation index of zero when the record
-/// layout tracks creation order.
-#[derive(Debug)]
-pub struct PreparedLinkRecord<'a> {
-    body: PreparedLink<'a>,
-    body_len: u16,
-}
-
-impl<'a> PreparedLinkRecord<'a> {
-    /// Prepares a record for a checked Link body.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the body exceeds [`u16::MAX`]
-    /// bytes.
-    pub fn new(body: PreparedLink<'a>) -> Result<Self, FormatError> {
-        let body_len = u16::try_from(body.encoded_size()).map_err(|_error| {
-            FormatError::ObjectHeaderMessageTooLarge {
-                message_type: MessageType::LINK.to_u16(),
-                size: body.encoded_size(),
-            }
-        })?;
-        Ok(Self { body, body_len })
-    }
-
-    /// Encodes the record prefix and body in an owned buffer using `layout`.
-    pub fn to_bytes(&self, layout: MessageRecordLayout) -> Vec<u8> {
-        let mut output = Vec::with_capacity(self.encoded_size(layout));
-        self.append(layout, &mut output);
-        output
-    }
-
-    /// Appends the record prefix and body using `layout`, preserving existing bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AllocationFailed`] if reserving space for the record fails.
-    pub fn append_to(
-        &self,
-        layout: MessageRecordLayout,
-        output: &mut Vec<u8>,
-    ) -> Result<(), FormatError> {
-        let length = self.encoded_size(layout);
-        output
-            .try_reserve(length)
-            .map_err(|source| FormatError::AllocationFailed {
-                values: length,
-                source,
-            })?;
-        self.append(layout, output);
-        Ok(())
-    }
-
-    /// Returns the hard-link address range relative to the start of the record.
-    ///
-    /// The offset includes the prefix length selected by `layout`. Returns [`None`] for a
-    /// symbolic or user-defined target.
-    pub fn hard_link_address_range(&self, layout: MessageRecordLayout) -> Option<Range<usize>> {
-        let prefix = layout.prefix_len();
-        self.body
-            .hard_link_address_range()
-            .map(|field| prefix + field.start..prefix + field.end)
-    }
-
-    pub(crate) fn encoded_size(&self, layout: MessageRecordLayout) -> usize {
-        layout.prefix_len() + usize::from(self.body_len)
-    }
-
-    /// Appends the record using `layout`. `output` needs spare capacity for the prefix and body.
-    pub(crate) fn append(&self, layout: MessageRecordLayout, output: &mut Vec<u8>) {
-        let type_byte = const {
-            let [low, high] = MessageType::LINK.to_u16().to_le_bytes();
-            assert!(high == 0);
-            low
-        };
-        layout.write_record_prefix(output, type_byte, MessageFlags::NONE, 0, self.body_len);
-        let start = output.len();
-        output.resize(start + usize::from(self.body_len), 0);
-        self.body.write_body(&mut output[start..]);
     }
 }
 
@@ -1080,7 +800,13 @@ mod tests {
             times,
             attribute_phase_change,
         };
-        let records = layout.record(MessageType::DATASPACE, &[1, 2, 3]);
+        let flags = if layout.tracks_creation_order() {
+            v2_bytes::HeaderFlags::TRACKS_CREATION_ORDER
+        } else {
+            v2_bytes::HeaderFlags::default()
+        };
+        let records =
+            v2_bytes::message_record(&Message::new(RecordType::DATASPACE, &[1, 2, 3]), flags);
         let header = prefix.encode_header(&records);
 
         let parsed = ObjectHeaderPrefix::parse(&header).unwrap();
@@ -1215,12 +941,16 @@ mod tests {
         #[case] expected: &[u8],
     ) {
         assert_eq!(
-            layout.record_with_creation_index(
-                MessageType::ATTRIBUTE,
-                MessageFlags::SHARED,
-                0x0102,
-                &[0xAA]
-            ),
+            layout
+                .prepare_raw_record(
+                    MessageType::ATTRIBUTE,
+                    MessageFlags::SHARED,
+                    0x0102,
+                    &[0xaa]
+                )
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
             expected
         );
     }
@@ -1232,7 +962,10 @@ mod tests {
         #[case] layout: MessageRecordLayout,
         #[case] expected: &[u8],
     ) {
-        assert_eq!(layout.record(MessageType::GROUP_INFO, &[0xAA]), expected);
+        let record = layout
+            .prepare_raw_record(MessageType::GROUP_INFO, MessageFlags::NONE, 0, &[0xaa])
+            .unwrap();
+        assert_eq!(record.to_bytes().unwrap(), expected);
     }
 
     #[rstest]
@@ -1254,25 +987,6 @@ mod tests {
     ) {
         let header = prefix.encode_header(&[]);
         assert_eq!((header[5], header.len()), (flags, header_len));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "message type 0x0117 does not fit the 1-byte type field of a version 2 object header"
-    )]
-    fn a_record_of_a_type_wider_than_its_field_panics() {
-        MessageRecordLayout::PLAIN.record(MessageType::from_u16(0x0117), &[]);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "a 65536-byte message body does not fit the 2-byte message size field"
-    )]
-    fn a_record_of_a_body_wider_than_its_size_field_panics() {
-        MessageRecordLayout::PLAIN.record(
-            MessageType::ATTRIBUTE,
-            &vec![0; OBJECT_HEADER_MESSAGE_MAX + 1],
-        );
     }
 
     #[test]

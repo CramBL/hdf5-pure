@@ -2,13 +2,16 @@
 
 use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
+use core::ops::Range;
 
+use crate::codec::Encode;
 use crate::error::FormatError;
-use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_header::v2::MessageBody;
 use crate::object_header::v2::MessageRecord;
 use crate::object_header::v2::MessageRecordLayout;
+use crate::object_header::v2::PreparedMessageRecord;
 
 /// The first message record of one type in the message region of a version 2 object header, with
 /// the bytes before and after it.
@@ -27,7 +30,6 @@ pub struct RecordSplice<'a> {
     layout: MessageRecordLayout,
     head: &'a [u8],
     record: MessageRecord<'a>,
-    type_byte: u8,
     tail: &'a [u8],
 }
 
@@ -45,9 +47,7 @@ impl<'a> RecordSplice<'a> {
         msg_type: MessageType,
     ) -> Result<Option<Self>, FormatError> {
         let mut msg_start = 0;
-        while let Some((type_byte, record)) =
-            layout.next_message_with_type_byte(region, msg_start)?
-        {
+        while let Some(record) = layout.next_message(region, msg_start)? {
             if record.msg_type == msg_type {
                 let (Some(head), Some(tail)) =
                     (region.get(..msg_start), region.get(record.body_range.end..))
@@ -60,7 +60,6 @@ impl<'a> RecordSplice<'a> {
                     layout,
                     head,
                     record,
-                    type_byte,
                     tail,
                 }));
             }
@@ -79,8 +78,7 @@ impl<'a> RecordSplice<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body` is longer than
-    /// [`OBJECT_HEADER_MESSAGE_MAX`], the largest size the 2-byte size field of a record holds.
+    /// Propagates message-size and allocation errors from [`Self::replace_record`].
     pub fn replace_body(&self, body: &[u8]) -> Result<Vec<u8>, FormatError> {
         self.replace_record(
             self.record.flags,
@@ -96,28 +94,31 @@ impl<'a> RecordSplice<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body` is longer than
-    /// [`OBJECT_HEADER_MESSAGE_MAX`], leaving `region` unchanged.
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body` exceeds
+    /// [`crate::error::OBJECT_HEADER_MESSAGE_MAX`], or [`FormatError::AllocationFailed`] if
+    /// reserving space fails. Leaves the existing contents and length of `region` unchanged
+    /// on error.
     pub fn replace_body_into(&self, region: &mut Vec<u8>, body: &[u8]) -> Result<(), FormatError> {
-        self.replace_record_into(
-            region,
+        let record = self.raw_record(
             self.record.flags,
             self.record.creation_index.unwrap_or(0),
             body,
-        )
+        )?;
+        self.append_replacement(region, &record)
     }
 
-    /// Appends the source region with a new body for the selected record.
+    /// Appends a copy of the source region with a replacement inline body.
     ///
-    /// Calls `write_body` with a zero-filled slice of `body_len` bytes for the replacement body.
-    /// Preserves the record's type, flags, and creation index and copies the surrounding bytes.
+    /// The replacement body must have the selected record's message type. Preserves the flags,
+    /// creation index, and surrounding bytes.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body_len` exceeds
-    /// [`OBJECT_HEADER_MESSAGE_MAX`] or [`FormatError::AllocationFailed`] if reserving space fails.
-    /// Propagates an error from `write_body`. Preserves the contents and length of `region` on
-    /// error. Reserving space may increase its capacity.
+    /// Returns [`FormatError::ObjectHeaderMessageTypeMismatch`] if the selected record's type
+    /// differs from the replacement body's type, or [`FormatError::AllocationFailed`] if
+    /// reserving space fails. Propagates errors from [`MessageRecordLayout::prepare_record`] and
+    /// the body encoder. Preserves the contents and length of `region` on error. Reserving space
+    /// may increase its capacity.
     ///
     /// # Examples
     ///
@@ -127,20 +128,19 @@ impl<'a> RecordSplice<'a> {
     ///
     /// ```
     /// use hdf5_pure_format::{FormatError, MessageType, OffsetWidth};
-    /// use hdf5_pure_format::__private::{AttributeInfoMessage, MessageRecordLayout, RecordSplice};
+    /// use hdf5_pure_format::__private::{
+    ///     AttributeInfoMessage, MessageFlags, MessageRecordLayout, RecordSplice,
+    /// };
     ///
     /// const TRACK_CREATION_ORDER: u8 = 0x04;
     /// let layout = MessageRecordLayout::from_header_flags(TRACK_CREATION_ORDER);
     /// let mut info = AttributeInfoMessage::compact(OffsetWidth::Two, Some(3), false);
-    /// let source = layout.record(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+    /// let source = layout.prepare_record(MessageFlags::NONE, 0, &info)?.to_bytes()?;
     /// let splice = RecordSplice::first(layout, &source, MessageType::ATTRIBUTE_INFO)?.unwrap();
     ///
     /// info.set_max_creation_index(Some(4));
     /// let mut output = Vec::new();
-    /// splice.replace_body_with(&mut output, info.encoded_size(), |body| {
-    ///     assert_eq!(info.write_into(body).unwrap(), body.len());
-    ///     Ok(())
-    /// })?;
+    /// splice.replace_typed_body_into(&mut output, &info)?;
     /// let record = layout.next_message(&output, 0)?.unwrap();
     /// let updated = AttributeInfoMessage::parse_with_offset_width(record.body, OffsetWidth::Two)?;
     /// assert_eq!(updated, info);
@@ -148,17 +148,24 @@ impl<'a> RecordSplice<'a> {
     /// ```
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
-    pub fn replace_body_with(
+    pub fn replace_typed_body_into<B: MessageBody>(
         &self,
         region: &mut Vec<u8>,
-        body_len: usize,
-        write_body: impl FnOnce(&mut [u8]) -> Result<(), FormatError>,
+        body: B,
     ) -> Result<(), FormatError> {
-        let original_len = region.len();
-        let body = self.prepare_replacement_body(region, body_len)?;
-        let result = write_body(body);
-        self.finish_replacement(region, original_len, result.is_ok());
-        result
+        let actual = self.record.msg_type;
+        if actual != B::MESSAGE_TYPE {
+            return Err(FormatError::ObjectHeaderMessageTypeMismatch {
+                expected: B::MESSAGE_TYPE.to_u16(),
+                actual: actual.to_u16(),
+            });
+        }
+        let record = self.layout.prepare_record(
+            self.record.flags,
+            self.record.creation_index.unwrap_or(0),
+            body,
+        )?;
+        self.append_replacement(region, &record)
     }
 
     /// Returns a copy of the region in which the selected record has `flags`, `creation_index`,
@@ -168,139 +175,103 @@ impl<'a> RecordSplice<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body` is longer than
-    /// [`OBJECT_HEADER_MESSAGE_MAX`], the largest size the 2-byte size field of a record holds.
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body` exceeds
+    /// [`crate::error::OBJECT_HEADER_MESSAGE_MAX`], or [`FormatError::AllocationFailed`] if
+    /// reserving space fails.
     pub fn replace_record(
         &self,
         flags: MessageFlags,
         creation_index: u16,
         body: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
-        let replacement = self.replacement(body.len())?;
-        let mut region = Vec::with_capacity(replacement.len);
-        self.append_record(
-            &mut region,
-            flags,
-            creation_index,
-            body,
-            replacement.body_len,
-        );
+        let record = self.raw_record(flags, creation_index, body)?;
+        let mut region = Vec::new();
+        let len = self.replacement_len(record.encoded_size());
+        region
+            .try_reserve_exact(len)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: len,
+                source,
+            })?;
+        self.append_replacement(&mut region, &record)?;
         Ok(region)
     }
 
-    /// Reserves the full replacement region and returns a zero-filled body slice.
+    fn raw_record<'body>(
+        &self,
+        flags: MessageFlags,
+        creation_index: u16,
+        body: &'body [u8],
+    ) -> Result<PreparedMessageRecord<&'body [u8]>, FormatError> {
+        self.layout
+            .prepare_raw_record(self.record.msg_type, flags, creation_index, body)
+    }
+
+    fn append_replacement<B: Encode<Error: Into<FormatError>>>(
+        &self,
+        region: &mut Vec<u8>,
+        record: &PreparedMessageRecord<B>,
+    ) -> Result<(), FormatError> {
+        let original_len = region.len();
+        let replacement = self.prepare_replacement(region, record.encoded_size())?;
+        let result = record.write_into(&mut region[replacement]).map(|_| ());
+        self.finish_replacement(region, original_len, result.is_ok());
+        result
+    }
+
+    /// Reserves space for the entire splice and copies the bytes before the selected record.
     ///
-    /// Appends the source bytes preceding the selected record and writes the replacement
-    /// record's prefix.
+    /// Returns the range of the zero-filled replacement record.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body_len` exceeds
-    /// [`OBJECT_HEADER_MESSAGE_MAX`] or [`FormatError::AllocationFailed`] if reserving space fails.
-    fn prepare_replacement_body<'region>(
+    /// Returns [`FormatError::AllocationFailed`] if reserving the splice extent fails, leaving
+    /// `region` unchanged.
+    fn prepare_replacement(
         &self,
-        region: &'region mut Vec<u8>,
-        body_len: usize,
-    ) -> Result<&'region mut [u8], FormatError> {
-        let replacement = self.replacement(body_len)?;
+        region: &mut Vec<u8>,
+        record_len: usize,
+    ) -> Result<Range<usize>, FormatError> {
+        let len = self.replacement_len(record_len);
         region
-            .try_reserve(replacement.len)
+            .try_reserve(len)
             .map_err(|source| FormatError::AllocationFailed {
-                values: replacement.len,
+                values: len,
                 source,
             })?;
 
-        self.append_prefix(
-            region,
-            self.record.flags,
-            self.record.creation_index.unwrap_or(0),
-            replacement.body_len,
-        );
-        let body_start = region.len();
-        region.resize(body_start + body_len, 0);
-        Ok(&mut region[body_start..])
+        region.extend_from_slice(self.head);
+        let start = region.len();
+        let end = start + record_len;
+        region.resize(end, 0);
+        Ok(start..end)
     }
 
-    /// Appends the source tail after a successful write or truncates `region` to `original_len`
-    /// after an error.
-    fn finish_replacement(&self, region: &mut Vec<u8>, original_len: usize, body_written: bool) {
-        if body_written {
+    fn finish_replacement(&self, region: &mut Vec<u8>, original_len: usize, record_written: bool) {
+        if record_written {
             region.extend_from_slice(self.tail);
         } else {
             region.truncate(original_len);
         }
     }
 
-    fn replace_record_into(
-        &self,
-        region: &mut Vec<u8>,
-        flags: MessageFlags,
-        creation_index: u16,
-        body: &[u8],
-    ) -> Result<(), FormatError> {
-        let replacement = self.replacement(body.len())?;
-        region.reserve(replacement.len);
-        self.append_record(region, flags, creation_index, body, replacement.body_len);
-        Ok(())
+    fn replacement_len(&self, record_len: usize) -> usize {
+        self.head.len() + record_len + self.tail.len()
     }
-
-    fn append_record(
-        &self,
-        region: &mut Vec<u8>,
-        flags: MessageFlags,
-        creation_index: u16,
-        body: &[u8],
-        body_len: u16,
-    ) {
-        self.append_prefix(region, flags, creation_index, body_len);
-        region.extend_from_slice(body);
-        region.extend_from_slice(self.tail);
-    }
-
-    /// Appends the source bytes before the selected record and the replacement record prefix.
-    fn append_prefix(
-        &self,
-        region: &mut Vec<u8>,
-        flags: MessageFlags,
-        creation_index: u16,
-        body_len: u16,
-    ) {
-        region.extend_from_slice(self.head);
-        self.layout
-            .write_record_prefix(region, self.type_byte, flags, creation_index, body_len);
-    }
-
-    /// Checks that the body length fits the record's size field and computes the append length.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `size` exceeds
-    /// [`OBJECT_HEADER_MESSAGE_MAX`].
-    fn replacement(&self, size: usize) -> Result<ReplacementExtent, FormatError> {
-        const { assert!(OBJECT_HEADER_MESSAGE_MAX == u16::MAX as usize) };
-        let body_len =
-            u16::try_from(size).map_err(|_error| FormatError::ObjectHeaderMessageTooLarge {
-                message_type: self.record.msg_type.to_u16(),
-                size,
-            })?;
-        let len =
-            self.head.len() + self.layout.prefix_len() + usize::from(body_len) + self.tail.len();
-        Ok(ReplacementExtent { len, body_len })
-    }
-}
-
-/// The region length to append and the body length for the record's size field.
-struct ReplacementExtent {
-    len: usize,
-    body_len: u16,
 }
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
     use rstest::rstest;
     use test_util::object_header::v2 as v2_bytes;
+    use test_util::object_header::{
+        Message, MessageFlags as FixtureFlags, MessageType as FixtureType,
+    };
 
     use super::*;
+    use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 
     #[rstest]
     fn a_replaced_record_takes_the_flags_and_the_creation_index_passed(
@@ -316,7 +287,16 @@ mod tests {
 
         assert_eq!(
             region,
-            records_around(layout, layout.record(MessageType::DATA_LAYOUT, &[0x77; 6]))
+            records_around(
+                layout,
+                fixture_record(
+                    layout,
+                    MessageType::DATA_LAYOUT,
+                    MessageFlags::NONE,
+                    0,
+                    &[0x77; 6]
+                )
+            )
         );
     }
 
@@ -336,7 +316,8 @@ mod tests {
             region,
             records_around(
                 layout,
-                layout.record_with_creation_index(
+                fixture_record(
+                    layout,
                     MessageType::DATA_LAYOUT,
                     MessageFlags::CONSTANT,
                     7,
@@ -390,7 +371,7 @@ mod tests {
         #[case] cut_type: MessageType,
         #[case] msg_type: MessageType,
     ) {
-        let mut region = layout.record(cut_type, &[0x11; 8]);
+        let mut region = fixture_record(layout, cut_type, MessageFlags::NONE, 0, &[0x11; 8]);
         region.pop();
         let len = region.len();
 
@@ -440,7 +421,8 @@ mod tests {
         let mut expected = vec![0x99; 5];
         expected.extend_from_slice(&records_around(
             layout,
-            layout.record_with_creation_index(
+            fixture_record(
+                layout,
                 MessageType::DATA_LAYOUT,
                 MessageFlags::CONSTANT,
                 7,
@@ -470,30 +452,127 @@ mod tests {
         assert_eq!(out, vec![0x99; 5]);
     }
 
+    #[rstest]
+    #[case::body_error(9, Some(9), ENCODING_ERROR)]
+    #[case::oversized_body(
+        OBJECT_HEADER_MESSAGE_MAX + 1,
+        None,
+        FormatError::ObjectHeaderMessageTooLarge {
+            message_type: MessageType::DATA_LAYOUT.to_u16(),
+            size: OBJECT_HEADER_MESSAGE_MAX + 1,
+        },
+    )]
+    fn splice_writer_preserves_the_destination_on_preparation_and_encoding_errors(
+        #[case] body_len: usize,
+        #[case] seen_len: Option<usize>,
+        #[case] expected: FormatError,
+    ) {
+        let source = records_around(TRACKED, first_data_layout_record(TRACKED));
+        let splice = RecordSplice::first(TRACKED, &source, MessageType::DATA_LAYOUT)
+            .unwrap()
+            .unwrap();
+        let original = [0xa5, 0x5a, 0xaa];
+        let mut output = original.to_vec();
+        let destination_len = Cell::new(None);
+        let body = FailingBody {
+            body_len,
+            destination_len: &destination_len,
+        };
+
+        assert_eq!(
+            splice.replace_typed_body_into(&mut output, body),
+            Err(expected)
+        );
+        assert_eq!(destination_len.get(), seen_len);
+        assert_eq!(output, original);
+    }
+
+    struct FailingBody<'a> {
+        body_len: usize,
+        destination_len: &'a Cell<Option<usize>>,
+    }
+
+    impl MessageBody for FailingBody<'_> {
+        const MESSAGE_TYPE: MessageType = MessageType::DATA_LAYOUT;
+    }
+
+    impl Encode for FailingBody<'_> {
+        type Error = FormatError;
+
+        fn encoded_len(&self) -> usize {
+            self.body_len
+        }
+
+        fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+            self.destination_len.set(Some(output.len()));
+            Err(ENCODING_ERROR)
+        }
+    }
+
+    fn fixture_record(
+        layout: MessageRecordLayout,
+        message_type: MessageType,
+        flags: MessageFlags,
+        creation_index: u16,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let header_flags = if layout.tracks_creation_order() {
+            v2_bytes::HeaderFlags::TRACKS_CREATION_ORDER
+        } else {
+            v2_bytes::HeaderFlags::default()
+        };
+        v2_bytes::message_record(
+            &Message::new(FixtureType(message_type.to_u16()), body)
+                .with_flags(FixtureFlags(flags.get()))
+                .with_creation_order(creation_index),
+            header_flags,
+        )
+    }
+
+    const ENCODING_ERROR: FormatError = FormatError::UnexpectedEof {
+        expected: 12,
+        available: 9,
+    };
+
     fn records_around(layout: MessageRecordLayout, data_layout: Vec<u8>) -> Vec<u8> {
         [
-            layout.record_with_creation_index(
+            fixture_record(
+                layout,
                 UNKNOWN_MESSAGE_TYPE,
                 MessageFlags::SHARED,
                 1,
                 &[0xAB; 3],
             ),
-            layout.record(MessageType::DATASPACE, &[0x11; 8]),
+            fixture_record(
+                layout,
+                MessageType::DATASPACE,
+                MessageFlags::NONE,
+                0,
+                &[0x11; 8],
+            ),
             data_layout,
-            layout.record_with_creation_index(
+            fixture_record(
+                layout,
                 MessageType::ATTRIBUTE,
                 MessageFlags::NONE,
                 2,
                 &[0xCD; 5],
             ),
-            layout.record(MessageType::DATA_LAYOUT, &[0xEE; 4]),
+            fixture_record(
+                layout,
+                MessageType::DATA_LAYOUT,
+                MessageFlags::NONE,
+                0,
+                &[0xEE; 4],
+            ),
             TRAILING_GAP.to_vec(),
         ]
         .concat()
     }
 
     fn first_data_layout_record(layout: MessageRecordLayout) -> Vec<u8> {
-        layout.record_with_creation_index(
+        fixture_record(
+            layout,
             MessageType::DATA_LAYOUT,
             MessageFlags::CONSTANT,
             7,

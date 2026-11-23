@@ -1341,6 +1341,13 @@ pub enum FormatError {
         /// The message's serialized size in bytes.
         size: usize,
     },
+    /// A typed replacement body has a different message type from the selected record.
+    ObjectHeaderMessageTypeMismatch {
+        /// The replacement body's message type code.
+        expected: u16,
+        /// The selected record's stored message type code.
+        actual: u16,
+    },
     /// A version 2 object header message type exceeds its one-byte field.
     ObjectHeaderMessageTypeTooLarge(u16),
     /// Address or size arithmetic exceeded the range of its integer type.
@@ -3079,6 +3086,13 @@ impl fmt::Display for FormatError {
                     "object header message {message_type:#06x} is {size} bytes, past the \
                      {OBJECT_HEADER_MESSAGE_MAX}-byte limit of the object header's \
                      message size field"
+                )
+            }
+            Self::ObjectHeaderMessageTypeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "object header message type {actual:#06x} does not match replacement type \
+                     {expected:#06x}"
                 )
             }
             Self::ObjectHeaderMessageTypeTooLarge(message_type) => {

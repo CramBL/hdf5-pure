@@ -341,7 +341,6 @@ pub use crate::object_header::ObjectReferenceCountUpdate;
 pub use crate::object_header::ObjectReferenceCountUpdateError;
 pub use crate::object_header::ObjectTimes;
 pub use crate::object_header::ParsedObjectHeaderPrefix;
-pub use crate::object_header::PreparedLinkRecord;
 pub use crate::object_header::PreparedMessageRecord;
 pub use crate::object_header::RecordSplice;
 pub use crate::object_header::continuation_block_messages;

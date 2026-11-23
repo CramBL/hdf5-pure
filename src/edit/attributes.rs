@@ -5,8 +5,7 @@ use std::ops::Range;
 
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::{
-    DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, PreparedAttributeMessage,
-    PreparedDenseAttrs, RecordSplice,
+    DenseAttrBlockKind, DenseAttrFixup, DenseAttrPlan, PreparedAttributeMessage, PreparedDenseAttrs,
 };
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
@@ -154,7 +153,7 @@ impl WriteEngine {
             return Ok(());
         };
         let info = self.place_dense_attrs(plan)?;
-        region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+        region.push_message(info, MessageFlags::NONE, 0)?;
         Ok(())
     }
 
@@ -295,7 +294,7 @@ pub(super) fn ensure_attribute_info(region: &mut OhRegion) -> Result<(), Error> 
     }
     if has_attrs {
         let info = compact_attribute_info(region)?;
-        region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+        region.push_message(info, MessageFlags::NONE, 0)?;
     }
     Ok(())
 }
@@ -1006,15 +1005,7 @@ impl<'a> CompactBatch<'a> {
                 if layout.indexes_creation_order() && !info.indexes_creation_order() {
                     info.set_creation_order_index(AttributeCreationOrderIndex::Undefined)?;
                 }
-                let splice =
-                    RecordSplice::first(layout, &original[range], MessageType::ATTRIBUTE_INFO)?
-                        .ok_or_else(|| {
-                            FormatError::Internal(
-                                "a parsed Attribute Info record is absent from its source range"
-                                    .into(),
-                            )
-                        })?;
-                region.append_spliced_attribute_info(&splice, &info)?;
+                region.push_replaced_body(&original[range], info)?;
                 has_info = true;
             } else {
                 region.push_bytes(&original[range]);
@@ -1038,13 +1029,14 @@ impl<'a> CompactBatch<'a> {
                 )
                 .into());
             };
-            layout.write_record(
-                &mut records,
-                MessageType::ATTRIBUTE,
-                MessageFlags::NONE,
-                slot.indices.first().copied().unwrap_or(0),
-                attribute.body(),
-            );
+            layout
+                .prepare_raw_record(
+                    MessageType::ATTRIBUTE,
+                    MessageFlags::NONE,
+                    slot.indices.first().copied().unwrap_or(0),
+                    attribute.body(),
+                )?
+                .append_to(&mut records)?;
             if let Some(collections) = collections {
                 let end = records.len();
                 let start = end - attribute.message().raw_data.len();
@@ -1061,7 +1053,7 @@ impl<'a> CompactBatch<'a> {
                 counter,
                 layout.indexes_creation_order(),
             );
-            region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+            region.push_message(info, MessageFlags::NONE, 0)?;
         }
         Ok(AttrEdits {
             region,
@@ -1352,20 +1344,14 @@ fn prepare_compact_attrs(
         } else {
             0
         };
-        let record_len = layout.prefix_len() + body.len();
-        records
-            .try_reserve(record_len)
-            .map_err(|source| FormatError::AllocationFailed {
-                values: record_len,
-                source,
-            })?;
-        layout.write_record(
-            &mut records,
-            MessageType::ATTRIBUTE,
-            MessageFlags::NONE,
-            creation_index,
-            body,
-        );
+        layout
+            .prepare_raw_record(
+                MessageType::ATTRIBUTE,
+                MessageFlags::NONE,
+                creation_index,
+                body,
+            )?
+            .append_to(&mut records)?;
         if let Some(collections) = slot.collections {
             let end = records.len();
             let start = end
@@ -1386,19 +1372,9 @@ fn prepare_compact_attrs(
     );
     let mut region = strip_attr_messages(original)?;
     if let Some((start, body, _)) = find_attribute_info(original)? {
-        let splice = RecordSplice::first(
-            layout,
-            &original[start..body.end],
-            MessageType::ATTRIBUTE_INFO,
-        )?
-        .ok_or_else(|| {
-            FormatError::Internal(
-                "a parsed Attribute Info record is absent from its source range".into(),
-            )
-        })?;
-        region.append_spliced_attribute_info(&splice, &info)?;
+        region.push_replaced_body(&original[start..body.end], info)?;
     } else {
-        region.push(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+        region.push_message(info, MessageFlags::NONE, 0)?;
     }
     Ok(AttrEdits {
         region,

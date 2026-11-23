@@ -9,7 +9,7 @@ use crate::address::AddressContext;
 use crate::edit::WriteEngine;
 use crate::edit::context;
 use crate::edit::object_header;
-use crate::message_type::MessageType;
+use crate::message_flags::MessageFlags;
 use crate::reader::OpenedSource;
 use crate::source::BytesSource;
 use crate::superblock;
@@ -116,7 +116,8 @@ fn attribute_plans_preserve_native_values_at_independent_widths(
             append_checked(&mut bytes, widths, addresses, &blob.blob);
             edited
                 .region
-                .push(MessageType::ATTRIBUTE_INFO, &blob.attribute_info.to_bytes());
+                .push_message(blob.attribute_info, MessageFlags::NONE, 0)
+                .unwrap();
         }
         EditedAttrs::Compact => panic!("the operations must prepare new attributes"),
     }

@@ -221,7 +221,7 @@ impl<'a> PreparedLink<'a> {
     /// # Panics
     ///
     /// Panics if `output.len()` differs from [`Self::encoded_size`].
-    pub(crate) fn write_body(&self, output: &mut [u8]) {
+    fn write_body(&self, output: &mut [u8]) {
         let LinkFields {
             target,
             value_len,

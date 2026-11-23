@@ -6,6 +6,7 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::attribute_info::AttributeInfoMessage;
 use crate::bytes::UnexpectedEof;
@@ -92,11 +93,7 @@ impl MessageRecordLayout {
         creation_index: u16,
         body: B,
     ) -> Result<PreparedMessageRecord<B>, FormatError> {
-        let message_type = const {
-            let [low, high] = B::MESSAGE_TYPE.to_u16().to_le_bytes();
-            assert!(high == 0);
-            low
-        };
+        let message_type = const { RecordPrefix::type_byte(B::MESSAGE_TYPE) };
         let prefix = RecordPrefix::new(
             self,
             message_type,
@@ -178,6 +175,18 @@ impl<B> PreparedMessageRecord<B> {
     reason = "the record dispatches through the private encoding contract of its admitted body"
 )]
 impl<B: Encode<Error: Into<FormatError>>> PreparedMessageRecord<B> {
+    /// Encodes the complete record into an owned buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AllocationFailed`] if reserving space fails. Propagates encoding
+    /// errors from the body.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, FormatError> {
+        let mut bytes = self.prefix.allocate_output()?;
+        self.write_record(&mut bytes)?;
+        Ok(bytes)
+    }
+
     /// Writes the record at the start of `output` and returns the number of bytes written.
     ///
     /// Leaves bytes after the record unchanged.
@@ -220,6 +229,19 @@ impl<B: Encode<Error: Into<FormatError>>> PreparedMessageRecord<B> {
     }
 }
 
+impl PreparedMessageRecord<PreparedLink<'_>> {
+    /// Returns the hard-link address range relative to the start of the record.
+    ///
+    /// The address offset includes the retained record prefix length. Returns [`None`] for a
+    /// symbolic or user-defined target.
+    pub fn hard_link_address_range(&self) -> Option<Range<usize>> {
+        let prefix = self.prefix.layout.prefix_len();
+        self.body
+            .hard_link_address_range()
+            .map(|field| prefix + field.start..prefix + field.end)
+    }
+}
+
 impl<B: Encode<Error: Into<FormatError>>> Encode for PreparedMessageRecord<B> {
     type Error = FormatError;
 
@@ -237,7 +259,7 @@ impl<B: Encode<Error: Into<FormatError>>> Encode for PreparedMessageRecord<B> {
 // Section `subsubsec_fmt4_dataobject_hdr_prefix_two`, version 4.0, defines the one-byte type,
 // two-byte size, and optional two-byte creation index.
 #[derive(Debug)]
-struct RecordPrefix {
+pub(super) struct RecordPrefix {
     message_type: u8,
     body_len: u16,
     flags: MessageFlags,
@@ -246,6 +268,33 @@ struct RecordPrefix {
 }
 
 impl RecordPrefix {
+    /// Returns the one-byte type code stored in a version 2 record prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the message type exceeds [`u8::MAX`].
+    pub(super) const fn type_byte(message_type: MessageType) -> u8 {
+        let [low, high] = message_type.to_u16().to_le_bytes();
+        assert!(high == 0);
+        low
+    }
+
+    pub(super) const fn from_fields(
+        layout: MessageRecordLayout,
+        message_type: u8,
+        flags: MessageFlags,
+        creation_index: u16,
+        body_len: u16,
+    ) -> Self {
+        Self {
+            message_type,
+            body_len,
+            flags,
+            creation_index,
+            layout,
+        }
+    }
+
     fn new(
         layout: MessageRecordLayout,
         message_type: u8,
@@ -258,13 +307,20 @@ impl RecordPrefix {
                 message_type: u16::from(message_type),
                 size: body_len,
             })?;
-        Ok(Self {
+        Ok(Self::from_fields(
+            layout,
             message_type,
-            body_len,
             flags,
             creation_index,
-            layout,
-        })
+            body_len,
+        ))
+    }
+
+    /// Appends the prefix for a body that the caller writes separately.
+    pub(super) fn append(&self, output: &mut Vec<u8>) {
+        let start = output.len();
+        output.resize(start + self.layout.prefix_len(), 0);
+        self.write_into(&mut output[start..]);
     }
 
     fn require_inline(&self) -> Result<(), FormatError> {
@@ -280,6 +336,24 @@ impl RecordPrefix {
     fn encoded_size(&self) -> usize {
         const { assert!(usize::BITS >= 32) };
         self.layout.prefix_len() + usize::from(self.body_len)
+    }
+
+    /// Returns a zeroed buffer the length of the complete record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AllocationFailed`] if reserving the complete record fails.
+    fn allocate_output(&self) -> Result<Vec<u8>, FormatError> {
+        let len = self.encoded_size();
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(len)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: len,
+                source,
+            })?;
+        output.resize(len, 0);
+        Ok(output)
     }
 
     /// Appends zeroed space for the complete record and returns its starting offset in `output`.

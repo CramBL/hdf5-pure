@@ -6,24 +6,22 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::MessageBody;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
 use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
-use hdf5_pure_format::__private::PreparedLinkRecord;
 use hdf5_pure_format::__private::RecordSplice;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ReservationRequest;
 
 use crate::address::AddressContext;
-use crate::attribute_info::AttributeInfoMessage;
 use crate::convert::Narrow;
 use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout, LAYOUT_CLASS_COMPACT};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_space_info::FileSpaceInfo;
-use crate::filter_pipeline::FilterPipeline;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::ObjectId;
@@ -868,99 +866,73 @@ impl OhRegion {
         self.bytes.extend_from_slice(record);
     }
 
-    /// Appends a Link record using this region's message record layout.
+    /// Appends an inline message encoded with this region's record layout.
     ///
-    /// The caller supplies hard-link targets checked at this region's offset width.
-    ///
-    /// # Errors
-    ///
-    /// Propagates allocation errors from [`PreparedLinkRecord::append_to`].
-    pub(super) fn push_link_record(
-        &mut self,
-        record: &PreparedLinkRecord<'_>,
-    ) -> Result<(), FormatError> {
-        record.append_to(self.layout(), &mut self.bytes)
-    }
-
-    /// Appends a Filter Pipeline record using this region's message record layout.
+    /// The caller supplies a body prepared at this region's file widths.
     ///
     /// # Errors
     ///
-    /// Propagates message-size and allocation errors from
-    /// [`MessageRecordLayout::write_filter_pipeline`].
-    pub(super) fn push_filter_pipeline(
+    /// Propagates errors from [`MessageRecordLayout::prepare_record`] and [the record writer].
+    ///
+    /// [the record writer]: hdf5_pure_format::__private::PreparedMessageRecord::append_to
+    pub(super) fn push_message<B: MessageBody>(
         &mut self,
-        constant: bool,
-        pipeline: &FilterPipeline,
+        body: B,
+        flags: MessageFlags,
+        creation_index: u16,
     ) -> Result<(), FormatError> {
         self.layout()
-            .write_filter_pipeline(&mut self.bytes, constant, pipeline)
+            .prepare_record(flags, creation_index, body)?
+            .append_to(&mut self.bytes)
     }
 
-    /// Appends a Link Info record using this region's message record layout.
+    /// Appends an encoded body with the supplied message type and flags.
     ///
-    /// The caller supplies `info` at this region's offset width.
+    /// Writes the creation index when the layout tracks creation order.
     ///
     /// # Errors
     ///
-    /// Propagates allocation errors from [`MessageRecordLayout::write_link_info`].
-    pub(super) fn push_link_info(
+    /// Propagates record preparation and append errors from
+    /// [`MessageRecordLayout::prepare_raw_record`] and [the record writer].
+    ///
+    /// [the record writer]: hdf5_pure_format::__private::PreparedMessageRecord::append_to
+    pub(super) fn push_raw_record(
         &mut self,
-        info: &crate::link_info::LinkInfoMessage,
+        msg_type: MessageType,
+        flags: MessageFlags,
+        creation_index: u16,
+        body: &[u8],
     ) -> Result<(), FormatError> {
-        self.layout().write_link_info(&mut self.bytes, info)
+        self.layout()
+            .prepare_raw_record(msg_type, flags, creation_index, body)?
+            .append_to(&mut self.bytes)
     }
 
-    /// Appends the spliced region with `info` encoded into the selected record's body.
+    /// Appends `source` with the first record of the body's message type replaced.
     ///
-    /// The caller passes a splice for an Attribute Info record and a message checked at this
-    /// region's offset width.
+    /// The caller supplies `source` at this region's layout and the body at its file widths.
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`RecordSplice::replace_body_with`].
-    pub(super) fn append_spliced_attribute_info(
+    /// Returns [`FormatError::Internal`] if the record type is absent from `source`. Propagates
+    /// errors from [`RecordSplice::first`] and [`RecordSplice::replace_typed_body_into`].
+    pub(super) fn push_replaced_body<B: MessageBody>(
         &mut self,
-        splice: &RecordSplice<'_>,
-        info: &AttributeInfoMessage,
+        source: &[u8],
+        body: B,
     ) -> Result<(), FormatError> {
-        splice.replace_body_with(&mut self.bytes, info.encoded_size(), |body| {
-            info.write_into(body)
-                .map(|_| ())
-                .map_err(|error| FormatError::Internal(error.to_string()))
-        })
+        let splice =
+            RecordSplice::first(self.layout(), source, B::MESSAGE_TYPE)?.ok_or_else(|| {
+                FormatError::Internal(
+                    "the replacement record is absent from its source range".into(),
+                )
+            })?;
+        splice.replace_typed_body_into(&mut self.bytes, body)
     }
 
     /// Returns the record bytes for a patch that preserves record lengths.
     pub(super) fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.bytes
-    }
-
-    /// Appends a message record with flags and creation index set to zero.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg_type` does not fit the 1-byte type field or `body` is longer than
-    /// [`OBJECT_HEADER_MESSAGE_MAX`], as [`MessageRecordLayout::record`] does.
-    pub(super) fn push(&mut self, msg_type: MessageType, body: &[u8]) {
-        let record = self.props.layout.record(msg_type, body);
-        self.push_bytes(&record);
-    }
-
-    /// Appends a shared-message reference with the shared flag set.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg_type` does not fit the 1-byte type field or `reference` is longer than
-    /// [`OBJECT_HEADER_MESSAGE_MAX`], as [`MessageRecordLayout::record_with_creation_index`] does.
-    pub(super) fn push_shared(&mut self, msg_type: MessageType, reference: &[u8]) {
-        let record = self.props.layout.record_with_creation_index(
-            msg_type,
-            MessageFlags::SHARED,
-            0,
-            reference,
-        );
-        self.push_bytes(&record);
     }
 }
 
@@ -1102,6 +1074,47 @@ mod tests {
 
     mod fixture;
     mod reconstruction;
+
+    #[rstest]
+    #[case::wide_type(
+        MessageType::from_u16(u16::MAX),
+        FormatError::ObjectHeaderMessageTypeTooLarge(u16::MAX)
+    )]
+    #[case::wide_body(
+        MessageType::ATTRIBUTE,
+        FormatError::ObjectHeaderMessageTooLarge {
+            message_type: MessageType::ATTRIBUTE.to_u16(),
+            size: OBJECT_HEADER_MESSAGE_MAX + 1,
+        },
+    )]
+    fn editor_preserves_existing_records_after_a_failed_raw_append(
+        #[case] message_type: MessageType,
+        #[case] error: FormatError,
+    ) {
+        let original = edit_test_util::fixture_record(
+            TRACKED,
+            MessageType::from_u16(u16::from(u8::MAX)),
+            MessageFlags::MARK_IF_UNKNOWN,
+            13,
+            b"preserved",
+        );
+        let mut region = OhRegion::new(
+            WIDTHS,
+            original.clone(),
+            ObjectHeaderPrefix::with_layout(TRACKED),
+        );
+
+        assert_eq!(
+            region.push_raw_record(
+                message_type,
+                MessageFlags::NONE,
+                0,
+                &vec![0; OBJECT_HEADER_MESSAGE_MAX + 1],
+            ),
+            Err(error)
+        );
+        assert_eq!(&*region, original);
+    }
 
     #[rstest]
     #[case::one_message(false, vec![1, 2, 3, 4])]

@@ -43,13 +43,17 @@ pub use update::ObjectReferenceCountUpdateError;
 /// use hdf5_pure_core::PhysicalAddress;
 /// use hdf5_pure_format::{BaseAddress, FormatError, MessageType};
 /// use hdf5_pure_format::__private::{
-///     AccessMode, FormatWidths, MessageFilter, ObjectHeader, ObjectHeaderPrefix,
-///     ObjectReferenceCount, ObjectReferenceCountObserver,
+///     AccessMode, FormatWidths, MessageFilter, ObjectHeader, ObjectHeaderWriter,
+///     ObjectReferenceCount, ObjectReferenceCountMessage, ObjectReferenceCountObserver,
 /// };
 ///
-/// let prefix = ObjectHeaderPrefix::PLAIN;
-/// let records = prefix.layout.record(MessageType::OBJECT_REFERENCE_COUNT, &[0, 2, 0, 0, 0]);
-/// let bytes = prefix.encode_header(&records);
+/// let header_bytes = |count| {
+///     let mut writer = ObjectHeaderWriter::new();
+///     let body = ObjectReferenceCountMessage::new(count).encode();
+///     writer.append_raw_message(MessageType::OBJECT_REFERENCE_COUNT, &body)?;
+///     writer.serialize()
+/// };
+/// let bytes = header_bytes(2)?;
 /// let observer = ObjectReferenceCountObserver::new(PhysicalAddress::new(0));
 /// let mut observation_error = None;
 /// let header = ObjectHeader::parse_from_source_with_chunk_observer(
@@ -83,9 +87,7 @@ pub use update::ObjectReferenceCountUpdateError;
 /// let mut writes = update.writes();
 /// assert_eq!(writes.next().unwrap(), (field.range(), [1, 0, 0, 0].as_slice()));
 /// let (checksum_range, checksum_bytes) = writes.next().unwrap();
-/// let expected_records =
-///     prefix.layout.record(MessageType::OBJECT_REFERENCE_COUNT, &[0, 1, 0, 0, 0]);
-/// let expected = prefix.encode_header(&expected_records);
+/// let expected = header_bytes(1)?;
 /// assert_eq!(checksum_range.length(), 4);
 /// assert_eq!(checksum_range.end(), field.chunk().end());
 /// assert_eq!(checksum_bytes, &expected[expected.len() - 4..]);
