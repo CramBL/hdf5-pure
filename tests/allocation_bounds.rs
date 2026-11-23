@@ -26,9 +26,11 @@ use std::fs::File as StdFile;
 use std::path::Path;
 
 use hdf5_pure::AttrValue;
+use hdf5_pure::CharacterSet;
 use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::CompoundTypeBuilder;
+use hdf5_pure::Datatype;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
@@ -38,6 +40,7 @@ use hdf5_pure::MessageType as ParsedMessageType;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::RepackOptions;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::StringPadding;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
@@ -2550,6 +2553,48 @@ fn writing_attributed_headers_has_bounded_allocations() {
         dataset.attrs().unwrap()["dataset_index"],
         AttrValue::I32(23)
     );
+}
+
+#[rstest]
+#[case::compact_inline("writer_compact_inline_attribute", 48_000, false, false)]
+#[case::compact_committed("writer_compact_committed_attribute", 48_000, true, false)]
+#[case::dense_inline("writer_dense_inline_attribute", 70_000, false, true)]
+#[case::dense_committed("writer_dense_committed_attribute", 70_000, true, true)]
+fn writing_large_attributes_has_bounded_allocations(
+    #[case] region: &str,
+    #[case] payload_len: u32,
+    #[case] committed: bool,
+    #[case] dense: bool,
+) {
+    let value = AttrValue::AsciiString("y".repeat(usize::try_from(payload_len).unwrap()));
+    let mut builder = FileBuilder::new();
+    if committed {
+        builder.commit_datatype(
+            "schema",
+            Datatype::String {
+                size: payload_len,
+                padding: StringPadding::NullPad,
+                charset: CharacterSet::Ascii,
+            },
+        );
+        builder.set_attr_committed("label", value.clone(), "schema");
+    } else {
+        builder.set_attr("label", value.clone());
+    }
+
+    let (image, measured) = allocation::measure(region, || builder.finish().unwrap());
+    eprintln!("{region}: {measured}");
+    let (block_budget, peak_budget) = if dense { (75, 225_000) } else { (40, 150_000) };
+    assert!(measured.blocks <= block_budget, "{measured}");
+    assert!(measured.bytes <= 300_000, "{measured}");
+    assert!(measured.peak_bytes <= peak_budget, "{measured}");
+    assert!(
+        measured.live_bytes >= u64::try_from(image.len()).unwrap(),
+        "{measured}"
+    );
+    assert_eq!(test_util::fractal_heap::has_fractal_heap(&image), dense);
+    let file = File::from_bytes(image).unwrap();
+    assert_eq!(file.root().attrs().unwrap()["label"], value);
 }
 
 #[rstest]
