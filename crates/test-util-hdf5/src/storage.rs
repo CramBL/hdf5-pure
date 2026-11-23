@@ -285,7 +285,7 @@ pub fn empty_extensible_array_extents(
             .unwrap(),
         )
         .unwrap();
-    assert_eq!(header.header().max_idx_set, 0);
+    assert_eq!(header.header().stored_statistics().max_idx_set, 0);
     let index = header.index_block().unwrap();
     let range = index.range();
     let parsed = index

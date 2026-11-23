@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Incomplete ownership or reference evidence retains
   the affected storage. Compaction failures report the completed collection prefix and restoration state ([#1253](https://github.com/CramBL/hdf5-pure/pull/1253)).
 
+- `ExtensibleArrayHeader::stored_statistics` in `hdf5-pure-format` exposes all six version 0
+  Extensible Array statistics as stored in the header for inspection and re-encoding ([#1322](https://github.com/CramBL/hdf5-pure/pull/1322)).
 - `ExtensibleArrayHeaderWithoutIndexBlock` in `hdf5-pure-format` encodes a version 0 Extensible
   Array header with zero statistics and an undefined index-block address ([#1321](https://github.com/CramBL/hdf5-pure/pull/1321)).
 - `BTreeKValues` in `hdf5-pure-format` parses and encodes the version 0 B-tree K Values message

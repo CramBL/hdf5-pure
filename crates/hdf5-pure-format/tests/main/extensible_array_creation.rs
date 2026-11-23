@@ -71,14 +71,11 @@ fn standalone_header_encodes_absent_index_storage(
     assert_eq!(array.range(), range);
     assert_eq!(array.index_block(), None);
     let header = array.header();
-    assert_eq!(header.client_id, client.id());
-    assert_eq!(header.element_size, client.element_size(offsets));
-    assert_eq!(header.bit_geometry(), creation.bit_geometry());
-    assert_eq!(header.idx_blk_elmts, parameters[1]);
-    assert_eq!(header.super_blk_min_data_ptrs, parameters[2]);
-    assert_eq!(header.min_dblk_nelmts, parameters[3]);
-    assert_eq!(header.max_idx_set, 0);
-    assert!(header.index_block_address.is_undefined(widths.offsets));
+    assert_eq!(header.client_id(), client.id());
+    assert_eq!(header.element_size(), client.element_size(offsets));
+    assert_eq!(header.creation_parameters(), creation);
+    assert_eq!(header.stored_statistics().max_idx_set, 0);
+    assert!(header.index_block_address().is_undefined(widths.offsets));
 }
 
 #[rstest]
@@ -188,18 +185,9 @@ fn initialization_preserves_creation_geometry_and_complete_allocations(
     let locator = ExtensibleArrayHeaderLocator::new(widths, BaseAddress::new(base), address);
     let array = locator.parse(region).unwrap();
     let header = array.header();
-    assert_eq!(header.client_id, u8::from(filtered));
-    assert_eq!(header.max_idx_set, 0);
-    assert_eq!(header.bit_geometry(), creation.bit_geometry());
-    assert_eq!(header.idx_blk_elmts, parameters[1]);
-    assert_eq!(header.super_blk_min_data_ptrs, parameters[2]);
-    assert_eq!(header.min_dblk_nelmts, parameters[3]);
-    assert_eq!(header.idx_blk_elmts, creation.inline_elements());
-    assert_eq!(
-        header.super_blk_min_data_ptrs,
-        creation.min_data_blocks().get()
-    );
-    assert_eq!(header.min_dblk_nelmts, creation.min_elements().get());
+    assert_eq!(header.client_id(), u8::from(filtered));
+    assert_eq!(header.stored_statistics().max_idx_set, 0);
+    assert_eq!(header.creation_parameters(), creation);
     let header_range = array.range();
     assert_eq!(header_range, locator.parse_range().unwrap());
     let index = array.index_block().unwrap();

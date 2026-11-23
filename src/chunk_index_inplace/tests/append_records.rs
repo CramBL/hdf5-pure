@@ -122,7 +122,7 @@ fn retry_records_all_referenced_ea_blocks(
         let bytes = fs::read(&path).unwrap();
         let element_size = ExtensibleArrayHeader::parse(&bytes, header, 8, 8)
             .unwrap()
-            .element_size;
+            .element_size();
         assert_eq!(
             ea_stats(&bytes, header),
             [

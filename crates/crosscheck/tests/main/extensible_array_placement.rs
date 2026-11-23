@@ -272,7 +272,7 @@ fn replace_index(
         populated = ExtensibleArrayPlan::new(
             parsed,
             SlotOccupancy::Slots(&slots),
-            array.header().max_idx_set,
+            array.header().stored_statistics().max_idx_set,
             4 * chunk,
             widths,
             filtered,
@@ -397,7 +397,7 @@ fn geometry(source: FileRegion<'_>, array: ExtensibleArray, paged: bool) -> Vec<
         },
         ObservedBlock {
             kind: ExtensibleArrayBlockKind::Index,
-            slots: Some(0..u64::from(array.header().idx_blk_elmts)),
+            slots: Some(0..u64::from(array.header().creation_parameters().inline_elements())),
             allocation: index.range(),
         },
     ];

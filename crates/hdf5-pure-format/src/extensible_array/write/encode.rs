@@ -618,17 +618,8 @@ mod tests {
         let locator = ExtensibleArrayHeaderLocator::new(plan.widths(), base, addresses[0]);
         let array = locator.parse(region).unwrap();
         let header = array.header();
-        assert_eq!(header.index_block_address, addresses[1]);
-        assert_eq!(
-            [
-                header.max_index_bits().get(),
-                header.idx_blk_elmts,
-                header.super_blk_min_data_ptrs,
-                header.min_dblk_nelmts,
-                header.page_nelmts().exponent()
-            ],
-            creation
-        );
+        assert_eq!(header.index_block_address(), addresses[1]);
+        assert_eq!(header.creation_parameters().encode(), creation);
         assert_eq!(
             extensible_array::tests::records_in(region, locator, 8).unwrap(),
             occupied.iter().copied().zip(records).collect::<Vec<_>>()

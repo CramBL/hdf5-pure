@@ -31,7 +31,6 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::checksum;
 use crate::chunk_record;
@@ -41,6 +40,7 @@ use crate::chunk_record::ChunkRecord;
 use crate::chunk_record::ElementEncoding;
 use crate::chunk_record::IndexSlots;
 use crate::chunk_record::InvalidElementEncoding;
+use crate::codec::Decode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width::FormatWidths;
@@ -56,7 +56,7 @@ pub(crate) mod write;
 /// message.
 ///
 /// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
-/// [`parse`](Self::parse), which returns the header and the reference to its index block.
+/// [`parse`](Self::parse), which returns the header and any index-block reference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensibleArrayHeaderLocator {
     widths: FormatWidths,
@@ -74,98 +74,45 @@ impl ExtensibleArrayHeaderLocator {
         }
     }
 
-    /// Parses the header in `region`.
+    /// Parses the complete header from [`Self::parse_range`] within `region`.
     ///
-    /// An unfiltered element is the chunk address alone, whatever the header's element size.
+    /// Uses the same framing and checksum policy as [`ExtensibleArrayHeader::parse_with_widths`].
+    /// Resolves a defined index-block address against the base and derives the block's range
+    /// from the checked creation parameters and element encoding.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
-    /// [`parse_range`](Self::parse_range), [`FormatError::InvalidExtensibleArraySignature`] if the
-    /// bytes do not start with `EAHD`, [`FormatError::InvalidExtensibleArrayVersion`] if the
-    /// version is not 0, [`FormatError::InvalidExtensibleArrayClient`] if the client ID is 2 or
-    /// more, and [`FormatError::InvalidExtensibleArrayGeometry`] if the element size or a creation
-    /// parameter is out of range. Returns [`FormatError::OffsetOverflow`] if the base address plus
-    /// `address` or plus the index block address, or the end of the header or of the index block,
-    /// is past [`u64::MAX`], and, under the `checksum` feature, [`FormatError::ChecksumMismatch`]
-    /// if the checksum does not match the header's bytes.
+    /// Returns [`FormatError::OffsetOverflow`] if the header address or end exceeds [`u64::MAX`],
+    /// or [`FormatError::InsufficientRegion`] if `region` omits any part of the header range.
+    /// Within that range, reports the header field and checksum errors documented by
+    /// [`ExtensibleArrayHeader::parse_with_widths`]. After decoding a header with a defined
+    /// index-block address, returns [`FormatError::OffsetOverflow`] if the resolved index-block
+    /// address or end exceeds [`u64::MAX`].
     pub fn parse(&self, region: FileRegion<'_>) -> Result<ExtensibleArray, FormatError> {
-        let Self {
-            widths,
-            base,
-            address: _,
-        } = *self;
         let range = self.parse_range()?;
         let bytes = region.subregion(range)?.bytes();
-        let mut cursor = bytes::ByteCursor::new(bytes);
-        if cursor.array::<{ HEADER_SIGNATURE.len() }>()? != HEADER_SIGNATURE {
-            return Err(FormatError::InvalidExtensibleArraySignature);
-        }
-        let version = cursor.u8()?;
-        if version != VERSION {
-            return Err(FormatError::InvalidExtensibleArrayVersion(version));
-        }
-        let client_id = cursor.u8()?;
-        let element_size = cursor.u8()?;
-        let max_index_bits = cursor.u8()?;
-        let index_block_elements = cursor.u8()?;
-        let data_block_min_elements = cursor.u8()?;
-        let super_block_min_data_blocks = cursor.u8()?;
-        let page_bits = cursor.u8()?;
-        for _ in 0..STATISTICS_BEFORE_MAX_INDEX_SET {
-            cursor.length(widths.lengths)?;
-        }
-        let max_index_set = cursor.length(widths.lengths)?;
-        // The number of elements, the last statistic.
-        cursor.length(widths.lengths)?;
-        let index_block_address = cursor.address(widths.offsets)?;
-        checksum::verify_trailing(bytes)?;
-
-        let encoding = ElementEncoding::new(widths.offsets, client_id, element_size).map_err(
-            |err| match err {
-                InvalidElementEncoding::Client(id) => FormatError::InvalidExtensibleArrayClient(id),
-                InvalidElementEncoding::EntrySize => FormatError::InvalidExtensibleArrayGeometry,
-            },
-        )?;
-        let creation = ExtensibleArrayCreationParameters::parse(&[
-            max_index_bits,
-            index_block_elements,
-            super_block_min_data_blocks,
-            data_block_min_elements,
-            page_bits,
-        ])?;
-        let layout = creation.layout(encoding);
-        let header = ExtensibleArrayHeader {
-            client_id,
-            element_size,
-            bit_geometry: creation.bit_geometry(),
-            idx_blk_elmts: index_block_elements,
-            min_dblk_nelmts: data_block_min_elements,
-            super_blk_min_data_ptrs: super_block_min_data_blocks,
-            max_idx_set: max_index_set,
-            index_block_address,
-        };
-        let owner = Owner {
-            base,
-            header: range.start(),
-            layout,
-            max_index_set,
-        };
-        let index_block = if index_block_address.is_undefined(widths.offsets) {
+        let header = ExtensibleArrayHeader::decode(bytes, self.widths)?;
+        let index_block_address = header.index_block_address();
+        let index_block = if index_block_address.is_undefined(header.encoding.offsets()) {
             None
         } else {
+            let owner = Owner {
+                base: self.base,
+                header: range.start(),
+                layout: header.layout(),
+                max_index_set: header.stored_statistics().max_idx_set,
+            };
             Some(ExtensibleArrayIndexBlockRef {
                 owner,
                 range: FileRange::new(
                     owner.resolve(index_block_address)?,
-                    layout.index_block_len()?,
+                    owner.layout.index_block_len()?,
                 )?,
             })
         };
         Ok(ExtensibleArray {
             range,
             header,
-            layout,
             index_block,
         })
     }
@@ -284,7 +231,6 @@ impl ExtensibleArrayBlockFraming {
 pub struct ExtensibleArray {
     range: FileRange,
     header: ExtensibleArrayHeader,
-    layout: Layout,
     index_block: Option<ExtensibleArrayIndexBlockRef>,
 }
 
@@ -296,8 +242,7 @@ impl ExtensibleArray {
 
     /// Returns the stored header fields.
     ///
-    /// The [`index_block_address`](ExtensibleArrayHeader::index_block_address) field holds a
-    /// base-relative address or the file-width undefined address.
+    /// The [`ExtensibleArrayHeader::index_block_address`] is base-relative or undefined.
     pub const fn header(&self) -> &ExtensibleArrayHeader {
         &self.header
     }
@@ -311,19 +256,18 @@ impl ExtensibleArray {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a derived block offset
     /// exceeds [`u64::MAX`].
     pub fn geometry(&self) -> Result<ExtensibleArrayGeometry, FormatError> {
-        ExtensibleArrayGeometry::from_layout(self.layout)
+        ExtensibleArrayGeometry::from_header(&self.header)
     }
 
     /// Returns whether the array indexes filtered chunks, the header's client ID 1.
     pub const fn is_filtered(&self) -> bool {
         matches!(
-            self.layout.encoding.client(),
+            self.header.encoding.client(),
             ArrayClient::FilteredChunks { .. }
         )
     }
 
-    /// Returns the reference to the index block, or `None` if the header stores the undefined
-    /// address, in an array without chunks.
+    /// Returns the index-block reference, or [`None`] when the header stores the undefined address.
     pub const fn index_block(&self) -> Option<ExtensibleArrayIndexBlockRef> {
         self.index_block
     }
@@ -1559,23 +1503,18 @@ impl ExtensibleArrayInitialization {
 /// The maximum element bit count is in `1..=64`, and the page exponent is at most that count
 /// and at most 63. The page element count fits a [`u64`], and the block offset is 1 to 8 bytes
 /// wide.
+///
+/// "The Extensible Array Index" of the [format specification, version 4.0][spec]
+/// defines the header.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensibleArrayHeader {
-    /// The client ID: 0 for unfiltered chunks and 1 for filtered ones.
-    pub client_id: u8,
-    /// The width in bytes of one element.
-    pub element_size: u8,
-    bit_geometry: ExtensibleArrayBitGeometry,
-    /// The number of elements the index block holds.
-    pub idx_blk_elmts: u8,
-    /// The number of elements in the smallest data block.
-    pub min_dblk_nelmts: u8,
-    /// The fewest data block addresses a super block holds.
-    pub super_blk_min_data_ptrs: u8,
-    /// One more than the highest element index set, the "Max Index Set" field.
-    pub max_idx_set: u64,
-    /// The address of the index block.
-    pub index_block_address: StoredAddress,
+    encoding: ElementEncoding,
+    element_size: u8,
+    creation: ExtensibleArrayCreationParameters,
+    stored_statistics: ExtensibleArrayStats,
+    index_block_address: StoredAddress,
 }
 
 impl ExtensibleArrayHeader {
@@ -1583,14 +1522,11 @@ impl ExtensibleArrayHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
-    /// [`FormatError::ChunkedReadError`] if the signature is not `EAHD` or the version is not 0,
-    /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
-    /// 2, 4, or 8, and [`FormatError::ChecksumMismatch`] if the checksum does not match.
-    ///
-    /// Returns [`FormatError::InvalidChunkGeometry`] if the maximum element bit count is outside
-    /// `1..=64`, the page element count does not fit a [`u64`], or the page exponent exceeds the
-    /// maximum element bit count.
+    /// Returns [`FormatError::InvalidOffsetSize`] for an unsupported `offset_size` or
+    /// [`FormatError::InvalidLengthSize`] for an unsupported `length_size`. The supported
+    /// widths are 2, 4, and 8 bytes. Checks the offset width before the length width and
+    /// checks both before reading the header. See [`Self::parse_with_widths`] for errors
+    /// from the header bytes.
     pub fn parse(
         file_data: &[u8],
         offset: usize,
@@ -1604,78 +1540,42 @@ impl ExtensibleArrayHeader {
         )
     }
 
-    /// Parses the Extensible Array header at `offset` using validated format widths.
+    /// Parses the complete header at `offset` and ignores bytes after its checksum.
+    ///
+    /// Reads the signature and version before checking the checksum. With the `checksum`
+    /// feature, verifies the four-byte Jenkins checksum over all preceding header bytes.
+    /// Then checks the client ID, the element size for filtered chunks, and the creation parameters
+    /// in that order.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
-    /// [`FormatError::ChunkedReadError`] if the signature is not `EAHD` or the version is not 0,
-    /// [`FormatError::ChecksumMismatch`] if the checksum does not match, and
-    /// [`FormatError::InvalidChunkGeometry`] if the stored bit geometry is invalid.
+    /// Returns [`FormatError::UnexpectedEof`] if the complete header is unavailable. This
+    /// error reports the required end relative to the start of `file_data` and the input length.
+    /// The parser caps the required end at [`usize::MAX`].
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArraySignature`] for a signature other than
+    /// `EAHD`, [`FormatError::InvalidExtensibleArrayVersion`] for a version other than 0,
+    /// or [`FormatError::ChecksumMismatch`] if verification is enabled and the checksum differs.
+    /// Returns [`FormatError::InvalidExtensibleArrayClient`] for a client ID other than 0 or 1,
+    /// or [`FormatError::InvalidExtensibleArrayGeometry`] for an unsupported filtered element
+    /// size or creation parameter.
     pub fn parse_with_widths(
         file_data: &[u8],
         offset: usize,
         widths: FormatWidths,
     ) -> Result<Self, FormatError> {
-        // EAHD: the signature (4), eight 1-byte fields, six statistics of `length_size` bytes,
-        // the index block address, and the checksum (4).
-        let min_size = Self::serialized_size_with_widths(widths);
-        if min_size > file_data.len() || offset > file_data.len() - min_size {
-            return Err(FormatError::UnexpectedEof {
-                expected: offset.saturating_add(min_size),
+        let input = file_data
+            .get(offset..)
+            .ok_or_else(|| FormatError::UnexpectedEof {
+                expected: offset.saturating_add(Self::serialized_size_with_widths(widths)),
                 available: file_data.len(),
-            });
-        }
-
-        let d = &file_data[offset..];
-        if &d[0..4] != b"EAHD" {
-            return Err(FormatError::ChunkedReadError(
-                "invalid Extensible Array header signature".into(),
-            ));
-        }
-
-        let version = d[4];
-        if version != 0 {
-            return Err(FormatError::ChunkedReadError(format!(
-                "unsupported Extensible Array header version: {version}"
-            )));
-        }
-
-        let client_id = d[5];
-        let element_size = d[6];
-        let max_nelmts_bits = d[7];
-        let idx_blk_elmts = d[8];
-        let min_dblk_nelmts = d[9];
-        let super_blk_min_data_ptrs = d[10];
-        let max_dblk_nelmts_bits = d[11];
-        let bit_geometry =
-            ExtensibleArrayBitGeometry::parse(max_nelmts_bits, max_dblk_nelmts_bits)?;
-
-        let mut pos = 12;
-        // The six statistics, in the order the header stores them:
-        //   [0] `nsuper_blks`   [1] `super_blk_size`   [2] `ndata_blks`
-        //   [3] `data_blk_size` [4] `max_idx_set`      [5] `nelmts`
-        // The parser reads `max_idx_set`, one more than the highest element index set, which
-        // bounds the elements in use. `nelmts` counts every slot of the allocated blocks.
-        let ls = usize::from(widths.lengths.get());
-        pos += 4 * ls; // skip [0]..[3]
-        let max_idx_set = bytes::read_length_width(d, pos, widths.lengths)?; // [4]
-        pos += ls;
-        pos += ls; // skip [5] nelmts
-        let index_block_address =
-            StoredAddress::new(bytes::read_offset_width(d, pos, widths.offsets)?);
-
-        crate::checksum::verify_trailing(&d[..min_size])?;
-
-        Ok(ExtensibleArrayHeader {
-            client_id,
-            element_size,
-            bit_geometry,
-            idx_blk_elmts,
-            min_dblk_nelmts,
-            super_blk_min_data_ptrs,
-            max_idx_set,
-            index_block_address,
+            })?;
+        Self::decode(input, widths).map_err(|error| match error {
+            FormatError::UnexpectedEof { expected, .. } => FormatError::UnexpectedEof {
+                expected: offset.saturating_add(expected),
+                available: file_data.len(),
+            },
+            error => error,
         })
     }
 
@@ -1693,24 +1593,139 @@ impl ExtensibleArrayHeader {
             + CHECKSUM_LEN
     }
 
+    /// Returns 0 for unfiltered chunks or 1 for filtered chunks.
+    pub const fn client_id(&self) -> u8 {
+        self.encoding.client().id()
+    }
+
+    /// Returns the stored element size in bytes.
+    ///
+    /// For unfiltered chunks, the reader uses the file's offset width to read the entries.
+    pub const fn element_size(&self) -> u8 {
+        self.element_size
+    }
+
+    /// Returns the checked creation parameters from the header.
+    pub const fn creation_parameters(&self) -> ExtensibleArrayCreationParameters {
+        self.creation
+    }
+
     /// Returns the parsed maximum element bit count and data block page exponent.
     pub fn bit_geometry(&self) -> ExtensibleArrayBitGeometry {
-        self.bit_geometry
+        self.creation.bit_geometry()
     }
 
     /// Returns the "Max Nelmts Bits" field, in `1..=64`.
     pub fn max_index_bits(&self) -> MaxIndexBits {
-        self.bit_geometry.max_index_bits()
+        self.bit_geometry().max_index_bits()
     }
 
     /// Returns the number of elements in a data block page, a nonzero power of two.
     pub const fn page_nelmts(&self) -> PageElementCount {
-        self.bit_geometry.page_nelmts()
+        self.creation.bits.page_nelmts()
     }
 
     /// Returns the width in bytes of a block offset, in `1..=8`.
     pub fn block_offset_width(&self) -> BlockOffsetWidth {
-        self.bit_geometry.block_offset_width()
+        self.bit_geometry().block_offset_width()
+    }
+
+    /// Returns the six statistics as stored in the header.
+    ///
+    /// The parser reads these values from the header bytes alone. Use
+    /// [`ExtensibleArrayStats::encode_fields`] to reproduce the fields at the file's length width.
+    ///
+    /// # Examples
+    ///
+    /// Reads and re-encodes the statistics of a header with two-byte lengths and four-byte addresses.
+    ///
+    /// ```
+    /// use hdf5_pure_format::__private::{ExtensibleArrayHeader, FormatWidths};
+    ///
+    /// let bytes = [
+    ///     b'E', b'A', b'H', b'D', 0, 0, 4, 32, 4, 16, 4, 10,
+    ///     1, 0, 0x80, 1, 3, 0, 0, 9, 5, 0, 6, 0,
+    ///     0, 0x10, 0, 0, 0x73, 0x63, 0xec, 0x2b,
+    /// ];
+    /// let widths = FormatWidths::from_sizes(4, 2)?;
+    /// let header = ExtensibleArrayHeader::parse_with_widths(&bytes, 0, widths)?;
+    /// let stats = header.stored_statistics();
+    /// assert_eq!(stats.max_idx_set, 5);
+    /// assert_eq!(stats.nelmts, 6);
+    ///
+    /// let mut fields = [0; 12];
+    /// assert_eq!(stats.encode_fields(&mut fields, widths.lengths)?, fields.len());
+    /// assert_eq!(fields, bytes[12..24]);
+    /// # Ok::<(), hdf5_pure_format::FormatError>(())
+    /// ```
+    pub const fn stored_statistics(&self) -> &ExtensibleArrayStats {
+        &self.stored_statistics
+    }
+
+    /// Returns the stored index-block address, including the file-width undefined address.
+    pub const fn index_block_address(&self) -> StoredAddress {
+        self.index_block_address
+    }
+
+    fn layout(&self) -> Layout {
+        self.creation.layout(self.encoding)
+    }
+}
+
+impl<'input> Decode<'input> for ExtensibleArrayHeader {
+    type Context = FormatWidths;
+    type Error = FormatError;
+
+    fn decode(input: &'input [u8], widths: FormatWidths) -> Result<Self, Self::Error> {
+        let header =
+            bytes::ByteCursor::new(input).take(Self::serialized_size_with_widths(widths))?;
+        let mut cursor = bytes::ByteCursor::new(header);
+        if *cursor.take_array()? != HEADER_SIGNATURE {
+            return Err(FormatError::InvalidExtensibleArraySignature);
+        }
+        let [
+            version,
+            client_id,
+            element_size,
+            max_index_bits,
+            inline_elements,
+            min_elements,
+            min_data_blocks,
+            page_bits,
+        ] = cursor.array::<HEADER_BYTE_FIELDS>()?;
+        if version != VERSION {
+            return Err(FormatError::InvalidExtensibleArrayVersion(version));
+        }
+        checksum::verify_trailing(header)?;
+
+        let encoding =
+            ElementEncoding::new(widths.offsets, client_id, element_size).map_err(|error| {
+                match error {
+                    InvalidElementEncoding::Client(id) => {
+                        FormatError::InvalidExtensibleArrayClient(id)
+                    }
+                    InvalidElementEncoding::EntrySize => {
+                        FormatError::InvalidExtensibleArrayGeometry
+                    }
+                }
+            })?;
+        let creation = ExtensibleArrayCreationParameters::from_fields([
+            max_index_bits,
+            inline_elements,
+            min_data_blocks,
+            min_elements,
+            page_bits,
+        ])
+        .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
+        let stored_statistics = ExtensibleArrayStats::decode_fields(&mut cursor, widths.lengths)?;
+        let index_block_address = cursor.address(widths.offsets)?;
+        Ok(Self {
+            encoding,
+            element_size,
+            creation,
+            stored_statistics,
+            index_block_address,
+        })
     }
 }
 
@@ -1728,28 +1743,6 @@ pub struct ExtensibleArrayBitGeometry {
 }
 
 impl ExtensibleArrayBitGeometry {
-    /// Parses the maximum element bit count and the data block page exponent.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidChunkGeometry`] if `max_index_bits` is outside `1..=64`,
-    /// the page element count does not fit a [`u64`], or `page_bits` exceeds `max_index_bits`.
-    fn parse(max_index_bits: u8, page_bits: u8) -> Result<Self, FormatError> {
-        Self::from_fields(max_index_bits, page_bits).map_err(|error| {
-            FormatError::InvalidChunkGeometry(match error {
-                InvalidBitGeometry::MaximumIndexBits => {
-                    "Extensible Array maximum element bit count must be in 1..=64"
-                }
-                InvalidBitGeometry::PageElementCount => {
-                    "Extensible Array page element count does not fit u64"
-                }
-                InvalidBitGeometry::PageExponentExceedsIndexBits => {
-                    "Extensible Array page exponent exceeds maximum element bit count"
-                }
-            })
-        })
-    }
-
     /// Returns the "Max Nelmts Bits" field, in `1..=64`.
     pub const fn max_index_bits(self) -> MaxIndexBits {
         self.max_index_bits
@@ -1800,6 +1793,7 @@ impl ExtensibleArrayBitGeometry {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
 enum InvalidBitGeometry {
     MaximumIndexBits,
     PageElementCount,
@@ -1949,47 +1943,14 @@ impl ExtensibleArrayGeometry {
         }
     }
 
-    /// Derives block geometry from the header's creation parameters.
-    ///
-    /// `offsets` is the file's address width, used to interpret the element encoding.
+    /// Derives block geometry from the header's checked creation parameters.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidExtensibleArrayClient`] if the client ID is 2 or more, and
-    /// [`FormatError::InvalidExtensibleArrayGeometry`] if a filtered element width or creation
-    /// parameter is out of range, or the block geometry overflows [`u64`].
-    pub fn from_header(
-        &ExtensibleArrayHeader {
-            client_id,
-            element_size,
-            bit_geometry,
-            idx_blk_elmts,
-            min_dblk_nelmts,
-            super_blk_min_data_ptrs,
-            max_idx_set: _,
-            index_block_address: _,
-        }: &ExtensibleArrayHeader,
-        offsets: OffsetWidth,
-    ) -> Result<Self, FormatError> {
-        let encoding =
-            ElementEncoding::new(offsets, client_id, element_size).map_err(
-                |error| match error {
-                    InvalidElementEncoding::Client(id) => {
-                        FormatError::InvalidExtensibleArrayClient(id)
-                    }
-                    InvalidElementEncoding::EntrySize => {
-                        FormatError::InvalidExtensibleArrayGeometry
-                    }
-                },
-            )?;
-        let creation = ExtensibleArrayCreationParameters::from_bit_geometry(
-            bit_geometry,
-            idx_blk_elmts,
-            super_blk_min_data_ptrs,
-            min_dblk_nelmts,
-        )
-        .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
-        Self::from_layout(creation.layout(encoding))
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a derived block offset
+    /// exceeds [`u64::MAX`].
+    pub fn from_header(header: &ExtensibleArrayHeader) -> Result<Self, FormatError> {
+        Self::from_layout(header.layout())
     }
 
     /// Returns the `(ndblks, dblk_nelmts)` of each super block: the number of its data blocks and
@@ -2273,8 +2234,8 @@ pub fn encode_super_block(
 
 /// The six statistics of an Extensible Array header, in the order the header stores them.
 ///
-/// An in-place writer that appends to an array rewrites them, and [`extensible_array_layout`] takes
-/// the length of the blocks after the index block from `super_blk_size` and `data_blk_size`.
+/// [`ExtensibleArrayHeader::stored_statistics`] reports the values read from a header.
+/// [`extensible_array_layout`] derives statistics from the occupied slots and creation geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtensibleArrayStats {
     /// The number of super blocks allocated.
@@ -2346,6 +2307,53 @@ impl ExtensibleArrayStats {
         })?;
         self.write_fields(fields, lengths);
         Ok(size)
+    }
+
+    /// Reads the six consecutive length fields in header order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bytes::UnexpectedEof`] if the remaining input is shorter than six length fields.
+    fn decode_fields(
+        cursor: &mut bytes::ByteCursor<'_>,
+        lengths: LengthWidth,
+    ) -> Result<Self, bytes::UnexpectedEof> {
+        let [
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        ] = match lengths {
+            LengthWidth::Two => {
+                Self::decode_values(cursor, |field| u64::from(u16::from_le_bytes(field)))?
+            }
+            LengthWidth::Four => {
+                Self::decode_values(cursor, |field| u64::from(u32::from_le_bytes(field)))?
+            }
+            LengthWidth::Eight => Self::decode_values(cursor, u64::from_le_bytes)?,
+        };
+        Ok(Self {
+            nsuper_blks,
+            super_blk_size,
+            ndata_blks,
+            data_blk_size,
+            max_idx_set,
+            nelmts,
+        })
+    }
+
+    fn decode_values<const N: usize>(
+        cursor: &mut bytes::ByteCursor<'_>,
+        decode: impl Fn([u8; N]) -> u64,
+    ) -> Result<[u64; STATISTICS as usize], bytes::UnexpectedEof> {
+        let fields = cursor.take_arrays::<N>(usize::from(STATISTICS))?;
+        let mut values = [0; STATISTICS as usize];
+        for (value, field) in values.iter_mut().zip(fields) {
+            *value = decode(*field);
+        }
+        Ok(values)
     }
 
     fn require_field_fits(&self, lengths: LengthWidth) -> Result<(), FormatError> {
@@ -2558,7 +2566,6 @@ const HEADER_BYTE_FIELDS: usize = 8;
 const HEADER_PREFIX_LEN: usize = HEADER_SIGNATURE.len() + HEADER_BYTE_FIELDS;
 // The six statistics of a header, each a length, of which "Max Index Set" is the fifth.
 const STATISTICS: u8 = 6;
-const STATISTICS_BEFORE_MAX_INDEX_SET: u64 = 4;
 // The version and client ID of a block.
 const BLOCK_BYTE_FIELDS: u64 = 2;
 const CHECKSUM_LEN: usize = 4;
@@ -2580,6 +2587,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::address::StoredAddressExt;
     use crate::width::FormatWidths;
 
     #[rstest::rstest]
@@ -2675,7 +2683,7 @@ mod tests {
     // The oracle is `H5EA__dblock_alloc`, which pages a block of more elements than a page.
     #[test]
     fn a_data_block_is_paged_only_past_a_full_page() {
-        let page_nelmts = ExtensibleArrayBitGeometry::parse(32, 4)
+        let page_nelmts = ExtensibleArrayBitGeometry::from_fields(32, 4)
             .unwrap()
             .page_nelmts();
         let at = |dblk_nelmts| DataBlockGeometry {
@@ -2691,7 +2699,7 @@ mod tests {
 
     #[test]
     fn the_page_init_bitmap_is_a_byte_per_eight_pages_per_block() {
-        let page_nelmts = ExtensibleArrayBitGeometry::parse(32, 4)
+        let page_nelmts = ExtensibleArrayBitGeometry::from_fields(32, 4)
             .unwrap()
             .page_nelmts();
         let sb = |ndblks, dblk_nelmts| SuperBlockGeometry {
@@ -2716,39 +2724,6 @@ mod tests {
     const fn eahd_len(os: u8, ls: u8) -> usize {
         12 + 6 * ls as usize + os as usize + 4
     }
-    #[test]
-    fn parse_header_valid() {
-        let os: u8 = 8;
-        let ls: u8 = 8;
-        let mut buf = vec![0u8; 256];
-        buf[0..4].copy_from_slice(b"EAHD");
-        buf[4] = 0; // version
-        buf[5] = 0; // `client_id` = non-filtered
-        buf[6] = 8; // `element_size`
-        buf[7] = 10; // `max_nelmts_bits`
-        buf[8] = 2; // `idx_blk_elmts`
-        buf[9] = 4; // `min_dblk_nelmts`
-        buf[10] = 2; // `super_blk_min_data_ptrs`
-        buf[11] = 8; // `max_dblk_nelmts_bits`
-        // 6 stats fields (each 8 bytes)
-        buf[12..20].copy_from_slice(&0u64.to_le_bytes()); // stat[0]
-        buf[20..28].copy_from_slice(&0u64.to_le_bytes()); // stat[1]
-        buf[28..36].copy_from_slice(&0u64.to_le_bytes()); // stat[2]
-        buf[36..44].copy_from_slice(&0u64.to_le_bytes()); // stat[3]
-        buf[44..52].copy_from_slice(&5u64.to_le_bytes()); // stat[4] = `max_idx_set`
-        buf[52..60].copy_from_slice(&0u64.to_le_bytes()); // stat[5]
-        buf[60..68].copy_from_slice(&0x1000u64.to_le_bytes()); // `index_block_address`
-        test_util::checksum::restamp(&mut buf, 0, eahd_len(os, ls));
-
-        let hdr = ExtensibleArrayHeader::parse(&buf, 0, os, ls).unwrap();
-        assert_eq!(hdr.client_id, 0);
-        assert_eq!(hdr.element_size, 8);
-        assert_eq!(hdr.idx_blk_elmts, 2);
-        assert_eq!(hdr.min_dblk_nelmts, 4);
-        assert_eq!(hdr.max_idx_set, 5);
-        assert_eq!(hdr.index_block_address, StoredAddress::new(0x1000));
-    }
-
     #[test]
     fn bit_geometry_stores_two_bytes_with_byte_alignment() {
         assert_eq!(core::mem::size_of::<MaxIndexBits>(), 1);
@@ -2789,45 +2764,27 @@ mod tests {
     }
 
     #[rstest]
-    #[case::zero_maximum(0, 10, "Extensible Array maximum element bit count must be in 1..=64")]
-    #[case::maximum_65(65, 10, "Extensible Array maximum element bit count must be in 1..=64")]
-    #[case::maximum_255(
-        255,
-        10,
-        "Extensible Array maximum element bit count must be in 1..=64"
-    )]
-    #[case::invalid_maximum_precedes_page_overflow(
-        0,
-        64,
-        "Extensible Array maximum element bit count must be in 1..=64"
-    )]
-    #[case::page_64(64, 64, "Extensible Array page element count does not fit u64")]
-    #[case::page_element_count_overflow_precedes_exponent_above_maximum_element_bits(
+    #[case::zero_maximum(0, 10, InvalidBitGeometry::MaximumIndexBits)]
+    #[case::maximum_65(65, 10, InvalidBitGeometry::MaximumIndexBits)]
+    #[case::maximum_255(255, 10, InvalidBitGeometry::MaximumIndexBits)]
+    #[case::invalid_maximum_precedes_page_overflow(0, 64, InvalidBitGeometry::MaximumIndexBits)]
+    #[case::page_64(64, 64, InvalidBitGeometry::PageElementCount)]
+    #[case::page_overflow_precedes_exponent_above_maximum(
         10,
         64,
-        "Extensible Array page element count does not fit u64"
+        InvalidBitGeometry::PageElementCount
     )]
-    #[case::page_255(64, 255, "Extensible Array page element count does not fit u64")]
-    #[case::page_exceeds_maximum(
-        10,
-        11,
-        "Extensible Array page exponent exceeds maximum element bit count"
-    )]
-    fn malformed_bit_geometry_fails_at_the_header(
+    #[case::page_255(64, 255, InvalidBitGeometry::PageElementCount)]
+    #[case::page_exceeds_maximum(10, 11, InvalidBitGeometry::PageExponentExceedsIndexBits)]
+    fn malformed_bit_geometry_is_rejected(
         #[case] max_bits: u8,
         #[case] page_bits: u8,
-        #[case] reason: &str,
+        #[case] expected: InvalidBitGeometry,
     ) {
-        let mut header = empty_array();
-        header[7] = max_bits;
-        header[11] = page_bits;
-        test_util::checksum::restamp(&mut header, 0, eahd_len(8, 8));
-
-        let err = ExtensibleArrayHeader::parse(&header, 0, 8, 8).unwrap_err();
-        let FormatError::InvalidChunkGeometry(actual) = err else {
-            panic!("expected InvalidChunkGeometry, got {err:?}");
-        };
-        assert_eq!(actual, reason);
+        assert_eq!(
+            ExtensibleArrayBitGeometry::from_fields(max_bits, page_bits).unwrap_err(),
+            expected,
+        );
     }
 
     #[rstest]
@@ -2842,16 +2799,12 @@ mod tests {
         #[case] page_nelmts: u64,
         #[case] offset_size: usize,
     ) {
-        let mut bytes = empty_array();
-        bytes[7] = max_bits;
-        bytes[11] = page_bits;
-        test_util::checksum::restamp(&mut bytes, 0, eahd_len(8, 8));
-        let header = ExtensibleArrayHeader::parse(&bytes, 0, 8, 8).unwrap();
-        assert_eq!(header.max_index_bits().get(), max_bits);
-        let page_count = header.page_nelmts();
+        let geometry = ExtensibleArrayBitGeometry::from_fields(max_bits, page_bits).unwrap();
+        assert_eq!(geometry.max_index_bits().get(), max_bits);
+        let page_count = geometry.page_nelmts();
         assert_eq!(page_count.exponent(), page_bits);
         assert_eq!(page_count.get(), page_nelmts);
-        assert_eq!(header.block_offset_width().bytes(), offset_size);
+        assert_eq!(geometry.block_offset_width().bytes(), offset_size);
 
         let offset = u64::MAX >> (8 * (8 - offset_size));
         let block = encode_super_block(
@@ -2860,8 +2813,8 @@ mod tests {
             &[],
             &[],
             OffsetWidth::Eight,
-            header.client_id,
-            header.block_offset_width(),
+            EA_CLIENT_ID_UNFILTERED,
+            geometry.block_offset_width(),
         )
         .unwrap();
         assert_eq!(
@@ -2869,45 +2822,10 @@ mod tests {
             &offset.to_le_bytes()[..offset_size]
         );
         assert_eq!(
-            header.block_offset_width().read(&block[14..]).unwrap(),
+            geometry.block_offset_width().read(&block[14..]).unwrap(),
             offset
         );
         checksum::verify_trailing(&block).unwrap();
-    }
-
-    fn empty_array() -> Vec<u8> {
-        build_extensible_array_at(
-            &IndexSlots::dense(&[]),
-            8,
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-            false,
-            StoredAddress::new(0),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn parse_header_invalid_signature() {
-        let mut buf = vec![0u8; 256];
-        buf[0..4].copy_from_slice(b"XXXX");
-        let result = ExtensibleArrayHeader::parse(&buf, 0, 8, 8);
-        assert_eq!(
-            result.unwrap_err(),
-            FormatError::ChunkedReadError("invalid Extensible Array header signature".into())
-        );
-    }
-
-    #[test]
-    fn parse_header_invalid_version() {
-        let mut buf = vec![0u8; 256];
-        buf[0..4].copy_from_slice(b"EAHD");
-        buf[4] = 1;
-        let result = ExtensibleArrayHeader::parse(&buf, 0, 8, 8);
-        assert_eq!(
-            result.unwrap_err(),
-            FormatError::ChunkedReadError("unsupported Extensible Array header version: 1".into())
-        );
     }
 
     /// Returns the records of the Extensible Array whose header is at `header_offset` in
@@ -3829,10 +3747,10 @@ mod tests {
         assert!(
             array
                 .header()
-                .index_block_address
+                .index_block_address()
                 .is_undefined(WIDTHS.offsets)
         );
-        assert_eq!(array.header().max_idx_set, 5);
+        assert_eq!(array.header().stored_statistics().max_idx_set, 5);
         assert_eq!(array.range().length(), 12 + 6 * 8 + 8 + 4);
         assert_eq!(fixture.records(8).unwrap(), Vec::new());
     }
@@ -3891,26 +3809,27 @@ mod tests {
             + u64::from(STATISTICS) * u64::from(lengths.get())
             + u64::from(offsets.get())
             + CHECKSUM_LEN.to_u64();
-        let expected = ExtensibleArrayHeader {
-            client_id: u8::from(filtered),
-            element_size: offsets.get() + if filtered { 2 + FILTER_MASK_BYTES } else { 0 },
-            bit_geometry: ExtensibleArrayBitGeometry {
-                max_index_bits: MaxIndexBits(NonZeroU8::new(32).unwrap()),
-                page_nelmts: PageElementCount(10),
-            },
-            idx_blk_elmts: 4,
-            min_dblk_nelmts: 16,
-            super_blk_min_data_ptrs: minimum_pointers,
-            max_idx_set: 20,
-            index_block_address: StoredAddress::new(ARRAY_AT + header_len),
-        };
         let array = fixture.header().unwrap();
-        assert_eq!(*array.header(), expected);
+        let header = array.header();
+        assert_eq!(header.client_id(), u8::from(filtered));
+        assert_eq!(
+            header.element_size(),
+            offsets.get() + if filtered { 2 + FILTER_MASK_BYTES } else { 0 },
+        );
+        assert_eq!(
+            header.creation_parameters().encode(),
+            [32, 4, minimum_pointers, 16, 10]
+        );
+        assert_eq!(header.stored_statistics().max_idx_set, 20);
+        assert_eq!(
+            header.index_block_address(),
+            StoredAddress::new(ARRAY_AT + header_len)
+        );
         assert_eq!(array.range().start().get(), base + ARRAY_AT);
         assert_eq!(array.range().length(), header_len);
         assert_eq!(
             array.index_block().unwrap().parse_range().start().get(),
-            base + expected.index_block_address.get()
+            base + ARRAY_AT + header_len,
         );
         let actual = array.geometry().unwrap();
         assert_eq!(
@@ -3963,6 +3882,7 @@ mod tests {
     #[case::no_min_elements(&[(9, 0)], FormatError::InvalidExtensibleArrayGeometry)]
     #[case::min_elements_not_a_power_of_two(&[(9, 24)], FormatError::InvalidExtensibleArrayGeometry)]
     #[case::min_elements_past_the_index_bits(&[(7, 2), (11, 2)], FormatError::InvalidExtensibleArrayGeometry)]
+    #[case::zero_min_data_blocks(&[(10, 0)], FormatError::InvalidExtensibleArrayGeometry)]
     #[case::one_min_data_block(&[(10, 1)], FormatError::InvalidExtensibleArrayGeometry)]
     #[case::min_data_blocks_not_a_power_of_two(&[(10, 6)], FormatError::InvalidExtensibleArrayGeometry)]
     #[case::direct_data_blocks_past_the_super_blocks(&[(7, 8), (10, 16), (11, 8)], FormatError::InvalidExtensibleArrayGeometry)]
@@ -4135,34 +4055,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::zero_minimum_elements(0, 4, 10)]
-    #[case::non_power_of_two_elements(3, 4, 10)]
-    #[case::zero_minimum_pointers(16, 0, 10)]
-    #[case::single_minimum_pointer(16, 1, 10)]
-    #[case::non_power_of_two_pointers(16, 3, 10)]
-    #[case::direct_block_exceeds_page(16, 4, 4)]
-    fn append_geometry_rejects_invalid_creation_parameters(
-        #[case] min_elements: u8,
-        #[case] minimum_pointers: u8,
-        #[case] page_bits: u8,
-    ) {
-        let header = ExtensibleArrayHeader {
-            client_id: EA_CLIENT_ID_UNFILTERED,
-            element_size: OffsetWidth::Eight.get(),
-            bit_geometry: ExtensibleArrayBitGeometry::parse(EA_MAX_NELMTS_BITS, page_bits).unwrap(),
-            idx_blk_elmts: EA_IDX_BLK_ELMTS,
-            min_dblk_nelmts: min_elements,
-            super_blk_min_data_ptrs: minimum_pointers,
-            max_idx_set: 0,
-            index_block_address: StoredAddress::new(0),
-        };
-        assert_eq!(
-            ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap_err(),
-            FormatError::InvalidExtensibleArrayGeometry
-        );
-    }
-
-    #[rstest]
     fn shared_geometry_agrees_on_block_page_and_bitmap_lengths(
         #[values(2, 4, 8, 16)] minimum_pointers: u8,
         #[values(OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
@@ -4174,27 +4066,17 @@ mod tests {
         } else {
             EA_CLIENT_ID_UNFILTERED
         };
-        let header = ExtensibleArrayHeader {
-            client_id,
-            element_size,
-            bit_geometry: ExtensibleArrayCreationParameters::canonical().bit_geometry(),
-            idx_blk_elmts: EA_IDX_BLK_ELMTS,
-            min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
-            super_blk_min_data_ptrs: minimum_pointers,
-            max_idx_set: 0,
-            index_block_address: StoredAddress::new(0),
-        };
-        let geometry = ExtensibleArrayGeometry::from_header(&header, offsets).unwrap();
-        let layout = layout_from_fields(
-            ElementEncoding::new(offsets, client_id, element_size).unwrap(),
-            [
-                EA_MAX_NELMTS_BITS,
-                EA_IDX_BLK_ELMTS,
-                minimum_pointers,
-                EA_MIN_DBLK_NELMTS,
-                EA_MAX_DBLK_NELMTS_BITS,
-            ],
-        );
+        let creation = ExtensibleArrayCreationParameters::parse(&[
+            EA_MAX_NELMTS_BITS,
+            EA_IDX_BLK_ELMTS,
+            minimum_pointers,
+            EA_MIN_DBLK_NELMTS,
+            EA_MAX_DBLK_NELMTS_BITS,
+        ])
+        .unwrap();
+        let encoding = ElementEncoding::new(offsets, client_id, element_size).unwrap();
+        let layout = creation.layout(encoding);
+        let geometry = ExtensibleArrayGeometry::from_layout(layout).unwrap();
         assert_eq!(
             layout.index_block_len().unwrap(),
             u64::try_from(measurement_sizes::index_block_len(
@@ -4207,14 +4089,18 @@ mod tests {
             .unwrap()
         );
         for ordinal in 0..geometry.nsblk_addrs() {
-            let writer = geometry.super_block_at(ordinal, header.page_nelmts());
+            let writer = geometry.super_block_at(ordinal, layout.page_nelmts);
             let reader = layout
                 .super_block(u32::try_from(geometry.first_indirect_sblk() + ordinal).unwrap())
                 .unwrap();
             assert_eq!(layout.bitmap_len(reader).unwrap(), writer.bitmap_size());
             assert_eq!(
                 layout.super_block_len(reader).unwrap(),
-                measurement_sizes::super_block_len(writer, offsets, header.block_offset_width())
+                measurement_sizes::super_block_len(
+                    writer,
+                    offsets,
+                    creation.bit_geometry().block_offset_width()
+                )
             );
             assert_eq!(
                 layout
@@ -4224,7 +4110,7 @@ mod tests {
                     writer.blocks,
                     usize::from(element_size),
                     offsets,
-                    header.block_offset_width()
+                    creation.bit_geometry().block_offset_width()
                 )
             );
             assert_eq!(
@@ -4245,17 +4131,17 @@ mod tests {
         #[case] first_secondary: usize,
         #[case] index_bytes: usize,
     ) {
-        let header = ExtensibleArrayHeader {
-            client_id: 0,
-            element_size: 8,
-            bit_geometry: ExtensibleArrayCreationParameters::canonical().bit_geometry(),
-            idx_blk_elmts: EA_IDX_BLK_ELMTS,
-            min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
-            super_blk_min_data_ptrs: min_data_pointers,
-            max_idx_set: 0,
-            index_block_address: StoredAddress::new(0),
-        };
-        let geometry = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        let layout = layout_from_fields(
+            ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap(),
+            [
+                EA_MAX_NELMTS_BITS,
+                EA_IDX_BLK_ELMTS,
+                min_data_pointers,
+                EA_MIN_DBLK_NELMTS,
+                EA_MAX_DBLK_NELMTS_BITS,
+            ],
+        );
+        let geometry = ExtensibleArrayGeometry::from_layout(layout).unwrap();
         assert_eq!(geometry.direct_dblk_nelmts().len(), direct_blocks);
         assert_eq!(geometry.first_indirect_sblk(), first_secondary);
         assert_eq!(
@@ -4267,16 +4153,6 @@ mod tests {
                 geometry.nsblk_addrs()
             ),
             index_bytes
-        );
-        let layout = layout_from_fields(
-            ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap(),
-            [
-                EA_MAX_NELMTS_BITS,
-                EA_IDX_BLK_ELMTS,
-                min_data_pointers,
-                EA_MIN_DBLK_NELMTS,
-                EA_MAX_DBLK_NELMTS_BITS,
-            ],
         );
         assert_eq!(
             layout

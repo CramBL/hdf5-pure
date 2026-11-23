@@ -840,7 +840,10 @@ impl Roles {
                     ..usize::try_from(header.parsed.end()).unwrap(),
             ) {
                 if ExtensibleArrayHeader::parse_with_widths(stored, 0, located.widths).is_ok_and(
-                    |parsed| parsed.max_idx_set == u64::try_from(extents::ROUNDS).unwrap(),
+                    |parsed| {
+                        parsed.stored_statistics().max_idx_set
+                            == u64::try_from(extents::ROUNDS).unwrap()
+                    },
                 ) {
                     count.get_or_insert(operation);
                 }

@@ -149,21 +149,15 @@ pub fn assert_storage(file: &File, image: &[u8]) {
         address,
     );
     let array = locator.parse(region).unwrap();
-    assert_eq!(array.header().client_id, CLIENT_UNFILTERED);
-    assert_eq!(array.header().max_idx_set, 16);
+    assert_eq!(array.header().client_id(), CLIENT_UNFILTERED);
+    assert_eq!(array.header().stored_statistics().max_idx_set, 16);
     let parameters_at = LAYOUT_PREFIX_LEN
         + usize::from(layout.data[DIMENSIONALITY_AT])
             * usize::from(layout.data[DIMENSION_WIDTH_AT])
         + INDEX_TYPE_LEN;
     assert_eq!(
         &layout.data[parameters_at..parameters_at + EA_PARAMETER_COUNT],
-        &[
-            array.header().max_index_bits().get(),
-            array.header().idx_blk_elmts,
-            array.header().super_blk_min_data_ptrs,
-            array.header().min_dblk_nelmts,
-            array.header().page_nelmts().exponent(),
-        ],
+        &array.header().creation_parameters().encode(),
     );
     let index = array.index_block().unwrap();
     let mut ranges = vec![locator.parse_range().unwrap(), index.parse_range()];

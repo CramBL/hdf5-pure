@@ -939,7 +939,7 @@ impl Observation {
                             )
                             .unwrap()
                             .header()
-                            .element_size,
+                            .element_size(),
                         ));
                         element_blocks.extend(index_element_blocks(&source, widths, address));
                         live.extend(
@@ -1355,7 +1355,7 @@ fn index_element_blocks(
 ) -> Vec<ElementBlock> {
     let header =
         extensible_array::read_header(&source::zero_base_source(source), widths, address).unwrap();
-    let stride = NonZeroU64::new(u64::from(header.header().element_size)).unwrap();
+    let stride = NonZeroU64::new(u64::from(header.header().element_size())).unwrap();
     let reference = header.index_block().unwrap();
     let range = reference.parse_range();
     let bytes = source.read_range(range).unwrap();
@@ -1367,7 +1367,7 @@ fn index_element_blocks(
             .start()
             .checked_add(INDEX_PREFIX_FIELDS + u64::from(widths.offsets.get()))
             .unwrap(),
-        u64::from(header.header().idx_blk_elmts) * stride.get(),
+        u64::from(header.header().creation_parameters().inline_elements()) * stride.get(),
     )
     .unwrap();
     let mut blocks = vec![ElementBlock::new(range, elements, stride)];

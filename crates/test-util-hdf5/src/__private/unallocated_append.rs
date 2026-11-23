@@ -72,14 +72,7 @@ pub fn inspect_initialized_index(path: &Path, header: usize, parameters: [u8; 5]
             .unwrap(),
         )
         .unwrap();
-    let fields = array.header();
-    assert_eq!(fields.bit_geometry(), creation.bit_geometry());
-    assert_eq!(fields.idx_blk_elmts, creation.inline_elements());
-    assert_eq!(fields.min_dblk_nelmts, creation.min_elements().get());
-    assert_eq!(
-        fields.super_blk_min_data_ptrs,
-        creation.min_data_blocks().get()
-    );
+    assert_eq!(array.header().creation_parameters(), creation);
     let index = array.index_block().unwrap();
     assert!(!index.range().overlaps(array.range()));
     let range = index.range();

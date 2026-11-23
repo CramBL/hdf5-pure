@@ -384,9 +384,9 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
     let header = ExtensibleArrayHeader::parse(&bytes, header_at, 8, 8).unwrap();
     assert_eq!(
         (
-            header.idx_blk_elmts,
-            header.min_dblk_nelmts,
-            header.super_blk_min_data_ptrs
+            header.creation_parameters().inline_elements(),
+            header.creation_parameters().min_elements().get(),
+            header.creation_parameters().min_data_blocks().get()
         ),
         (4, 16, 4)
     );
