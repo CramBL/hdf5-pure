@@ -638,6 +638,22 @@ pub enum FormatError {
         /// The identifier of the named filter.
         id: u16,
     },
+    /// The number of current or maximum dimensions differs from the dataspace rank.
+    InvalidDataspaceDimensionCount {
+        /// The rank supplied for the dataspace.
+        rank: u8,
+        /// The number of current dimensions supplied.
+        dimensions: usize,
+        /// The number of maximum dimensions supplied, if present.
+        maximum_dimensions: Option<usize>,
+    },
+    /// A simple dataspace has rank zero or a scalar or null dataspace has a positive rank.
+    InvalidDataspaceRank {
+        /// The version 2 dataspace type code.
+        space_type: u8,
+        /// The rank supplied for the dataspace.
+        rank: u8,
+    },
     /// Invalid dataspace type.
     InvalidDataspaceType(u8),
     /// Invalid dataspace version.
@@ -2177,6 +2193,17 @@ impl fmt::Display for FormatError {
             }
             Self::CompoundFieldTypeMismatch(name) => {
                 write!(f, "compound field {name:?} has an incompatible datatype")
+            }
+            Self::InvalidDataspaceDimensionCount {
+                rank,
+                dimensions,
+                maximum_dimensions,
+            } => write!(
+                f,
+                "dataspace of rank {rank} has {dimensions} dimensions and maximum dimension count {maximum_dimensions:?}"
+            ),
+            Self::InvalidDataspaceRank { space_type, rank } => {
+                write!(f, "invalid rank {rank} for dataspace type {space_type}")
             }
             Self::InvalidDataspaceVersion(v) => {
                 write!(f, "invalid dataspace version: {v}")

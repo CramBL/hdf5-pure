@@ -409,11 +409,11 @@ impl ValueOverwrite {
     /// # Errors
     ///
     /// Returns reference-width errors from [`crate::file_writer::require_reference_width`],
-    /// dimension errors from [`Dataspace::serialize`], or conversion errors from
+    /// dataspace errors from [`Dataspace::prepare`], or conversion errors from
     /// [`PreparedBytes::prepare_widths`].
     pub(crate) fn into_widths(mut self, widths: FormatWidths) -> Result<Self, FormatError> {
         crate::file_writer::require_reference_width(widths, &self.dt)?;
-        self.ds.serialize(widths.lengths.get())?;
+        self.ds.prepare(widths.lengths)?;
         self.bytes.prepare_widths(widths, &self.dt)?;
         Ok(self)
     }

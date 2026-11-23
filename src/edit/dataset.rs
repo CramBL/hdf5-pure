@@ -2141,7 +2141,7 @@ pub(super) fn flatten_dataset(
         #[cfg(feature = "provenance")]
         provenance,
     } = metadata;
-    ds.serialize(widths.lengths.get())?;
+    ds.prepare(widths.lengths)?;
     let storage = storage.into_widths(widths, &dt)?;
     let stored_element_size =
         hdf5_pure_format::__private::stored_element_size(&dt, widths.offsets)?;

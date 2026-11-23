@@ -1,5 +1,11 @@
-//! HDF5 Dataspace message parsing (message type 0x0001).
+//! Parses versions 1 and 2 of the HDF5 Dataspace message and writes version 2.
+//!
+//! Both layouts are defined in "The Dataspace Message" of the
+//! [format specification, version 4.0][spec].
+//!
+//! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_simple
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 use core::ops::Range;
@@ -9,6 +15,7 @@ use hdf5_pure_core::__private::ElementCount;
 use crate::bytes;
 use crate::bytes::ByteCursor;
 use crate::codec::Decode;
+use crate::codec::Encode;
 use crate::error::FormatError;
 use crate::width;
 use crate::width::LengthWidth;
@@ -29,7 +36,7 @@ pub enum DataspaceType {
 pub struct Dataspace {
     /// The type of this dataspace.
     pub space_type: DataspaceType,
-    /// Number of dimensions (0 for scalar).
+    /// The declared number of dimensions.
     pub rank: u8,
     /// Current dimension sizes.
     pub dimensions: Vec<u64>,
@@ -110,36 +117,56 @@ impl Dataspace {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, or
-    /// [`FormatError::LengthTooLarge`] if a dimension or maximum dimension exceeds that width.
-    /// An unlimited maximum requires eight-byte lengths, and [`stored_max_extent`] returns the
-    /// maximum to store in its place at 2 and 4 bytes.
+    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, and otherwise
+    /// returns the errors of [`Self::prepare`].
     pub fn serialize(&self, length_size: u8) -> Result<Vec<u8>, FormatError> {
-        let length_width = LengthWidth::try_from(length_size)?;
-        let mut buf = Vec::new();
-        buf.push(VERSION_TWO);
-        buf.push(self.rank);
-        let flags = if self.max_dimensions.is_some() {
-            MAX_DIMENSIONS_FLAG
-        } else {
-            0x00
-        };
-        buf.push(flags);
-        let type_byte = match self.space_type {
-            DataspaceType::Scalar => TYPE_SCALAR,
-            DataspaceType::Simple => TYPE_SIMPLE,
-            DataspaceType::Null => TYPE_NULL,
-        };
-        buf.push(type_byte);
-        for &dim in &self.dimensions {
-            bytes::try_write_length(&mut buf, dim, length_width)?;
+        Ok(self
+            .prepare(LengthWidth::try_from(length_size)?)?
+            .to_bytes())
+    }
+
+    /// Borrows the dataspace for version 2 encoding at the file's length width.
+    ///
+    /// Checks the fields without allocating or writing bytes.
+    ///
+    /// An unlimited maximum requires eight-byte lengths. At two- and four-byte lengths,
+    /// [`stored_max_extent`] converts an unlimited maximum to the largest fixed maximum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidDataspaceRank`] if a simple dataspace has rank zero or a
+    /// scalar or null dataspace has a positive rank. Returns
+    /// [`FormatError::InvalidDataspaceDimensionCount`] if either supplied dimension list has a
+    /// length different from the rank. Returns [`FormatError::LengthTooLarge`] for the first
+    /// value that exceeds `length_width`, in current dimension order followed by maximum dimension
+    /// order.
+    ///
+    /// Checks the rank before the counts and the counts before the dimension values.
+    pub fn prepare(&self, length_width: LengthWidth) -> Result<PreparedDataspace<'_>, FormatError> {
+        let expected_rank = usize::from(self.rank);
+        if matches!(self.space_type, DataspaceType::Simple) != (self.rank != 0) {
+            return Err(FormatError::InvalidDataspaceRank {
+                space_type: self.type_byte(),
+                rank: self.rank,
+            });
         }
-        if let Some(ref max_dims) = self.max_dimensions {
-            for &md in max_dims {
-                bytes::try_write_length(&mut buf, max_extent_to_length(md), length_width)?;
-            }
+        let dimensions = self.dimensions.len();
+        let maximum_dimensions = self.max_dimensions.as_ref().map(Vec::len);
+        if dimensions != expected_rank || maximum_dimensions.is_some_and(|len| len != expected_rank)
+        {
+            return Err(FormatError::InvalidDataspaceDimensionCount {
+                rank: self.rank,
+                dimensions,
+                maximum_dimensions,
+            });
         }
-        Ok(buf)
+        for length in self.lengths() {
+            bytes::require_length(length, length_width)?;
+        }
+        Ok(PreparedDataspace {
+            dataspace: self,
+            length_width,
+        })
     }
 
     /// Returns the element count, saturating dimension products at [`u64::MAX`].
@@ -174,6 +201,25 @@ impl Dataspace {
                 .zip(&self.dimensions)
                 .all(|(max, &dim)| max.size() == Some(dim));
         (!fixed_at_current).then_some(max_dims)
+    }
+
+    fn lengths(&self) -> impl Iterator<Item = u64> + '_ {
+        self.dimensions.iter().copied().chain(
+            self.max_dimensions
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .copied()
+                .map(max_extent_to_length),
+        )
+    }
+
+    fn type_byte(&self) -> u8 {
+        match self.space_type {
+            DataspaceType::Scalar => TYPE_SCALAR,
+            DataspaceType::Simple => TYPE_SIMPLE,
+            DataspaceType::Null => TYPE_NULL,
+        }
     }
 
     /// Reads a dataspace and locates the bytes of its current dimensions.
@@ -383,6 +429,112 @@ impl<'input> Decode<'input> for Dataspace {
     /// Returns the errors of [`Self::decode_with_dimension_fields`].
     fn decode(input: &'input [u8], lengths: LengthWidth) -> Result<Self, Self::Error> {
         Self::decode_with_dimension_fields(input, lengths).map(|(dataspace, _)| dataspace)
+    }
+}
+
+/// A version 2 dataspace body ready to write at the selected length width.
+///
+/// [`Dataspace::prepare`] checks the rank, dimension counts, and the width of each dimension
+/// field. The writer borrows the checked dataspace and can write the same body to multiple
+/// destinations.
+#[derive(Debug)]
+pub struct PreparedDataspace<'a> {
+    dataspace: &'a Dataspace,
+    length_width: LengthWidth,
+}
+
+impl PreparedDataspace<'_> {
+    /// Returns the exact body size in bytes, including the four-byte version 2 prefix.
+    pub fn encoded_size(&self) -> usize {
+        self.encoded_len()
+    }
+
+    /// Writes the body to the start of `output` and returns the number of bytes written.
+    ///
+    /// Leaves bytes after the body untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`],
+    /// leaving the entire slice untouched.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth, MaxExtent};
+    ///
+    /// let dataspace = format::Dataspace {
+    ///     space_type: format::DataspaceType::Simple,
+    ///     rank: 1,
+    ///     dimensions: vec![258],
+    ///     max_dimensions: Some(vec![MaxExtent::Fixed(513)]),
+    /// };
+    /// let prepared = dataspace.prepare(LengthWidth::Two)?;
+    /// let mut output = [0xff; 9];
+    /// let written = prepared.write_into(&mut output)?;
+    ///
+    /// assert_eq!(written, prepared.encoded_size());
+    /// assert_eq!(output, [2, 1, 1, 1, 2, 1, 1, 2, 0xff]);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        Ok(self.encode_into(output)?)
+    }
+
+    /// Writes the body to a newly allocated vector of [`Self::encoded_size`] bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut output = vec![0; self.encoded_len()];
+        self.write_body(&mut output);
+        output
+    }
+
+    fn write_body(&self, body: &mut [u8]) {
+        let (header, fields) = body.split_at_mut(V2_HEADER_SIZE);
+        let flags = if self.dataspace.max_dimensions.is_some() {
+            MAX_DIMENSIONS_FLAG
+        } else {
+            0
+        };
+        header.copy_from_slice(&[
+            VERSION_TWO,
+            self.dataspace.rank,
+            flags,
+            self.dataspace.type_byte(),
+        ]);
+        match self.length_width {
+            LengthWidth::Two => self.write_lengths::<2>(fields),
+            LengthWidth::Four => self.write_lengths::<4>(fields),
+            LengthWidth::Eight => self.write_lengths::<8>(fields),
+        }
+    }
+
+    fn write_lengths<const N: usize>(&self, fields: &mut [u8]) {
+        const { assert!(N > 0 && N <= size_of::<u64>()) };
+        let (fields, _) = fields.as_chunks_mut::<N>();
+        for (field, length) in fields.iter_mut().zip(self.dataspace.lengths()) {
+            field.copy_from_slice(&length.to_le_bytes()[..N]);
+        }
+    }
+}
+
+impl Encode for PreparedDataspace<'_> {
+    type Error = bytes::UnexpectedEof;
+
+    fn encoded_len(&self) -> usize {
+        V2_HEADER_SIZE
+            + usize::from(self.length_width.get())
+                * usize::from(self.dataspace.rank)
+                * (1 + usize::from(self.dataspace.max_dimensions.is_some()))
+    }
+
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let expected = self.encoded_len();
+        let available = output.len();
+        let body = output
+            .get_mut(..expected)
+            .ok_or_else(|| bytes::UnexpectedEof::new(expected, available))?;
+        self.write_body(body);
+        Ok(expected)
     }
 }
 
