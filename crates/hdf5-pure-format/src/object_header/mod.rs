@@ -169,10 +169,10 @@ impl ObjectHeader {
     /// this parser cannot name and [`MessageFlags::must_be_understood`] returns
     /// `true` for `access_mode`.
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a continuation message of a version 2 header
-    /// ends inside its fields. Returns [`FormatError::UndefinedContinuationAddress`] if a
-    /// continuation body contains complete address and length fields and stores the undefined
-    /// address, in either header version.
+    /// Returns [`FormatError::UnexpectedEof`] if a version 2 header's continuation message
+    /// body is shorter than the combined offset and length widths. Returns
+    /// [`FormatError::UndefinedContinuationAddress`] if a complete continuation body stores an
+    /// undefined address, in either header version.
     ///
     /// Returns [`FormatError::NestingDepthExceeded`] if a version 1 header exceeds 256 followed
     /// continuation references or 32 continuation hops after the root, or if a version 2 header
@@ -932,7 +932,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(&[], FormatError::UnexpectedEof { expected: 8, available: 0 })]
+    #[case::empty(&[], FormatError::UnexpectedEof { expected: 16, available: 0 })]
     #[case::the_address_alone(&[0; 8], FormatError::UnexpectedEof { expected: 16, available: 8 })]
     #[case::one_byte_short(&[0; 15], FormatError::UnexpectedEof { expected: 16, available: 15 })]
     fn a_v2_continuation_message_too_short_for_its_fields_is_rejected(

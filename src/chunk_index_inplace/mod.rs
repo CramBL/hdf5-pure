@@ -4460,7 +4460,7 @@ mod tests {
         (
             header,
             FormatError::UnexpectedEof {
-                expected: 8,
+                expected: Widths::EIGHT.offset + Widths::EIGHT.length,
                 available: 4,
             },
         )
