@@ -1,12 +1,71 @@
 #![cfg(feature = "libhdf5")]
 
-use hdf5_pure::{File, MessageType};
-use hdf5_pure_format::__private::{AccessMode, GroupInfo, GroupPhaseChange, ObjectHeader};
+use hdf5_pure::{File, MessageType, OffsetWidth};
+use hdf5_pure_format::__private::{
+    AccessMode, GroupInfo, GroupPhaseChange, LinkInfoMessage, MessageFlags, MessageRecordLayout,
+    ObjectHeader, ObjectHeaderPrefix,
+};
 use libhdf5::file::LibraryVersion;
 use libhdf5::plist::group_create::LinkPhaseChange;
 use rstest::rstest;
+use test_util::link_message::SymbolicLink;
+use test_util::object_header::v2::HeaderFlags;
+use test_util::superblock::v2::Superblock;
+use test_util::widths::Widths;
 use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::storage;
+
+#[rstest]
+#[case::plain(HeaderFlags::default())]
+#[case::tracked(HeaderFlags::TRACKS_CREATION_ORDER)]
+fn native_reader_accepts_typed_and_raw_group_records(#[case] flags: HeaderFlags) {
+    let layout = MessageRecordLayout::from_header_flags(flags.0);
+    let phase_change = GroupPhaseChange::new(12, 8).unwrap();
+    let group_info = GroupInfo::new(Some(phase_change), None);
+    let link_info = LinkInfoMessage::compact(OffsetWidth::Eight, None, false);
+    let link = SymbolicLink::soft("alias", "/missing").build();
+
+    let mut records = Vec::new();
+    layout
+        .prepare_record(MessageFlags::NONE, 0, link_info)
+        .unwrap()
+        .append_to(&mut records)
+        .unwrap();
+    layout
+        .prepare_record(MessageFlags::NONE, 0, group_info)
+        .unwrap()
+        .append_to(&mut records)
+        .unwrap();
+    layout
+        .prepare_raw_record(MessageType::LINK, MessageFlags::NONE, 0, &link)
+        .unwrap()
+        .append_to(&mut records)
+        .unwrap();
+
+    let header = ObjectHeaderPrefix::with_layout(layout).encode_header(&records);
+    let fixture = Superblock::new(Widths::EIGHT);
+    let root = u64::try_from(fixture.build().len()).unwrap();
+    let eof = root + u64::try_from(header.len()).unwrap();
+    let mut image = fixture.root_header_address(root).eof_address(eof).build();
+    image.extend_from_slice(&header);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("group-records.h5");
+    std::fs::write(&path, image).unwrap();
+
+    let file = libhdf5::File::open(&path).unwrap();
+    let group = file.group("/").unwrap();
+    assert_eq!(group.member_names().unwrap(), ["alias"]);
+    assert_eq!(
+        group.gcpl().unwrap().get_link_phase_change().unwrap(),
+        LinkPhaseChange {
+            max_compact: u32::from(phase_change.max_compact()),
+            min_dense: u32::from(phase_change.min_dense()),
+        }
+    );
+    drop(group);
+    file.close().unwrap();
+    directory.close().unwrap();
+}
 
 #[rstest]
 #[case::defaults(8, 6)]

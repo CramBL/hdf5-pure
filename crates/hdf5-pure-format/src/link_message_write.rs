@@ -399,6 +399,16 @@ impl fmt::Display for LinkOutputTooSmall {
 
 impl Error for LinkOutputTooSmall {}
 
+impl From<LinkOutputTooSmall> for FormatError {
+    /// Reports a short destination as [`FormatError::UnexpectedEof`], preserving both lengths.
+    fn from(error: LinkOutputTooSmall) -> Self {
+        Self::UnexpectedEof {
+            expected: error.required,
+            available: error.available,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct LinkFields<'a> {
     target: LinkTargetView<'a>,

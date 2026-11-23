@@ -1341,6 +1341,8 @@ pub enum FormatError {
         /// The message's serialized size in bytes.
         size: usize,
     },
+    /// A version 2 object header message type exceeds its one-byte field.
+    ObjectHeaderMessageTypeTooLarge(u16),
     /// Address or size arithmetic exceeded the range of its integer type.
     OffsetOverflow {
         /// First operand (typically the base offset/address).
@@ -1418,6 +1420,13 @@ pub enum FormatError {
         /// report the mismatch in elements as well as bytes. Non-zero by type,
         /// so the division in the message is well defined.
         element_size: NonZeroUsize,
+    },
+    /// An inline object header message has the shared-message flag set.
+    SharedFlagForInlineMessage {
+        /// The inline body's message type.
+        message_type: u16,
+        /// The complete record flags byte.
+        flags: u8,
     },
     /// A shared message reference identifies an object header without a message
     /// of the referenced type.
@@ -2633,6 +2642,13 @@ impl fmt::Display for FormatError {
             Self::SohmIndexMissing(t) => {
                 write!(f, "no shared message index holds messages of type {t:#06x}")
             }
+            Self::SharedFlagForInlineMessage {
+                message_type,
+                flags,
+            } => write!(
+                f,
+                "inline object header message {message_type:#06x} uses shared flags {flags:#04x}"
+            ),
             Self::SharedMessageMissing {
                 object_header_address,
                 message_type,
@@ -3063,6 +3079,12 @@ impl fmt::Display for FormatError {
                     "object header message {message_type:#06x} is {size} bytes, past the \
                      {OBJECT_HEADER_MESSAGE_MAX}-byte limit of the object header's \
                      message size field"
+                )
+            }
+            Self::ObjectHeaderMessageTypeTooLarge(message_type) => {
+                write!(
+                    f,
+                    "object header message type {message_type:#06x} exceeds one byte"
                 )
             }
             Self::AttributeFieldTooLong {

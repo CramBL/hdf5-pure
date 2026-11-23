@@ -12,6 +12,7 @@ Use these foundations when adding or extending parsers and encoders:
 | [`ByteCursor` and bounded-array helpers][bytes] | Acquire complete byte regions and arrays before interpreting them.                                         |
 | [`Decode<'input>`][codec]                       | Decode using supplied context. Results may borrow input. Each implementation defines framing.              |
 | [`Encode`][codec]                               | Exact, infallible length and bounded writing. Errors leave output unchanged. Success preserves its suffix. |
+| [`MessageBody`][message-body]                   | Associates a checked inline body with its object-header message type.                                      |
 | [`MetadataSource`][source]                      | Read metadata through a caller-supplied byte source.                                                       |
 
 `Decode` and `Encode` are crate-private. Workspace-facing operations use [`__private`][private].
@@ -42,6 +43,7 @@ and [TESTING.md][testing].
 [codec]: src/codec.rs
 [source]: src/metadata_source.rs
 [private]: src/__private.rs
+[message-body]: src/object_header/v2/record.rs#L30-L34
 [architecture]: ../../ARCHITECTURE.md
 [style]: ../../CODE_STYLE.md
 [testing]: ../../TESTING.md

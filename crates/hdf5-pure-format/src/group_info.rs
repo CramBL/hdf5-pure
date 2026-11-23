@@ -379,6 +379,16 @@ impl fmt::Display for GroupInfoOutputTooSmall {
 
 impl Error for GroupInfoOutputTooSmall {}
 
+impl From<GroupInfoOutputTooSmall> for FormatError {
+    /// Reports a short destination as [`FormatError::UnexpectedEof`], preserving both lengths.
+    fn from(error: GroupInfoOutputTooSmall) -> Self {
+        Self::UnexpectedEof {
+            expected: error.required,
+            available: error.available,
+        }
+    }
+}
+
 enum GroupInfoBody<'a> {
     Both(&'a [u8; 2 * GROUP_INFO_PAIR_LENGTH]),
     Estimates(&'a [u8; GROUP_INFO_PAIR_LENGTH]),

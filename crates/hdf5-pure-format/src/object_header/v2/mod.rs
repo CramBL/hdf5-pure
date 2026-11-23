@@ -1,4 +1,8 @@
 //! The version 2 object header: its prefix, its message records, and its continuation blocks.
+//!
+//! [`MessageRecordLayout::prepare_record`] prepares a typed inline record through [`MessageBody`].
+//! [`MessageRecordLayout::prepare_raw_record`] borrows an encoded body, including a shared message
+//! reference. Write the returned [`PreparedMessageRecord`] into a slice or append it to a buffer.
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -34,11 +38,13 @@ use crate::width::{FormatWidths, OffsetWidth};
 mod allocation;
 mod chunk;
 mod collector;
+mod record;
 mod splice;
 mod worklist;
 
 pub use allocation::ObjectHeaderAllocation;
 pub use allocation::ObjectHeaderAllocationGeometry;
+pub use record::{MessageBody, PreparedMessageRecord};
 pub use splice::RecordSplice;
 
 impl ObjectHeader {

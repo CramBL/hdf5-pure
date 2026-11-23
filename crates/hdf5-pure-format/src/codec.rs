@@ -57,3 +57,15 @@ pub(crate) trait Encode {
     /// unchanged.
     fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error>;
 }
+
+impl<T: Encode + ?Sized> Encode for &T {
+    type Error = T::Error;
+
+    fn encoded_len(&self) -> usize {
+        T::encoded_len(self)
+    }
+
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        T::encode_into(self, output)
+    }
+}

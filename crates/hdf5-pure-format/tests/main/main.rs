@@ -23,6 +23,7 @@ mod group_info;
 mod link_info;
 mod link_message_v1;
 mod link_projection;
+mod message_record;
 mod nested_datatype;
 mod object_header_allocation;
 mod object_header_splice;
