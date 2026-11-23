@@ -80,8 +80,9 @@ fn link_batches_preserve_other_fields_and_repeated_request_order(
 #[case::external(SymbolicLink::external("changed", "file.h5", "/target").build(), "a group on the edited path is reached by a soft/external link")]
 #[case::truncated({ let mut body = HardLink::new("changed", 7).build(Widths::EIGHT); body.pop(); body }, "expected child link not found in parent group")]
 #[case::trailing({ let mut body = HardLink::new("changed", 7).build(Widths::EIGHT); body.push(0); body }, "a link message holds bytes past its hard link address")]
-#[case::invalid_soft(SymbolicLink::soft_bytes("changed", &[0xff]).build(), "expected child link not found in parent group")]
-#[case::unknown_type({ let mut body = SymbolicLink::soft("changed", "/target").build(); body[2] = 65; body }, "expected child link not found in parent group")]
+#[case::raw_soft(SymbolicLink::soft_bytes("changed", &[0xff]).build(), "a group on the edited path is reached by a soft/external link")]
+#[case::invalid_external(b"\x01\x08\x40\x07changed\x00\x00".to_vec(), "expected child link not found in parent group")]
+#[case::user_defined({ let mut body = SymbolicLink::soft("changed", "/target").build(); body[2] = 65; body }, "expected child link not found in parent group")]
 #[case::missing(HardLink::new("other", 7).build(Widths::EIGHT), "expected child link not found in parent group")]
 fn link_batches_report_existing_target_errors_at_the_requested_operation(
     #[case] body: Vec<u8>,

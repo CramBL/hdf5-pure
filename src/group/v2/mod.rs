@@ -277,18 +277,26 @@ pub(crate) fn collect_dense_group_index_storage_extents(
 /// Returns [`FormatError::PathNotFound`] if a dense group has no B-tree name index address, and
 /// the [`FormatError`] of the first structure that does not parse. Returns errors from
 /// [`PhysicalBytes::stored`] when constructing the stored view.
-pub fn resolve_v2_group_entries(
+fn resolve_v2_group_entries(
     physical: PhysicalBytes<'_>,
     access_mode: AccessMode,
     object_header: &ObjectHeader,
     widths: FormatWidths,
+    projection: GroupEntryProjection,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let link_info = find_link_info(object_header, widths.offsets)?;
 
     if let Some(fh_addr) = link_info.fractal_heap_address() {
-        resolve_dense_entries(physical.stored()?, access_mode, &link_info, fh_addr, widths)
+        resolve_dense_entries(
+            physical.stored()?,
+            access_mode,
+            &link_info,
+            fh_addr,
+            widths,
+            projection,
+        )
     } else {
-        resolve_compact_entries(object_header, widths.offsets)
+        resolve_compact_entries(object_header, widths.offsets, projection)
     }
 }
 
@@ -296,27 +304,60 @@ pub fn resolve_v2_group_entries(
 ///
 /// # Errors
 ///
-/// Returns errors from [`LinkMessage::parse_with_offset_width`].
+/// Returns the Link message errors of the selected [`GroupEntryProjection`].
 fn resolve_compact_entries(
     object_header: &ObjectHeader,
     offset_width: OffsetWidth,
+    projection: GroupEntryProjection,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let mut entries = Vec::new();
     for msg in &object_header.messages {
-        if msg.msg_type == MessageType::LINK {
-            let link = LinkMessage::parse_with_offset_width(&msg.data, offset_width)?;
-            if let LinkTarget::Hard {
-                object_header_address,
-            } = link.link_target
-            {
-                entries.push(GroupEntry {
-                    name: link.name,
-                    object_header_address,
-                });
-            }
+        if msg.msg_type == MessageType::LINK
+            && let Some(entry) = projection.read_link(&msg.data, offset_width)?
+        {
+            entries.push(entry);
         }
     }
     Ok(entries)
+}
+
+/// Selects how a group walk reads hard links from Link messages.
+#[derive(Clone, Copy)]
+pub(crate) enum GroupEntryProjection {
+    /// Reads hard addresses and converts their names with replacement for invalid UTF-8.
+    Discovery,
+    /// Parses each complete message and converts link names and supported targets to text.
+    Text,
+}
+
+impl GroupEntryProjection {
+    fn read_link(
+        self,
+        data: &[u8],
+        offsets: OffsetWidth,
+    ) -> Result<Option<GroupEntry>, FormatError> {
+        Ok(match self {
+            Self::Discovery => LinkMessage::discover_hard_link(data, offsets)?.map(
+                |(name, object_header_address)| GroupEntry {
+                    name: String::from_utf8_lossy(name).into_owned(),
+                    object_header_address,
+                },
+            ),
+            Self::Text => {
+                let link = LinkMessage::parse_with_offset_width(data, offsets)?;
+                let LinkTarget::Hard {
+                    object_header_address,
+                } = link.link_target
+                else {
+                    return Ok(None);
+                };
+                Some(GroupEntry {
+                    name: link.name,
+                    object_header_address,
+                })
+            }
+        })
+    }
 }
 
 /// The result of looking up one link name in an object.
@@ -755,6 +796,7 @@ fn resolve_dense_entries(
     link_info: &LinkInfoMessage,
     fh_addr: StoredAddress,
     widths: FormatWidths,
+    projection: GroupEntryProjection,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let file_data = source.metadata_frame().bytes();
     let heap_source = HeapSource::resident(source);
@@ -776,15 +818,8 @@ fn resolve_dense_entries(
 
         let link_data = heap.read(layout.parse(id_bytes)?)?;
 
-        let link = LinkMessage::parse_with_offset_width(&link_data, widths.offsets)?;
-        if let LinkTarget::Hard {
-            object_header_address,
-        } = link.link_target
-        {
-            entries.push(GroupEntry {
-                name: link.name,
-                object_header_address,
-            });
+        if let Some(entry) = projection.read_link(&link_data, widths.offsets)? {
+            entries.push(entry);
         }
     }
 
@@ -883,12 +918,13 @@ pub fn resolve_path_any(
 ///
 /// Returns [`FormatError::PathNotFound`] if the header describes no group, and the
 /// [`FormatError`] of the first structure of the group that does not parse.
-pub fn resolve_group_entries(
+pub(crate) fn resolve_group_entries(
     physical: PhysicalBytes<'_>,
     access_mode: AccessMode,
     object_header: &ObjectHeader,
     widths: FormatWidths,
     group_leaf_node_k: Option<NonZeroU16>,
+    projection: GroupEntryProjection,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
         let sym_msg = object_header
@@ -899,7 +935,7 @@ pub fn resolve_group_entries(
         let stm = SymbolTableMessage::parse_with_offset_width(&sym_msg.data, widths.offsets)?;
         group_v1::resolve_v1_group_entries(physical, &stm, widths, group_leaf_node_k)
     } else if is_v2_group(object_header) {
-        resolve_v2_group_entries(physical, access_mode, object_header, widths)
+        resolve_v2_group_entries(physical, access_mode, object_header, widths, projection)
     } else {
         Err(FormatError::PathNotFound(String::from(
             "object header is not a group",
@@ -958,12 +994,13 @@ pub fn resolve_path_any_from_source(
 ///
 /// Returns the errors of [`resolve_group_entries`], and the error `source` reports for
 /// a structure it cannot read.
-pub fn resolve_group_entries_from_source(
+pub(crate) fn resolve_group_entries_from_source(
     source: &(impl OriginalSource + ?Sized),
     access_mode: AccessMode,
     object_header: &ObjectHeader,
     widths: FormatWidths,
     group_leaf_node_k: Option<NonZeroU16>,
+    projection: GroupEntryProjection,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
         let sym_msg = object_header
@@ -979,7 +1016,7 @@ pub fn resolve_group_entries_from_source(
             group_leaf_node_k,
         )
     } else if is_v2_group(object_header) {
-        resolve_v2_group_entries_from_source(source, access_mode, object_header, widths)
+        resolve_v2_group_entries_from_source(source, access_mode, object_header, widths, projection)
     } else {
         Err(FormatError::PathNotFound(String::from(
             "object header is not a group",
@@ -1001,13 +1038,21 @@ fn resolve_v2_group_entries_from_source(
     access_mode: AccessMode,
     object_header: &ObjectHeader,
     widths: FormatWidths,
+    projection: GroupEntryProjection,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let link_info = find_link_info(object_header, widths.offsets)?;
     if let Some(fh_addr) = link_info.fractal_heap_address() {
         let stored = PhysicalSource::new(source).stored();
-        resolve_dense_entries_from_source(&stored, access_mode, &link_info, fh_addr, widths)
+        resolve_dense_entries_from_source(
+            &stored,
+            access_mode,
+            &link_info,
+            fh_addr,
+            widths,
+            projection,
+        )
     } else {
-        resolve_compact_entries(object_header, widths.offsets)
+        resolve_compact_entries(object_header, widths.offsets, projection)
     }
 }
 
@@ -1026,6 +1071,7 @@ pub(crate) fn resolve_dense_entries_from_source(
     link_info: &LinkInfoMessage,
     fh_addr: StoredAddress,
     widths: FormatWidths,
+    projection: GroupEntryProjection,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     let heap_source = HeapSource::new(source);
     let (fh, _) = fractal_heap::read_header_and_range_from_source(&heap_source, fh_addr, widths)?;
@@ -1051,15 +1097,8 @@ pub(crate) fn resolve_dense_entries_from_source(
     for record in &records {
         let id_bytes = context.record(&record.data)?.heap_id();
         let link_data = heap.read(layout.parse(id_bytes)?)?;
-        let link = LinkMessage::parse_with_offset_width(&link_data, widths.offsets)?;
-        if let LinkTarget::Hard {
-            object_header_address,
-        } = link.link_target
-        {
-            entries.push(GroupEntry {
-                name: link.name,
-                object_header_address,
-            });
+        if let Some(entry) = projection.read_link(&link_data, widths.offsets)? {
+            entries.push(entry);
         }
     }
 

@@ -52,13 +52,14 @@ use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
+use hdf5_pure_format::__private::{LinkMessageView, LinkTargetView};
 use rstest::rstest;
 use test_util::allocation;
 use test_util::data_layout;
 use test_util::dataspace;
 use test_util::datatype;
 use test_util::image::Image;
-use test_util::link_message::HardLink;
+use test_util::link_message::{HardLink, SymbolicLink};
 use test_util::object_header::Message;
 use test_util::object_header::MessageType;
 use test_util::object_header::v2;
@@ -2506,6 +2507,33 @@ impl WrittenOutput {
 fn assert_f64_bytes(bytes: &[u8], values: impl Iterator<Item = f64>) {
     let expected: Vec<_> = values.flat_map(f64::to_le_bytes).collect();
     assert_eq!(bytes, expected);
+}
+
+#[test]
+fn borrowed_external_link_decoding_allocates_nothing() {
+    let object_path = [0xff; 2048];
+    let bytes = SymbolicLink::external_bytes("x", b"source.h5", &object_path).build();
+    let (control, measured) = allocation::measure("borrowed_link_control", || {
+        std::hint::black_box(object_path.to_vec())
+    });
+    assert!(measured.blocks > 0, "{measured}");
+    assert_eq!(measured.live_bytes, 2048, "{measured}");
+    drop(control);
+
+    let (view, measured) = allocation::measure("borrowed_link_decode", || {
+        LinkMessageView::parse_prefix(&bytes, OffsetWidth::Eight).unwrap()
+    });
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(view.name_bytes(), b"x");
+    assert_eq!(
+        view.target(),
+        LinkTargetView::External {
+            filename: b"source.h5",
+            object_path: &object_path,
+        },
+    );
+    assert_eq!(view.consumed(), bytes.len());
 }
 
 #[rstest]

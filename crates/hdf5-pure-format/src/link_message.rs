@@ -7,12 +7,13 @@ use core::ops::Range;
 
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::bytes;
 
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
+use crate::link_message_read::{LinkMessageView, LinkPrefix};
+use crate::link_message_v1::LinkProjectionError;
 use crate::width::OffsetWidth;
 use crate::width::UintWidth;
 
@@ -70,237 +71,6 @@ pub struct LinkMessage {
     pub charset: CharacterSet,
 }
 
-/// The borrowed name, target offset, and optional fields of a version 1 Link message.
-///
-/// The prefix is defined in "The Link Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
-pub(crate) struct LinkPrefix<'a> {
-    /// The link name as stored, undecoded.
-    pub(crate) name: &'a [u8],
-    /// The stored kind code, or zero for an omitted hard-link type field.
-    pub(crate) link_type_code: u8,
-    pub(crate) creation_order: Option<u64>,
-    pub(crate) charset: CharacterSet,
-    /// Offset of the target data that follows the name.
-    pub(crate) target_pos: usize,
-    pub(crate) name_width: UintWidth,
-    pub(crate) has_link_type: bool,
-    pub(crate) has_charset: bool,
-}
-
-impl<'a> LinkPrefix<'a> {
-    /// Parses the fields through the link name.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidLinkVersion`] for a version other than 1,
-    /// [`FormatError::InvalidCharacterSet`] for an unknown character-set code,
-    /// [`FormatError::ValueTooLargeForPlatform`] if the name length exceeds [`usize::MAX`],
-    /// and [`FormatError::UnexpectedEof`] for a truncated prefix.
-    pub(crate) fn parse(data: &'a [u8]) -> Result<Self, FormatError> {
-        bytes::ensure_len(data, 0, 2)?;
-
-        let version = data[0];
-        if version != 1 {
-            return Err(FormatError::InvalidLinkVersion(version));
-        }
-
-        let flags = data[1];
-        let name_size_field_width = UintWidth::from_flags(flags);
-        // Bit 2: creation order field present
-        let has_creation_order = flags & 0x04 != 0;
-        // Bit 3: link type field present
-        let has_link_type = flags & 0x08 != 0;
-        // Bit 4: link name character set field present
-        let has_charset = flags & 0x10 != 0;
-
-        let mut pos = 2;
-
-        let link_type_code = if has_link_type {
-            bytes::ensure_len(data, pos, 1)?;
-            let v = data[pos];
-            pos += 1;
-            v
-        } else {
-            0 // hard link
-        };
-
-        let creation_order = if has_creation_order {
-            bytes::ensure_len(data, pos, 8)?;
-            let co = u64::from_le_bytes([
-                data[pos],
-                data[pos + 1],
-                data[pos + 2],
-                data[pos + 3],
-                data[pos + 4],
-                data[pos + 5],
-                data[pos + 6],
-                data[pos + 7],
-            ]);
-            pos += 8;
-            Some(co)
-        } else {
-            None
-        };
-
-        let charset = if has_charset {
-            bytes::ensure_len(data, pos, 1)?;
-            let cs = data[pos];
-            pos += 1;
-            match cs {
-                0 => CharacterSet::Ascii,
-                1 => CharacterSet::Utf8,
-                _ => return Err(FormatError::InvalidCharacterSet(cs)),
-            }
-        } else {
-            CharacterSet::Ascii
-        };
-
-        let name_len = bytes::read_uint_width(data, pos, name_size_field_width)?.to_usize()?;
-        pos += usize::from(name_size_field_width.get());
-
-        bytes::ensure_len(data, pos, name_len)?;
-        let name = &data[pos..pos + name_len];
-        pos += name_len;
-
-        Ok(LinkPrefix {
-            name,
-            link_type_code,
-            creation_order,
-            charset,
-            target_pos: pos,
-            name_width: name_size_field_width,
-            has_link_type,
-            has_charset,
-        })
-    }
-
-    fn target(&self, data: &[u8], offset_width: OffsetWidth) -> Result<LinkTarget, FormatError> {
-        Ok(self.target_view(data, offset_width)?.into_owned())
-    }
-
-    /// Parses the target, borrowing path strings from `data`.
-    ///
-    /// The caller passes the message from which this prefix was parsed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidLinkType`] for an unsupported link type,
-    /// [`FormatError::InvalidSoftLinkEncoding`] for a soft target with invalid UTF-8, or
-    /// [`FormatError::UnexpectedEof`] for truncated target data.
-    fn target_view<'data>(
-        &self,
-        data: &'data [u8],
-        offset_width: OffsetWidth,
-    ) -> Result<LinkTargetView<'data>, FormatError> {
-        let mut pos = self.target_pos;
-        Ok(match self.link_type_code {
-            HARD_LINK => LinkTargetView::Hard {
-                object_header_address: StoredAddress::new(bytes::read_offset_width(
-                    data,
-                    pos,
-                    offset_width,
-                )?),
-            },
-            SOFT_LINK => {
-                bytes::ensure_len(data, pos, 2)?;
-                let soft_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-                pos += 2;
-                bytes::ensure_len(data, pos, soft_len)?;
-                let target_path = core::str::from_utf8(&data[pos..pos + soft_len])
-                    .map_err(|source| FormatError::InvalidSoftLinkEncoding { source })?;
-                LinkTargetView::Soft { target_path }
-            }
-            EXTERNAL_LINK => {
-                bytes::ensure_len(data, pos, 2)?;
-                let ext_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-                pos += 2;
-                bytes::ensure_len(data, pos, ext_len)?;
-                let ext_data = &data[pos..pos + ext_len];
-                // The external link value starts with one byte for version and flags, followed by
-                // null-terminated file and object path strings ("The Link Message", format
-                // specification, version 4.0).
-                let start = if !ext_data.is_empty() { 1 } else { 0 };
-                let rest = &ext_data[start..];
-                let null1 = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-                let filename = &rest[..null1];
-                let after_null1 = if null1 + 1 < rest.len() {
-                    null1 + 1
-                } else {
-                    rest.len()
-                };
-                let rest2 = &rest[after_null1..];
-                let null2 = rest2.iter().position(|&b| b == 0).unwrap_or(rest2.len());
-                let object_path = &rest2[..null2];
-                LinkTargetView::External {
-                    filename,
-                    object_path,
-                }
-            }
-            other => return Err(FormatError::InvalidLinkType(other)),
-        })
-    }
-
-    /// Returns the range of the hard link address in `data`, the message this prefix is parsed
-    /// from, or `None` for a soft or an external link.
-    fn hard_link_address_range(
-        &self,
-        data: &[u8],
-        offset_width: OffsetWidth,
-    ) -> Result<Option<Range<usize>>, FormatError> {
-        match self.link_type_code {
-            HARD_LINK => {
-                let address = self.target_pos..self.target_pos + usize::from(offset_width.get());
-                bytes::ensure_len(data, address.start, address.len())?;
-                Ok(Some(address))
-            }
-            SOFT_LINK | EXTERNAL_LINK => Ok(None),
-            // A link type this crate does not know is an error, as in
-            // `LinkMessage::parse`: a lookup that returned no address would report a
-            // corrupt group as a missing name.
-            other => Err(FormatError::InvalidLinkType(other)),
-        }
-    }
-}
-
-/// A parsed link target with borrowed symbolic paths.
-///
-/// External file and object paths are borrowed as encoded bytes. Soft paths are valid UTF-8.
-enum LinkTargetView<'a> {
-    External {
-        filename: &'a [u8],
-        object_path: &'a [u8],
-    },
-    Hard {
-        object_header_address: StoredAddress,
-    },
-    Soft {
-        target_path: &'a str,
-    },
-}
-
-impl LinkTargetView<'_> {
-    /// Copies symbolic paths, replacing invalid UTF-8 in external paths.
-    fn into_owned(self) -> LinkTarget {
-        match self {
-            Self::External {
-                filename,
-                object_path,
-            } => LinkTarget::external(
-                String::from_utf8_lossy(filename).into_owned(),
-                String::from_utf8_lossy(object_path).into_owned(),
-            ),
-            Self::Hard {
-                object_header_address,
-            } => LinkTarget::Hard {
-                object_header_address,
-            },
-            Self::Soft { target_path } => LinkTarget::soft(String::from(target_path)),
-        }
-    }
-}
-
 /// Whether the stored name bytes `raw` name the link `wanted`.
 ///
 /// [`LinkMessage::parse`] decodes a name with `from_utf8_lossy`, so a name that
@@ -314,13 +84,10 @@ fn name_matches(raw: &[u8], wanted: &str) -> bool {
     core::str::from_utf8(raw).is_err() && String::from_utf8_lossy(raw) == wanted
 }
 
-/// Returns `true` if the Link message `data` holds the link `name`.
+/// Returns `true` if the stored name matches `name` or the name prefix is malformed.
 ///
-/// A message this cannot parse returns `true`: this exists to let an object-header
-/// parse drop the links a lookup will not read (see
-/// [`crate::object_header::MessageFilter`]), and a link whose name cannot even be
-/// read is one the scan that follows must still see, so that it rejects the group
-/// wherever the damage sits, and not only when it precedes the wanted link.
+/// Reads through the name. An object-header filter can retain malformed prefixes for
+/// the later lookup to report.
 pub fn link_is_named(data: &[u8], name: &str) -> bool {
     match LinkPrefix::parse(data) {
         Ok(prefix) => name_matches(prefix.name, name),
@@ -340,7 +107,8 @@ impl LinkMessage {
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidLinkVersion`] for a version other than 1,
-    /// [`FormatError::InvalidCharacterSet`] for an unknown character set, and
+    /// [`FormatError::InvalidLinkFlags`] for reserved flag bits,
+    /// [`FormatError::InvalidCharacterSet`] for an unknown character set, or
     /// [`FormatError::UnexpectedEof`] for a truncated prefix. Returns
     /// [`FormatError::ValueTooLargeForPlatform`] if the name length exceeds [`usize::MAX`].
     ///
@@ -349,35 +117,34 @@ impl LinkMessage {
         LinkPrefix::parse(data).map(|prefix| prefix.name)
     }
 
-    /// Returns the stored name bytes after parsing the message's prefix and target.
+    /// Returns a borrowed hard-link name and its defined address for discovery.
     ///
-    /// Borrows the name and symbolic targets from `data` during parsing. The returned name
-    /// preserves invalid UTF-8 bytes. Target parsing uses the same rules as
-    /// [`Self::parse_with_offset_width`].
+    /// The caller can check the returned name bytes for component syntax. Returns [`None`]
+    /// for a soft or external link after reading through its name.
     ///
     /// # Errors
     ///
-    /// Returns the errors documented by [`Self::parse_with_offset_width`] for malformed
-    /// prefixes or targets.
-    pub fn parsed_name_bytes(data: &[u8], offset_width: OffsetWidth) -> Result<&[u8], FormatError> {
-        let prefix = LinkPrefix::parse(data)?;
-        prefix.target_view(data, offset_width)?;
-        Ok(prefix.name)
+    /// Propagates prefix errors from [`Self::name_bytes`]. Returns
+    /// [`FormatError::InvalidLinkType`] for any kind other than hard, soft, or external,
+    /// [`FormatError::UnexpectedEof`] for a truncated hard address, or
+    /// [`FormatError::DefinedAddressIsUndefined`] for the undefined address at `offset_width`.
+    pub fn discover_hard_link(
+        data: &[u8],
+        offset_width: OffsetWidth,
+    ) -> Result<Option<(&[u8], StoredAddress)>, FormatError> {
+        LinkPrefix::parse(data)?.discover_hard_link(offset_width)
     }
 
     /// Returns the object header address of the link in the Link message `data`, if it is a
     /// hard link named `name`.
     ///
-    /// Returns `Ok(None)` for a link with another name, and for a soft or external link, which
-    /// refers to a path in place of an object header. The name is compared where it lies in
-    /// `data`, so a path lookup that reads every Link message of a group allocates nothing for
-    /// the links it passes over.
+    /// Compares the name before reading the target. Returns [`None`] for a different name or
+    /// a soft or external link.
     ///
     /// # Errors
     ///
-    /// Returns the error [`parse`](Self::parse) returns if the message is malformed up to the end
-    /// of the name, and, for a link named `name`, if its link type or its hard link address is
-    /// malformed.
+    /// Returns [`FormatError::InvalidOffsetSize`] for an unsupported `offset_size` or the
+    /// errors of [`Self::hard_link_address_if_named_with_offset_width`].
     pub fn hard_link_address_if_named(
         data: &[u8],
         offset_size: u8,
@@ -393,11 +160,14 @@ impl LinkMessage {
     /// Returns the object header address of the hard link named `name` using a validated address
     /// width.
     ///
+    /// Returns [`None`] when the name differs. For a matching soft or external link, checks
+    /// the name component and returns [`None`] before reading its target.
+    ///
     /// # Errors
     ///
-    /// Returns the error [`parse_with_offset_width`](Self::parse_with_offset_width) returns if the
-    /// message is malformed up to the end of the name, and, for a link named `name`, if its link
-    /// type or hard link address is malformed.
+    /// Propagates prefix errors from [`Self::name_bytes`]. For a matching name, returns
+    /// the errors of [`Self::hard_link_address_range`] for an invalid kind, name component,
+    /// or hard address.
     pub fn hard_link_address_if_named_with_offset_width(
         data: &[u8],
         offset_width: OffsetWidth,
@@ -407,16 +177,9 @@ impl LinkMessage {
         if !name_matches(prefix.name, name) {
             return Ok(None);
         }
-        prefix
-            .hard_link_address_range(data, offset_width)?
-            .map(|address| {
-                Ok(StoredAddress::new(bytes::read_offset_width(
-                    data,
-                    address.start,
-                    offset_width,
-                )?))
-            })
-            .transpose()
+        Ok(prefix
+            .read_hard_target(offset_width)?
+            .map(|(address, _)| address))
     }
 
     /// Returns the target of the link named `name`, or `None` for another name.
@@ -425,8 +188,9 @@ impl LinkMessage {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`parse_with_offset_width`](Self::parse_with_offset_width) for a
-    /// malformed prefix or, when the name matches, a malformed target.
+    /// Propagates prefix errors from [`Self::name_bytes`]. For a matching name, returns
+    /// the errors of [`Self::parse_with_offset_width`] for invalid name components,
+    /// invalid targets, or failed text conversion.
     pub fn target_if_named(
         data: &[u8],
         offset_width: OffsetWidth,
@@ -436,25 +200,29 @@ impl LinkMessage {
         if !name_matches(prefix.name, name) {
             return Ok(None);
         }
-        Ok(Some(prefix.target(data, offset_width)?))
+        Ok(Some(prefix.read_text_target(offset_width)?))
     }
 
     /// Returns the byte range of the object header address in the Link message `data`, or `None`
     /// for a soft or an external link.
     ///
     /// A caller that points a hard link at another object in place writes the new address over
-    /// this range.
+    /// this range. For soft and external links, checks the name and returns [`None`] before
+    /// reading the target.
     ///
     /// # Errors
     ///
-    /// Returns the error [`parse`](Self::parse) returns if the message is malformed up to the end
-    /// of the name, [`FormatError::InvalidLinkType`] if the link type is not hard, soft, or
-    /// external, and [`FormatError::UnexpectedEof`] if `data` ends inside the address.
+    /// Propagates prefix errors from [`Self::name_bytes`]. Returns [`FormatError::InvalidLinkType`]
+    /// for any kind other than hard, soft, or external, [`FormatError::InvalidLinkNameBytes`] for
+    /// an invalid name component, [`FormatError::UnexpectedEof`] for a truncated hard address,
+    /// or [`FormatError::DefinedAddressIsUndefined`] for the undefined address at `offset_width`.
     pub fn hard_link_address_range(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<Option<Range<usize>>, FormatError> {
-        LinkPrefix::parse(data)?.hard_link_address_range(data, offset_width)
+        Ok(LinkPrefix::parse(data)?
+            .read_hard_target(offset_width)?
+            .map(|(_, range)| range))
     }
 
     /// Serializes this message's body, the inverse of [`parse`](Self::parse).
@@ -559,38 +327,23 @@ impl LinkMessage {
         Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
     }
 
-    /// Parses the body of a Link message using a validated hard-link address width.
+    /// Parses and converts the complete Link message at the start of `data` to owned text.
+    ///
+    /// Uses the framing of [`LinkMessageView::parse_prefix`] and the text conversion of
+    /// [`LinkMessageView::to_text`]. Ignores bytes after the target.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidLinkVersion`] if the version is not 1,
-    /// [`FormatError::InvalidCharacterSet`] if the character set is not ASCII or UTF-8,
-    /// [`FormatError::InvalidLinkType`] if the link type is not hard, soft, or external,
-    /// [`FormatError::InvalidSoftLinkEncoding`] if a soft link target is not valid UTF-8,
-    /// [`FormatError::ValueTooLargeForPlatform`] if the name length does not fit `usize`, and
-    /// [`FormatError::UnexpectedEof`] if `data` ends inside a field.
+    /// Propagates the structural errors of [`LinkMessageView::parse_prefix`]. After decoding,
+    /// returns [`FormatError::InvalidLinkType`] for a user-defined kind or
+    /// [`FormatError::InvalidSoftLinkEncoding`] for a soft path with invalid UTF-8.
     pub fn parse_with_offset_width(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<LinkMessage, FormatError> {
-        let prefix = LinkPrefix::parse(data)?;
-        let link_target = prefix.target(data, offset_width)?;
-        let LinkPrefix {
-            name,
-            link_type_code: _,
-            creation_order,
-            charset,
-            target_pos: _,
-            name_width: _,
-            has_link_type: _,
-            has_charset: _,
-        } = prefix;
-        Ok(LinkMessage {
-            name: String::from_utf8_lossy(name).into_owned(),
-            link_target,
-            creation_order,
-            charset,
-        })
+        LinkMessageView::parse_prefix(data, offset_width)?
+            .to_text()
+            .map_err(LinkProjectionError::into_format)
     }
 }
 
@@ -628,6 +381,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::address::StoredAddressExt;
 
     #[rstest]
     #[case::hard(LinkTarget::Hard { object_header_address: StoredAddress::new(42) })]
@@ -643,7 +397,7 @@ mod tests {
         .serialize(OffsetWidth::Eight)
         .unwrap();
         let prefix = LinkPrefix::parse(&data).unwrap();
-        let name = LinkMessage::name_bytes(&data[..prefix.target_pos]).unwrap();
+        let name = LinkMessage::name_bytes(&data[..prefix.target_start()]).unwrap();
         assert_eq!(name, b"link");
         assert_eq!(name.as_ptr(), prefix.name.as_ptr());
     }
@@ -651,7 +405,7 @@ mod tests {
     #[rstest]
     #[case::version(vec![2, 0], FormatError::InvalidLinkVersion(2))]
     #[case::truncated(vec![1, 0, 3, b'x'], FormatError::UnexpectedEof { expected: 6, available: 4 })]
-    #[case::charset(vec![1, 0x10, 2], FormatError::InvalidCharacterSet(2))]
+    #[case::charset(vec![1, 0x10, 2, 1], FormatError::InvalidCharacterSet(2))]
     fn borrowed_link_names_reject_malformed_prefixes(
         #[case] data: Vec<u8>,
         #[case] expected: FormatError,
@@ -664,62 +418,6 @@ mod tests {
         let mut data = build_hard_link("a", 42, 8, None, None, 1);
         data[3] = 0xff;
         assert_eq!(LinkMessage::name_bytes(&data).unwrap(), &[0xff]);
-    }
-
-    #[rstest]
-    #[case::hard(test_util::link_message::HardLink::new("name", 42).build(Widths::EIGHT))]
-    #[case::soft(test_util::link_message::SymbolicLink::soft("name", "/target").build())]
-    #[case::external(test_util::link_message::SymbolicLink::external("name", "file.h5", "/target").build())]
-    fn parsed_link_names_borrow_bytes_after_parsing_the_target(#[case] data: Vec<u8>) {
-        let name = LinkMessage::parsed_name_bytes(&data, OffsetWidth::Eight).unwrap();
-        assert_eq!(name, b"name");
-        assert_eq!(
-            name.as_ptr(),
-            LinkMessage::name_bytes(&data).unwrap().as_ptr()
-        );
-        assert_eq!(
-            LinkMessage::parse_with_offset_width(&data, OffsetWidth::Eight)
-                .unwrap()
-                .name,
-            "name"
-        );
-    }
-
-    #[rstest]
-    #[case::two(OffsetWidth::Two, Widths::new(2, 8))]
-    #[case::four(OffsetWidth::Four, Widths::FOUR)]
-    #[case::eight(OffsetWidth::Eight, Widths::EIGHT)]
-    fn parsed_link_names_read_the_supplied_address_width(
-        #[case] width: OffsetWidth,
-        #[case] widths: Widths,
-    ) {
-        let mut data = test_util::link_message::HardLink::new("name", 42).build(widths);
-        assert_eq!(
-            LinkMessage::parsed_name_bytes(&data, width).unwrap(),
-            b"name"
-        );
-        data.pop();
-        assert_eq!(
-            LinkMessage::parsed_name_bytes(&data, width).unwrap_err(),
-            FormatError::UnexpectedEof {
-                expected: 7 + usize::from(width.get()),
-                available: data.len()
-            },
-        );
-    }
-
-    #[rstest]
-    #[case::truncated_hard({ let mut data = test_util::link_message::HardLink::new("name", 42).build(Widths::EIGHT); data.pop(); data }, FormatError::UnexpectedEof { expected: 15, available: 14 })]
-    #[case::invalid_soft(test_util::link_message::SymbolicLink::soft_bytes("name", &[0xff]).build(), FormatError::InvalidSoftLinkEncoding { source: String::from_utf8(vec![0xff]).unwrap_err().utf8_error() })]
-    #[case::unknown_type({ let mut data = test_util::link_message::SymbolicLink::soft("name", "/target").build(); data[2] = 65; data }, FormatError::InvalidLinkType(65))]
-    fn parsed_link_names_report_target_errors(
-        #[case] data: Vec<u8>,
-        #[case] expected: FormatError,
-    ) {
-        assert_eq!(
-            LinkMessage::parsed_name_bytes(&data, OffsetWidth::Eight).unwrap_err(),
-            expected,
-        );
     }
 
     fn build_hard_link(
@@ -916,18 +614,6 @@ mod tests {
         let data = vec![2, 0, 0, 0]; // version 2
         let err = LinkMessage::parse(&data, 8).unwrap_err();
         assert_eq!(err, FormatError::InvalidLinkVersion(2));
-    }
-
-    #[test]
-    fn invalid_link_type() {
-        let mut data = Vec::new();
-        data.push(1); // version
-        data.push(0x08); // flags: bit 3 = link type present
-        data.push(99); // invalid link type
-        data.push(1); // name length = 1
-        data.push(b'x');
-        let err = LinkMessage::parse(&data, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidLinkType(99));
     }
 
     #[test]

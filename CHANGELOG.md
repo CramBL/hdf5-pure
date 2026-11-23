@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::groups` accepting malformed external-link targets in version 1 Link messages.
 - Fixed `Group::groups` and related group operations accepting Link Info messages with reserved flag bits set ([#1328](https://github.com/CramBL/hdf5-pure/pull/1328)).
 - Fixed `repack` dropping explicitly stored default link thresholds from Group Info messages ([#1320](https://github.com/CramBL/hdf5-pure/pull/1320)).
 - Fixed `Group::attrs` and related attribute reads accepting reserved flag bits in Attribute Info

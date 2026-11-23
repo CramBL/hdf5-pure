@@ -172,6 +172,52 @@ impl<'n> SymbolicLink<'n> {
     }
 }
 
+/// A version 1 Link message fixture with a borrowed name and user-defined value.
+pub struct UserDefinedLink<'a> {
+    name: &'a [u8],
+    name_len: u8,
+    kind: u8,
+    value: &'a [u8],
+    value_len: u16,
+}
+
+impl<'a> UserDefinedLink<'a> {
+    /// Prepares a fixture with a one-byte name length and a two-byte value length.
+    ///
+    /// Returns [`None`] if the name is invalid, the kind is below 65, or either length
+    /// overflows its field.
+    pub fn new(name: &'a [u8], kind: u8, value: &'a [u8]) -> Option<Self> {
+        if kind < USER_DEFINED_MIN
+            || name.is_empty()
+            || name == b"."
+            || name.contains(&0)
+            || name.contains(&b'/')
+        {
+            return None;
+        }
+        Some(Self {
+            name,
+            name_len: u8::try_from(name.len()).ok()?,
+            kind,
+            value,
+            value_len: u16::try_from(value.len()).ok()?,
+        })
+    }
+
+    /// Builds the message with the user-defined kind stored explicitly.
+    pub fn build(&self) -> Vec<u8> {
+        let mut message = vec![VERSION, STORES_LINK_TYPE, self.kind, self.name_len];
+        message.extend_from_slice(self.name);
+        message.extend_from_slice(&self.value_len.to_le_bytes());
+        message.extend_from_slice(self.value);
+        message
+    }
+}
+
+// "The Link Message" of the format specification, version 4.0, assigns kinds 65 and above
+// to user-defined links.
+const USER_DEFINED_MIN: u8 = 65;
+
 /// Builds a managed-heap image and version 0 Link Info body for one supplied Link message.
 ///
 /// Uses eight-byte addresses and lengths. The caller passes `name` for the name-index hash and

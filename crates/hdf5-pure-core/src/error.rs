@@ -1,5 +1,6 @@
 use alloc::collections::TryReserveError;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 use core::num::NonZeroU64;
@@ -736,6 +737,13 @@ pub enum FormatError {
     /// An Extensible Array header or block version other than 0, the only version the format
     /// defines.
     InvalidExtensibleArrayVersion(u8),
+    /// An external-link value lacks its version and flags byte, the filename terminator,
+    /// or the object path terminator.
+    InvalidExternalLinkValue,
+    /// An external-link value has an unsupported version or flag bit set.
+    ///
+    /// Contains the complete version and flags byte.
+    InvalidExternalLinkVersionFlags(u8),
     /// A file space page size is outside 512 bytes to 1 GiB, the range of [`FileSpacePageSize`].
     InvalidFileSpacePageSize(u64),
     /// Invalid file-space management strategy code in a File Space Info message.
@@ -926,6 +934,10 @@ pub enum FormatError {
     InvalidLayoutVersion(u8),
     /// Invalid length size (must be 2, 4, or 8).
     InvalidLengthSize(u8),
+    /// A Link message sets reserved flag bits.
+    ///
+    /// Contains the complete flags byte.
+    InvalidLinkFlags(u8),
     /// A Link Info message sets reserved bits in its flags byte.
     ///
     /// Contains the complete flags byte.
@@ -936,6 +948,12 @@ pub enum FormatError {
     /// component of an object path: the empty name, `.`, or a name holding `/`. The object
     /// under such a link has no path, and the write reports the name it rejects.
     InvalidLinkName(String),
+    /// A Link message's name is empty, is `.`, or contains a NUL or slash.
+    ///
+    /// Contains the stored name bytes.
+    InvalidLinkNameBytes(Vec<u8>),
+    /// A symbolic target has an empty path, a NUL within its path, or an empty external filename.
+    InvalidLinkTarget,
     /// Invalid link type code.
     InvalidLinkType(u8),
     /// Invalid Link message version.
@@ -2278,6 +2296,27 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidLinkType(t) => {
                 write!(f, "invalid link type: {t}")
+            }
+            Self::InvalidLinkFlags(flags) => {
+                write!(f, "reserved bits in Link flags: {flags:#04x}")
+            }
+            Self::InvalidLinkNameBytes(name) => {
+                write!(f, "invalid link name bytes: {name:?}")
+            }
+            Self::InvalidLinkTarget => {
+                write!(f, "symbolic link target is empty or contains a null byte")
+            }
+            Self::InvalidExternalLinkValue => {
+                write!(
+                    f,
+                    "external link value lacks its version, separator, or terminator"
+                )
+            }
+            Self::InvalidExternalLinkVersionFlags(flags) => {
+                write!(
+                    f,
+                    "unsupported external link version or flags: {flags:#04x}"
+                )
             }
             Self::InvalidLinkInfoFlags(flags) => {
                 write!(f, "reserved bits in Link Info flags: {flags:#04x}")
