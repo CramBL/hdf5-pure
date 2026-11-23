@@ -307,6 +307,7 @@ pub use crate::link_message_v1::{
     LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError, UserLinkKind,
     UserLinkValue,
 };
+pub use crate::link_message_write::{LinkOutputTooSmall, PreparedLink};
 pub use crate::link_storage::{
     GroupLinkStorage, LinkCreationCounter, LinkCreationPolicy, LinkStorageError, OwnedLink,
     OwnedLinkTarget, OwnedSymbolicLinkTarget,
@@ -337,6 +338,7 @@ pub use crate::object_header::ObjectReferenceCountUpdate;
 pub use crate::object_header::ObjectReferenceCountUpdateError;
 pub use crate::object_header::ObjectTimes;
 pub use crate::object_header::ParsedObjectHeaderPrefix;
+pub use crate::object_header::PreparedLinkRecord;
 pub use crate::object_header::RecordSplice;
 pub use crate::object_header::continuation_block_messages;
 pub use crate::object_header_writer::ObjectHeaderWriter;

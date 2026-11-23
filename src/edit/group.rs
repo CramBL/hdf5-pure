@@ -10,10 +10,12 @@ use hdf5_pure_format::__private::GroupInfo as GroupInfoMessage;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationPolicy;
-use hdf5_pure_format::__private::LinkMessageV1;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
-use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::PreparedLinkRecord;
+use hdf5_pure_format::__private::{
+    LinkMessageView, LinkProjectionError, LinkTargetView, LinkWireError,
+};
 
 use hdf5_pure_space::__private::{AllocationClass, ReservationRequest};
 
@@ -208,15 +210,16 @@ impl WriteEngine {
         .map_err(group_links::storage_error)?;
         let mut region = fresh_group_region(widths)?;
         for link in links {
-            let body = link
-                .serialize(region.widths().offsets)
+            let link = link
+                .prepare(widths.offsets)
                 .map_err(group_links::storage_error)?;
-            if body.len() > OBJECT_HEADER_MESSAGE_MAX {
-                return Err(Error::EditUnsupported(
+            let record = PreparedLinkRecord::new(link).map_err(|error| match error {
+                FormatError::ObjectHeaderMessageTooLarge { .. } => Error::EditUnsupported(
                     "a version 1 group's link is too large to convert in place",
-                ));
-            }
-            region.push(MessageType::LINK, &body);
+                ),
+                error => error.into(),
+            })?;
+            region.push_link_record(&record)?;
         }
         Ok(region)
     }
@@ -259,12 +262,10 @@ impl GroupInfo {
             links.use_compact_storage();
             region.replace_link_info(&links.info())?;
             for link in links.links() {
-                region.push(
-                    MessageType::LINK,
-                    &link
-                        .serialize(region.widths().offsets)
-                        .map_err(group_links::storage_error)?,
-                );
+                let link = link
+                    .prepare(region.widths().offsets)
+                    .map_err(group_links::storage_error)?;
+                region.push_link_record(&PreparedLinkRecord::new(link)?)?;
             }
         }
         Ok((region, names))
@@ -504,10 +505,14 @@ fn unpadded_body(message: &HeaderMessage, offset_width: OffsetWidth) -> Result<&
             GroupInfoMessage::unpadded_body_len(data).map_err(group_links::group_info_error)?
         }
         MessageType::LINK => {
-            let (wire, consumed) = LinkMessageV1::parse_prefix(data, offset_width)
-                .map_err(group_links::storage_error)?;
-            OwnedLink::try_from(wire).map_err(group_links::storage_error)?;
-            consumed
+            let link = LinkMessageView::parse_prefix(data, offset_width)
+                .map_err(|error| group_links::storage_error(LinkWireError::from(error)))?;
+            if let LinkTargetView::UserDefined { kind, .. } = link.target() {
+                return Err(group_links::storage_error(
+                    LinkProjectionError::UnsupportedKind(kind),
+                ));
+            }
+            link.consumed()
         }
         _ => {
             return Err(FormatError::Internal(

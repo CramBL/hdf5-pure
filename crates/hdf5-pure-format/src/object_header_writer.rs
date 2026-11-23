@@ -2,11 +2,17 @@
 
 use alloc::vec::Vec;
 
+use crate::address::StoredAddress;
+use crate::convert::Narrow;
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
+use crate::group_info::GroupInfo;
 use crate::link_info::LinkInfoMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::object_header::ObjectHeaderPrefix;
+use crate::object_header::{
+    MessageRecordLayout, OBJECT_HEADER_PREFIX_MAX_LEN, ObjectHeaderPrefix, PreparedLinkRecord,
+};
+use crate::width::OffsetWidth;
 
 /// A writer for checksummed version 2 object headers.
 ///
@@ -110,56 +116,163 @@ impl ObjectHeaderWriter {
     /// # Errors
     ///
     /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if a message body exceeds
-    /// [`OBJECT_HEADER_MESSAGE_MAX`]. The optional record creation index is outside that body.
+    /// [`OBJECT_HEADER_MESSAGE_MAX`], or [`FormatError::OffsetOverflow`] if the combined extent
+    /// exceeds [`usize::MAX`]. The optional record creation index is outside the message body.
     pub fn serialize(&self) -> Result<Vec<u8>, FormatError> {
-        self.serialize_records(None)
+        let messages_len = self.messages_len(RecordSet::All)?;
+        add_extent(
+            messages_len,
+            OBJECT_HEADER_PREFIX_MAX_LEN + size_of::<u32>(),
+        )?;
+        Ok(self
+            .prefix
+            .encode_header_with(messages_len, |buf| self.append_messages(buf)))
     }
 
-    /// Serializes the header with a Link Info record before the stored records.
+    /// Writes Link Info, Group Info, inline Link records, and supplemental records in order.
     ///
-    /// The Link Info record has empty flags and a creation index of zero when the record
-    /// layout tracks creation order.
+    /// A defined heap address in `link_info` selects dense storage and requires an empty
+    /// `links` iterator. Inline hard links use the offset width retained by `link_info`.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if a stored message body exceeds
-    /// [`OBJECT_HEADER_MESSAGE_MAX`].
-    pub fn serialize_with_link_info(
+    /// Returns [`FormatError::QueuedGroupLinkMessage`] for a queued Link, Link Info, Group Info,
+    /// or Symbol Table record, or [`FormatError::ObjectHeaderMessageTooLarge`] if a queued body
+    /// exceeds [`OBJECT_HEADER_MESSAGE_MAX`]. Returns [`FormatError::InlineLinksWithDenseStorage`]
+    /// for an inline link with dense storage or [`FormatError::LinkOffsetWidthMismatch`] for a
+    /// hard link with a different offset width. Returns [`FormatError::OffsetOverflow`] if the
+    /// combined extent exceeds [`usize::MAX`], or [`FormatError::AllocationFailed`] if reserving
+    /// output space fails. Propagates errors from `links`.
+    ///
+    /// # Examples
+    ///
+    /// Writes a compact group header with one hard link.
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::{
+    ///     AccessMode, GroupInfo, LinkInfoMessage, ObjectHeader, ObjectHeaderWriter,
+    ///     PreparedLink, PreparedLinkRecord,
+    /// };
+    /// use hdf5_pure_format::{CharacterSet, MessageType, OffsetWidth};
+    ///
+    /// let info = LinkInfoMessage::compact(OffsetWidth::Two, None, false);
+    /// let link = PreparedLink::hard(
+    ///     OffsetWidth::Two,
+    ///     "alias",
+    ///     StoredAddress::new(0x1234),
+    ///     None,
+    ///     CharacterSet::Ascii,
+    /// )?;
+    /// let bytes = ObjectHeaderWriter::new().serialize_group(
+    ///     &info,
+    ///     &GroupInfo::DEFAULT,
+    ///     core::iter::once(PreparedLinkRecord::new(link)),
+    /// )?;
+    /// let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 2, 2)?;
+    /// assert_eq!(header.messages[2].msg_type, MessageType::LINK);
+    /// assert_eq!(header.messages[2].data, b"\x01\x00\x05alias\x34\x12");
+    /// # Ok::<(), hdf5_pure_format::FormatError>(())
+    /// ```
+    pub fn serialize_group<'a>(
         &self,
         link_info: &LinkInfoMessage,
+        group_info: &GroupInfo,
+        links: impl ExactSizeIterator<Item = Result<PreparedLinkRecord<'a>, FormatError>>,
     ) -> Result<Vec<u8>, FormatError> {
-        self.serialize_records(Some(link_info))
+        let supplemental_len = self.messages_len(RecordSet::Supplemental)?;
+        let mut group = self.begin_group(link_info, group_info, links.len())?;
+        for link in links {
+            group.append_link(&link?)?;
+        }
+        self.finish_group(group, supplemental_len)
     }
 
-    fn serialize_records(
+    fn begin_group(
         &self,
-        link_info: Option<&LinkInfoMessage>,
+        link_info: &LinkInfoMessage,
+        group_info: &GroupInfo,
+        link_count: usize,
+    ) -> Result<GroupRecordWriter, FormatError> {
+        let layout = self.prefix.layout;
+        let group_info = group_info.serialize();
+        let mut buffer = Vec::new();
+        let prefix = self.prefix.reserved_prefix_len();
+        let capacity = add_extent(
+            prefix + 2 * layout.prefix_len() + link_info.encoded_size() + group_info.len(),
+            link_count.saturating_mul(layout.prefix_len()),
+        )?;
+        buffer
+            .try_reserve_exact(capacity)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: capacity,
+                source,
+            })?;
+        buffer.resize(prefix, 0);
+        layout.append_link_info(&mut buffer, link_info);
+        layout.write_record(
+            &mut buffer,
+            MessageType::GROUP_INFO,
+            MessageFlags::NONE,
+            0,
+            &group_info,
+        );
+        Ok(GroupRecordWriter {
+            layout,
+            offset_width: link_info.offset_width(),
+            heap_address: link_info.fractal_heap_address(),
+            buffer,
+        })
+    }
+
+    fn finish_group(
+        &self,
+        group: GroupRecordWriter,
+        supplemental_len: usize,
     ) -> Result<Vec<u8>, FormatError> {
+        let mut buffer = group.buffer;
+        buffer
+            .try_reserve(supplemental_len)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: supplemental_len,
+                source,
+            })?;
+        self.append_messages(&mut buffer);
+        self.prefix.finish_header(buffer)
+    }
+
+    fn messages_len(&self, records: RecordSet) -> Result<usize, FormatError> {
+        let record_prefix = self.prefix.layout.prefix_len();
+        let mut messages_len = 0;
         for (msg_type, data, _, _) in &self.messages {
+            if matches!(records, RecordSet::Supplemental)
+                && matches!(
+                    *msg_type,
+                    MessageType::LINK
+                        | MessageType::LINK_INFO
+                        | MessageType::GROUP_INFO
+                        | MessageType::SYMBOL_TABLE
+                )
+            {
+                return Err(FormatError::QueuedGroupLinkMessage(msg_type.to_u16()));
+            }
             if data.len() > OBJECT_HEADER_MESSAGE_MAX {
                 return Err(FormatError::ObjectHeaderMessageTooLarge {
                     message_type: msg_type.to_u16(),
                     size: data.len(),
                 });
             }
+            messages_len = add_extent(messages_len, record_prefix + data.len())?;
         }
+        Ok(messages_len)
+    }
 
+    fn append_messages(&self, output: &mut Vec<u8>) {
         let layout = self.prefix.layout;
-        let first_len = link_info.map_or(0, |info| layout.prefix_len() + info.encoded_size());
-        let messages_len = first_len
-            + self
-                .messages
-                .iter()
-                .map(|(_, data, _, _)| layout.prefix_len() + data.len())
-                .sum::<usize>();
-        Ok(self.prefix.encode_header_with(messages_len, |buf| {
-            if let Some(info) = link_info {
-                layout.append_link_info(buf, info);
-            }
-            for (msg_type, data, msg_flags, creation_index) in &self.messages {
-                layout.write_record(buf, *msg_type, *msg_flags, *creation_index, data);
-            }
-        }))
+        for (msg_type, data, msg_flags, creation_index) in &self.messages {
+            layout.write_record(output, *msg_type, *msg_flags, *creation_index, data);
+        }
     }
 }
 
@@ -167,6 +280,47 @@ impl Default for ObjectHeaderWriter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+enum RecordSet {
+    All,
+    Supplemental,
+}
+
+struct GroupRecordWriter {
+    layout: MessageRecordLayout,
+    offset_width: OffsetWidth,
+    heap_address: Option<StoredAddress>,
+    buffer: Vec<u8>,
+}
+
+impl GroupRecordWriter {
+    fn append_link(&mut self, link: &PreparedLinkRecord<'_>) -> Result<(), FormatError> {
+        if let Some(heap_address) = self.heap_address {
+            return Err(FormatError::InlineLinksWithDenseStorage {
+                heap_address: heap_address.get(),
+            });
+        }
+        if let Some(link_width) = link
+            .hard_offset_width()
+            .filter(|&width| width != self.offset_width)
+        {
+            return Err(FormatError::LinkOffsetWidthMismatch {
+                group_width: self.offset_width.get(),
+                link_width: link_width.get(),
+            });
+        }
+        link.append_to(self.layout, &mut self.buffer)
+    }
+}
+
+fn add_extent(offset: usize, length: usize) -> Result<usize, FormatError> {
+    offset
+        .checked_add(length)
+        .ok_or_else(|| FormatError::OffsetOverflow {
+            offset: offset.to_u64(),
+            length: length.to_u64(),
+        })
 }
 
 #[cfg(test)]

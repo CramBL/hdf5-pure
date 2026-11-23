@@ -17,8 +17,6 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 
-use alloc::vec::Vec;
-
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_core::__private::StoredAddressExt;
 pub use hdf5_pure_core::LengthWidth;
@@ -159,12 +157,12 @@ impl UintWidth {
         }
     }
 
-    /// Appends `value` to `buf` as a little-endian integer of this width.
+    /// Writes `value` to `buf` as a little-endian integer of this width.
     ///
     /// # Panics
     ///
-    /// Panics if `value` does not fit this width.
-    pub(crate) fn write(self, buf: &mut Vec<u8>, value: usize) {
+    /// Panics if `value` does not fit this width or if the buffer has another length.
+    pub(crate) fn write(self, buf: &mut [u8], value: usize) {
         let value = value.to_u64();
         assert!(
             value
@@ -173,16 +171,7 @@ impl UintWidth {
             "{value} does not fit a {}-byte field",
             self.get()
         );
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the assertion above admits only a value that fits the width of each arm"
-        )]
-        match self {
-            Self::One => buf.push(value as u8),
-            Self::Two => buf.extend_from_slice(&(value as u16).to_le_bytes()),
-            Self::Four => buf.extend_from_slice(&(value as u32).to_le_bytes()),
-            Self::Eight => buf.extend_from_slice(&value.to_le_bytes()),
-        }
+        buf.copy_from_slice(&value.to_le_bytes()[..usize::from(self.get())]);
     }
 }
 
@@ -367,7 +356,7 @@ mod tests {
         #[case] value: usize,
         #[case] expected: Vec<u8>,
     ) {
-        let mut buf = Vec::new();
+        let mut buf = vec![0; usize::from(width.get())];
         width.write(&mut buf, value);
 
         assert_eq!(buf, expected);
@@ -376,6 +365,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "256 does not fit a 1-byte field")]
     fn a_value_wider_than_its_field_panics() {
-        UintWidth::One.write(&mut Vec::new(), 256);
+        UintWidth::One.write(&mut [0], 256);
     }
 }

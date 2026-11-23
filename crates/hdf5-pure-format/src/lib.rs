@@ -62,6 +62,7 @@ mod link_info;
 mod link_message;
 mod link_message_read;
 mod link_message_v1;
+mod link_message_write;
 mod link_storage;
 mod local_heap;
 mod message_flags;

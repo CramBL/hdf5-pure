@@ -23,6 +23,44 @@ mod allocation;
 #[cfg(feature = "std")]
 mod paged_arrays;
 
+#[test]
+fn compact_group_writer_emits_prepared_links_in_record_order() {
+    use test_util::link_message::{HardLink, SymbolicLink};
+    use test_util::object_header::Message as FixtureMessage;
+    use test_util::object_header::MessageType as FixtureType;
+    use test_util::object_header::v2::Header;
+    use test_util::widths::Widths;
+
+    let widths = FormatWidths {
+        offsets: OffsetWidth::Two,
+        lengths: LengthWidth::Eight,
+    };
+    let hard = make_link("child", StoredAddress::new(0x1234));
+    let soft = LinkMessage {
+        name: "ref".into(),
+        link_target: LinkTarget::soft("/child".into()),
+        creation_order: None,
+        charset: CharacterSet::Ascii,
+    };
+    let bytes = build_group_oh(widths, &[hard, soft], &[], None, None, GroupInfo::DEFAULT).unwrap();
+    let expected = Header::new()
+        .message(FixtureMessage::new(
+            FixtureType::LINK_INFO,
+            &[0, 0, 0xff, 0xff, 0xff, 0xff],
+        ))
+        .message(FixtureMessage::new(FixtureType::GROUP_INFO, &[0, 0]))
+        .message(FixtureMessage::new(
+            FixtureType::LINK,
+            &HardLink::new("child", 0x1234).build(Widths::new(2, 8)),
+        ))
+        .message(FixtureMessage::new(
+            FixtureType::LINK,
+            &SymbolicLink::soft("ref", "/child").build(),
+        ))
+        .build();
+    assert_eq!(bytes, expected);
+}
+
 #[rstest]
 #[case::unbounded(None)]
 #[case::v18(Some(LibVer::V18))]

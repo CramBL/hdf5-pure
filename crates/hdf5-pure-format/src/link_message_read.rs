@@ -10,7 +10,9 @@ use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
 use crate::link_message::{EXTERNAL_LINK, HARD_LINK, LinkMessage, LinkTarget, SOFT_LINK};
-use crate::link_message_v1::{self, LinkName, LinkProjectionError, UserLinkKind};
+use crate::link_message_v1::{self, LinkName, LinkProjectionError, LinkWireError, UserLinkKind};
+use crate::link_message_write::PreparedLink;
+use crate::link_storage::LinkStorageError;
 use crate::width::{OffsetWidth, UintWidth};
 
 /// The checked fields of a version 1 Link message, borrowed from the message body.
@@ -23,6 +25,7 @@ use crate::width::{OffsetWidth, UintWidth};
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkMessageView<'a> {
     target: LinkTargetView<'a>,
+    target_value_len: u16,
     creation_order: Option<u64>,
     charset: Option<CharacterSet>,
     name: &'a [u8],
@@ -32,6 +35,21 @@ pub struct LinkMessageView<'a> {
 }
 
 impl<'a> LinkMessageView<'a> {
+    /// Borrows the fields of an exact Link body, excluding object header padding.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::parse_prefix`] converted to [`LinkWireError`], or
+    /// [`LinkStorageError::TrailingBytes`] wrapped in [`LinkWireError::Storage`] if bytes
+    /// follow the target.
+    pub fn parse(data: &'a [u8], offset_width: OffsetWidth) -> Result<Self, LinkWireError> {
+        let link = Self::decode(data, offset_width)?;
+        if link.consumed() != data.len() {
+            return Err(LinkStorageError::TrailingBytes.into());
+        }
+        Ok(link)
+    }
+
     /// Reads the complete Link message at the start of `data`.
     ///
     /// Borrows the name and any target bytes. Ignores bytes after the target, including
@@ -75,6 +93,22 @@ impl<'a> LinkMessageView<'a> {
     /// ```
     pub fn parse_prefix(data: &'a [u8], offset_width: OffsetWidth) -> Result<Self, FormatError> {
         Self::decode(data, offset_width)
+    }
+
+    /// Prepares a body at `offset_width` using the borrowed fields and retained encoding choices.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkStorageError::UndefinedAddress`] for the new width's undefined address,
+    /// [`LinkStorageError::Format`] if the hard address exceeds that width, or
+    /// [`LinkStorageError::LengthOverflow`] if the body length exceeds [`usize::MAX`].
+    pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'a>, LinkStorageError> {
+        PreparedLink::for_view(self, offset_width)
+    }
+
+    /// Returns the stored target value length, or zero for a hard link.
+    pub(crate) fn target_value_len(&self) -> u16 {
+        self.target_value_len
     }
 
     /// Returns the decoded target with any path or user-defined value borrowed from the message.
@@ -142,7 +176,7 @@ impl<'a> Decode<'a> for LinkMessageView<'a> {
 
     fn decode(input: &'a [u8], width: OffsetWidth) -> Result<Self, Self::Error> {
         let prefix = LinkPrefix::parse(input)?;
-        let (target, consumed) = prefix.read_target(width)?;
+        let (target, consumed, target_value_len) = prefix.read_target(width)?;
         let target_start = prefix.target_start();
         let LinkPrefix {
             name,
@@ -154,6 +188,7 @@ impl<'a> Decode<'a> for LinkMessageView<'a> {
         } = prefix;
         Ok(Self {
             target,
+            target_value_len,
             creation_order,
             charset,
             name,
@@ -356,30 +391,37 @@ impl<'a> LinkPrefix<'a> {
             .map(|(address, _)| (self.name, address)))
     }
 
-    /// Checks the selected target and name component and returns the target and its end position.
+    /// Checks the name component and reads the target, end position, and stored value length.
     ///
-    /// The end position is relative to the start of the entire Link message.
+    /// The end position is relative to the start of the entire Link message. Returns a value
+    /// length of zero for a hard address.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::UnexpectedEof`] if the target is incomplete. Also returns the
     /// kind, name, and target errors of [`LinkMessageView::parse_prefix`].
-    fn read_target(&self, width: OffsetWidth) -> Result<(LinkTargetView<'a>, usize), FormatError> {
+    fn read_target(
+        &self,
+        width: OffsetWidth,
+    ) -> Result<(LinkTargetView<'a>, usize, u16), FormatError> {
         let mut cursor = self.target;
-        let target = match self.link_type.unwrap_or(HARD_LINK) {
-            HARD_LINK => LinkTargetView::Hard {
-                object_header_address: self.read_hard_address(
-                    &mut cursor,
-                    width,
-                    LinkNamePolicy::Component,
-                )?,
-                explicit_type: self.link_type.is_some(),
-            },
+        let (target, value_len) = match self.link_type.unwrap_or(HARD_LINK) {
+            HARD_LINK => (
+                LinkTargetView::Hard {
+                    object_header_address: self.read_hard_address(
+                        &mut cursor,
+                        width,
+                        LinkNamePolicy::Component,
+                    )?,
+                    explicit_type: self.link_type.is_some(),
+                },
+                0,
+            ),
             kind @ (SOFT_LINK | EXTERNAL_LINK | USER_LINK_MIN..=u8::MAX) => {
-                let len = usize::from(cursor.u16()?);
-                let value = cursor.take(len)?;
+                let len = cursor.u16()?;
+                let value = cursor.take(usize::from(len))?;
                 self.check_name(LinkNamePolicy::Component)?;
-                match kind {
+                let target = match kind {
                     SOFT_LINK if link_message_v1::is_symbolic_path(value) => {
                         LinkTargetView::Soft { target_path: value }
                     }
@@ -389,11 +431,12 @@ impl<'a> LinkPrefix<'a> {
                         kind: UserLinkKind::new(kind)?,
                         value,
                     },
-                }
+                };
+                (target, len)
             }
             kind => return Err(FormatError::InvalidLinkType(kind)),
         };
-        Ok((target, cursor.position()))
+        Ok((target, cursor.position(), value_len))
     }
 
     pub(crate) fn read_hard_target(

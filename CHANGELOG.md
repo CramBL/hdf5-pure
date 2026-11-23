@@ -38,7 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `Group::groups` accepting malformed external-link targets in version 1 Link messages.
+- Fixed `Group::groups` accepting malformed external-link targets in version 1 Link messages ([#1329](https://github.com/CramBL/hdf5-pure/pull/1329)).
 - Fixed `Group::groups` and related group operations accepting Link Info messages with reserved flag bits set ([#1328](https://github.com/CramBL/hdf5-pure/pull/1328)).
 - Fixed `repack` dropping explicitly stored default link thresholds from Group Info messages ([#1320](https://github.com/CramBL/hdf5-pure/pull/1320)).
 - Fixed `Group::attrs` and related attribute reads accepting reserved flag bits in Attribute Info
@@ -54,6 +54,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- Reduced allocations when `FileBuilder` writes compact group links ([#1329](https://github.com/CramBL/hdf5-pure/pull/1329)).
 - Reduced dimension-list decoding time in `Dataspace::parse` for nonempty shapes ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 - `parse_file_space_info` in `hdf5-pure-format` allocates persistent manager lists once ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 

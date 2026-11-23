@@ -16,7 +16,7 @@ use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::FractalHeapLayout;
 use hdf5_pure_format::__private::GROUP_HEAP_MAX_MANAGED_OBJECT;
 use hdf5_pure_format::__private::LinkInfoMessage;
-use hdf5_pure_format::__private::LinkMessageV1;
+use hdf5_pure_format::__private::LinkMessageView;
 use hdf5_pure_format::__private::LinkProjectionError;
 use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::LinkWireError;
@@ -110,11 +110,9 @@ pub(crate) fn read_dense(
             ));
         }
         let bytes = heap.read(view)?;
-        let wire = LinkMessageV1::parse(&bytes, widths.offsets).map_err(storage_error)?;
-        let link = OwnedLink::try_from(wire).map_err(storage_error)?;
-        if link.encoded_len(widths.offsets).map_err(storage_error)?
-            > GROUP_HEAP_MAX_MANAGED_OBJECT.to_usize()?
-        {
+        let wire = LinkMessageView::parse(&bytes, widths.offsets).map_err(storage_error)?;
+        let link = OwnedLink::try_from(&wire).map_err(storage_error)?;
+        if wire.consumed() > GROUP_HEAP_MAX_MANAGED_OBJECT.to_usize()? {
             return Err(Error::EditUnsupported(
                 "a group's link exceeds the supported managed object size",
             ));

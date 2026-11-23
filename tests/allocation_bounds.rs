@@ -52,7 +52,7 @@ use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
-use hdf5_pure_format::__private::{LinkMessageView, LinkTargetView};
+use hdf5_pure_format::__private::{LinkMessage, LinkMessageView, LinkTargetView};
 use rstest::rstest;
 use test_util::allocation;
 use test_util::data_layout;
@@ -2534,6 +2534,57 @@ fn borrowed_external_link_decoding_allocates_nothing() {
         },
     );
     assert_eq!(view.consumed(), bytes.len());
+}
+
+#[test]
+fn borrowed_external_link_encoding_allocates_nothing() {
+    let object_path = [0xff; 2048];
+    let bytes = SymbolicLink::external_bytes("x", b"source.h5", &object_path).build();
+    let view = LinkMessageView::parse_prefix(&bytes, OffsetWidth::Eight).unwrap();
+    let (control, measured) = allocation::measure("borrowed_link_encode_control", || {
+        std::hint::black_box(bytes.clone())
+    });
+    assert!(measured.blocks > 0, "{measured}");
+    assert_eq!(
+        measured.live_bytes,
+        u64::try_from(bytes.len()).unwrap(),
+        "{measured}"
+    );
+    drop(control);
+    let mut output = vec![0; bytes.len()];
+    let (written, measured) = allocation::measure("borrowed_link_encode", || {
+        view.prepare(OffsetWidth::Eight)
+            .unwrap()
+            .write_into(&mut output)
+            .unwrap()
+    });
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(written, bytes.len());
+    assert_eq!(output, bytes);
+}
+
+#[test]
+fn direct_link_conversion_omits_a_temporary_body_allocation() {
+    let bytes = SymbolicLink::external("x", "source.h5", &"/target".repeat(256)).build();
+    let link = LinkMessage::parse_with_offset_width(&bytes, OffsetWidth::Eight).unwrap();
+    let (via_wire, wire) = allocation::measure("own_link_via_wire", || {
+        let encoded = link.serialize(OffsetWidth::Eight).unwrap();
+        OwnedLink::parse(&encoded, OffsetWidth::Eight).unwrap()
+    });
+    let (direct, measured) = allocation::measure("own_link_directly", || {
+        OwnedLink::from_text(&link, OffsetWidth::Eight).unwrap()
+    });
+    assert_eq!(direct, via_wire);
+    assert_eq!(direct.serialize(OffsetWidth::Eight).unwrap(), bytes);
+    assert!(measured.blocks > 0, "{measured}");
+    assert_eq!(measured.blocks + 1, wire.blocks, "{measured}, {wire}");
+    assert_eq!(
+        measured.bytes + u64::try_from(bytes.len()).unwrap(),
+        wire.bytes,
+        "{measured}, {wire}"
+    );
+    assert_eq!(measured.live_bytes, wire.live_bytes, "{measured}, {wire}");
 }
 
 #[rstest]
