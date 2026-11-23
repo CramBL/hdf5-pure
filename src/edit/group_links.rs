@@ -3,7 +3,7 @@
 use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
-use hdf5_pure_format::__private::LinkMessageV1;
+use hdf5_pure_format::__private::LinkMessageView;
 use hdf5_pure_format::__private::OwnedLink;
 
 use crate::error::{Error, FormatError};
@@ -67,9 +67,9 @@ pub(super) fn inspect(
                 group_info = true;
             }
             MessageType::LINK => {
-                let wire = LinkMessageV1::parse(record.body, widths.offsets)
+                let wire = LinkMessageView::parse(record.body, widths.offsets)
                     .map_err(storage::storage_error)?;
-                links.push(OwnedLink::try_from(wire).map_err(storage::storage_error)?);
+                links.push(OwnedLink::try_from(&wire).map_err(storage::storage_error)?);
             }
             MessageType::SYMBOL_TABLE => {
                 return Err(Error::EditUnsupported(

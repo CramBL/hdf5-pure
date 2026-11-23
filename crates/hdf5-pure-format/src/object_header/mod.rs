@@ -39,6 +39,7 @@ pub use v2::ObjectHeaderContinuation;
 pub use v2::ObjectHeaderPrefix;
 pub use v2::ObjectTimes;
 pub use v2::ParsedObjectHeaderPrefix;
+pub use v2::PreparedLinkRecord;
 pub use v2::RecordSplice;
 pub use v2::continuation_block_messages;
 

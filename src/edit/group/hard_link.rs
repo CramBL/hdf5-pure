@@ -2,16 +2,15 @@
 
 use core::ops::Range;
 
-use hdf5_pure_format::__private::MessageRecordLayout;
+use hdf5_pure_format::__private::{MessageRecordLayout, PreparedLink, PreparedLinkRecord};
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::datatype::CharacterSet;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
-use crate::file_writer;
 use crate::link_message::LinkMessage;
-use crate::message_type::MessageType;
 use crate::object_path::LinkNameBuf;
 use crate::width::OffsetWidth;
 
@@ -44,21 +43,25 @@ impl PreparedHardLinkRecord {
         name: LinkNameBuf,
         creation_order: Option<u64>,
     ) -> Result<Self, Error> {
-        let mut link = file_writer::make_link(name.as_str(), StoredAddress::new(0));
-        link.creation_order = creation_order;
-        let body = link.serialize(offsets)?;
-        if body.len() > OBJECT_HEADER_MESSAGE_MAX {
+        let link = PreparedLink::hard(
+            offsets,
+            name.as_str(),
+            StoredAddress::ZERO,
+            creation_order,
+            CharacterSet::Ascii,
+        )?;
+        if link.encoded_size() > OBJECT_HEADER_MESSAGE_MAX {
             return Err(Error::EditUnsupported(
                 "a new hard link message exceeds the object-header message size limit",
             ));
         }
-        let target = LinkMessage::hard_link_address_range(&body, offsets)?.ok_or_else(|| {
+        let record = PreparedLinkRecord::new(link)?;
+        let target = record.hard_link_address_range(layout).ok_or_else(|| {
             FormatError::Internal("a prepared hard link has no target address".into())
         })?;
-        let target = layout.prefix_len() + target.start..layout.prefix_len() + target.end;
         Ok(Self {
             offsets,
-            record: layout.record(MessageType::LINK, &body),
+            record: record.to_bytes(layout),
             target,
             layout,
         })

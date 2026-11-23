@@ -1787,7 +1787,7 @@ fn group_header(
 ) -> Result<Vec<u8>, FormatError> {
     super::group_header(
         links.iter().map(|link| {
-            link.serialize(super::OFFSET_WIDTH)
+            link.prepare(super::OFFSET_WIDTH)
                 .map_err(super::link_storage_error)
         }),
         attributes,

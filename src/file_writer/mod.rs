@@ -34,7 +34,7 @@ use hdf5_pure_format::__private::ManagedHeapPlanError;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 use hdf5_pure_format::__private::OwnedLink;
-use hdf5_pure_format::__private::PreparedDenseAttrs;
+use hdf5_pure_format::__private::{PreparedDenseAttrs, PreparedLink, PreparedLinkRecord};
 use hdf5_pure_space::__private::AllocationClass;
 
 use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
@@ -326,7 +326,8 @@ pub(crate) fn build_committed_datatype_oh(
 /// Returns [`FormatError::AttributeFieldTooLong`] if a compact attribute field exceeds its
 /// encoding, [`FormatError::ObjectHeaderMessageTooLarge`] if a message exceeds the
 /// object-header message size limit, or [`FormatError::Internal`] if the Link Info offset
-/// width differs from the file's.
+/// width differs from the file's. Propagates errors from [`LinkMessage::prepare`] for inline
+/// links and header serialization errors from [`ObjectHeaderWriter::serialize_group`].
 pub(crate) fn build_group_oh(
     widths: FormatWidths,
     links: &[LinkMessage],
@@ -336,7 +337,7 @@ pub(crate) fn build_group_oh(
     group_info: GroupInfo,
 ) -> Result<Vec<u8>, FormatError> {
     group_header(
-        links.iter().map(|link| link.serialize(widths.offsets)),
+        links.iter().map(|link| link.prepare(widths.offsets)),
         attrs,
         attr_info,
         link_info.unwrap_or(&compact_link_info(widths.offsets)),
@@ -345,8 +346,8 @@ pub(crate) fn build_group_oh(
     )
 }
 
-fn group_header(
-    links: impl IntoIterator<Item = Result<Vec<u8>, FormatError>>,
+fn group_header<'a>(
+    links: impl ExactSizeIterator<Item = Result<PreparedLink<'a>, FormatError>>,
     attrs: &[AttributeMessage],
     attr_info: Option<&AttributeInfoMessage>,
     link_info: &LinkInfoMessage,
@@ -361,14 +362,14 @@ fn group_header(
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
     // libhdf5 requires Group Info when inserting a link into a group with Link Info
     // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
-    w.add_message(MessageType::GROUP_INFO, group_info.serialize());
-    if link_info.fractal_heap_address().is_none() {
-        for link in links {
-            w.add_message(MessageType::LINK, link?);
-        }
-    }
+    let count = if link_info.fractal_heap_address().is_none() {
+        links.len()
+    } else {
+        0
+    };
+    let records = links.take(count).map(|link| PreparedLinkRecord::new(link?));
     add_attributes(&mut w, attrs, attr_info, header)?;
-    w.serialize_with_link_info(link_info)
+    w.serialize_group(link_info, &group_info, records)
 }
 
 /// Serializes dense links at the reserved address and checks the reserved length.
@@ -416,10 +417,7 @@ fn dense_links_plan(
     }
     let links = links
         .iter()
-        .map(|link| {
-            OwnedLink::parse(&link.serialize(widths.offsets)?, widths.offsets)
-                .map_err(link_storage_error)
-        })
+        .map(|link| OwnedLink::from_text(link, widths.offsets))
         .collect::<Result<Vec<_>, _>>()?;
     let storage = GroupLinkStorage::new(&compact_link_info(widths.offsets), links)
         .map_err(link_storage_error)?;

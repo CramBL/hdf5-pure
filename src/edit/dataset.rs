@@ -14,6 +14,7 @@ use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::PreparedLink;
 use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_format::__private::{DenseAttrFixup, PreparedDenseAttrs};
 use hdf5_pure_space::__private::AllocationClass;
@@ -46,7 +47,7 @@ use crate::dataset_request::{
     PreparedFill, ValueOverwrite,
 };
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
-use crate::datatype::Datatype;
+use crate::datatype::{CharacterSet, Datatype};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_emission::EmissionError;
 use crate::file_writer;
@@ -2182,9 +2183,14 @@ pub(super) fn flatten_dataset(
             widths.lengths,
         )?;
     }
-    let mut sized = file_writer::make_link(name.as_str(), StoredAddress::new(0));
-    sized.creation_order = Some(0);
-    if sized.serialize(widths.offsets)?.len() > OBJECT_HEADER_MESSAGE_MAX {
+    let link = PreparedLink::hard(
+        widths.offsets,
+        name.as_str(),
+        StoredAddress::new(0),
+        Some(0),
+        CharacterSet::Ascii,
+    )?;
+    if link.encoded_size() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
             "dataset name is too long to encode as a link message",
         ));

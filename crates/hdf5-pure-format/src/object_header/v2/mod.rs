@@ -14,6 +14,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::link_info::LinkInfoMessage;
+use crate::link_message_write::PreparedLink;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::metadata_source;
@@ -26,8 +27,8 @@ use crate::object_header::ObjectHeaderChunk;
 use crate::object_header::ParseContext;
 use crate::object_header::v2::chunk::RootChunk;
 use crate::object_header::v2::collector::HeaderCollector;
-use crate::width::FormatWidths;
 use crate::width::UintWidth;
+use crate::width::{FormatWidths, OffsetWidth};
 
 mod allocation;
 mod chunk;
@@ -400,7 +401,7 @@ impl ObjectHeaderPrefix {
         messages_len: usize,
         write_messages: impl FnOnce(&mut Vec<u8>),
     ) -> Vec<u8> {
-        let prefix_len = OHDR_SIGNATURE.len() + 2 + self.optional_len() + usize::from(width.get());
+        let prefix_len = self.prefix_len(width);
         let mut buf = Vec::with_capacity(prefix_len + messages_len + CHECKSUM_LEN);
         self.write_prefix(&mut buf, width, messages_len);
         write_messages(&mut buf);
@@ -409,9 +410,47 @@ impl ObjectHeaderPrefix {
             prefix_len + messages_len,
             "the messages written differ from the length the header declares"
         );
-        let checksum = checksum::jenkins_lookup3(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
+        append_checksum(&mut buf);
         buf
+    }
+
+    /// Returns the prefix reservation for a header with an eight-byte chunk length field.
+    pub(crate) fn reserved_prefix_len(self) -> usize {
+        self.prefix_len(UintWidth::Eight)
+    }
+
+    /// Finishes a header whose messages start after [`Self::reserved_prefix_len`] bytes.
+    ///
+    /// Chooses the smallest chunk length width, shifts the messages to that prefix length,
+    /// and writes the prefix and checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the buffer is shorter than the prefix reservation,
+    /// or [`FormatError::AllocationFailed`] if reserving the checksum fails.
+    pub(crate) fn finish_header(self, mut buf: Vec<u8>) -> Result<Vec<u8>, FormatError> {
+        let start = self.reserved_prefix_len();
+        let messages_len = buf.len().checked_sub(start).ok_or_else(|| {
+            FormatError::Internal("object header buffer lacks its prefix reservation".into())
+        })?;
+        let width = UintWidth::smallest_for_len(messages_len);
+        let prefix_len = self.prefix_len(width);
+        let header_len = prefix_len + messages_len;
+        buf.copy_within(start.., prefix_len);
+        buf.truncate(header_len);
+        self.write_prefix_into(&mut buf[..prefix_len], width, messages_len);
+        buf.try_reserve_exact(CHECKSUM_LEN)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: CHECKSUM_LEN,
+                source,
+            })?;
+        append_checksum(&mut buf);
+        buf.shrink_to_fit();
+        Ok(buf)
+    }
+
+    fn prefix_len(self, width: UintWidth) -> usize {
+        OHDR_SIGNATURE.len() + 2 + self.optional_len() + usize::from(width.get())
     }
 
     /// Appends the signature, flags, optional fields, and chunk-size field.
@@ -421,14 +460,34 @@ impl ObjectHeaderPrefix {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
     fn write_prefix(self, buf: &mut Vec<u8>, width: UintWidth, messages_len: usize) {
-        buf.extend_from_slice(&OHDR_SIGNATURE);
-        buf.push(OBJECT_HEADER_VERSION);
-        buf.push(width.flag_bits() | self.header_flags());
+        let start = buf.len();
+        buf.resize(start + self.prefix_len(width), 0);
+        self.write_prefix_into(&mut buf[start..], width, messages_len);
+    }
+
+    /// Writes the signature, version, flags, optional fields, and chunk size into `buf`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf.len()` differs from [`Self::prefix_len`] for `width`, or if
+    /// `messages_len` exceeds the largest value representable at `width`.
+    fn write_prefix_into(self, buf: &mut [u8], width: UintWidth, messages_len: usize) {
+        let (signature, buf) = buf.split_at_mut(OHDR_SIGNATURE.len());
+        signature.copy_from_slice(&OHDR_SIGNATURE);
+        let (version_flags, mut buf) = buf.split_at_mut(2);
+        version_flags.copy_from_slice(&[
+            OBJECT_HEADER_VERSION,
+            width.flag_bits() | self.header_flags(),
+        ]);
         if let Some(times) = self.times {
-            buf.extend_from_slice(&times.to_bytes());
+            let (field, rest) = buf.split_at_mut(ObjectTimes::LEN);
+            field.copy_from_slice(&times.to_bytes());
+            buf = rest;
         }
         if let Some(phase) = self.attribute_phase_change {
-            buf.extend_from_slice(&phase.to_bytes());
+            let (field, rest) = buf.split_at_mut(AttributePhaseChange::LEN);
+            field.copy_from_slice(&phase.to_bytes());
+            buf = rest;
         }
         width.write(buf, messages_len);
     }
@@ -463,6 +522,11 @@ impl ObjectHeaderPrefix {
         };
         times + phase
     }
+}
+
+fn append_checksum(buf: &mut Vec<u8>) {
+    let checksum = checksum::jenkins_lookup3(buf);
+    buf.extend_from_slice(&checksum.to_le_bytes());
 }
 
 impl MessageRecordLayout {
@@ -711,6 +775,94 @@ impl MessageRecordLayout {
         if self.tracks_creation_order() {
             buf.extend_from_slice(&creation_index.to_le_bytes());
         }
+    }
+}
+
+/// A Link body checked to fit the length field of a version 2 message record.
+///
+/// The writer uses empty record flags and writes a creation index of zero when the record
+/// layout tracks creation order.
+#[derive(Debug)]
+pub struct PreparedLinkRecord<'a> {
+    body: PreparedLink<'a>,
+    body_len: u16,
+}
+
+impl<'a> PreparedLinkRecord<'a> {
+    /// Prepares a record for a checked Link body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the body exceeds [`u16::MAX`]
+    /// bytes.
+    pub fn new(body: PreparedLink<'a>) -> Result<Self, FormatError> {
+        let body_len = u16::try_from(body.encoded_size()).map_err(|_error| {
+            FormatError::ObjectHeaderMessageTooLarge {
+                message_type: MessageType::LINK.to_u16(),
+                size: body.encoded_size(),
+            }
+        })?;
+        Ok(Self { body, body_len })
+    }
+
+    /// Encodes the record prefix and body in an owned buffer using `layout`.
+    pub fn to_bytes(&self, layout: MessageRecordLayout) -> Vec<u8> {
+        let mut output = Vec::with_capacity(self.encoded_size(layout));
+        self.append(layout, &mut output);
+        output
+    }
+
+    /// Appends the record prefix and body using `layout`, preserving existing bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AllocationFailed`] if reserving space for the record fails.
+    pub fn append_to(
+        &self,
+        layout: MessageRecordLayout,
+        output: &mut Vec<u8>,
+    ) -> Result<(), FormatError> {
+        let length = self.encoded_size(layout);
+        output
+            .try_reserve(length)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: length,
+                source,
+            })?;
+        self.append(layout, output);
+        Ok(())
+    }
+
+    /// Returns the hard-link address range relative to the start of the record.
+    ///
+    /// The offset includes the prefix length selected by `layout`. Returns [`None`] for a
+    /// symbolic or user-defined target.
+    pub fn hard_link_address_range(&self, layout: MessageRecordLayout) -> Option<Range<usize>> {
+        let prefix = layout.prefix_len();
+        self.body
+            .hard_link_address_range()
+            .map(|field| prefix + field.start..prefix + field.end)
+    }
+
+    pub(crate) fn encoded_size(&self, layout: MessageRecordLayout) -> usize {
+        layout.prefix_len() + usize::from(self.body_len)
+    }
+
+    pub(crate) fn hard_offset_width(&self) -> Option<OffsetWidth> {
+        self.body.hard_offset_width()
+    }
+
+    /// Appends the record using `layout`. `output` needs spare capacity for the prefix and body.
+    pub(crate) fn append(&self, layout: MessageRecordLayout, output: &mut Vec<u8>) {
+        let type_byte = const {
+            let [low, high] = MessageType::LINK.to_u16().to_le_bytes();
+            assert!(high == 0);
+            low
+        };
+        layout.write_record_prefix(output, type_byte, MessageFlags::NONE, 0, self.body_len);
+        let start = output.len();
+        output.resize(start + usize::from(self.body_len), 0);
+        self.body.write_body(&mut output[start..]);
     }
 }
 

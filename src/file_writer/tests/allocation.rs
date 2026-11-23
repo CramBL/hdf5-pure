@@ -95,6 +95,54 @@ fn paged_creation_bounds_metadata_and_reads_each_payload_once(
     }
 }
 
+#[test]
+fn compact_group_header_bounds_allocations_for_many_short_links() {
+    use hdf5_pure_core::__private::StoredAddressExt;
+    use hdf5_pure_format::__private::GroupPhaseChange;
+    use test_util::group_info::{GroupInfo as GroupInfoFixture, PhaseChange};
+    use test_util::link_info::{Body, CreationIndex, Width};
+    use test_util::link_message::HardLink;
+    use test_util::object_header::v2::{Header, HeaderFlags};
+    use test_util::object_header::{Message, MessageType};
+    use test_util::widths::Widths;
+
+    use super::super::{GroupInfo, StoredAddress, WIDTHS};
+
+    const MAX_COMPACT: u16 = 10_001;
+    const MIN_DENSE: u16 = 6;
+    let links: Vec<_> = (0..MAX_COMPACT - 1)
+        .map(|index| super::super::make_link(&format!("l{index:04x}"), StoredAddress::new(0x1234)))
+        .collect();
+    let group_info = GroupInfo::new(
+        Some(GroupPhaseChange::new(MAX_COMPACT, MIN_DENSE).unwrap()),
+        None,
+    );
+    let (header, measured) = allocation::measure("compact_group_header", || {
+        super::super::build_group_oh(WIDTHS, &links, &[], None, None, group_info).unwrap()
+    });
+    let link_info = Body::new(Width::Eight, None, None, None, CreationIndex::Absent)
+        .unwrap()
+        .build();
+    let group_info = GroupInfoFixture {
+        phase_change: Some(PhaseChange::new(MAX_COMPACT, MIN_DENSE).unwrap()),
+        estimates: None,
+    }
+    .build();
+    let mut expected = Header::new()
+        .flags(HeaderFlags(0b10))
+        .message(Message::new(MessageType::LINK_INFO, &link_info))
+        .message(Message::new(MessageType::GROUP_INFO, &group_info));
+    for link in &links {
+        let body = HardLink::new(&link.name, 0x1234).build(Widths::EIGHT);
+        expected = expected.message(Message::new(MessageType::LINK, &body));
+    }
+    assert_eq!(header, expected.build());
+    let encoded_len = u64::try_from(header.len()).unwrap();
+    assert!((1..=8).contains(&measured.blocks), "{measured}");
+    assert!(measured.peak_bytes <= 2 * encoded_len, "{measured}");
+    assert_eq!(measured.live_bytes, encoded_len, "{measured}");
+}
+
 struct CountingProvider {
     value: i32,
     reads: Arc<AtomicUsize>,

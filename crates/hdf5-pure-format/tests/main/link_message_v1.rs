@@ -1,12 +1,14 @@
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{CharacterSet, FormatError, OffsetWidth, StoredAddress};
 use hdf5_pure_format::__private::{
-    LinkMessage, LinkMessageV1, LinkMessageView, LinkName, LinkProjectionError, LinkStorageError,
-    LinkTarget, LinkTargetV1, LinkTargetView, LinkWireError, UintWidth, UserLinkKind,
-    UserLinkValue,
+    LinkMessage, LinkMessageV1, LinkMessageView, LinkName, LinkOutputTooSmall, LinkProjectionError,
+    LinkStorageError, LinkTarget, LinkTargetV1, LinkTargetView, LinkWireError, MessageRecordLayout,
+    OwnedLink, PreparedLink, PreparedLinkRecord, UintWidth, UserLinkKind, UserLinkValue,
 };
 use rstest::rstest;
 use test_util::link_message::{HardLink, SymbolicLink, UserDefinedLink};
+use test_util::object_header::v2::{self, HeaderFlags};
+use test_util::object_header::{Message, MessageType};
 use test_util::widths::Widths;
 
 #[rstest]
@@ -34,6 +36,10 @@ fn borrowed_hard_link_preserves_raw_fields_and_the_target_range(
     assert_eq!(view.charset(), Some(CharacterSet::Ascii));
     assert_eq!(view.consumed(), end);
     assert_eq!(view.hard_link_address_range(), Some(15..end));
+    assert_bounded(&view.prepare(width).unwrap(), &bytes[..end]);
+    let owned = OwnedLink::try_from(&view).unwrap();
+    assert_bounded(&owned.prepare(width).unwrap(), &bytes[..end]);
+
     assert_eq!(
         view.target(),
         LinkTargetView::Hard {
@@ -95,6 +101,10 @@ fn a_borrowed_soft_link_preserves_bytes_until_text_projection() {
     };
     assert_eq!(target_path, b"\xff/target");
     assert!(core::ptr::eq(target_path, &bytes[7..]));
+    assert_bounded(&view.prepare(OffsetWidth::Two).unwrap(), &bytes);
+    let owned = OwnedLink::try_from(&view).unwrap();
+    assert_bounded(&owned.prepare(OffsetWidth::Two).unwrap(), &bytes);
+
     let utf8_error = String::from_utf8(b"\xff/target".to_vec())
         .unwrap_err()
         .utf8_error();
@@ -125,6 +135,10 @@ fn a_borrowed_external_link_retains_both_paths_without_text_conversion() {
     assert_eq!(object_path, b"/\xfe");
     assert!(core::ptr::eq(filename, &bytes[8..12]));
     assert!(core::ptr::eq(object_path, &bytes[13..15]));
+    assert_bounded(&view.prepare(OffsetWidth::Two).unwrap(), &bytes);
+    let owned = OwnedLink::try_from(&view).unwrap();
+    assert_bounded(&owned.prepare(OffsetWidth::Two).unwrap(), &bytes);
+
     assert_eq!(view.hard_link_address_range(), None);
     assert_eq!(view.consumed(), bytes.len());
     assert_eq!(
@@ -148,6 +162,8 @@ fn a_borrowed_user_link_retains_opaque_bytes_and_rejects_text_conversion() {
     assert_eq!(kind.get(), 65);
     assert_eq!(value, b"\x00\xff");
     assert!(core::ptr::eq(value, &bytes[7..]));
+    assert_bounded(&view.prepare(OffsetWidth::Eight).unwrap(), &bytes);
+
     assert_eq!(
         view.to_text().unwrap_err(),
         LinkProjectionError::UnsupportedKind(kind)
@@ -337,6 +353,7 @@ fn wire_links_preserve_name_width_and_target(
     assert_eq!(link.charset(), None);
     assert_eq!(link.creation_order(), None);
     assert_eq!(link.encoded_len(OffsetWidth::Two).unwrap(), bytes.len());
+    assert_bounded(&link.prepare(OffsetWidth::Two).unwrap(), bytes);
     assert_eq!(link.serialize(OffsetWidth::Two).unwrap(), bytes);
     let constructed = LinkMessageV1::new(
         LinkName::with_width(b"x".to_vec(), width).unwrap(),
@@ -427,6 +444,12 @@ fn prefix_parsing_reports_extent_without_object_header_padding(
     let (link, consumed) = LinkMessageV1::parse_prefix(bytes, OffsetWidth::Two).unwrap();
     assert_eq!(consumed, len);
     assert_eq!(link.serialize(OffsetWidth::Two).unwrap(), &bytes[..len]);
+    let borrowed = LinkMessageView::parse(&bytes[..len], OffsetWidth::Two).unwrap();
+    assert_eq!(borrowed.consumed(), len);
+    assert_eq!(
+        LinkMessageView::parse(bytes, OffsetWidth::Two).unwrap_err(),
+        LinkWireError::Storage(LinkStorageError::TrailingBytes)
+    );
     assert_eq!(
         LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap_err(),
         LinkWireError::Storage(LinkStorageError::TrailingBytes)
@@ -558,6 +581,159 @@ fn hard_targets_use_the_supplied_address_width(#[case] bytes: &[u8], #[case] wid
     let link = LinkMessageV1::parse(bytes, width).unwrap();
     assert_eq!(link.target(), &hard(false));
     assert_eq!(link.serialize(width).unwrap(), bytes);
+}
+
+#[rstest]
+#[case::hard(
+    "x",
+    LinkTarget::Hard { object_header_address: StoredAddress::new(0x1234) },
+    None,
+    CharacterSet::Ascii,
+    HardLink::new("x", 0x1234).build(Widths::new(2, 8)),
+)]
+#[case::soft(
+    "x",
+    LinkTarget::soft("/target".into()),
+    None,
+    CharacterSet::Ascii,
+    SymbolicLink::soft("x", "/target").build(),
+)]
+#[case::external(
+    "x",
+    LinkTarget::external("source.h5".into(), "/target".into()),
+    None,
+    CharacterSet::Ascii,
+    SymbolicLink::external("x", "source.h5", "/target").build(),
+)]
+#[case::utf8_with_creation_order(
+    "données",
+    LinkTarget::Hard { object_header_address: StoredAddress::new(0x1234) },
+    Some(19),
+    CharacterSet::Utf8,
+    HardLink::new("données", 0x1234)
+        .creation_order(19)
+        .character_set(test_util::link_message::CharacterSet::UTF8)
+        .build(Widths::new(2, 8)),
+)]
+fn canonical_text_preparation_and_direct_conversion_match_independent_bytes(
+    #[case] name: &str,
+    #[case] link_target: LinkTarget,
+    #[case] creation_order: Option<u64>,
+    #[case] charset: CharacterSet,
+    #[case] bytes: Vec<u8>,
+) {
+    let link = LinkMessage {
+        name: name.into(),
+        link_target,
+        creation_order,
+        charset,
+    };
+    let offset_width = OffsetWidth::Two;
+    let prepared = link.prepare(offset_width).unwrap();
+    assert_bounded(&prepared, &bytes);
+    assert_eq!(link.serialize(offset_width).unwrap(), bytes);
+
+    let owned = OwnedLink::from_text(&link, offset_width).unwrap();
+    assert_eq!(owned, OwnedLink::parse(&bytes, offset_width).unwrap());
+    assert_bounded(&owned.prepare(offset_width).unwrap(), &bytes);
+}
+
+#[rstest]
+#[case::invalid_name(".", LinkTarget::soft("/target".into()), FormatError::InvalidLinkName(".".into()))]
+#[case::empty_soft("x", LinkTarget::soft(String::new()), FormatError::InvalidLinkTarget)]
+#[case::nul_external("x", LinkTarget::external("source\0.h5".into(), "/target".into()), FormatError::InvalidLinkTarget)]
+#[case::long_soft("x", LinkTarget::soft("x".repeat(65_536)), FormatError::LengthTooLarge { length: 65_536, length_size: 2 })]
+#[case::width("x", LinkTarget::Hard { object_header_address: StoredAddress::new(0x1_0000) }, FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 })]
+#[case::undefined("x", LinkTarget::Hard { object_header_address: StoredAddress::new(0xffff) }, FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 })]
+fn canonical_preparation_and_direct_conversion_return_the_same_errors(
+    #[case] name: &str,
+    #[case] link_target: LinkTarget,
+    #[case] expected: FormatError,
+) {
+    let link = LinkMessage {
+        name: name.into(),
+        link_target,
+        creation_order: None,
+        charset: CharacterSet::Ascii,
+    };
+    assert_eq!(link.prepare(OffsetWidth::Two).unwrap_err(), expected);
+    assert_eq!(
+        OwnedLink::from_text(&link, OffsetWidth::Two).unwrap_err(),
+        expected
+    );
+}
+
+#[test]
+fn hard_link_preparation_uses_the_new_width_and_preserves_optional_fields() {
+    let fixture = HardLink::new("x", 0x1234)
+        .name_size_width(4)
+        .creation_order(17)
+        .character_set(test_util::link_message::CharacterSet::ASCII);
+    let input = fixture.build(Widths::FOUR);
+    let view = LinkMessageView::parse_prefix(&input, OffsetWidth::Four).unwrap();
+    let expected = fixture.build(Widths::new(2, 8));
+    let prepared = view.prepare(OffsetWidth::Two).unwrap();
+    assert_eq!(
+        prepared.hard_link_address_range(),
+        Some(expected.len() - 2..expected.len())
+    );
+    assert_bounded(&prepared, &expected);
+}
+
+#[test]
+fn prepared_link_records_reject_bodies_larger_than_the_record_size_field() {
+    let value = vec![0xff; 65_535];
+    let bytes = UserDefinedLink::new(b"x", 65, &value).unwrap().build();
+    let view = LinkMessageView::parse_prefix(&bytes, OffsetWidth::Two).unwrap();
+    let link = view.prepare(OffsetWidth::Two).unwrap();
+    assert_eq!(
+        PreparedLinkRecord::new(link).unwrap_err(),
+        FormatError::ObjectHeaderMessageTooLarge {
+            message_type: 0x0006,
+            size: 65_542,
+        },
+    );
+}
+
+#[rstest]
+#[case::plain(HeaderFlags(0))]
+#[case::tracked(HeaderFlags::TRACKS_CREATION_ORDER)]
+fn prepared_link_records_append_after_existing_bytes(#[case] flags: HeaderFlags) {
+    let body = HardLink::new("child", 0x1234).build(Widths::new(2, 8));
+    let link = LinkMessageView::parse(&body, OffsetWidth::Two).unwrap();
+    let record = PreparedLinkRecord::new(link.prepare(OffsetWidth::Two).unwrap()).unwrap();
+    let mut output = vec![0x3e; 7];
+    record
+        .append_to(MessageRecordLayout::from_header_flags(flags.0), &mut output)
+        .unwrap();
+
+    let mut expected = vec![0x3e; 7];
+    expected.extend_from_slice(&v2::message_record(
+        &Message::new(MessageType::LINK, &body),
+        flags,
+    ));
+    assert_eq!(output, expected);
+}
+
+fn assert_bounded(link: &PreparedLink<'_>, expected: &[u8]) {
+    let len = expected.len();
+    assert_eq!(link.encoded_size(), len);
+    let mut output = vec![0xa5; len + 3];
+    let original = output.clone();
+    for available in [0, len - 1] {
+        assert_eq!(
+            link.write_into(&mut output[1..1 + available]).unwrap_err(),
+            LinkOutputTooSmall {
+                required: len,
+                available
+            },
+        );
+        assert_eq!(output, original);
+    }
+    assert_eq!(link.write_into(&mut output[1..]).unwrap(), len);
+    let mut expected_output = vec![0xa5; len + 3];
+    expected_output[1..1 + len].copy_from_slice(expected);
+    assert_eq!(output, expected_output);
 }
 
 fn hard(explicit_type: bool) -> LinkTargetV1 {

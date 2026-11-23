@@ -928,6 +928,11 @@ pub enum FormatError {
     InvalidGroupLeafNodeK,
     /// Invalid heap ID type.
     InvalidHeapIdType(u8),
+    /// A group header writer received inline links for a group with a dense link heap.
+    InlineLinksWithDenseStorage {
+        /// The heap's stored address.
+        heap_address: u64,
+    },
     /// Invalid data layout class.
     InvalidLayoutClass(u8),
     /// Invalid data layout version.
@@ -958,6 +963,20 @@ pub enum FormatError {
     InvalidLinkType(u8),
     /// Invalid Link message version.
     InvalidLinkVersion(u8),
+    /// The complete Link body length exceeds [`usize::MAX`].
+    LinkMessageLengthOverflow,
+    /// A prepared hard link's address width differs from its group's offset width.
+    LinkOffsetWidthMismatch {
+        /// The offset width retained by the group's Link Info, in bytes.
+        group_width: u8,
+        /// The width of the hard link's target address, in bytes.
+        link_width: u8,
+    },
+    /// The supplemental records for a group header include Link, Link Info, Group Info, or
+    /// Symbol Table.
+    ///
+    /// Contains the raw message type.
+    QueuedGroupLinkMessage(u16),
     /// A link name in a group's local heap is not UTF-8. A version 1 group
     /// stores the names of its links in a local heap, defined in "Local Heaps"
     /// of the [format specification, version 4.0][spec].
@@ -2293,6 +2312,28 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidLinkVersion(v) => {
                 write!(f, "invalid link message version: {v}")
+            }
+            Self::LinkMessageLengthOverflow => {
+                write!(f, "Link message length does not fit the current platform")
+            }
+            Self::LinkOffsetWidthMismatch {
+                group_width,
+                link_width,
+            } => write!(
+                f,
+                "hard link uses a {link_width}-byte offset in a group with {group_width}-byte offsets"
+            ),
+            Self::InlineLinksWithDenseStorage { heap_address } => {
+                write!(
+                    f,
+                    "inline links in a group with a dense link heap at {heap_address:#x}"
+                )
+            }
+            Self::QueuedGroupLinkMessage(message_type) => {
+                write!(
+                    f,
+                    "queued group link message {message_type:#06x} in checked group header"
+                )
             }
             Self::InvalidLinkType(t) => {
                 write!(f, "invalid link type: {t}")

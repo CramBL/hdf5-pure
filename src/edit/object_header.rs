@@ -12,6 +12,7 @@ use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
 use hdf5_pure_format::__private::ObjectHeaderChunk;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use hdf5_pure_format::__private::PreparedLinkRecord;
 use hdf5_pure_format::__private::RecordSplice;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ReservationRequest;
@@ -864,6 +865,20 @@ impl OhRegion {
     /// Appends records already encoded at this region's file widths and record layout.
     pub(super) fn push_bytes(&mut self, record: &[u8]) {
         self.bytes.extend_from_slice(record);
+    }
+
+    /// Appends a Link record using this region's message record layout.
+    ///
+    /// The caller supplies hard-link targets checked at this region's offset width.
+    ///
+    /// # Errors
+    ///
+    /// Propagates allocation errors from [`PreparedLinkRecord::append_to`].
+    pub(super) fn push_link_record(
+        &mut self,
+        record: &PreparedLinkRecord<'_>,
+    ) -> Result<(), FormatError> {
+        record.append_to(self.layout(), &mut self.bytes)
     }
 
     /// Appends a Link Info record using this region's message record layout.

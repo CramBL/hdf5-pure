@@ -5,17 +5,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
-use crate::bytes;
 
-use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_message_read::{LinkMessageView, LinkPrefix};
+use crate::link_message_read::{LinkMessageView, LinkPrefix, LinkTargetView};
 use crate::link_message_v1::LinkProjectionError;
+use crate::link_message_write::PreparedLink;
 use crate::width::OffsetWidth;
-use crate::width::UintWidth;
 
 /// The type of a link in an HDF5 v2 group.
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +37,28 @@ impl LinkTarget {
             filename,
             object_path,
         }))
+    }
+    pub(crate) fn as_view(&self) -> LinkTargetView<'_> {
+        match self {
+            Self::Hard {
+                object_header_address,
+            } => LinkTargetView::Hard {
+                object_header_address: *object_header_address,
+                explicit_type: false,
+            },
+            Self::Indirect(target) => match target.as_ref() {
+                SymbolicLinkTarget::Soft { target_path } => LinkTargetView::Soft {
+                    target_path: target_path.as_bytes(),
+                },
+                SymbolicLinkTarget::External {
+                    filename,
+                    object_path,
+                } => LinkTargetView::External {
+                    filename: filename.as_bytes(),
+                    object_path: object_path.as_bytes(),
+                },
+            },
+        }
     }
 }
 
@@ -225,96 +244,28 @@ impl LinkMessage {
             .map(|(_, range)| range))
     }
 
-    /// Serializes this message's body, the inverse of [`parse`](Self::parse).
+    /// Serializes this message using the canonical field choices of [`Self::prepare`].
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::AddressTooLarge`] if a hard-link target exceeds `offset_width`,
-    /// [`FormatError::DefinedAddressIsUndefined`] if it equals that width's undefined marker, or
-    /// [`FormatError::LengthTooLarge`] if a soft or external target exceeds its two-byte length
-    /// field.
+    /// Returns the errors of [`Self::prepare`].
     pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
-        let mut buf = Vec::new();
-        buf.push(1); // version
+        Ok(self.prepare(offset_width)?.to_bytes())
+    }
 
-        let name_bytes = self.name.as_bytes();
-        let name_len = name_bytes.len();
-        let name_width = UintWidth::smallest_for_len(name_len);
-
-        let is_hard = matches!(self.link_target, LinkTarget::Hard { .. });
-        let has_link_type = !is_hard;
-        let has_creation_order = self.creation_order.is_some();
-        let has_charset = self.charset != CharacterSet::Ascii;
-
-        let mut flags: u8 = 0;
-        // Bits 0-1: size of name length field
-        flags |= name_width.flag_bits();
-        // Bit 2: creation order present
-        if has_creation_order {
-            flags |= 0x04;
-        }
-        // Bit 3: link type present
-        if has_link_type {
-            flags |= 0x08;
-        }
-        // Bit 4: charset present
-        if has_charset {
-            flags |= 0x10;
-        }
-        buf.push(flags);
-
-        if let LinkTarget::Indirect(target) = &self.link_target {
-            buf.push(match target.as_ref() {
-                SymbolicLinkTarget::Soft { .. } => SOFT_LINK,
-                SymbolicLinkTarget::External { .. } => EXTERNAL_LINK,
-            });
-        }
-
-        if let Some(co) = self.creation_order {
-            buf.extend_from_slice(&co.to_le_bytes());
-        }
-
-        if has_charset {
-            buf.push(match self.charset {
-                CharacterSet::Ascii => 0,
-                CharacterSet::Utf8 => 1,
-            });
-        }
-
-        name_width.write(&mut buf, name_len);
-        buf.extend_from_slice(name_bytes);
-
-        match &self.link_target {
-            LinkTarget::Hard {
-                object_header_address,
-            } => bytes::try_write_decoded_address(
-                &mut buf,
-                DecodedStoredAddress::Defined(*object_header_address),
-                offset_width,
-            )?,
-            LinkTarget::Indirect(target) => match target.as_ref() {
-                SymbolicLinkTarget::Soft { target_path } => {
-                    let path_bytes = target_path.as_bytes();
-                    push_link_information_length(&mut buf, path_bytes.len())?;
-                    buf.extend_from_slice(path_bytes);
-                }
-                SymbolicLinkTarget::External {
-                    filename,
-                    object_path,
-                } => {
-                    let mut ext_data = Vec::new();
-                    ext_data.push(0); // flags
-                    ext_data.extend_from_slice(filename.as_bytes());
-                    ext_data.push(0);
-                    ext_data.extend_from_slice(object_path.as_bytes());
-                    ext_data.push(0);
-                    push_link_information_length(&mut buf, ext_data.len())?;
-                    buf.extend_from_slice(&ext_data);
-                }
-            },
-        }
-
-        Ok(buf)
+    /// Prepares a Link body from the borrowed name and supported target.
+    ///
+    /// Uses the smallest name-length width and omits the hard-link type field and the ASCII
+    /// character-set field. Preserves any creation-order field.
+    ///
+    /// # Errors
+    ///
+    /// Returns the name, address, and length-overflow errors of [`PreparedLink::hard`].
+    /// Returns [`FormatError::InvalidLinkTarget`] for an empty path or one containing a NUL,
+    /// or [`FormatError::LengthTooLarge`] if a symbolic target exceeds its two-byte length field.
+    /// The external target size includes its version and flags byte and both NUL terminators.
+    pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'_>, FormatError> {
+        PreparedLink::for_text(self, offset_width)
     }
 
     /// Parses the body of a Link message.
@@ -346,21 +297,6 @@ impl LinkMessage {
             .map_err(LinkProjectionError::into_format)
     }
 }
-
-fn push_link_information_length(buf: &mut Vec<u8>, len: usize) -> Result<(), FormatError> {
-    let field: u16 = len.narrow_or_else(|| FormatError::LengthTooLarge {
-        length: len.to_u64(),
-        length_size: LINK_INFORMATION_LENGTH_SIZE,
-    })?;
-    buf.extend_from_slice(&field.to_le_bytes());
-    Ok(())
-}
-
-/// The two-byte target length for soft and external links, defined in "The Link Message" of
-/// the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
-const LINK_INFORMATION_LENGTH_SIZE: u8 = 2;
 
 /// The link type of a hard link, from the Link type table of "The Link Message" of the [format
 /// specification, version 4.0][spec].

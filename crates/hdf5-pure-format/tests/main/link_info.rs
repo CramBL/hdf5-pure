@@ -1,15 +1,19 @@
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FormatError, OffsetWidth, StoredAddress};
+use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::{
     LinkCreationOrderIndex, LinkInfoMessage, MessageFlags, MessageRecordLayout, ObjectHeaderPrefix,
-    ObjectHeaderWriter,
+    ObjectHeaderWriter, PreparedLink, PreparedLinkRecord,
 };
+use hdf5_pure_format::CharacterSet;
 use hdf5_pure_format::MessageType;
 use rstest::rstest;
 use test_util::link_info::{Body, CreationIndex, Width};
+use test_util::link_message::HardLink;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType as FixtureMessageType;
 use test_util::object_header::v2::{Header, HeaderFlags};
+use test_util::widths::Widths;
 
 #[rstest]
 #[case::compact(&[0, 0x80, 0xff, 0xff, 0xff, 0xff], 0x80)]
@@ -202,7 +206,7 @@ fn link_info_bounded_output_preserves_guards_and_supports_reuse(
 #[rstest]
 #[case::one_byte_chunk_size(HeaderFlags::default(), 16)]
 #[case::two_byte_chunk_size(HeaderFlags(1) | HeaderFlags::TRACKS_CREATION_ORDER, 225)]
-fn object_header_writes_checked_link_info_before_owned_records(
+fn group_header_writes_link_info_and_group_info_before_supplemental_records(
     #[case] flags: HeaderFlags,
     #[case] padding: usize,
 ) {
@@ -213,6 +217,7 @@ fn object_header_writes_checked_link_info_before_owned_records(
     let expected = Header::new()
         .flags(flags)
         .message(Message::new(FixtureMessageType::LINK_INFO, &body))
+        .message(Message::new(FixtureMessageType::GROUP_INFO, &[0, 0]))
         .message(Message::new(FixtureMessageType::NIL, &padding).with_creation_order(17))
         .build();
     let mut writer = ObjectHeaderWriter::with_prefix(ObjectHeaderPrefix {
@@ -222,7 +227,102 @@ fn object_header_writes_checked_link_info_before_owned_records(
     writer.add_message_record(MessageType::NIL, padding, MessageFlags::NONE, 17);
 
     let info = LinkInfoMessage::compact(OffsetWidth::Four, Some(42), true);
-    assert_eq!(writer.serialize_with_link_info(&info).unwrap(), expected);
+    assert_eq!(
+        writer
+            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::empty())
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn a_group_header_rejects_a_hard_link_at_a_different_offset_width() {
+    let info = LinkInfoMessage::compact(OffsetWidth::Four, None, false);
+    let link = hard_link_record(OffsetWidth::Two);
+
+    assert_eq!(
+        ObjectHeaderWriter::new()
+            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::once(Ok(link)))
+            .unwrap_err(),
+        FormatError::LinkOffsetWidthMismatch {
+            group_width: 4,
+            link_width: 2,
+        }
+    );
+}
+
+#[test]
+fn a_group_header_rejects_inline_links_with_dense_storage() {
+    let info = LinkInfoMessage::new(
+        OffsetWidth::Four,
+        None,
+        Some(StoredAddress::new(0x1234)),
+        Some(StoredAddress::new(0x5678)),
+        LinkCreationOrderIndex::Absent,
+    )
+    .unwrap();
+    let link = hard_link_record(OffsetWidth::Four);
+
+    assert_eq!(
+        ObjectHeaderWriter::new()
+            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::once(Ok(link)))
+            .unwrap_err(),
+        FormatError::InlineLinksWithDenseStorage {
+            heap_address: 0x1234,
+        }
+    );
+}
+
+#[rstest]
+#[case::link(
+    MessageType::LINK,
+    FixtureMessageType::LINK,
+    HardLink::new("child", 0x1234).build(Widths::new(2, 8)),
+)]
+#[case::link_info(
+    MessageType::LINK_INFO,
+    FixtureMessageType::LINK_INFO,
+    Body::new(Width::Four, None, None, None, CreationIndex::Absent).unwrap().build(),
+)]
+#[case::group_info(MessageType::GROUP_INFO, FixtureMessageType::GROUP_INFO, vec![0, 0])]
+#[case::symbol_table(
+    MessageType::SYMBOL_TABLE,
+    FixtureMessageType::SYMBOL_TABLE,
+    vec![0x12, 0, 0, 0, 0x34, 0, 0, 0],
+)]
+fn ordinary_serialization_accepts_queued_group_records_that_group_serialization_rejects(
+    #[case] message_type: MessageType,
+    #[case] fixture_type: FixtureMessageType,
+    #[case] body: Vec<u8>,
+) {
+    let expected = Header::new()
+        .message(Message::new(fixture_type, &body))
+        .build();
+    let info = LinkInfoMessage::compact(OffsetWidth::Four, None, false);
+    let mut writer = ObjectHeaderWriter::new();
+    writer.add_message(message_type, body);
+
+    assert_eq!(
+        writer
+            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::empty())
+            .unwrap_err(),
+        FormatError::QueuedGroupLinkMessage(fixture_type.0)
+    );
+    assert_eq!(writer.serialize().unwrap(), expected);
+}
+
+fn hard_link_record(offset_width: OffsetWidth) -> PreparedLinkRecord<'static> {
+    PreparedLinkRecord::new(
+        PreparedLink::hard(
+            offset_width,
+            "child",
+            StoredAddress::new(0x4321),
+            None,
+            CharacterSet::Ascii,
+        )
+        .unwrap(),
+    )
+    .unwrap()
 }
 
 #[rstest]
