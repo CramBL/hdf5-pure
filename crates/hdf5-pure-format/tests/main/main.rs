@@ -19,6 +19,7 @@ mod fractal_heap_huge;
 mod fractal_heap_placement;
 mod fractal_heap_tiny;
 mod group_info;
+mod link_info;
 mod link_message_v1;
 mod link_projection;
 mod nested_datatype;

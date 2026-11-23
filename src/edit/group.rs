@@ -653,22 +653,22 @@ impl LinkCreationOrder {
 
 /// Returns the first parsed Link Info message, with its record start and body range.
 ///
-/// Returns `None` if every Link Info message is absent or unparseable.
+/// Returns [`None`] if the region contains no Link Info message.
 ///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] if a message body extends past the region.
+/// Returns [`Error::EditUnsupported`] if a message body extends past the region, and propagates
+/// errors from [`LinkInfoMessage::parse_with_offset_width`].
 pub(super) fn find_link_info(
     region: &OhRegion,
 ) -> Result<Option<(usize, core::ops::Range<usize>, LinkInfoMessage)>, Error> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::LINK_INFO
-            && let Ok(info) = LinkInfoMessage::parse_with_offset_width(
+        if msg_type == MessageType::LINK_INFO {
+            let info = LinkInfoMessage::parse_with_offset_width(
                 &region[body..body_end],
                 region.widths().offsets,
-            )
-        {
+            )?;
             return Ok(Some((p, body..body_end, info)));
         }
         p = body_end;
@@ -824,6 +824,17 @@ mod tests {
 
     mod link_messages;
     mod reference_count;
+
+    #[test]
+    fn link_creation_order_rejects_reserved_link_info_flags() {
+        let widths = hdf5_pure_format::__private::FormatWidths::from_sizes(2, 8).unwrap();
+        let mut region = OhRegion::empty(widths, ObjectHeaderPrefix::PLAIN);
+        region.push(MessageType::LINK_INFO, &[0, 0x80, 0xff, 0xff, 0xff, 0xff]);
+        let Err(Error::Format(error)) = super::LinkCreationOrder::for_region(&region) else {
+            panic!("expected a Link Info format error");
+        };
+        assert_eq!(error, crate::FormatError::InvalidLinkInfoFlags(0x80));
+    }
 
     #[rstest]
     #[case::ends(&["a", "c"], &["b"])]

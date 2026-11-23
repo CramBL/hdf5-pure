@@ -926,6 +926,10 @@ pub enum FormatError {
     InvalidLayoutVersion(u8),
     /// Invalid length size (must be 2, 4, or 8).
     InvalidLengthSize(u8),
+    /// A Link Info message sets reserved bits in its flags byte.
+    ///
+    /// Contains the complete flags byte.
+    InvalidLinkInfoFlags(u8),
     /// Invalid Link Info message version.
     InvalidLinkInfoVersion(u8),
     /// A name a builder was given for a dataset, a group, or a committed datatype is not a
@@ -2274,6 +2278,9 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidLinkType(t) => {
                 write!(f, "invalid link type: {t}")
+            }
+            Self::InvalidLinkInfoFlags(flags) => {
+                write!(f, "reserved bits in Link Info flags: {flags:#04x}")
             }
             Self::InvalidLinkInfoVersion(v) => {
                 write!(f, "invalid link info message version: {v}")

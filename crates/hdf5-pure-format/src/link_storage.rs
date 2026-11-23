@@ -56,13 +56,6 @@ impl GroupLinkStorage {
         offset_width: OffsetWidth,
     ) -> Result<Self, LinkStorageError> {
         let info = LinkInfoMessage::parse_with_offset_width(data, offset_width)?;
-        let flags = data
-            .get(1)
-            .copied()
-            .ok_or(LinkStorageError::StorageAddresses)?;
-        if flags & LINK_INFO_RESERVED_FLAGS != 0 {
-            return Err(LinkStorageError::Flags(flags));
-        }
         if info.serialize(offset_width)?.len() != data.len() {
             return Err(LinkStorageError::TrailingBytes);
         }
@@ -908,7 +901,10 @@ pub enum LinkStorageError {
 
 impl From<FormatError> for LinkStorageError {
     fn from(error: FormatError) -> Self {
-        Self::Format(error)
+        match error {
+            FormatError::InvalidLinkInfoFlags(flags) => Self::Flags(flags),
+            error => Self::Format(error),
+        }
     }
 }
 
@@ -979,12 +975,6 @@ const CREATION_ORDER_PRESENT: u8 = 0x04;
 const LINK_TYPE_PRESENT: u8 = 0x08;
 /// Bit 4 of the Link flags, declaring the character set in the table cited by [`LINK_VERSION`].
 const CHARSET_PRESENT: u8 = 0x10;
-/// Bits 2 through 7, reserved in version 0 Link Info flags.
-///
-/// Defined in "The Link Info Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
-const LINK_INFO_RESERVED_FLAGS: u8 = 0xfc;
 /// The eight-byte creation-index field from the Link message table cited by [`LINK_VERSION`].
 const CREATION_ORDER_LEN: usize = 8;
 /// The two-byte symbolic-target length field from the table cited by [`LINK_VERSION`].

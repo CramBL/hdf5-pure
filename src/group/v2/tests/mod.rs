@@ -28,6 +28,23 @@ mod huge_links;
 #[cfg(feature = "std")]
 mod stored;
 
+#[test]
+fn group_reading_rejects_reserved_link_info_flags() {
+    let widths = FormatWidths::from_sizes(2, 8).unwrap();
+    let body = [0, 0x80, 0xff, 0xff, 0xff, 0xff];
+    let bytes = test_util::object_header::v2::Header::new()
+        .message(test_util::object_header::Message::new(
+            test_util::object_header::MessageType::LINK_INFO,
+            &body,
+        ))
+        .build();
+    let header = ObjectHeader::parse_with_widths(&bytes, AccessMode::ReadOnly, 0, widths).unwrap();
+    assert_eq!(
+        find_link_info(&header, widths.offsets).unwrap_err(),
+        FormatError::InvalidLinkInfoFlags(0x80),
+    );
+}
+
 #[rstest::rstest]
 #[case::present(true)]
 #[case::absent(false)]

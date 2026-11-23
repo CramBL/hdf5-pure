@@ -58,6 +58,9 @@ impl LinkInfoMessage {
         }
 
         let flags = data[1];
+        if flags & !(TRACKS_CREATION_ORDER | INDEXES_CREATION_ORDER) != 0 {
+            return Err(FormatError::InvalidLinkInfoFlags(flags));
+        }
         let has_max_creation_order = flags & TRACKS_CREATION_ORDER != 0;
         let has_creation_order_index = flags & INDEXES_CREATION_ORDER != 0;
 
