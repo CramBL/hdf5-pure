@@ -32,8 +32,8 @@ use crate::object_header::ObjectHeaderChunk;
 use crate::object_header::ParseContext;
 use crate::object_header::v2::chunk::RootChunk;
 use crate::object_header::v2::collector::HeaderCollector;
+use crate::width::FormatWidths;
 use crate::width::UintWidth;
-use crate::width::{FormatWidths, OffsetWidth};
 
 mod allocation;
 mod chunk;
@@ -381,76 +381,54 @@ impl ObjectHeaderPrefix {
     ///
     /// The Size of Chunk #0 field takes the fewest bytes that hold the length of `messages`.
     pub fn encode_header(self, messages: &[u8]) -> Vec<u8> {
-        self.encode_header_with(messages.len(), |buf| buf.extend_from_slice(messages))
-    }
-
-    /// Returns a version 2 object header of one chunk, and calls `write_messages` to append its
-    /// `messages_len` bytes of message records.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `write_messages` appends a length other than `messages_len`.
-    pub fn encode_header_with(
-        self,
-        messages_len: usize,
-        write_messages: impl FnOnce(&mut Vec<u8>),
-    ) -> Vec<u8> {
-        self.encode_header_at_width(
-            UintWidth::smallest_for_len(messages_len),
-            messages_len,
-            write_messages,
-        )
-    }
-
-    fn encode_header_at_width(
-        self,
-        width: UintWidth,
-        messages_len: usize,
-        write_messages: impl FnOnce(&mut Vec<u8>),
-    ) -> Vec<u8> {
-        let prefix_len = self.prefix_len(width);
-        let mut buf = Vec::with_capacity(prefix_len + messages_len + CHECKSUM_LEN);
+        let messages_len = messages.len();
+        let width = UintWidth::smallest_for_len(messages_len);
+        let mut buf = Vec::with_capacity(self.prefix_len(width) + messages_len + CHECKSUM_LEN);
         self.write_prefix(&mut buf, width, messages_len);
-        write_messages(&mut buf);
-        assert_eq!(
-            buf.len(),
-            prefix_len + messages_len,
-            "the messages written differ from the length the header declares"
-        );
+        buf.extend_from_slice(messages);
         append_checksum(&mut buf);
         buf
     }
 
-    /// Returns the prefix reservation for a header with an eight-byte chunk length field.
-    pub(crate) fn reserved_prefix_len(self) -> usize {
-        self.prefix_len(UintWidth::Eight)
+    /// Returns the shortest prefix length that can encode `messages_len` as its chunk size.
+    pub(crate) fn prefix_len_for_messages(self, messages_len: usize) -> usize {
+        self.prefix_len(UintWidth::smallest_for_len(messages_len))
     }
 
-    /// Finishes a header whose messages start after [`Self::reserved_prefix_len`] bytes.
+    /// Finishes a header whose messages start after `start` bytes.
     ///
     /// Chooses the smallest chunk length width, shifts the messages to that prefix length,
     /// and writes the prefix and checksum.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if the buffer is shorter than the prefix reservation,
-    /// or [`FormatError::AllocationFailed`] if reserving the checksum fails.
-    pub(crate) fn finish_header(self, mut buf: Vec<u8>) -> Result<Vec<u8>, FormatError> {
-        let start = self.reserved_prefix_len();
-        let messages_len = buf.len().checked_sub(start).ok_or_else(|| {
+    /// Returns [`FormatError::Internal`] if `start` exceeds the buffer length, or
+    /// [`FormatError::AllocationFailed`] if reserving space for the final prefix and checksum
+    /// fails.
+    pub(crate) fn finish_header(
+        self,
+        mut buf: Vec<u8>,
+        start: usize,
+    ) -> Result<Vec<u8>, FormatError> {
+        let end = buf.len();
+        let messages_len = end.checked_sub(start).ok_or_else(|| {
             FormatError::Internal("object header buffer lacks its prefix reservation".into())
         })?;
         let width = UintWidth::smallest_for_len(messages_len);
         let prefix_len = self.prefix_len(width);
         let header_len = prefix_len + messages_len;
-        buf.copy_within(start.., prefix_len);
-        buf.truncate(header_len);
-        self.write_prefix_into(&mut buf[..prefix_len], width, messages_len);
-        buf.try_reserve_exact(CHECKSUM_LEN)
+        let additional = (header_len + CHECKSUM_LEN).saturating_sub(end);
+        buf.try_reserve_exact(additional)
             .map_err(|source| FormatError::AllocationFailed {
-                values: CHECKSUM_LEN,
+                values: additional,
                 source,
             })?;
+        if prefix_len != start {
+            buf.resize(end.max(header_len), 0);
+            buf.copy_within(start..end, prefix_len);
+        }
+        buf.truncate(header_len);
+        self.write_prefix_into(&mut buf[..prefix_len], width, messages_len);
         append_checksum(&mut buf);
         buf.shrink_to_fit();
         Ok(buf)
@@ -899,10 +877,6 @@ impl<'a> PreparedLinkRecord<'a> {
 
     pub(crate) fn encoded_size(&self, layout: MessageRecordLayout) -> usize {
         layout.prefix_len() + usize::from(self.body_len)
-    }
-
-    pub(crate) fn hard_offset_width(&self) -> Option<OffsetWidth> {
-        self.body.hard_offset_width()
     }
 
     /// Appends the record using `layout`. `output` needs spare capacity for the prefix and body.
