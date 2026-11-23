@@ -84,13 +84,17 @@ fn decode_heap_payload(
     // `H5Z__filter_shuffle` in `H5Zshuffle.c`, HDF5 2.2.0, shuffles at the width in its first
     // client value. `filters::decompress_chunk` reverses a shuffle at the element size of its
     // context, one byte here, so an active shuffle filter of another width is rejected.
-    let wide_shuffle = pipeline.filters.iter().enumerate().any(|(index, filter)| {
-        let skipped = u32::try_from(index)
-            .ok()
-            .and_then(|bit| mask.checked_shr(bit))
-            .is_some_and(|mask| mask & 1 == 1);
-        filter.filter_id == FILTER_SHUFFLE && !skipped && filter.client_data != [1]
-    });
+    let wide_shuffle = pipeline
+        .filters()
+        .iter()
+        .enumerate()
+        .any(|(index, filter)| {
+            let skipped = u32::try_from(index)
+                .ok()
+                .and_then(|bit| mask.checked_shr(bit))
+                .is_some_and(|mask| mask & 1 == 1);
+            filter.filter_id == FILTER_SHUFFLE && !skipped && filter.client_data != [1]
+        });
     if wide_shuffle {
         return Err(FilterError::UnsupportedFilter(FILTER_SHUFFLE));
     }
@@ -835,15 +839,16 @@ mod tests {
             header.filtering = FractalHeapFiltering::Filtered {
                 root_direct_block_size: 91,
                 root_filter_mask: 0,
-                pipeline: FilterPipeline {
-                    version: PIPELINE_VERSION_TWO,
-                    filters: vec![FilterDescription {
+                pipeline: FilterPipeline::new(
+                    PIPELINE_VERSION_TWO,
+                    vec![FilterDescription {
                         filter_id: crate::filter_pipeline::FILTER_DEFLATE,
                         name: None,
                         flags: 0,
                         client_data: vec![6],
                     }],
-                },
+                )
+                .unwrap(),
             };
         }
         let id = parse_id(&header, &bytes);
@@ -921,10 +926,7 @@ mod tests {
     ) {
         let mut heap = FilteredHeap::new(
             true,
-            FilterPipeline {
-                version: PIPELINE_VERSION_TWO,
-                filters: Vec::new(),
-            },
+            FilterPipeline::new(PIPELINE_VERSION_TWO, Vec::new()).unwrap(),
             |_block| {},
         );
         if !indirect {
@@ -1041,7 +1043,7 @@ mod tests {
             test_data::deflate_pipeline(),
             test_data::filter_pipeline(vec![
                 test_data::shuffle(1),
-                test_data::deflate_pipeline().filters[0].clone(),
+                test_data::deflate_pipeline().filters()[0].clone(),
             ])
         )]
         pipeline: FilterPipeline,
@@ -1407,10 +1409,10 @@ mod tests {
 
     #[rstest]
     #[case::deflate(test_data::deflate_pipeline(), 0)]
-    #[case::checksum_then_deflate(test_data::filter_pipeline(vec![huge_fletcher(), test_data::deflate_pipeline().filters[0].clone()]), 0)]
-    #[case::deflate_then_checksum(test_data::filter_pipeline(vec![test_data::deflate_pipeline().filters[0].clone(), huge_fletcher()]), 0)]
-    #[case::skipped_unknown(test_data::filter_pipeline(vec![huge_unknown(), test_data::deflate_pipeline().filters[0].clone()]), 1)]
-    #[case::skipped_wide_shuffle(test_data::filter_pipeline(vec![test_data::shuffle(4), test_data::deflate_pipeline().filters[0].clone()]), 1)]
+    #[case::checksum_then_deflate(test_data::filter_pipeline(vec![huge_fletcher(), test_data::deflate_pipeline().filters()[0].clone()]), 0)]
+    #[case::deflate_then_checksum(test_data::filter_pipeline(vec![test_data::deflate_pipeline().filters()[0].clone(), huge_fletcher()]), 0)]
+    #[case::skipped_unknown(test_data::filter_pipeline(vec![huge_unknown(), test_data::deflate_pipeline().filters()[0].clone()]), 1)]
+    #[case::skipped_wide_shuffle(test_data::filter_pipeline(vec![test_data::shuffle(4), test_data::deflate_pipeline().filters()[0].clone()]), 1)]
     #[case::all_skipped(test_data::filter_pipeline(vec![huge_unknown(), test_data::shuffle(4)]), 3)]
     #[case::empty(test_data::filter_pipeline(vec![]), 0)]
     #[cfg(feature = "deflate")]
@@ -1511,7 +1513,7 @@ mod tests {
         let pipeline = if checksum_before_deflate {
             test_data::filter_pipeline(vec![
                 huge_fletcher(),
-                test_data::deflate_pipeline().filters[0].clone(),
+                test_data::deflate_pipeline().filters()[0].clone(),
             ])
         } else {
             test_data::deflate_pipeline()
@@ -2192,7 +2194,7 @@ mod tests {
 
     impl HugeFilters {
         fn new(pipeline: FilterPipeline, bits: u32) -> Self {
-            let mask = PipelineFilterMask::from_raw_bits(bits, pipeline.filters.len()).unwrap();
+            let mask = PipelineFilterMask::from_raw_bits(bits, pipeline.filters().len()).unwrap();
             assert_eq!(mask.uninterpreted_bits(), 0);
             Self { pipeline, mask }
         }
@@ -2230,7 +2232,7 @@ mod tests {
             let (encoded, mask) = if let Some(HugeFilters { pipeline, mask }) = filters {
                 let active = test_data::filter_pipeline(
                     pipeline
-                        .filters
+                        .filters()
                         .iter()
                         .enumerate()
                         .filter(|(index, _)| !mask.is_skipped(*index).unwrap())

@@ -1,6 +1,5 @@
 //! Group-link inspection, storage selection, and placement for staged edits.
 
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use hdf5_pure_core::__private::NonZeroByteLength;
@@ -301,7 +300,7 @@ impl WriteEngine {
                 MessageType::FILTER_PIPELINE => {
                     filtered |= record.flags.is_shared()
                         || !filter_pipeline::parse_filter_pipeline(record.body)?
-                            .filters
+                            .filters()
                             .is_empty();
                 }
                 _ => {}
@@ -458,21 +457,19 @@ pub(super) fn link_message_region(
                 "a group's link metadata has object-header flags this editor cannot reproduce",
             ));
         }
-        let body = if message.msg_type == MessageType::FILTER_PIPELINE {
-            Cow::Owned(
-                filter_pipeline::parse_filter_pipeline(&message.data)?
-                    .serialize()
-                    .map_err(filter_pipeline::map_filter_pipeline_error)?,
-            )
-        } else {
-            Cow::Borrowed(unpadded_body(message, widths.offsets)?)
-        };
-        // Filter serialization does not increase the parsed lengths. A version 1 header stores
-        // each message size in two bytes, so every body fits `OBJECT_HEADER_MESSAGE_MAX`.
+        if message.msg_type == MessageType::FILTER_PIPELINE {
+            let pipeline = filter_pipeline::parse_filter_pipeline(&message.data)?;
+            region.push_filter_pipeline(message.flags == MessageFlags::CONSTANT, &pipeline)?;
+            continue;
+        }
+        let body = unpadded_body(message, widths.offsets)?;
+        // The unpadded body fits the two-byte version 2 size field because the padded body fits
+        // the two-byte version 1 size field (section `subsubsec_fmt4_dataobject_hdr_prefix_one`,
+        // version 4.0).
         let record =
             region
                 .layout()
-                .record_with_creation_index(message.msg_type, message.flags, 0, &body);
+                .record_with_creation_index(message.msg_type, message.flags, 0, body);
         region.push_bytes(&record);
     }
     ensure_group_info(&mut region)?;

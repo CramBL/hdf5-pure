@@ -150,7 +150,7 @@ use crate::file_writer::source::Plan;
 use crate::file_writer::source::SourceLink;
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
-    FilterPipeline,
+    FilterPipeline, RetainedFilterPipeline,
 };
 use crate::libver::LibVer;
 use crate::object_graph::TraversalBudget;
@@ -796,7 +796,8 @@ fn emit_dataset(
     let datatype = ds.datatype()?;
     let dataspace = ds.dataspace()?;
     let layout = ds.data_layout()?;
-    let pipeline = ds.filter_pipeline_parsed()?;
+    let pipeline_source = ds.filter_pipeline_source()?;
+    let (pipeline, retained_pipeline) = pipeline_source.read()?.unzip();
 
     check_datatype(&datatype, &format!("dataset {path}"))?;
     check_layout(&layout, path)?;
@@ -871,7 +872,8 @@ fn emit_dataset(
         }
         db.fill = fill.map(|bytes| StagedFill::source(datatype.clone(), bytes));
         db.with_unallocated_storage(datatype, &dims);
-        db.chunk_options.unallocated_pipeline = ds.filter_pipeline_message_bytes()?;
+        db.chunk_options.unallocated_pipeline =
+            retained_pipeline.map(RetainedFilterPipeline::into_owned);
         carry_shape_and_pipeline(
             db,
             &dims,
@@ -987,7 +989,7 @@ fn emit_dataset(
                 &chunk_dims,
                 elem_size,
                 *flags,
-                ds.filter_pipeline_message_bytes()?,
+                retained_pipeline.map(RetainedFilterPipeline::into_owned),
                 meta,
                 Box::new(provider),
             );
@@ -1921,13 +1923,13 @@ fn check_pipeline(
     // deflate on one dataset — they fill the same byte-compressor slot — so a
     // foreign pipeline carrying both cannot be reproduced. Refused here, by
     // name, rather than left to surface as the builder's combination error.
-    let has = |id| p.filters.iter().any(|f| f.filter_id == id);
+    let has = |id| p.filters().iter().any(|f| f.filter_id == id);
     if has(FILTER_LZF) && has(FILTER_DEFLATE) {
         return Err(Error::RepackUnsupported(format!(
             "dataset {path}: an lzf + deflate pipeline cannot be re-encoded faithfully"
         )));
     }
-    p.filters
+    p.filters()
         .iter()
         .map(|f| {
             let kind = match f.filter_id {

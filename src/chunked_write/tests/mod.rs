@@ -759,7 +759,7 @@ fn header_lengths_and_filter_parameters_match_geometry(
         header.pipeline_message.as_ref().map(|message| {
             FilterPipeline::parse(message)
                 .unwrap()
-                .filters
+                .into_filters()
                 .into_iter()
                 .map(|filter| (filter.filter_id, filter.client_data))
                 .collect::<Vec<_>>()
@@ -1247,7 +1247,7 @@ fn the_scale_offset_fill_availability_reaches_the_filter_parameters() {
         )]);
         let pl = options.build_pipeline(&ctx, fill).unwrap().unwrap();
         let f = pl
-            .filters
+            .filters()
             .iter()
             .find(|f| f.filter_id == FILTER_SCALEOFFSET)
             .expect("the scale-offset filter");
@@ -1295,9 +1295,9 @@ fn the_scale_offset_fill_availability_reaches_the_filter_parameters() {
         .build_pipeline(&ctx, FillPattern::UNKNOWN)
         .unwrap()
         .unwrap();
-    assert_eq!(pipeline.filters.len(), 1);
-    assert_eq!(pipeline.filters[0].filter_id, FILTER_SCALEOFFSET);
-    assert_eq!(&pipeline.filters[0].client_data[7..10], &[0, 0, 0]);
+    assert_eq!(pipeline.filters().len(), 1);
+    assert_eq!(pipeline.filters()[0].filter_id, FILTER_SCALEOFFSET);
+    assert_eq!(&pipeline.filters()[0].client_data[7..10], &[0, 0, 0]);
 
     // Check the builder default independently of native feature and target availability.
     let mut db = crate::type_builders::DatasetBuilder::new("d");
@@ -1315,9 +1315,9 @@ fn the_scale_offset_fill_availability_reaches_the_filter_parameters() {
         .build_pipeline(&ctx, FillPattern::UNKNOWN)
         .unwrap()
         .unwrap();
-    assert_eq!(pipeline.filters.len(), 1);
-    assert_eq!(pipeline.filters[0].filter_id, FILTER_DEFLATE);
-    assert_eq!(pipeline.filters[0].client_data, [6]);
+    assert_eq!(pipeline.filters().len(), 1);
+    assert_eq!(pipeline.filters()[0].filter_id, FILTER_DEFLATE);
+    assert_eq!(pipeline.filters()[0].client_data, [6]);
 }
 
 #[rstest]
@@ -1331,9 +1331,9 @@ fn pipeline_preserves_deflate_level_parameters(#[case] level: DeflateLevel) {
         .build_pipeline(&ChunkContext::basic(&[], 8), FillPattern::ZERO)
         .unwrap()
         .unwrap();
-    assert_eq!(pl.filters.len(), 1);
-    assert_eq!(pl.filters[0].filter_id, FILTER_DEFLATE);
-    assert_eq!(pl.filters[0].client_data, [u32::from(level.get())]);
+    assert_eq!(pl.filters().len(), 1);
+    assert_eq!(pl.filters()[0].filter_id, FILTER_DEFLATE);
+    assert_eq!(pl.filters()[0].client_data, [u32::from(level.get())]);
 }
 
 #[test]
@@ -1347,10 +1347,10 @@ fn chunk_options_pipeline_shuffle_deflate_fletcher32() {
         .build_pipeline(&ChunkContext::basic(&[], 8), FillPattern::ZERO)
         .unwrap()
         .unwrap();
-    assert_eq!(pl.filters.len(), 3);
-    assert_eq!(pl.filters[0].filter_id, FILTER_SHUFFLE);
-    assert_eq!(pl.filters[1].filter_id, FILTER_DEFLATE);
-    assert_eq!(pl.filters[2].filter_id, FILTER_FLETCHER32);
+    assert_eq!(pl.filters().len(), 3);
+    assert_eq!(pl.filters()[0].filter_id, FILTER_SHUFFLE);
+    assert_eq!(pl.filters()[1].filter_id, FILTER_DEFLATE);
+    assert_eq!(pl.filters()[2].filter_id, FILTER_FLETCHER32);
 }
 
 // Repeated setters replace the earlier level at its original position.
@@ -1407,7 +1407,11 @@ fn a_pushed_pipeline_keeps_its_order_and_its_optional_flags() {
         .build_pipeline(&ChunkContext::basic(&[], 8), FillPattern::ZERO)
         .unwrap()
         .unwrap();
-    let stored: Vec<(u16, u16)> = pl.filters.iter().map(|f| (f.filter_id, f.flags)).collect();
+    let stored: Vec<(u16, u16)> = pl
+        .filters()
+        .iter()
+        .map(|f| (f.filter_id, f.flags))
+        .collect();
     assert_eq!(
         stored,
         [
@@ -1468,7 +1472,7 @@ fn compatible_filter_requests_still_build() {
             .build_pipeline(&f64_ctx(&[64]), FillPattern::ZERO)
             .unwrap()
             .unwrap();
-        let ids: Vec<u16> = pl.filters.iter().map(|f| f.filter_id).collect();
+        let ids: Vec<u16> = pl.filters().iter().map(|f| f.filter_id).collect();
         assert_eq!(&ids, expected);
     }
 }

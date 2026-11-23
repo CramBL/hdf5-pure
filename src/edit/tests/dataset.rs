@@ -454,15 +454,16 @@ fn a_chunked_overwrite_stores_its_partial_edge_chunks_raw_under_the_layout_flag(
     #[values(false, true)] stored_raw: bool,
 ) {
     let element_size = crate::convert::nz(4);
-    let pipeline = FilterPipeline {
-        version: FILTER_PIPELINE_VERSION_TWO,
-        filters: vec![FilterDescription {
+    let pipeline = FilterPipeline::new(
+        FILTER_PIPELINE_VERSION_TWO,
+        vec![FilterDescription {
             filter_id: FILTER_DEFLATE,
             name: None,
             flags: 0,
             client_data: vec![6],
         }],
-    };
+    )
+    .unwrap();
     let padding = PaddingFill::Value(17_i32.to_le_bytes().to_vec());
     let values: Vec<u8> = (0..shape.iter().product::<u64>())
         .flat_map(|value| i32::try_from(value).unwrap().to_le_bytes())

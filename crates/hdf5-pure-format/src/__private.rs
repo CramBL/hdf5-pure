@@ -180,6 +180,8 @@ pub use crate::fill_value::serialize_fill_value_message_v3;
 pub use crate::filter_pipeline::FilterDescription;
 pub use crate::filter_pipeline::FilterPipeline;
 pub use crate::filter_pipeline::FilterPipelineError;
+pub use crate::filter_pipeline::FilterPipelineOutputTooSmall;
+pub use crate::filter_pipeline::PreparedFilterPipeline;
 pub use crate::filter_pipeline::VERSION_TWO as FILTER_PIPELINE_VERSION_TWO;
 pub use crate::fixed_array::FixedArrayDataBlock;
 pub use crate::fixed_array::FixedArrayDataBlockRef;

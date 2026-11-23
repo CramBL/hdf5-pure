@@ -1,27 +1,17 @@
-use hdf5_pure_format::__private::{FilterDescription, FilterPipeline, FilterPipelineError};
+use hdf5_pure_format::__private::{
+    FilterDescription, FilterPipeline, FilterPipelineError, FilterPipelineOutputTooSmall,
+    MessageRecordLayout, PreparedFilterPipeline,
+};
 use hdf5_pure_format::FormatError;
 use rstest::rstest;
 use test_util::filter_pipeline::{Pipeline, Version};
+use test_util::object_header::MessageType as FixtureMessageType;
 
 #[rstest]
 #[case::version_one(Version::One)]
 #[case::version_two(Version::Two)]
 fn decoded_filters_preserve_names_flags_values_and_order(#[case] version: Version) {
-    let mut fixture = Pipeline::new(version);
-    fixture
-        .push(
-            255,
-            (version == Version::One).then_some("predefined"),
-            0,
-            &[7],
-        )
-        .unwrap();
-    fixture.push(256, Some(""), 0x03, &[u32::MAX, 14]).unwrap();
-    fixture
-        .push(40_500, Some("custom"), 0xfe, &[0, 1, 0x1234_5678])
-        .unwrap();
-    fixture.push(u16::MAX, None, 1, &[]).unwrap();
-
+    let fixture = representative_pipeline(version);
     assert_eq!(
         FilterPipeline::parse(&fixture.build()).unwrap(),
         expected_pipeline(&fixture)
@@ -36,31 +26,28 @@ fn parser_ignores_bytes_after_an_empty_pipeline(#[case] version: Version) {
     bytes.extend_from_slice(&[0xa5; 3]);
     assert_eq!(
         FilterPipeline::parse(&bytes).unwrap(),
-        FilterPipeline {
-            version: version.byte(),
-            filters: Vec::new(),
-        }
+        FilterPipeline::new(version.byte(), Vec::new()).unwrap()
     );
 }
 
 #[rstest]
 #[case::version_one(Version::One)]
 #[case::version_two(Version::Two)]
-fn parser_accepts_thirty_two_filters(#[case] version: Version) {
+fn parser_and_writer_accept_thirty_two_filters(#[case] version: Version) {
     let mut fixture = Pipeline::new(version);
     for id in 1..=32 {
         fixture.push(id, None, 0, &[]).unwrap();
     }
-    assert_eq!(
-        FilterPipeline::parse(&fixture.build()).unwrap(),
-        expected_pipeline(&fixture)
-    );
+    let bytes = fixture.build();
+    let expected = expected_pipeline(&fixture);
+    assert_eq!(FilterPipeline::parse(&bytes).unwrap(), expected);
+    assert_eq!(expected.to_bytes(), bytes);
 }
 
 #[rstest]
 #[case::aligned_name(Version::One, 65_527)]
 #[case::unpadded_name(Version::Two, 65_534)]
-fn parser_accepts_the_largest_name_and_client_data_fields(
+fn parser_and_writer_accept_the_largest_name_and_client_data_fields(
     #[case] version: Version,
     #[case] name_len: usize,
 ) {
@@ -73,10 +60,10 @@ fn parser_accepts_the_largest_name_and_client_data_fields(
         .push(FILTER_ID, Some(&name), 0, &client_data)
         .unwrap();
 
-    assert_eq!(
-        FilterPipeline::parse(&fixture.build()).unwrap(),
-        expected_pipeline(&fixture)
-    );
+    let bytes = fixture.build();
+    let expected = expected_pipeline(&fixture);
+    assert_eq!(FilterPipeline::parse(&bytes).unwrap(), expected);
+    assert_eq!(expected.to_bytes(), bytes);
 }
 
 #[rstest]
@@ -262,6 +249,152 @@ fn parser_rejects_an_unaligned_name_length_in_version_one() {
     );
 }
 
+#[rstest]
+#[case::version_one(Version::One)]
+#[case::version_two(Version::Two)]
+fn writer_encodes_fixture_bytes_from_borrowed_owned_and_parsed_pipelines(#[case] version: Version) {
+    let fixture = representative_pipeline(version);
+    let expected = fixture.build();
+    let filters = descriptions(&fixture);
+    let borrowed = PreparedFilterPipeline::new(version.byte(), &filters).unwrap();
+    let owned = FilterPipeline::new(version.byte(), filters.clone()).unwrap();
+    let decoded = FilterPipeline::parse(&expected).unwrap();
+
+    assert_eq!(borrowed.encoded_size(), expected.len());
+    assert_eq!(borrowed.to_bytes(), expected);
+    assert_eq!(owned.to_bytes(), expected);
+    assert_eq!(decoded.to_bytes(), expected);
+    assert_eq!(owned, decoded);
+}
+
+#[rstest]
+#[case::version_one(Version::One)]
+#[case::version_two(Version::Two)]
+fn writer_preserves_the_destination_on_capacity_error_and_guards_on_retry(
+    #[case] version: Version,
+) {
+    let fixture = representative_pipeline(version);
+    let expected = fixture.build();
+    let filters = descriptions(&fixture);
+    let prepared = PreparedFilterPipeline::new(version.byte(), &filters).unwrap();
+    let required = prepared.encoded_size();
+    assert_eq!(required, expected.len());
+    let mut output = vec![0xa5; required + 3];
+    for available in [0, required - 1] {
+        assert_eq!(
+            prepared
+                .write_into(&mut output[1..1 + available])
+                .unwrap_err(),
+            FilterPipelineOutputTooSmall {
+                required,
+                available
+            }
+        );
+        assert_eq!(output, vec![0xa5; required + 3]);
+    }
+    assert_eq!(prepared.write_into(&mut output[1..]).unwrap(), required);
+    let mut guarded = vec![0xa5];
+    guarded.extend_from_slice(&expected);
+    guarded.extend_from_slice(&[0xa5; 2]);
+    assert_eq!(output, guarded);
+}
+
+#[rstest]
+#[case::unknown_version(
+    9, vec![description(300, None, 0x8000, 0); 33],
+    FilterPipelineError::Format(FormatError::InvalidFilterPipelineVersion(9))
+)]
+#[case::too_many_filters(
+    Version::Two.byte(), vec![description(300, None, 0x8000, 0); 33],
+    FilterPipelineError::FieldTooLarge { field: "filter count", value: 33, maximum: 32 }
+)]
+#[case::reserved_flags_before_invalid_name(
+    Version::One.byte(), vec![description(300, Some("a\0b".into()), 0x0100, 0)],
+    FilterPipelineError::Format(FormatError::InvalidFilterFlags { filter_id: 300, flags: 0x0100 })
+)]
+#[case::reserved_flags_version_two(
+    Version::Two.byte(), vec![description(300, None, 0x8000, 0)],
+    FilterPipelineError::Format(FormatError::InvalidFilterFlags { filter_id: 300, flags: 0x8000 })
+)]
+#[case::predefined_name(
+    Version::Two.byte(), vec![description(255, Some(String::new()), 0, 0)],
+    FilterPipelineError::InvalidName { filter_id: 255, reason: "predefined filters have no name field in version 2" }
+)]
+#[case::embedded_null(
+    Version::One.byte(), vec![description(300, Some("a\0b".into()), 0, 0)],
+    FilterPipelineError::InvalidName { filter_id: 300, reason: "name must be ASCII without null bytes" }
+)]
+#[case::non_ascii(
+    Version::Two.byte(), vec![description(300, Some("été".into()), 0, 0)],
+    FilterPipelineError::InvalidName { filter_id: 300, reason: "name must be ASCII without null bytes" }
+)]
+#[case::overlong_aligned_name(
+    Version::One.byte(), vec![description(300, Some("n".repeat(65_528)), 0, 65_536)],
+    FilterPipelineError::FieldTooLarge { field: "filter name length", value: 65_536, maximum: 65_535 }
+)]
+#[case::overlong_unpadded_name(
+    Version::Two.byte(), vec![description(300, Some("n".repeat(65_535)), 0, 0)],
+    FilterPipelineError::FieldTooLarge { field: "filter name length", value: 65_536, maximum: 65_535 }
+)]
+#[case::too_many_client_values(
+    Version::Two.byte(), vec![description(300, None, 0, 65_536)],
+    FilterPipelineError::FieldTooLarge { field: "client data count", value: 65_536, maximum: 65_535 }
+)]
+fn construction_rejects_unencodable_pipelines(
+    #[case] version: u8,
+    #[case] filters: Vec<FilterDescription>,
+    #[case] error: FilterPipelineError,
+) {
+    assert_eq!(
+        PreparedFilterPipeline::new(version, &filters).unwrap_err(),
+        error
+    );
+    assert_eq!(FilterPipeline::new(version, filters).unwrap_err(), error);
+}
+
+#[test]
+fn writer_uses_the_shortest_aligned_name_field_when_reencoding_version_one() {
+    let mut fixture = Pipeline::new(Version::One);
+    fixture.push(FILTER_ID, Some("x"), 0, &[]).unwrap();
+    let expected = fixture.build();
+    let mut bytes = expected.clone();
+    bytes[10] = 16;
+    bytes.extend_from_slice(&[0; 8]);
+
+    let pipeline = FilterPipeline::parse(&bytes).unwrap();
+    assert_eq!(pipeline.prepare().encoded_size(), expected.len());
+    assert_eq!(pipeline.to_bytes(), expected);
+}
+
+#[test]
+fn record_writer_preserves_the_destination_when_the_pipeline_body_exceeds_its_limit() {
+    let values = vec![7; 65_535];
+    let mut fixture = Pipeline::new(Version::Two);
+    fixture.push(FILTER_ID, None, 0, &values).unwrap();
+    let pipeline = expected_pipeline(&fixture);
+    let mut destination = vec![0x37; 17];
+
+    assert_eq!(
+        MessageRecordLayout::PLAIN
+            .write_filter_pipeline(&mut destination, false, &pipeline)
+            .unwrap_err(),
+        FormatError::ObjectHeaderMessageTooLarge {
+            message_type: FixtureMessageType::FILTER_PIPELINE.0,
+            size: fixture.build().len(),
+        }
+    );
+    assert_eq!(destination, vec![0x37; 17]);
+}
+
+fn description(id: u16, name: Option<String>, flags: u16, count: usize) -> FilterDescription {
+    FilterDescription {
+        filter_id: id,
+        name,
+        flags,
+        client_data: vec![0; count],
+    }
+}
+
 fn one_filter(version: Version) -> Pipeline<'static> {
     let mut fixture = Pipeline::new(version);
     fixture
@@ -270,20 +403,40 @@ fn one_filter(version: Version) -> Pipeline<'static> {
     fixture
 }
 
+fn representative_pipeline(version: Version) -> Pipeline<'static> {
+    let mut fixture = Pipeline::new(version);
+    fixture
+        .push(
+            255,
+            (version == Version::One).then_some("predefined"),
+            0,
+            &[7],
+        )
+        .unwrap();
+    fixture.push(256, Some(""), 0x03, &[u32::MAX, 14]).unwrap();
+    fixture
+        .push(40_500, Some("custom"), 0xfe, &[0, 1, 0x1234_5678])
+        .unwrap();
+    fixture.push(u16::MAX, None, 1, &[]).unwrap();
+
+    fixture
+}
+
 fn expected_pipeline(fixture: &Pipeline<'_>) -> FilterPipeline {
-    FilterPipeline {
-        version: fixture.version().byte(),
-        filters: fixture
-            .filters()
-            .iter()
-            .map(|filter| FilterDescription {
-                filter_id: filter.id(),
-                name: filter.name().map(str::to_owned),
-                flags: u16::from(filter.flags()),
-                client_data: filter.client_data().to_vec(),
-            })
-            .collect(),
-    }
+    FilterPipeline::new(fixture.version().byte(), descriptions(fixture)).unwrap()
+}
+
+fn descriptions(fixture: &Pipeline<'_>) -> Vec<FilterDescription> {
+    fixture
+        .filters()
+        .iter()
+        .map(|filter| FilterDescription {
+            filter_id: filter.id(),
+            name: filter.name().map(str::to_owned),
+            flags: u16::from(filter.flags()),
+            client_data: filter.client_data().to_vec(),
+        })
+        .collect()
 }
 
 const FILTER_ID: u16 = 300;

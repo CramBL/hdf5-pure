@@ -418,7 +418,7 @@ impl HugeRecordLayout {
                 }
             }
             FractalHeapFiltering::Filtered { pipeline, .. } => {
-                let count = pipeline.filters.len();
+                let count = pipeline.filters().len();
                 assert!(count <= u32::BITS as usize);
                 let allowed_mask = u32::try_from((1_u64 << count) - 1).unwrap();
                 if heap.heap_id_length >= HUGE_FILTERED_DIRECT_ID_LEN {

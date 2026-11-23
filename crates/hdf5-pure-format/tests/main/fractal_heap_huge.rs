@@ -67,9 +67,11 @@ fn huge_references_preserve_selectively_skipped_filters(#[values(false, true)] d
     let FractalHeapFiltering::Filtered { pipeline, .. } = &mut fixture.header.filtering else {
         panic!("expected filtered fixture")
     };
-    let mut second = pipeline.filters[0].clone();
+    let mut second = pipeline.filters()[0].clone();
     second.filter_id = 32_002;
-    pipeline.filters.push(second);
+    let mut filters = pipeline.filters().to_vec();
+    filters.push(second);
+    *pipeline = FilterPipeline::new(pipeline.version(), filters).unwrap();
     let expected = pipeline.clone();
     fixture.layout = FractalHeapHugeObjectLayout::new(
         &fixture.header,
@@ -360,7 +362,9 @@ fn parsed_huge_ids_recheck_the_receiving_pipeline(#[case] mask: u32) {
     let FractalHeapFiltering::Filtered { pipeline, .. } = &mut source.header.filtering else {
         panic!("expected filtered fixture")
     };
-    pipeline.filters.push(pipeline.filters[0].clone());
+    let mut filters = pipeline.filters().to_vec();
+    filters.push(filters[0].clone());
+    *pipeline = FilterPipeline::new(pipeline.version(), filters).unwrap();
     source.layout = FractalHeapHugeObjectLayout::new(
         &source.header,
         EIGHT_WIDTHS,
@@ -458,15 +462,16 @@ impl Fixture {
         header.root_block_address = StoredAddress::undefined(widths.offsets);
         header.btree_huge_objects_address = StoredAddress::new(256);
         header.heap_id_length = if direct { 64 } else { 2 };
-        let pipeline = FilterPipeline {
-            version: VERSION_TWO,
-            filters: vec![FilterDescription {
+        let pipeline = FilterPipeline::new(
+            VERSION_TWO,
+            vec![FilterDescription {
                 filter_id: 32_001,
                 name: None,
                 flags: 0,
                 client_data: vec![],
             }],
-        };
+        )
+        .unwrap();
         header.filtering = if filtered {
             FractalHeapFiltering::Filtered {
                 root_direct_block_size: 0,

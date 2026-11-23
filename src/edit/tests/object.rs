@@ -672,7 +672,7 @@ fn fresh_group_region_pairs_link_info_with_group_info() {
 }
 
 #[test]
-fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
+fn converting_version_1_group_messages_removes_body_padding() {
     let link_info = padded(&LINK_INFO_UNTRACKED_COMPACT, 24);
     let group_info = GroupInfo {
         phase_change: Some(PhaseChange::new(8, 6).unwrap()),
@@ -684,6 +684,14 @@ fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
         group_info.len().next_multiple_of(MESSAGE_ALIGNMENT),
     );
     let link = padded(&hard_link_a(), 16);
+    let mut pipeline =
+        test_util::filter_pipeline::Pipeline::new(test_util::filter_pipeline::Version::Two);
+    pipeline.push(300, Some("abc"), 0x80, &[7]).unwrap();
+    let pipeline = pipeline.build();
+    let padded_pipeline = padded(
+        &pipeline,
+        pipeline.len().next_multiple_of(MESSAGE_ALIGNMENT),
+    );
     let header = version_1_header(vec![
         (MessageType::LINK_INFO, MessageFlags::CONSTANT, link_info),
         (
@@ -692,6 +700,11 @@ fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
             padded_group_info,
         ),
         (MessageType::LINK, MessageFlags::NONE, link),
+        (
+            MessageType::FILTER_PIPELINE,
+            MessageFlags::CONSTANT,
+            padded_pipeline,
+        ),
     ]);
     let region = edit::group::link_message_region(&header, crate::file_writer::WIDTHS).unwrap();
     let mut records = Vec::new();
@@ -710,6 +723,11 @@ fn converting_version_1_link_messages_drops_the_padding_of_each_body() {
             ),
             (MessageType::GROUP_INFO, MessageFlags::CONSTANT, group_info),
             (MessageType::LINK, MessageFlags::NONE, hard_link_a()),
+            (
+                MessageType::FILTER_PIPELINE,
+                MessageFlags::CONSTANT,
+                pipeline
+            ),
         ]
     );
 }

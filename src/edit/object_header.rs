@@ -23,6 +23,7 @@ use crate::convert::Narrow;
 use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout, LAYOUT_CLASS_COMPACT};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_space_info::FileSpaceInfo;
+use crate::filter_pipeline::FilterPipeline;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_graph::ObjectId;
@@ -879,6 +880,21 @@ impl OhRegion {
         record: &PreparedLinkRecord<'_>,
     ) -> Result<(), FormatError> {
         record.append_to(self.layout(), &mut self.bytes)
+    }
+
+    /// Appends a Filter Pipeline record using this region's message record layout.
+    ///
+    /// # Errors
+    ///
+    /// Propagates message-size and allocation errors from
+    /// [`MessageRecordLayout::write_filter_pipeline`].
+    pub(super) fn push_filter_pipeline(
+        &mut self,
+        constant: bool,
+        pipeline: &FilterPipeline,
+    ) -> Result<(), FormatError> {
+        self.layout()
+            .write_filter_pipeline(&mut self.bytes, constant, pipeline)
     }
 
     /// Appends a Link Info record using this region's message record layout.

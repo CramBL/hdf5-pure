@@ -39,6 +39,7 @@ use crate::error::FormatError;
 use crate::file_emission::EmissionError;
 use crate::file_emission::Reservation;
 use crate::fill_value::FillPattern;
+use crate::filter_pipeline::RetainedFilterPipeline;
 use crate::filters::ChunkContext;
 use crate::libver::LibVer;
 use crate::object_path::LinkNameBuf;
@@ -507,7 +508,9 @@ impl PreparedDataset {
                 &rc.chunk_dims,
                 rc.element_size,
                 rc.flags,
-                rc.pipeline_message.as_deref(),
+                rc.pipeline_message
+                    .as_ref()
+                    .map(RetainedFilterPipeline::as_bytes),
                 data_address,
                 self.maxshape.as_deref(),
             )?;
@@ -521,7 +524,10 @@ impl PreparedDataset {
             }
             Ok(ChunkedBuilt {
                 layout_message,
-                pipeline_message: rc.pipeline_message.clone(),
+                pipeline_message: rc
+                    .pipeline_message
+                    .as_ref()
+                    .map(|pipeline| pipeline.as_bytes().to_vec()),
                 data: DsData::Streamed {
                     payload,
                     array,
@@ -583,7 +589,9 @@ impl PreparedDataset {
                 &rc.chunk_dims,
                 rc.element_size,
                 rc.flags,
-                rc.pipeline_message.as_deref(),
+                rc.pipeline_message
+                    .as_ref()
+                    .map(RetainedFilterPipeline::as_bytes),
                 data_address,
                 self.maxshape.as_deref(),
             )?;
@@ -640,11 +648,16 @@ impl PreparedDataset {
                     &rc.chunk_dims,
                     rc.element_size,
                     rc.flags,
-                    rc.pipeline_message.as_deref(),
+                    rc.pipeline_message
+                        .as_ref()
+                        .map(RetainedFilterPipeline::as_bytes),
                     data_address,
                     self.maxshape.as_deref(),
                 )?,
-                pipeline: rc.pipeline_message.as_deref(),
+                pipeline: rc
+                    .pipeline_message
+                    .as_ref()
+                    .map(RetainedFilterPipeline::as_bytes),
             }
         } else {
             PreparedChunkStorage::Encoded(chunk_set.ok_or_else(|| {
@@ -1404,6 +1417,7 @@ pub(crate) fn prepare_attribute_widths(
 
 #[cfg(test)]
 mod tests {
+    use alloc::borrow::Cow;
     use alloc::string::ToString;
     use alloc::sync::Arc;
     use alloc::vec;
@@ -1440,6 +1454,7 @@ mod tests {
     use crate::datatype::Datatype;
     use crate::error::FormatError;
     use crate::file_emission::EmissionError;
+    use crate::filter_pipeline::RetainedFilterPipeline;
     use crate::libver::LibVer;
     use crate::shared_message::DatatypeLocation;
     use crate::type_builders::DatasetBuilder;
@@ -1730,7 +1745,10 @@ mod tests {
                 &[2],
                 NonZeroUsize::new(4).unwrap(),
                 ChunkedLayoutFlags::NONE,
-                header.pipeline_message.clone(),
+                header
+                    .pipeline_message
+                    .clone()
+                    .map(|body| RetainedFilterPipeline::parse(Cow::Owned(body)).unwrap().1),
                 records
                     .iter()
                     .map(|record| ChunkMeta {
@@ -1935,8 +1953,11 @@ mod tests {
         use test_util::allocation;
 
         let reads = Arc::new(AtomicUsize::new(0));
-        let pipeline = filtered.then(|| test_util::filter_pipeline::user_filter(true));
-        assert!(!pipeline.as_ref().is_some_and(Vec::is_empty));
+        let pipeline = filtered.then(|| {
+            RetainedFilterPipeline::parse(Cow::Owned(test_util::filter_pipeline::user_filter(true)))
+                .unwrap()
+                .1
+        });
         let mut builder = DatasetBuilder::new("values");
         builder.with_raw_chunks_lazy(
             crate::make_i32_type(),

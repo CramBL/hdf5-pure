@@ -50,15 +50,16 @@ fn pipeline_decoding_preserves_native_filter_definition_flags(
     assert_eq!(&body[..expected.len()], expected);
     assert_eq!(
         FilterPipeline::parse(&body).unwrap(),
-        FilterPipeline {
-            version: version.byte(),
-            filters: vec![FilterDescription {
+        FilterPipeline::new(
+            version.byte(),
+            vec![FilterDescription {
                 filter_id: DEFLATE_ID,
                 name: name.map(str::to_owned),
                 flags: u16::from(OPAQUE_DEFINITION_FLAGS),
                 client_data: level.to_vec(),
-            }],
-        },
+            }]
+        )
+        .unwrap(),
     );
 
     let native = libhdf5::File::open(&path).unwrap();

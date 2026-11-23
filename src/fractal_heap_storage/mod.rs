@@ -2566,7 +2566,7 @@ mod tests {
             Widths::EIGHT,
             *root_direct_block_size,
             *root_filter_mask,
-            &pipeline.serialize().unwrap(),
+            &pipeline.to_bytes(),
         );
         place(file, STORAGE_HEAP_AT, &bytes);
         len_u64(bytes.len())

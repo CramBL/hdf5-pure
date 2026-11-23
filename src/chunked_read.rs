@@ -3499,14 +3499,17 @@ mod tests {
             max_dimensions: None,
         };
         let datatype = crate::type_builders::make_i32_type();
-        let pipeline = decoding.then(|| FilterPipeline {
-            version: FILTER_PIPELINE_VERSION,
-            filters: vec![FilterDescription {
-                filter_id: 999,
-                name: None,
-                flags: 0,
-                client_data: vec![],
-            }],
+        let pipeline = decoding.then(|| {
+            FilterPipeline::new(
+                FILTER_PIPELINE_VERSION,
+                vec![FilterDescription {
+                    filter_id: 999,
+                    name: None,
+                    flags: 0,
+                    client_data: vec![],
+                }],
+            )
+            .unwrap()
         });
         let spec = RawReadSpec::parse(
             &layout,
@@ -3964,15 +3967,16 @@ mod tests {
     }
 
     fn shuffle_pipeline() -> FilterPipeline {
-        FilterPipeline {
-            version: FILTER_PIPELINE_VERSION,
-            filters: vec![FilterDescription {
+        FilterPipeline::new(
+            FILTER_PIPELINE_VERSION,
+            vec![FilterDescription {
                 filter_id: crate::filter_pipeline::FILTER_SHUFFLE,
                 name: None,
                 flags: 0,
                 client_data: vec![4],
             }],
-        }
+        )
+        .unwrap()
     }
 
     #[test]
@@ -5990,15 +5994,16 @@ mod tests {
         let chunk_elems = 10usize;
         let total = 20usize;
 
-        let pipeline = FilterPipeline {
-            version: 2,
-            filters: vec![FilterDescription {
+        let pipeline = FilterPipeline::new(
+            FILTER_PIPELINE_VERSION,
+            vec![FilterDescription {
                 filter_id: FILTER_DEFLATE,
                 name: None,
                 flags: 0,
                 client_data: vec![6],
             }],
-        };
+        )
+        .unwrap();
 
         let values: Vec<f64> = (0..total).map(|i| i as f64).collect();
         let mut file_data = vec![0u8; 0x10000];
@@ -6076,15 +6081,16 @@ mod tests {
         use crate::filter_pipeline::{FILTER_DEFLATE, FilterDescription, FilterPipeline};
         use crate::filters;
 
-        let pipeline = FilterPipeline {
-            version: 2,
-            filters: vec![FilterDescription {
+        let pipeline = FilterPipeline::new(
+            FILTER_PIPELINE_VERSION,
+            vec![FilterDescription {
                 filter_id: FILTER_DEFLATE,
                 name: None,
                 flags: 0,
                 client_data: vec![6],
             }],
-        };
+        )
+        .unwrap();
         let datatype = make_f64_type();
         let dataspace = btree_v2_dataspace(&[4, 4]);
         let chunk_dims = [2u64, 2u64];
@@ -6366,15 +6372,16 @@ mod tests {
     fn a_raw_partial_edge_chunk_skips_the_deflate_decoder() {
         use crate::filter_pipeline::{FILTER_DEFLATE, FilterDescription};
 
-        let pipeline = FilterPipeline {
-            version: 2,
-            filters: vec![FilterDescription {
+        let pipeline = FilterPipeline::new(
+            FILTER_PIPELINE_VERSION,
+            vec![FilterDescription {
                 filter_id: FILTER_DEFLATE,
                 name: None,
                 flags: 0,
                 client_data: vec![6],
             }],
-        };
+        )
+        .unwrap();
         let stored: Vec<u8> = (0..32u8).collect();
         let ctx = ChunkContext::basic(&[4], 8);
         let mut scratch = FilterScratch::new();

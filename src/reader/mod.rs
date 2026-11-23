@@ -74,6 +74,7 @@ use crate::file_space_info::FileSpaceInfo;
 use crate::file_writer::source::AttributeReconstruction;
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
+use crate::filter_pipeline::RetainedFilterPipeline;
 use crate::free_sections::FreeSections;
 use crate::free_sections::PersistedFreeSections;
 use crate::free_sections::ReusableSpaceStats;
@@ -2323,7 +2324,7 @@ impl FileInner {
             for message in &header.messages {
                 if message.msg_type == MessageType::FILTER_PIPELINE
                     && !crate::filter_pipeline::parse_filter_pipeline(&self.message_body(message)?)?
-                        .filters
+                        .filters()
                         .is_empty()
                 {
                     return Err(Error::RepackUnsupported(
@@ -5762,6 +5763,37 @@ struct DatasetState {
     header: ObjectHeader,
 }
 
+/// A resolved dataset header and the file context needed to read its filter message.
+pub(crate) struct DatasetFilterPipelineSource<'a> {
+    file: &'a FileInner,
+    state: Arc<DatasetState>,
+}
+
+impl DatasetFilterPipelineSource<'_> {
+    /// Reads the pipeline and its original body, or returns [`None`] if the message is absent.
+    ///
+    /// For a shared message, retains the resolved body for copying into another file.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from resolving a shared message or parsing the pipeline body.
+    pub(crate) fn read(
+        &self,
+    ) -> Result<Option<(FilterPipeline, RetainedFilterPipeline<'_>)>, Error> {
+        let Some(message) = self
+            .state
+            .header
+            .messages
+            .iter()
+            .find(|message| message.msg_type == MessageType::FILTER_PIPELINE)
+        else {
+            return Ok(None);
+        };
+        let body = self.file.message_body(message)?;
+        Ok(Some(RetainedFilterPipeline::parse(body)?))
+    }
+}
+
 /// An owned handle to an HDF5 dataset.
 ///
 /// The handle names the dataset by its root-relative path and remembers where
@@ -7049,7 +7081,7 @@ the same commit to replace it",
         }
         self.filter_pipeline_parsed()?
             .into_iter()
-            .flat_map(|pipeline| pipeline.filters)
+            .flat_map(FilterPipeline::into_filters)
             .map(|description| Ok(Filter::from_description(description)?.id()))
             .collect()
     }
@@ -7176,7 +7208,7 @@ the same commit to replace it",
         }
         self.filter_pipeline_parsed()?
             .into_iter()
-            .flat_map(|pipeline| pipeline.filters)
+            .flat_map(FilterPipeline::into_filters)
             .map(Filter::from_description)
             .collect::<Result<_, _>>()
             .map_err(Error::from)
@@ -7883,17 +7915,22 @@ the same commit to replace it",
     }
 
     pub(crate) fn filter_pipeline_parsed(&self) -> Result<Option<FilterPipeline>, Error> {
-        let state = self.resolved()?;
-        let Some(msg) = state
-            .header
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::FILTER_PIPELINE)
-        else {
-            return Ok(None);
-        };
-        let body = self.file.message_body(msg)?;
-        Ok(Some(crate::filter_pipeline::parse_filter_pipeline(&body)?))
+        Ok(self
+            .filter_pipeline_source()?
+            .read()?
+            .map(|(pipeline, _)| pipeline))
+    }
+
+    /// Resolves the dataset header for reading its filter message.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from resolving the dataset.
+    pub(crate) fn filter_pipeline_source(&self) -> Result<DatasetFilterPipelineSource<'_>, Error> {
+        Ok(DatasetFilterPipelineSource {
+            file: &self.file,
+            state: self.resolved()?,
+        })
     }
 
     /// Whether this dataset's element bytes live in files outside this one
@@ -7978,26 +8015,6 @@ the same commit to replace it",
                 self.file.widths,
             )?)
         })
-    }
-
-    /// The raw `FilterPipeline` message bytes from this dataset's object header,
-    /// if it has one. Repack reuses this verbatim so that every filter — including
-    /// ones this crate cannot itself apply (ZFP, SZIP, unknown) — is reproduced
-    /// byte-for-byte in the repacked file's pipeline message.
-    pub(crate) fn filter_pipeline_message_bytes(&self) -> Result<Option<Vec<u8>>, Error> {
-        let state = self.resolved()?;
-        let Some(msg) = state
-            .header
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::FILTER_PIPELINE)
-        else {
-            return Ok(None);
-        };
-        // A shared pipeline message's record body is an address, not a pipeline;
-        // its resolved content is what a copy must carry. The content itself is
-        // position-independent, so copying it verbatim stays faithful.
-        Ok(Some(self.file.message_body(msg)?.into_owned()))
     }
 
     /// Read the dataset's exact unfiltered element bytes.

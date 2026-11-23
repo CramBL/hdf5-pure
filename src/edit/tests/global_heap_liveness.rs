@@ -298,15 +298,16 @@ fn a_chunk_that_cannot_be_read_or_decoded_is_incomplete(
     let mut fixture = Fixture::new();
     let stored = [0xff; 32];
     let chunk = fixture.image.append(&stored) as u64;
-    let pipeline = format::FilterPipeline {
-        version: FILTER_PIPELINE_VERSION,
-        filters: vec![format::FilterDescription {
+    let pipeline = format::FilterPipeline::new(
+        FILTER_PIPELINE_VERSION,
+        vec![format::FilterDescription {
             filter_id,
             name: None,
             flags: 0,
             client_data: vec![6],
         }],
-    };
+    )
+    .unwrap();
     let layout = format::DataLayout::encode_chunked(
         format::ChunkedLayoutFlags::NONE,
         &[2],
@@ -333,7 +334,7 @@ fn a_chunk_that_cannot_be_read_or_decoded_is_incomplete(
         global_heap_fixture::dataset_messages(&global_heap_fixture::vlen_string(), &space);
     messages.push(Message::new(
         MessageType::FILTER_PIPELINE,
-        &pipeline.serialize().unwrap(),
+        &pipeline.to_bytes(),
     ));
     messages.push(Message::new(MessageType::DATA_LAYOUT, &layout));
     fixture.object("d", messages);
