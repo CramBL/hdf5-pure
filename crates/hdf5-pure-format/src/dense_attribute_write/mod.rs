@@ -1039,7 +1039,7 @@ impl EncodedDenseAttrs {
         creation: DenseAttrCreationOrder,
     ) -> Result<Self, FormatError> {
         Self::encode(widths, attrs, creation, |attribute| {
-            attribute.serialize_v3(widths.offsets, widths.lengths.get())
+            Ok(attribute.prepare_v3(widths)?.to_bytes())
         })
     }
 

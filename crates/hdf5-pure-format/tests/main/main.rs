@@ -1,4 +1,5 @@
 mod attribute_info;
+mod attribute_message;
 mod btree;
 mod btree_k_values;
 mod datatype_array_complex_codec;

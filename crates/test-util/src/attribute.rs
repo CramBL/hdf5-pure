@@ -2,7 +2,157 @@
 //! `subsubsec_fmt4_dataobject_hdr_msg_attribute`, version 4.0.
 
 use crate::bytes;
+use crate::datatype;
 use crate::widths::Widths;
+
+/// The Attribute message layout used by the fixture.
+#[derive(Clone, Copy, Debug)]
+pub enum UnpaddedVersion {
+    /// Version 2 with an ASCII name.
+    Two,
+    /// Version 3 with a character-set byte for the name.
+    Three,
+}
+
+/// An Attribute body with checked framing for version 2 or 3.
+#[derive(Debug)]
+pub struct UnpaddedAttribute<'a> {
+    version: UnpaddedVersion,
+    name: &'a str,
+    datatype: DatatypeField<'a>,
+    dataspace: &'a [u8],
+    data: &'a [u8],
+}
+
+impl<'a> UnpaddedAttribute<'a> {
+    /// Describes an attribute with inline datatype and dataspace bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the name is empty, contains a NUL, or is non-ASCII in version 2. Also panics if
+    /// the name with its terminator, datatype, or dataspace is longer than [`u16::MAX`] bytes.
+    #[track_caller]
+    pub fn inline(
+        version: UnpaddedVersion,
+        name: &'a str,
+        datatype: &'a [u8],
+        dataspace: &'a [u8],
+        data: &'a [u8],
+    ) -> Self {
+        Self::new(
+            version,
+            name,
+            DatatypeField::Inline(datatype),
+            dataspace,
+            data,
+        )
+    }
+
+    /// Describes an attribute that refers to a committed datatype at `address`.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of [`Self::inline`], using the reference length for the
+    /// datatype field. Also panics if `widths.offset` is other than 2, 4, or 8 or if `address`
+    /// cannot be written as a defined address at that width.
+    #[track_caller]
+    pub fn committed(
+        version: UnpaddedVersion,
+        name: &'a str,
+        address: u64,
+        widths: Widths,
+        dataspace: &'a [u8],
+        data: &'a [u8],
+    ) -> Self {
+        let undefined = match widths.offset {
+            2 => u64::from(u16::MAX),
+            4 => u64::from(u32::MAX),
+            8 => u64::MAX,
+            width => panic!("an offset width is 2, 4, or 8 bytes, not {width}"),
+        };
+        assert!(
+            address < undefined,
+            "a committed datatype has a defined address at its width"
+        );
+        let len = COMMITTED_REFERENCE_PREFIX_SIZE + widths.offset;
+        Self::new(
+            version,
+            name,
+            DatatypeField::Committed { address, len },
+            dataspace,
+            data,
+        )
+    }
+
+    /// Writes the body and copies the supplied dataspace and element bytes.
+    pub fn build(self) -> Vec<u8> {
+        let Self {
+            version,
+            name,
+            datatype,
+            dataspace,
+            data,
+        } = self;
+        let mut reference;
+        let (datatype, flags) = match datatype {
+            DatatypeField::Inline(datatype) => (datatype, Flags::NONE),
+            DatatypeField::Committed { address, len } => {
+                reference = datatype::committed_reference(address);
+                reference.truncate(len);
+                (reference.as_slice(), Flags::SHARED_DATATYPE)
+            }
+        };
+        let attribute = Attribute::new(name, datatype, dataspace, data).flags(flags);
+        match version {
+            UnpaddedVersion::Two => attribute.build(),
+            UnpaddedVersion::Three => attribute.character_set(u8::from(!name.is_ascii())).build(),
+        }
+    }
+
+    #[track_caller]
+    fn new(
+        version: UnpaddedVersion,
+        name: &'a str,
+        datatype: DatatypeField<'a>,
+        dataspace: &'a [u8],
+        data: &'a [u8],
+    ) -> Self {
+        assert!(
+            !name.is_empty() && !name.as_bytes().contains(&0),
+            "the name must be nonempty and contain no NUL"
+        );
+        if matches!(version, UnpaddedVersion::Two) {
+            assert!(name.is_ascii(), "a version 2 name must be ASCII");
+        }
+        let datatype_len = match datatype {
+            DatatypeField::Inline(datatype) => datatype.len(),
+            DatatypeField::Committed { len, .. } => len,
+        };
+        for len in [name.len() + 1, datatype_len, dataspace.len()] {
+            assert!(
+                u16::try_from(len).is_ok(),
+                "field size {len} exceeds the two-byte limit"
+            );
+        }
+        Self {
+            version,
+            name,
+            datatype,
+            dataspace,
+            data,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DatatypeField<'a> {
+    Inline(&'a [u8]),
+    Committed { address: u64, len: usize },
+}
+
+// The shared reference version and location type precede the address in
+// "Data Object Header Messages" in version 4.0.
+const COMMITTED_REFERENCE_PREFIX_SIZE: usize = 2;
 
 /// The body of an Attribute message.
 ///

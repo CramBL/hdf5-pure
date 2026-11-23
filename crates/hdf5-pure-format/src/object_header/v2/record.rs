@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_message::PreparedAttributeBody;
 use crate::bytes::UnexpectedEof;
 use crate::codec::Encode;
 use crate::error::FormatError;
@@ -55,6 +56,10 @@ impl MessageBody for PreparedFilterPipeline<'_> {
 
 impl MessageBody for AttributeInfoMessage {
     const MESSAGE_TYPE: MessageType = MessageType::ATTRIBUTE_INFO;
+}
+
+impl MessageBody for PreparedAttributeBody<'_> {
+    const MESSAGE_TYPE: MessageType = MessageType::ATTRIBUTE;
 }
 
 impl MessageRecordLayout {
