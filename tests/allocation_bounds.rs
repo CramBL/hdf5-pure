@@ -2767,6 +2767,51 @@ fn named_filter_pipeline() -> (
 }
 
 #[test]
+fn prepared_dataspace_uses_only_the_destination_allocation() {
+    use hdf5_pure_format::__private::{Dataspace, DataspaceType};
+    use hdf5_pure_format::{LengthWidth, MaxExtent};
+    use test_util::dataspace;
+    use test_util::widths::Widths;
+
+    let dimensions = [3, 5];
+    let maximum_dimensions = [7, u64::MAX];
+    let dataspace = Dataspace {
+        space_type: DataspaceType::Simple,
+        rank: 2,
+        dimensions: dimensions.to_vec(),
+        max_dimensions: Some(vec![MaxExtent::Fixed(7), MaxExtent::Unlimited]),
+    };
+    let expected =
+        dataspace::VersionTwo::simple(Widths::EIGHT, &dimensions, Some(&maximum_dimensions))
+            .build();
+
+    let (owned, measured) = allocation::measure("dataspace_owned", || {
+        dataspace.serialize(LengthWidth::Eight.get()).unwrap()
+    });
+    assert_eq!(measured.blocks, 1, "{measured}");
+    assert_eq!(
+        measured.bytes,
+        u64::try_from(expected.len()).unwrap(),
+        "{measured}"
+    );
+    assert_eq!(measured.live_bytes, measured.bytes, "{measured}");
+    assert_eq!(owned, expected);
+
+    let mut output = vec![0xa5; expected.len()];
+    let (written, measured) = allocation::measure("dataspace_bounded", || {
+        dataspace
+            .prepare(LengthWidth::Eight)
+            .unwrap()
+            .write_into(&mut output)
+            .unwrap()
+    });
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn direct_link_conversion_omits_a_temporary_body_allocation() {
     let bytes = SymbolicLink::external("x", "source.h5", &"/target".repeat(256)).build();
     let link = LinkMessage::parse_with_offset_width(&bytes, OffsetWidth::Eight).unwrap();

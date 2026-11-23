@@ -4,6 +4,100 @@
 use crate::bytes;
 use crate::widths::Widths;
 
+/// A version 2 body with dimensions that fit the selected length width.
+#[derive(Clone, Copy, Debug)]
+pub struct VersionTwo<'a> {
+    widths: Widths,
+    kind: Kind,
+    rank: u8,
+    dimensions: &'a [u64],
+    maximum_dimensions: Option<&'a [u64]>,
+}
+
+impl<'a> VersionTwo<'a> {
+    /// Describes a dataspace for one element with no dimensions.
+    pub const fn scalar() -> Self {
+        Self::dimensionless(Kind::SCALAR)
+    }
+
+    /// Describes a dataspace with no elements or dimensions.
+    pub const fn null() -> Self {
+        Self::dimensionless(Kind::NULL)
+    }
+
+    /// Describes an array with the supplied current and optional maximum dimensions.
+    ///
+    /// Pass dimension values as stored in the file.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rank is outside `1..=255`, a present maximum dimension count differs from
+    /// the rank, the length width is unsupported, or a dimension exceeds that width.
+    #[track_caller]
+    pub fn simple(
+        widths: Widths,
+        dimensions: &'a [u64],
+        maximum_dimensions: Option<&'a [u64]>,
+    ) -> Self {
+        let rank = u8::try_from(dimensions.len()).expect("the dataspace rank fits in a byte");
+        assert_ne!(rank, 0, "a simple dataspace has at least one dimension");
+        if let Some(maxima) = maximum_dimensions {
+            assert_eq!(maxima.len(), dimensions.len(), "the dimension lists match");
+        }
+        let limit = match widths.length {
+            2 => u64::from(u16::MAX),
+            4 => u64::from(u32::MAX),
+            8 => u64::MAX,
+            width => panic!("a dataspace length width is 2, 4, or 8 bytes, not {width}"),
+        };
+        for &dimension in dimensions
+            .iter()
+            .chain(maximum_dimensions.unwrap_or_default())
+        {
+            assert!(
+                dimension <= limit,
+                "dimension {dimension} exceeds the maximum {limit} for this length width"
+            );
+        }
+        Self {
+            widths,
+            kind: Kind::SIMPLE,
+            rank,
+            dimensions,
+            maximum_dimensions,
+        }
+    }
+
+    /// Writes the version 2 message body to a new vector.
+    pub fn build(self) -> Vec<u8> {
+        let Self {
+            widths,
+            kind,
+            rank,
+            dimensions,
+            maximum_dimensions,
+        } = self;
+        v2_with_widths(
+            rank,
+            maximum_dimensions.map_or(Flags::NONE, |_| Flags::MAX_DIMS),
+            kind,
+            dimensions,
+            maximum_dimensions,
+            widths,
+        )
+    }
+
+    const fn dimensionless(kind: Kind) -> Self {
+        Self {
+            widths: Widths::EIGHT,
+            kind,
+            rank: 0,
+            dimensions: &[],
+            maximum_dimensions: None,
+        }
+    }
+}
+
 /// Encodes a version 1 dataspace body with eight-byte dimension fields.
 pub fn v1(rank: u8, flags: Flags, dims: &[u64], max_dims: Option<&[u64]>) -> Vec<u8> {
     v1_with_widths(rank, flags, dims, max_dims, Widths::EIGHT)
