@@ -4,6 +4,7 @@ use hdf5_pure_format::__private::BTreeV2Header;
 use rstest::rstest;
 
 use super::*;
+use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
 use crate::attribute_info::AttributeCreationOrderIndex;
 use crate::attribute_policy;

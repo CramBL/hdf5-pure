@@ -42,16 +42,19 @@ use hdf5_pure::{
     ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
     MaxExtent, MemoryStrategy, SyncPolicy,
 };
-use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
+use hdf5_pure_core::{BaseAddress, PhysicalAddress, SuperblockStatus};
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LinkInfoMessage;
+use hdf5_pure_format::__private::ModernSuperblockLayout;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
+use hdf5_pure_format::__private::PreparedSuperblock;
 use hdf5_pure_format::__private::{LinkMessage, LinkMessageView, LinkTargetView};
 use rstest::rstest;
 use test_util::allocation;
@@ -64,12 +67,55 @@ use test_util::object_header::Message;
 use test_util::object_header::MessageType;
 use test_util::object_header::v2;
 use test_util::object_header::v2::Header;
+use test_util::superblock::VERSION_3;
 use test_util::superblock::v2::Superblock;
 use test_util::temp::TempPath;
 use test_util::widths::Widths;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::reader::ReadBackend;
+
+#[test]
+fn superblock_preparation_and_stack_encoding_allocate_nothing() {
+    let (control, measured) =
+        allocation::measure("superblock_stack_encoding_control", || vec![0_u8; 1024]);
+    assert!(measured.blocks > 0, "{measured}");
+    assert!(
+        measured.bytes >= u64::try_from(control.len()).unwrap(),
+        "{measured}"
+    );
+    drop(control);
+
+    let widths = FormatWidths::from_sizes(2, 8).unwrap();
+    let ((bytes, written), measured) = allocation::measure("superblock_stack_encoding", || {
+        let layout = ModernSuperblockLayout::new(widths);
+        let prepared = layout
+            .prepare(
+                SuperblockStatus::Three(0x80),
+                BaseAddress::new(512),
+                Some(StoredAddress::new(64)),
+                PhysicalAddress::new(4096),
+                StoredAddress::new(96),
+            )
+            .unwrap();
+        let mut bytes = [0xa5; PreparedSuperblock::MAX_ENCODED_SIZE];
+        let written = prepared.write_into(&mut bytes).unwrap();
+        (bytes, written)
+    });
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    let expected = Superblock::new(Widths::new(2, 8))
+        .version(VERSION_3)
+        .consistency_flags(0x80)
+        .base_address(512)
+        .extension_address(64)
+        .eof_address(4096)
+        .root_header_address(96)
+        .build();
+    assert_eq!(written, expected.len());
+    assert_eq!(&bytes[..written], expected);
+    assert_eq!(&bytes[written..], vec![0xa5; bytes.len() - written]);
+}
 
 #[path = "allocation_bounds/commit.rs"]
 mod commit;

@@ -10,12 +10,50 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::LengthWidth;
+use hdf5_pure::LibVer;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::ReferenceType;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
+use test_util::superblock::{VERSION_2, VERSION_3, v2};
+use test_util::widths::Widths;
+
+#[rstest]
+#[case::version_two(LibVer::V18, VERSION_2, OffsetWidth::Two, LengthWidth::Four)]
+#[case::version_three(LibVer::V110, VERSION_3, OffsetWidth::Four, LengthWidth::Two)]
+fn ordinary_writer_places_the_root_immediately_after_the_superblock(
+    #[case] libver: LibVer,
+    #[case] version: u8,
+    #[case] offsets: OffsetWidth,
+    #[case] lengths: LengthWidth,
+) {
+    let base = 512;
+    let mut builder = FileBuilder::new();
+    builder
+        .with_libver_bounds(libver, libver)
+        .with_offset_width(offsets)
+        .with_length_width(lengths)
+        .with_userblock(UserblockSize::try_from(base).unwrap());
+    let image = builder.finish().unwrap();
+
+    let fixture = v2::Superblock::new(Widths::new(
+        usize::from(offsets.get()),
+        usize::from(lengths.get()),
+    ))
+    .version(version)
+    .base_address(base)
+    .eof_address(u64::try_from(image.len()).unwrap());
+    let root = fixture.build().len();
+    let expected = fixture
+        .root_header_address(u64::try_from(root).unwrap())
+        .build();
+    let start = usize::try_from(base).unwrap();
+    assert_eq!(&image[start..start + root], expected);
+    let file = File::from_bytes(image).unwrap();
+    assert_eq!(file.root().groups().unwrap(), Vec::<String>::new());
+}
 
 #[derive(Clone, Copy, Debug)]
 enum Selection {

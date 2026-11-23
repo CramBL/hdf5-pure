@@ -2,14 +2,10 @@
 
 use crate::bytes;
 use crate::checksum;
-use crate::superblock::{self, SIGNATURE};
+use crate::superblock::{self, SIGNATURE, VERSION_2, VERSION_3};
 use crate::widths::Widths;
 
-/// The bytes of a version 2 or version 3 superblock, checksum included.
-///
-/// The two versions share a layout. Version 3 differs only in giving the
-/// consistency flags meaning, for a file open under single-writer/multiple-
-/// reader access.
+/// A checked fixture for the bytes of a version 2 or 3 superblock, including its checksum.
 #[derive(Clone, Copy, Debug)]
 pub struct Superblock {
     version: u8,
@@ -22,9 +18,17 @@ pub struct Superblock {
 }
 
 impl Superblock {
+    /// Creates a version 2 fixture with zero required addresses, zero flags, and an undefined
+    /// extension.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either width is other than 2, 4, or 8 bytes.
     pub fn new(widths: Widths) -> Self {
+        assert!(matches!(widths.offset, 2 | 4 | 8), "invalid offset width");
+        assert!(matches!(widths.length, 2 | 4 | 8), "invalid length width");
         Self {
-            version: 2,
+            version: VERSION_2,
             widths,
             consistency_flags: 0,
             base_address: 0,
@@ -34,18 +38,30 @@ impl Superblock {
         }
     }
 
+    /// Selects the version byte stored with the fixture's fields.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `version` is outside the range 2 through 3.
     pub fn version(mut self, version: u8) -> Self {
+        assert!(matches!(version, VERSION_2 | VERSION_3));
         self.version = version;
         self
     }
 
+    /// Sets all bits of the stored consistency byte.
     pub fn consistency_flags(mut self, flags: u8) -> Self {
         self.consistency_flags = flags;
         self
     }
 
-    /// The offset every other address in the file is measured from.
+    /// Sets the absolute base address from which the extension and root addresses are measured.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `address` is at or above the selected offset width's undefined marker.
     pub fn base_address(mut self, address: u64) -> Self {
+        self.assert_defined_address(address);
         self.base_address = address;
         self
     }
@@ -53,21 +69,39 @@ impl Superblock {
     /// Sets the stored address of the superblock extension.
     ///
     /// The address is relative to [`Self::base_address`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `address` is at or above the selected offset width's undefined marker.
     pub fn extension_address(mut self, address: u64) -> Self {
+        self.assert_defined_address(address);
         self.extension_address = Some(address);
         self
     }
 
+    /// Sets the absolute end-of-file address.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `address` is at or above the selected offset width's undefined marker.
     pub fn eof_address(mut self, address: u64) -> Self {
+        self.assert_defined_address(address);
         self.eof_address = address;
         self
     }
 
+    /// Sets the root group header address relative to the base address.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `address` is at or above the selected offset width's undefined marker.
     pub fn root_header_address(mut self, address: u64) -> Self {
+        self.assert_defined_address(address);
         self.root_header_address = address;
         self
     }
 
+    /// Builds the encoded superblock and computes its checksum.
     pub fn build(&self) -> Vec<u8> {
         let offset = self.widths.offset;
 
@@ -82,5 +116,15 @@ impl Superblock {
         bytes::push_uint(&mut superblock, self.root_header_address, offset);
         checksum::append(&mut superblock);
         superblock
+    }
+
+    #[track_caller]
+    fn assert_defined_address(&self, address: u64) {
+        let bits = 8 * self.widths.offset;
+        let marker = u64::MAX >> (u64::BITS as usize - bits);
+        assert!(
+            address < marker,
+            "address {address:#x} must fit below {marker:#x}"
+        );
     }
 }

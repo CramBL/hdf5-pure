@@ -16,6 +16,8 @@
 use std::fs::{File, TryLockError};
 use std::path::Path;
 
+use hdf5_pure_format::__private::PreparedSuperblock;
+
 use crate::SuperblockStatusFlag;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
@@ -382,18 +384,18 @@ pub(crate) fn clear_status_flags_at(path: &Path) -> Result<(), Error> {
         sb.version(),
         SuperblockVersion::Zero | SuperblockVersion::One
     ) {
-        // `serialize_superblock` writes only the v2/v3 layout and returns an error for a v0/v1
-        // superblock. `check_status_flags`, like `H5Fopen`, reads the status flags from version 3
-        // on, so a flag left in a v0/v1 superblock does not block an open.
+        // `check_status_flags` ignores the flags in versions 0 and 1. `PreparedSuperblock`
+        // writes versions 2 and 3.
         return Ok(());
     }
     if sb.consistency_flags().is_empty() {
         return Ok(());
     }
     sb.set_consistency_flags(SuperblockStatusFlags::new())?;
-    let bytes = hdf5_pure_format::__private::serialize_superblock(&sb)?;
+    let mut bytes = [0; PreparedSuperblock::MAX_ENCODED_SIZE];
+    let len = PreparedSuperblock::new(&sb)?.write_into(&mut bytes)?;
     w.seek(SeekFrom::Start(address.get())).map_err(Error::Io)?;
-    w.write_all(&bytes).map_err(Error::Io)?;
+    w.write_all(&bytes[..len]).map_err(Error::Io)?;
     w.sync_data().map_err(Error::Io)?;
     Ok(())
 }
