@@ -90,6 +90,7 @@ use crate::source::BytesSource;
 use crate::superblock::LocatedSuperblock;
 use crate::type_builders::AttrValue;
 use crate::type_builders::ObjectRefTarget;
+use crate::width::FormatWidths;
 use crate::writer::FileBuilder;
 
 #[test]
@@ -112,6 +113,28 @@ fn a_continuation_to_the_undefined_address_fails_the_chunk_walk() {
             Error::Format(FormatError::UndefinedContinuationAddress)
         ),
         "{err:?}"
+    );
+}
+
+#[test]
+fn editor_reports_a_missing_continuation_length_before_an_undefined_address() {
+    let mut message = Message::undefined_continuation(64, Widths::new(2, 2));
+    message.data.truncate(2);
+    let header = v2_bytes::Header::new().message(message).build();
+    let Err(error) = edit::object_header::read_oh_chunks(
+        &BytesSource::new(header.as_slice()),
+        PhysicalAddress::new(0),
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+        FormatWidths::from_sizes(2, 2).unwrap(),
+    ) else {
+        panic!("expected the chunk walk to fail");
+    };
+    assert!(
+        matches!(
+            error,
+            Error::EditUnsupported("malformed continuation message")
+        ),
+        "{error:?}"
     );
 }
 

@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::attrs` reporting an undefined address when a version 2 object header's
+  continuation message is missing all or part of its length field ([#1333](https://github.com/CramBL/hdf5-pure/pull/1333)).
 - Fixed `Dataset::filter_pipeline` accepting set bits in positions 8 through 15 of the filter
   flags, nonzero version 1 reserved header bytes, and nonzero version 1 client data padding ([#1330](https://github.com/CramBL/hdf5-pure/pull/1330)).
 - Fixed `Group::groups` accepting malformed external-link targets in version 1 Link messages ([#1329](https://github.com/CramBL/hdf5-pure/pull/1329)).
