@@ -882,10 +882,13 @@ fn link_creation_indexing_preserves_index_addresses_while_updating_the_counter()
     order.record(&mut region).unwrap();
 
     let (_, _, info) = edit::group::find_link_info(&region).unwrap().unwrap();
-    assert_eq!(info.max_creation_order, Some(2));
-    assert_eq!(info.fractal_heap_address, None);
-    assert_eq!(info.btree_name_index_address, None);
-    assert_eq!(info.btree_creation_order_address, Some(None));
+    assert_eq!(info.max_creation_order(), Some(2));
+    assert_eq!(info.fractal_heap_address(), None);
+    assert_eq!(info.btree_name_index_address(), None);
+    assert_eq!(
+        info.creation_order_index(),
+        hdf5_pure_format::__private::LinkCreationOrderIndex::Undefined
+    );
     assert_eq!(region_links(&region).last().unwrap().1, Some(1));
 }
 
@@ -2099,7 +2102,7 @@ fn region_links(region: &OhRegion) -> Vec<(String, Option<u64>)> {
 fn recorded_link_max(region: &OhRegion) -> Option<u64> {
     edit::group::find_link_info(region)
         .unwrap()
-        .and_then(|(_, _, info)| info.max_creation_order)
+        .and_then(|(_, _, info)| info.max_creation_order())
 }
 
 /// The record layout for tracked and indexed attribute creation order.

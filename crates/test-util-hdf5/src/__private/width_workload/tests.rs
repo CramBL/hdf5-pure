@@ -303,8 +303,8 @@ fn assert_dense_storage(path: &Path) {
     let links =
         LinkInfoMessage::parse_with_offset_width(&links.data, file.superblock().offset_size)
             .unwrap();
-    assert!(links.fractal_heap_address.is_some());
-    assert!(links.btree_name_index_address.is_some());
+    assert!(links.fractal_heap_address().is_some());
+    assert!(links.btree_name_index_address().is_some());
     let attributes = header
         .messages
         .iter()

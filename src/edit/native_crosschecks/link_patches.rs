@@ -23,7 +23,7 @@ fn batched_link_relocations_preserve_native_values_and_creation_metadata(
     creation_order::write_link_relocation_fixture(&path, group_path, count);
     let before = group_inspection::inspect_group_links(&path, group_path, source_only).unwrap();
     assert_eq!(
-        before.links.info().fractal_heap_address.is_some(),
+        before.links.info().fractal_heap_address().is_some(),
         count > 4
     );
     let session = group_inspection::open_group_inspection(&path, source_only).unwrap();
@@ -50,7 +50,10 @@ fn batched_link_relocations_preserve_native_values_and_creation_metadata(
     drop(group);
     drop(session);
     let after = group_inspection::inspect_group_links(&path, group_path, source_only).unwrap();
-    assert_eq!(after.links.info().fractal_heap_address.is_some(), count > 4);
+    assert_eq!(
+        after.links.info().fractal_heap_address().is_some(),
+        count > 4
+    );
     assert_eq!(after.group_info, before.group_info);
     let actual: BTreeMap<_, _> = after
         .links

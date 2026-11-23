@@ -47,9 +47,7 @@ fn modern_link_storage_keeps_the_version_1_prefix_count() {
     let mut fixture = Fixture::new();
     let mut link_info = Message::new(
         WireType::LINK_INFO,
-        &file_writer::COMPACT_LINK_INFO
-            .serialize(OffsetWidth::Eight)
-            .unwrap(),
+        &crate::file_writer::compact_link_info(OffsetWidth::Eight).to_bytes(),
     );
     link_info.data.resize(24, 0);
     let header = v1::Header::new()

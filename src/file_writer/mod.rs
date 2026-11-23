@@ -127,14 +127,10 @@ pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();
 const SUPERBLOCK_SIZE: usize =
     hdf5_pure_format::__private::superblock_serialized_size(OFFSET_WIDTH);
 
-/// The Link Info message of a group that keeps its links in its object header and
-/// does not track their creation order.
-pub(crate) const COMPACT_LINK_INFO: LinkInfoMessage = LinkInfoMessage {
-    max_creation_order: None,
-    fractal_heap_address: None,
-    btree_name_index_address: None,
-    btree_creation_order_address: None,
-};
+/// Constructs Link Info for untracked compact links at the file's offset width.
+pub(crate) fn compact_link_info(offset_width: OffsetWidth) -> LinkInfoMessage {
+    LinkInfoMessage::compact(offset_width, None, false)
+}
 
 // ---- OH builders ----
 
@@ -320,15 +316,17 @@ pub(crate) fn build_committed_datatype_oh(
 
 /// Builds a version 2 group header with compact or dense link storage.
 ///
-/// Writes `links` into the header when `link_info` is [`None`]. Otherwise, writes
-/// `link_info` and omits the inline links. Writes `attr_info` in place of compact attributes
-/// when supplied. Writes the thresholds and estimates from `group_info`.
+/// Writes the supplied Link Info message or constructs compact defaults when `link_info` is
+/// [`None`]. Writes the inline links when the Link Info heap address is undefined.
+/// Writes `attr_info` in place of compact attributes when supplied. Writes the thresholds
+/// and estimates from `group_info`.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::AttributeFieldTooLong`] if a compact attribute field exceeds its
-/// encoding, or [`FormatError::ObjectHeaderMessageTooLarge`] if a message exceeds the
-/// object-header message size limit.
+/// encoding, [`FormatError::ObjectHeaderMessageTooLarge`] if a message exceeds the
+/// object-header message size limit, or [`FormatError::Internal`] if the Link Info offset
+/// width differs from the file's.
 pub(crate) fn build_group_oh(
     widths: FormatWidths,
     links: &[LinkMessage],
@@ -341,7 +339,7 @@ pub(crate) fn build_group_oh(
         links.iter().map(|link| link.serialize(widths.offsets)),
         attrs,
         attr_info,
-        link_info.unwrap_or(&COMPACT_LINK_INFO),
+        link_info.unwrap_or(&compact_link_info(widths.offsets)),
         group_info,
         HeaderOptions::PLAIN.with_widths(widths),
     )
@@ -355,21 +353,22 @@ fn group_header(
     group_info: GroupInfo,
     header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
+    if link_info.offset_width() != header.widths.offsets {
+        return Err(FormatError::Internal(
+            "the Link Info encoding uses a different offset width from its file".into(),
+        ));
+    }
     let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
-    w.add_message(
-        MessageType::LINK_INFO,
-        link_info.serialize(header.widths.offsets)?,
-    );
     // libhdf5 requires Group Info when inserting a link into a group with Link Info
     // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
     w.add_message(MessageType::GROUP_INFO, group_info.serialize());
-    if link_info.fractal_heap_address.is_none() {
+    if link_info.fractal_heap_address().is_none() {
         for link in links {
             w.add_message(MessageType::LINK, link?);
         }
     }
     add_attributes(&mut w, attrs, attr_info, header)?;
-    w.serialize()
+    w.serialize_with_link_info(link_info)
 }
 
 /// Serializes dense links at the reserved address and checks the reserved length.
@@ -422,7 +421,7 @@ fn dense_links_plan(
                 .map_err(link_storage_error)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let storage = GroupLinkStorage::new(&COMPACT_LINK_INFO, links, widths.offsets)
+    let storage = GroupLinkStorage::new(&compact_link_info(widths.offsets), links)
         .map_err(link_storage_error)?;
     DenseLinkPlan::new(storage, widths.lengths)
         .map(Some)

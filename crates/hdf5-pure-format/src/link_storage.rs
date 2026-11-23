@@ -15,7 +15,7 @@ use crate::bytes;
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_info::LinkInfoMessage;
+use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
 use crate::link_message::{EXTERNAL_LINK, HARD_LINK, SOFT_LINK};
 use crate::link_message_v1::{
     LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError,
@@ -27,7 +27,7 @@ use crate::width::{self, OffsetWidth};
 /// Tracked links have distinct indexes below the stored next-index counter. Compact storage
 /// retains the indexing policy with an undefined creation-order index address. Dense storage
 /// has defined heap and name-index addresses, plus a creation-order index when indexing is enabled.
-/// Addresses remain stored file addresses at the width passed to the constructor.
+/// Link targets and storage addresses use the offset width retained by [`LinkInfoMessage`].
 ///
 /// The storage fields are defined in "The Link Info Message" of the [format specification,
 /// version 4.0][spec].
@@ -35,10 +35,9 @@ use crate::width::{self, OffsetWidth};
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupLinkStorage {
-    offset_width: OffsetWidth,
     links: Vec<OwnedLink>,
     creation_order: LinkCreationPolicy,
-    addresses: Option<DenseLinkAddresses>,
+    addresses: LinkInfoMessage,
 }
 
 impl GroupLinkStorage {
@@ -56,31 +55,63 @@ impl GroupLinkStorage {
         offset_width: OffsetWidth,
     ) -> Result<Self, LinkStorageError> {
         let info = LinkInfoMessage::parse_with_offset_width(data, offset_width)?;
-        if info.serialize(offset_width)?.len() != data.len() {
+        if info.encoded_size() != data.len() {
             return Err(LinkStorageError::TrailingBytes);
         }
-        Self::new(&info, links, offset_width)
+        Self::new(&info, links)
     }
 
-    /// Combines Link Info metadata with links that can be encoded at `offset_width`.
+    /// Combines Link Info metadata with links that can be encoded at its offset width.
     ///
     /// # Errors
     ///
-    /// Returns [`LinkStorageError::DuplicateName`] or
-    /// [`LinkStorageError::DuplicateCreationOrder`] for repeated names or indexes,
-    /// [`LinkStorageError::CreationOrderPresence`] if link indexes disagree with tracking, and
-    /// [`LinkStorageError::CreationOrderCounter`] if an index is not below the next counter.
-    /// Returns the errors of [`LinkCreationPolicy::from_info`] for an unsupported policy,
-    /// [`LinkStorageError::StorageAddresses`] for inconsistent storage addresses, and the
-    /// errors of [`OwnedLink::encoded_len`] for a link that cannot be encoded.
-    /// Returns [`LinkStorageError::UndefinedAddress`] if a required storage address is undefined,
-    /// or [`LinkStorageError::Format`] if it does not fit `offset_width`.
-    pub fn new(
-        info: &LinkInfoMessage,
-        links: Vec<OwnedLink>,
-        offset_width: OffsetWidth,
-    ) -> Result<Self, LinkStorageError> {
+    /// Propagates the metadata errors of [`Self::from_info`] and the link errors of
+    /// [`Self::with_links`].
+    pub fn new(info: &LinkInfoMessage, links: Vec<OwnedLink>) -> Result<Self, LinkStorageError> {
+        Self::from_info(info)?.with_links(links)
+    }
+
+    /// Creates an empty group link set with the policy and addresses from `info`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkStorageError::StorageAddresses`] if the addresses disagree with each
+    /// other or with the indexing policy, and the policy errors of [`LinkCreationPolicy::from_info`].
+    pub fn from_info(info: &LinkInfoMessage) -> Result<Self, LinkStorageError> {
         let creation_order = LinkCreationPolicy::from_info(info)?;
+        let mut addresses = match (
+            info.fractal_heap_address(),
+            info.btree_name_index_address(),
+            info.creation_order_index(),
+        ) {
+            (None, None, LinkCreationOrderIndex::Absent | LinkCreationOrderIndex::Undefined)
+            | (
+                Some(_),
+                Some(_),
+                LinkCreationOrderIndex::Absent | LinkCreationOrderIndex::Defined(_),
+            ) => *info,
+            _ => return Err(LinkStorageError::StorageAddresses),
+        };
+        addresses.set_max_creation_order(None);
+        Ok(Self {
+            links: Vec::new(),
+            creation_order,
+            addresses,
+        })
+    }
+
+    /// Replaces the links after checking their encoding, names, and creation indexes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`OwnedLink::encoded_len`] for a link that cannot be encoded,
+    /// [`LinkStorageError::DuplicateName`] or [`LinkStorageError::DuplicateCreationOrder`]
+    /// for repeated names or indexes, [`LinkStorageError::CreationOrderPresence`] if indexes
+    /// disagree with tracking, or [`LinkStorageError::CreationOrderCounter`] if an index
+    /// reaches or exceeds the next-index counter.
+    pub fn with_links(mut self, links: Vec<OwnedLink>) -> Result<Self, LinkStorageError> {
+        let creation_order = self.creation_order;
+        let offset_width = self.offset_width();
         let mut names = BTreeSet::new();
         let mut indexes = BTreeSet::new();
         for link in &links {
@@ -101,13 +132,8 @@ impl GroupLinkStorage {
                 _ => return Err(LinkStorageError::CreationOrderPresence),
             }
         }
-        let addresses = DenseLinkAddresses::from_info(info, offset_width)?;
-        Ok(Self {
-            offset_width,
-            links,
-            creation_order,
-            addresses,
-        })
+        self.links = links;
+        Ok(self)
     }
 
     /// Inserts a link and assigns its creation index from the stored counter when tracked.
@@ -123,10 +149,9 @@ impl GroupLinkStorage {
     /// Returns the errors of [`OwnedLink::encoded_len`] if the link cannot be encoded.
     pub fn insert(&mut self, mut link: OwnedLink) -> Result<(), LinkStorageError> {
         let Self {
-            offset_width,
             links,
             creation_order,
-            addresses: _,
+            addresses,
         } = self;
         if link.creation_order.is_some() {
             return Err(LinkStorageError::CreationOrderPresence);
@@ -134,7 +159,7 @@ impl GroupLinkStorage {
         if links.iter().any(|existing| existing.name() == link.name()) {
             return Err(LinkStorageError::DuplicateName(link.name.into_bytes()));
         }
-        link.encoded_len(*offset_width)?;
+        link.encoded_len(addresses.offset_width())?;
         let mut next_policy = *creation_order;
         link.creation_order = next_policy.take()?;
         links.push(link);
@@ -164,16 +189,18 @@ impl GroupLinkStorage {
         name: &[u8],
         address: StoredAddress,
     ) -> Result<bool, LinkStorageError> {
+        let offset_width = self.offset_width();
         let Some(link) = self.links.iter_mut().find(|link| link.name() == name) else {
             return Ok(false);
         };
-        link.set_hard_target(address, self.offset_width)?;
+        link.set_hard_target(address, offset_width)?;
         Ok(true)
     }
 
     /// Clears dense-storage addresses while preserving the creation-order policy.
     pub fn use_compact_storage(&mut self) {
-        self.addresses = None;
+        self.addresses =
+            LinkInfoMessage::compact(self.offset_width(), None, self.creation_order.is_indexed());
     }
 
     /// Sets the dense-storage addresses without changing links or creation-order policy.
@@ -194,12 +221,20 @@ impl GroupLinkStorage {
         if creation_index.is_some() != self.creation_order.is_indexed() {
             return Err(LinkStorageError::StorageAddresses);
         }
-        self.addresses = Some(DenseLinkAddresses::new(
-            heap,
-            name_index,
-            creation_index,
-            self.offset_width,
-        )?);
+        self.addresses = LinkInfoMessage::new(
+            self.offset_width(),
+            None,
+            Some(heap),
+            Some(name_index),
+            creation_index.map_or(
+                LinkCreationOrderIndex::Absent,
+                LinkCreationOrderIndex::Defined,
+            ),
+        )
+        .map_err(|error| match error {
+            FormatError::DefinedAddressIsUndefined { .. } => LinkStorageError::UndefinedAddress,
+            error => LinkStorageError::Format(error),
+        })?;
         Ok(())
     }
 
@@ -210,7 +245,7 @@ impl GroupLinkStorage {
 
     /// Returns the file-address width used to check link targets and storage addresses.
     pub fn offset_width(&self) -> OffsetWidth {
-        self.offset_width
+        self.addresses.offset_width()
     }
 
     /// Returns the links in their retained order.
@@ -225,15 +260,9 @@ impl GroupLinkStorage {
 
     /// Returns Link Info metadata with the current policy, counter, and storage addresses.
     pub fn info(&self) -> LinkInfoMessage {
-        LinkInfoMessage {
-            max_creation_order: self.creation_order.next_index(),
-            fractal_heap_address: self.addresses.map(|addresses| addresses.heap),
-            btree_name_index_address: self.addresses.map(|addresses| addresses.name_index),
-            btree_creation_order_address: self.creation_order.is_indexed().then(|| {
-                self.addresses
-                    .and_then(|addresses| addresses.creation_index)
-            }),
-        }
+        let mut info = self.addresses;
+        info.set_max_creation_order(self.creation_order.next_index());
+        info
     }
 }
 
@@ -269,10 +298,10 @@ impl LinkCreationPolicy {
     /// the range accepted by [`LinkCreationCounter::new`].
     pub fn from_info(info: &LinkInfoMessage) -> Result<Self, LinkStorageError> {
         let next = info
-            .max_creation_order
+            .max_creation_order()
             .map(LinkCreationCounter::new)
             .transpose()?;
-        match (next, info.btree_creation_order_address.is_some()) {
+        match (next, info.indexes_creation_order()) {
             (None, false) => Ok(Self::Untracked),
             (Some(next), false) => Ok(Self::Tracked { next }),
             (Some(next), true) => Ok(Self::Indexed { next }),
@@ -787,65 +816,6 @@ impl OwnedSymbolicLinkTarget {
     }
 }
 
-/// Defined stored addresses of a dense link heap and its required indexes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DenseLinkAddresses {
-    heap: StoredAddress,
-    name_index: StoredAddress,
-    creation_index: Option<StoredAddress>,
-}
-
-impl DenseLinkAddresses {
-    /// Reads a complete dense address set, or `None` for compact storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LinkStorageError::StorageAddresses`] for an incomplete set,
-    /// [`LinkStorageError::UndefinedAddress`] for undefined addresses, and
-    /// [`LinkStorageError::Format`] for addresses that do not fit `offset_width`.
-    fn from_info(
-        info: &LinkInfoMessage,
-        offset_width: OffsetWidth,
-    ) -> Result<Option<Self>, LinkStorageError> {
-        match (
-            info.fractal_heap_address,
-            info.btree_name_index_address,
-            info.btree_creation_order_address,
-        ) {
-            (None, None, None | Some(None)) => Ok(None),
-            (Some(heap), Some(name), None) => Self::new(heap, name, None, offset_width).map(Some),
-            (Some(heap), Some(name), Some(Some(index))) => {
-                Self::new(heap, name, Some(index), offset_width).map(Some)
-            }
-            _ => Err(LinkStorageError::StorageAddresses),
-        }
-    }
-
-    /// Checks the defined stored addresses of a dense link heap and its indexes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LinkStorageError::UndefinedAddress`] for undefined addresses and
-    /// [`LinkStorageError::Format`] for addresses that do not fit `offset_width`.
-    fn new(
-        heap: StoredAddress,
-        name_index: StoredAddress,
-        creation_index: Option<StoredAddress>,
-        offset_width: OffsetWidth,
-    ) -> Result<Self, LinkStorageError> {
-        required_address(heap, offset_width)?;
-        required_address(name_index, offset_width)?;
-        if let Some(index) = creation_index {
-            required_address(index, offset_width)?;
-        }
-        Ok(Self {
-            heap,
-            name_index,
-            creation_index,
-        })
-    }
-}
-
 /// Reports link metadata that cannot be represented or combined faithfully.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkStorageError {
@@ -1328,9 +1298,9 @@ mod tests {
         #[values(false, true)] dense: bool,
         #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
     ) {
-        let original = info(policy, dense);
+        let original = info_at(width, policy, dense);
         let links = vec![hard_link(b"a".to_vec(), policy.next_index().map(|_| 3))];
-        let bytes = original.serialize(width).unwrap();
+        let bytes = original.to_bytes();
         let storage = GroupLinkStorage::parse(&bytes, links.clone(), width).unwrap();
         assert_eq!(storage.info(), original);
         assert_eq!(storage.links(), links);
@@ -1352,7 +1322,6 @@ mod tests {
                 hard_link(b"a".to_vec(), indexes.map(|x| x.0)),
                 hard_link(b"b".to_vec(), indexes.map(|x| x.1)),
             ],
-            OffsetWidth::Eight,
         )
         .unwrap();
         assert_eq!(
@@ -1369,10 +1338,14 @@ mod tests {
         );
         storage.use_compact_storage();
         assert_eq!(
-            storage.info().btree_creation_order_address,
-            policy.is_indexed().then_some(None)
+            storage.info().creation_order_index(),
+            if policy.is_indexed() {
+                LinkCreationOrderIndex::Undefined
+            } else {
+                LinkCreationOrderIndex::Absent
+            }
         );
-        let compact = storage.info().serialize(OffsetWidth::Eight).unwrap();
+        let compact = storage.info().to_bytes();
         let reparsed =
             GroupLinkStorage::parse(&compact, storage.links().to_vec(), OffsetWidth::Eight)
                 .unwrap();
@@ -1385,7 +1358,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            storage.info().max_creation_order,
+            storage.info().max_creation_order(),
             policy.next_index().map(|index| index + 1)
         );
     }
@@ -1402,8 +1375,7 @@ mod tests {
             LinkStorageError::CreationOrderExhausted
         );
         assert_eq!(policy, original);
-        let mut storage =
-            GroupLinkStorage::new(&info(policy, false), vec![], OffsetWidth::Eight).unwrap();
+        let mut storage = GroupLinkStorage::new(&info(policy, false), vec![]).unwrap();
         let original = storage.clone();
         assert_eq!(
             storage.insert(hard_link(b"a".to_vec(), None)).unwrap_err(),
@@ -1434,19 +1406,10 @@ mod tests {
             maximum: MAX_LINK_CREATION_COUNTER,
         };
         assert_eq!(LinkCreationCounter::new(next).unwrap_err(), error);
-        let message = LinkInfoMessage {
-            max_creation_order: Some(next),
-            btree_creation_order_address: indexed.then_some(None),
-            ..info(LinkCreationPolicy::Untracked, false)
-        };
+        let message = LinkInfoMessage::compact(OffsetWidth::Eight, Some(next), indexed);
         assert_eq!(LinkCreationPolicy::from_info(&message).unwrap_err(), error);
         assert_eq!(
-            GroupLinkStorage::new(
-                &message,
-                vec![hard_link(b"a".to_vec(), Some(0))],
-                OffsetWidth::Eight
-            )
-            .unwrap_err(),
+            GroupLinkStorage::new(&message, vec![hard_link(b"a".to_vec(), Some(0))]).unwrap_err(),
             error
         );
     }
@@ -1464,33 +1427,36 @@ mod tests {
         #[case] error: LinkStorageError,
     ) {
         assert_eq!(
-            GroupLinkStorage::new(&info(policy, false), links, OffsetWidth::Eight).unwrap_err(),
+            GroupLinkStorage::new(&info(policy, false), links).unwrap_err(),
             error
         );
     }
 
     #[rstest]
-    #[case::heap_only(LinkInfoMessage { fractal_heap_address: Some(StoredAddress::new(512)), ..info(LinkCreationPolicy::Untracked, false) }, LinkStorageError::StorageAddresses)]
-    #[case::name_only(LinkInfoMessage { btree_name_index_address: Some(StoredAddress::new(512)), ..info(LinkCreationPolicy::Untracked, false) }, LinkStorageError::StorageAddresses)]
-    #[case::index_without_tracking(LinkInfoMessage { btree_creation_order_address: Some(None), ..info(LinkCreationPolicy::Untracked, false) }, LinkStorageError::IndexingWithoutTracking)]
-    #[case::missing_dense_index(LinkInfoMessage { btree_creation_order_address: Some(None), ..info(LinkCreationPolicy::Indexed { next: counter(0) }, true) }, LinkStorageError::StorageAddresses)]
-    #[case::compact_with_index(LinkInfoMessage { btree_creation_order_address: Some(Some(StoredAddress::new(512))), ..info(LinkCreationPolicy::Indexed { next: counter(0) }, false) }, LinkStorageError::StorageAddresses)]
+    #[case::heap_only(LinkInfoMessage::new(OffsetWidth::Eight, None, Some(StoredAddress::new(512)), None, LinkCreationOrderIndex::Absent).unwrap(), LinkStorageError::StorageAddresses)]
+    #[case::name_only(LinkInfoMessage::new(OffsetWidth::Eight, None, None, Some(StoredAddress::new(512)), LinkCreationOrderIndex::Absent).unwrap(), LinkStorageError::StorageAddresses)]
+    #[case::index_without_tracking(
+        LinkInfoMessage::compact(OffsetWidth::Eight, None, true),
+        LinkStorageError::IndexingWithoutTracking
+    )]
+    #[case::missing_dense_index(LinkInfoMessage::new(OffsetWidth::Eight, Some(0), Some(StoredAddress::new(512)), Some(StoredAddress::new(1024)), LinkCreationOrderIndex::Undefined).unwrap(), LinkStorageError::StorageAddresses)]
+    #[case::compact_with_index(LinkInfoMessage::new(OffsetWidth::Eight, Some(0), None, None, LinkCreationOrderIndex::Defined(StoredAddress::new(512))).unwrap(), LinkStorageError::StorageAddresses)]
     fn inconsistent_storage_addresses_are_rejected(
         #[case] message: LinkInfoMessage,
         #[case] error: LinkStorageError,
     ) {
-        assert_eq!(
-            GroupLinkStorage::new(&message, vec![], OffsetWidth::Eight).unwrap_err(),
-            error
-        );
+        assert_eq!(GroupLinkStorage::new(&message, vec![]).unwrap_err(), error);
     }
 
     #[test]
     fn invalid_dense_replacement_preserves_the_existing_representation() {
         let mut storage = GroupLinkStorage::new(
-            &info(LinkCreationPolicy::Indexed { next: counter(0) }, false),
+            &info_at(
+                OffsetWidth::Two,
+                LinkCreationPolicy::Indexed { next: counter(0) },
+                false,
+            ),
             vec![],
-            OffsetWidth::Two,
         )
         .unwrap();
         let original = storage.clone();
@@ -1533,7 +1499,6 @@ mod tests {
         let mut storage = GroupLinkStorage::new(
             &info(LinkCreationPolicy::Indexed { next: counter(1) }, false),
             vec![hard_link(b"a".to_vec(), Some(0))],
-            OffsetWidth::Eight,
         )
         .unwrap();
         let original = storage.clone();
@@ -1554,12 +1519,8 @@ mod tests {
     #[test]
     fn group_retargeting_preserves_names_creation_indexes_and_storage_policy() {
         let original_info = info(LinkCreationPolicy::Indexed { next: counter(12) }, true);
-        let mut storage = GroupLinkStorage::new(
-            &original_info,
-            vec![hard_link(b"a".to_vec(), Some(3))],
-            OffsetWidth::Eight,
-        )
-        .unwrap();
+        let mut storage =
+            GroupLinkStorage::new(&original_info, vec![hard_link(b"a".to_vec(), Some(3))]).unwrap();
         assert!(
             !storage
                 .set_hard_target(b"missing", StoredAddress::new(4096))
@@ -1586,16 +1547,16 @@ mod tests {
         let mut link = hard_link(b"a".to_vec(), None);
         link.set_hard_target(StoredAddress::new(0x1_0000), OffsetWidth::Eight)
             .unwrap();
-        let message = info(LinkCreationPolicy::Untracked, false);
+        let message = LinkInfoMessage::compact(OffsetWidth::Two, None, false);
         let error = LinkStorageError::Format(FormatError::AddressTooLarge {
             address: 0x1_0000,
             offset_size: 2,
         });
         assert_eq!(
-            GroupLinkStorage::new(&message, vec![link.clone()], OffsetWidth::Two).unwrap_err(),
+            GroupLinkStorage::new(&message, vec![link.clone()]).unwrap_err(),
             error
         );
-        let mut storage = GroupLinkStorage::new(&message, vec![], OffsetWidth::Two).unwrap();
+        let mut storage = GroupLinkStorage::new(&message, vec![]).unwrap();
         assert_eq!(storage.offset_width(), OffsetWidth::Two);
         assert_eq!(storage.insert(link).unwrap_err(), error);
         assert!(storage.links().is_empty());
@@ -1603,9 +1564,7 @@ mod tests {
 
     #[test]
     fn reserved_link_info_flags_and_trailing_bytes_are_rejected() {
-        let mut bytes = info(LinkCreationPolicy::Untracked, false)
-            .serialize(OffsetWidth::Eight)
-            .unwrap();
+        let mut bytes = info(LinkCreationPolicy::Untracked, false).to_bytes();
         bytes[1] = 4;
         assert_eq!(
             GroupLinkStorage::parse(&bytes, vec![], OffsetWidth::Eight).unwrap_err(),
@@ -1636,13 +1595,24 @@ mod tests {
     }
 
     fn info(policy: LinkCreationPolicy, dense: bool) -> LinkInfoMessage {
-        LinkInfoMessage {
-            max_creation_order: policy.next_index(),
-            fractal_heap_address: dense.then(|| StoredAddress::new(512)),
-            btree_name_index_address: dense.then(|| StoredAddress::new(1024)),
-            btree_creation_order_address: policy
-                .is_indexed()
-                .then(|| dense.then(|| StoredAddress::new(2048))),
+        info_at(OffsetWidth::Eight, policy, dense)
+    }
+
+    fn info_at(width: OffsetWidth, policy: LinkCreationPolicy, dense: bool) -> LinkInfoMessage {
+        if !dense {
+            return LinkInfoMessage::compact(width, policy.next_index(), policy.is_indexed());
         }
+        LinkInfoMessage::new(
+            width,
+            policy.next_index(),
+            Some(StoredAddress::new(512)),
+            Some(StoredAddress::new(1024)),
+            if policy.is_indexed() {
+                LinkCreationOrderIndex::Defined(StoredAddress::new(2048))
+            } else {
+                LinkCreationOrderIndex::Absent
+            },
+        )
+        .unwrap()
     }
 }

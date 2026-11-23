@@ -147,8 +147,8 @@ pub fn assert_representation(file: &File, bytes: &[u8], fixture: Fixture) {
             .collect();
         match fixture {
             Fixture::Groups => {
-                assert_eq!(info.fractal_heap_address, None);
-                assert_eq!(info.btree_name_index_address, None);
+                assert_eq!(info.fractal_heap_address(), None);
+                assert_eq!(info.btree_name_index_address(), None);
                 assert_eq!(links.len(), if observed == 0 { 1 } else { 2 });
                 if observed == 0 {
                     let link = LinkMessage::parse_with_offset_width(&links[0].data, widths.offsets)
@@ -167,7 +167,7 @@ pub fn assert_representation(file: &File, bytes: &[u8], fixture: Fixture) {
                 assert!(links.is_empty());
                 let heap = FractalHeapHeader::parse(
                     bytes,
-                    usize::try_from(info.fractal_heap_address.unwrap().get()).unwrap(),
+                    usize::try_from(info.fractal_heap_address().unwrap().get()).unwrap(),
                     widths.offsets.get(),
                     widths.lengths.get(),
                 )
@@ -175,7 +175,7 @@ pub fn assert_representation(file: &File, bytes: &[u8], fixture: Fixture) {
                 assert_eq!(heap.managed_objects_count, 20);
                 let index = BTreeV2Header::parse_with_widths(
                     bytes,
-                    usize::try_from(info.btree_name_index_address.unwrap().get()).unwrap(),
+                    usize::try_from(info.btree_name_index_address().unwrap().get()).unwrap(),
                     widths,
                 )
                 .unwrap();

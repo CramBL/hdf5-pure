@@ -45,7 +45,7 @@ fn dense_group_lookup_and_listing_use_the_captured_frame(
             .unwrap();
         image[name_at] = 0xff;
     }
-    let heap_address = info.fractal_heap_address.unwrap();
+    let heap_address = info.fractal_heap_address().unwrap();
     let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
     let mut physical = vec![0; base.to_usize().unwrap()];
     physical.extend_from_slice(&image);
@@ -136,18 +136,25 @@ fn dense_group_walks_preserve_storage_error_precedence(
     #[values(false, true)] resident: bool,
 ) {
     let (mut image, _, mut info, widths) = dense_image();
-    let heap_address = info.fractal_heap_address.unwrap();
+    let heap_address = info.fractal_heap_address().unwrap();
     image[if invalid_heap {
         heap_address.get().to_usize().unwrap()
     } else {
-        info.btree_name_index_address
+        info.btree_name_index_address()
             .unwrap()
             .get()
             .to_usize()
             .unwrap()
     }] = 0;
     if missing_index {
-        info.btree_name_index_address = None;
+        info = LinkInfoMessage::new(
+            widths.offsets,
+            info.max_creation_order(),
+            info.fractal_heap_address(),
+            None,
+            info.creation_order_index(),
+        )
+        .unwrap();
     }
     let mut physical = vec![0; base.to_usize().unwrap()];
     physical.extend_from_slice(&image);
@@ -186,10 +193,17 @@ fn dense_group_heap_bounds_preserve_reader_errors(
     #[values(0, 512)] base: u64,
     #[values(false, true)] resident: bool,
 ) {
-    let (image, _, mut info, widths) = dense_image();
+    let (image, _, info, widths) = dense_image();
     let image_len = image.len().to_u64();
     let heap_address = StoredAddress::new(image_len + after_eof);
-    info.fractal_heap_address = Some(heap_address);
+    let info = LinkInfoMessage::new(
+        widths.offsets,
+        info.max_creation_order(),
+        Some(heap_address),
+        info.btree_name_index_address(),
+        info.creation_order_index(),
+    )
+    .unwrap();
     let addresses = AddressContext::from_effective_base(BaseAddress::new(base));
     let mut physical = vec![0; base.to_usize().unwrap()];
     physical.extend_from_slice(&image);
@@ -264,7 +278,7 @@ fn dense_group_reads_preserve_metadata_ownership_and_cache_admission(
         &stored,
         AccessMode::ReadOnly,
         &info,
-        info.fractal_heap_address.unwrap(),
+        info.fractal_heap_address().unwrap(),
         widths,
     )
     .unwrap();
@@ -274,7 +288,7 @@ fn dense_group_reads_preserve_metadata_ownership_and_cache_admission(
         &stored,
         AccessMode::ReadOnly,
         &info,
-        info.fractal_heap_address.unwrap(),
+        info.fractal_heap_address().unwrap(),
         widths,
     )
     .unwrap();
@@ -299,7 +313,7 @@ fn dense_group_reads_preserve_metadata_ownership_and_cache_admission(
         assert_eq!((after.hits(), after.entries(), after.bytes()), (0, 0, 0));
         assert_eq!(after.misses(), 2 * before.misses());
     }
-    let address = info.btree_name_index_address.unwrap();
+    let address = info.btree_name_index_address().unwrap();
     let metadata = stored
         .read_metadata(address, btree_v2::SIGNATURE.len())
         .unwrap();
@@ -338,8 +352,8 @@ fn dense_image() -> (Vec<u8>, ObjectHeader, LinkInfoMessage, FormatWidths) {
     )
     .unwrap();
     let info = group_v2::find_link_info(&header, widths.offsets).unwrap();
-    assert!(info.fractal_heap_address.is_some());
-    assert!(info.btree_name_index_address.is_some());
+    assert!(info.fractal_heap_address().is_some());
+    assert!(info.btree_name_index_address().is_some());
     (image, header, info, widths)
 }
 

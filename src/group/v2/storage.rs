@@ -75,7 +75,7 @@ pub(crate) fn read_dense(
     FractalHeapLayout::new(&header, widths.offsets, widths.lengths)
         .map_err(|_error| FormatError::InvalidFractalHeapGeometry)?;
     let name_address = info
-        .btree_name_index_address
+        .btree_name_index_address()
         .ok_or(Error::EditUnsupported("a dense group has no name index"))?;
     let name_header = BTreeV2Header::parse_from_source_with_widths(
         &StoredMetadata(source),
@@ -146,7 +146,7 @@ pub(crate) fn read_dense(
             "a group's heap and name index have different link counts",
         ));
     }
-    if let Some(Some(address)) = info.btree_creation_order_address {
+    if let Some(address) = info.creation_order_index().defined_address() {
         read_creation_index(source, widths, address, creation)?;
     }
     Ok(links)

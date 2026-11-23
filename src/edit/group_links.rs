@@ -88,10 +88,10 @@ pub(super) fn inspect(
     let info_bytes = info.ok_or(Error::EditUnsupported(
         "a target group's object header has no link-info message",
     ))?;
-    let info = GroupLinkStorage::parse(info_bytes, Vec::new(), widths.offsets)
-        .map_err(storage::storage_error)?
-        .info();
-    if let Some(heap) = info.fractal_heap_address {
+    let storage = GroupLinkStorage::parse(info_bytes, Vec::new(), widths.offsets)
+        .map_err(storage::storage_error)?;
+    let info = storage.info();
+    if let Some(heap) = info.fractal_heap_address() {
         if !links.is_empty() {
             return Err(Error::EditUnsupported(
                 "a group mixes compact and dense links",
@@ -99,7 +99,7 @@ pub(super) fn inspect(
         }
         links = storage::read_dense(&PhysicalSource::new(source).stored(), widths, &info, heap)?;
     }
-    GroupLinkStorage::new(&info, links, widths.offsets).map_err(storage::storage_error)
+    storage.with_links(links).map_err(storage::storage_error)
 }
 
 /// Reads the Group Info thresholds and converts parse errors for the editor.

@@ -223,7 +223,7 @@ impl WriteEngine {
                         &region[body..body_end],
                         widths.offsets,
                     )?;
-                    if info.fractal_heap_address.is_some() {
+                    if info.fractal_heap_address().is_some() {
                         return Err(Error::EditUnsupported(
                             "a group uses dense (fractal-heap) link storage (not supported in place yet)",
                         ));

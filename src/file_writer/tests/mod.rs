@@ -993,10 +993,10 @@ fn group_link_representation_matches_child_count(
     )
     .unwrap();
     let dense = count > MAX_COMPACT_LINKS;
-    assert_eq!(info.fractal_heap_address.is_some(), dense);
-    assert_eq!(info.btree_name_index_address.is_some(), dense);
-    assert_eq!(info.max_creation_order, None);
-    assert_eq!(info.btree_creation_order_address, None);
+    assert_eq!(info.fractal_heap_address().is_some(), dense);
+    assert_eq!(info.btree_name_index_address().is_some(), dense);
+    assert_eq!(info.max_creation_order(), None);
+    assert!(!info.indexes_creation_order());
     assert_eq!(
         header
             .messages
@@ -1017,7 +1017,7 @@ fn group_link_representation_matches_child_count(
     if count >= 100 {
         let heap = FractalHeapHeader::parse(
             &bytes,
-            (info.fractal_heap_address.unwrap().get() + userblock)
+            (info.fractal_heap_address().unwrap().get() + userblock)
                 .to_usize()
                 .unwrap(),
             OFFSET_SIZE,
@@ -1030,7 +1030,7 @@ fn group_link_representation_matches_child_count(
     if count == 2_000 {
         let index = BTreeV2Header::parse_with_widths(
             &bytes,
-            (info.btree_name_index_address.unwrap().get() + userblock)
+            (info.btree_name_index_address().unwrap().get() + userblock)
                 .to_usize()
                 .unwrap(),
             WIDTHS,

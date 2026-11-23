@@ -904,7 +904,7 @@ impl WriteEngine {
                     }
                 }
                 let inspected = self.inspect_group(addr)?;
-                node.prepared.dense_links = inspected.links.info().fractal_heap_address.is_some();
+                node.prepared.dense_links = inspected.links.info().fractal_heap_address().is_some();
                 let (region, link_names) = inspected.into_compact()?;
                 superseded_addrs.push((key.clone(), addr));
                 node.prepared.region = region;

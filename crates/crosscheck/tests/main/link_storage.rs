@@ -86,8 +86,8 @@ fn libhdf5_link_messages_preserve_targets_encodings_and_creation_policy(
         .collect::<Vec<_>>();
     let mut storage = GroupLinkStorage::parse(&message.data, links, width).unwrap();
     assert_eq!(storage.info(), info);
-    assert_eq!(info.fractal_heap_address, None);
-    assert_eq!(info.btree_name_index_address, None);
+    assert_eq!(info.fractal_heap_address(), None);
+    assert_eq!(info.btree_name_index_address(), None);
     let tracked = order != LinkCreationOrder::Untracked;
     let expected_next = 5 + u64::from(deleted);
     let policy = match order {
@@ -100,10 +100,8 @@ fn libhdf5_link_messages_preserve_targets_encodings_and_creation_policy(
         },
     };
     assert_eq!(storage.creation_order(), policy);
-    assert_eq!(
-        info.btree_creation_order_address,
-        policy.is_indexed().then_some(None)
-    );
+    assert_eq!(info.indexes_creation_order(), policy.is_indexed());
+    assert_eq!(info.creation_order_index().defined_address(), None);
     let links = storage
         .links()
         .iter()
@@ -166,7 +164,7 @@ fn libhdf5_link_messages_preserve_targets_encodings_and_creation_policy(
         tracked.then_some(expected_next)
     );
     assert_eq!(
-        storage.info().max_creation_order,
+        storage.info().max_creation_order(),
         tracked.then_some(expected_next + 1)
     );
     assert_eq!(

@@ -260,7 +260,7 @@ impl FixtureStorage<'_> {
                         self.widths.offsets,
                     )
                     .unwrap();
-                    if let Some(heap) = info.fractal_heap_address {
+                    if let Some(heap) = info.fractal_heap_address() {
                         let index = group::v2::collect_dense_group_index_storage_extents(
                             &self.source,
                             &info,

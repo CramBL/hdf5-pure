@@ -23,6 +23,7 @@ use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
+use hdf5_pure_format::__private::LinkCreationOrderIndex;
 use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
@@ -1175,7 +1176,7 @@ impl<S: ObjectSource> Plan<S> {
                 let link_info = record
                     .link_info()?
                     .unwrap_or_else(|| compact_link_info(*creation_order));
-                let links = if link_info.fractal_heap_address.is_some() {
+                let links = if link_info.fractal_heap_address().is_some() {
                     Vec::new()
                 } else {
                     links_at(&self.source, index, Some(&self.records))?
@@ -1258,28 +1259,26 @@ impl DenseLinks {
     /// Returns [`FormatError::Internal`] if the creation-order policy is inconsistent, the heap
     /// address is absent or nonzero, or a required index address is absent or zero.
     fn new(info: &LinkInfoMessage, phase_change: GroupPhaseChange) -> Result<Self, FormatError> {
-        let LinkInfoMessage {
-            max_creation_order: _,
-            fractal_heap_address,
-            btree_name_index_address,
-            btree_creation_order_address,
-        } = info;
         let creation_order =
             LinkCreationPolicy::from_info(info).map_err(|_error| inconsistent())?;
-        if *fractal_heap_address != Some(StoredAddress::ZERO) {
+        if info.fractal_heap_address() != Some(StoredAddress::ZERO) {
             return Err(inconsistent());
         }
-        let creation_index_offset = btree_creation_order_address
-            .map(|address| {
-                NonZeroU64::new(address.ok_or_else(inconsistent)?.get()).ok_or_else(inconsistent)
-            })
-            .transpose()?;
+        let creation_index_offset = match info.creation_order_index() {
+            LinkCreationOrderIndex::Absent => None,
+            LinkCreationOrderIndex::Defined(address) => {
+                Some(NonZeroU64::new(address.get()).ok_or_else(inconsistent)?)
+            }
+            LinkCreationOrderIndex::Undefined => return Err(inconsistent()),
+        };
         Ok(Self {
             phase_change,
             creation_order,
             creation_index_offset,
             name_index_offset: NonZeroU64::new(
-                btree_name_index_address.ok_or_else(inconsistent)?.get(),
+                info.btree_name_index_address()
+                    .ok_or_else(inconsistent)?
+                    .get(),
             )
             .ok_or_else(inconsistent)?,
         })
@@ -1313,19 +1312,19 @@ impl DenseLinks {
             return Err(inconsistent());
         }
         let name_index = address.checked_add(name_index_offset.get())?;
-        Ok(LinkInfoMessage {
-            max_creation_order: creation_order.next_index(),
-            fractal_heap_address: Some(address),
-            btree_name_index_address: Some(name_index),
-            btree_creation_order_address: creation_order
-                .is_indexed()
-                .then(|| {
-                    creation_index_offset
-                        .map(|offset| address.checked_add(offset.get()))
-                        .transpose()
-                })
-                .transpose()?,
-        })
+        LinkInfoMessage::new(
+            super::OFFSET_WIDTH,
+            creation_order.next_index(),
+            Some(address),
+            Some(name_index),
+            creation_index_offset
+                .map(|offset| address.checked_add(offset.get()))
+                .transpose()?
+                .map_or(
+                    LinkCreationOrderIndex::Absent,
+                    LinkCreationOrderIndex::Defined,
+                ),
+        )
     }
 }
 
@@ -1764,20 +1763,18 @@ fn links_at(
 }
 
 fn compact_link_info(creation: LinkCreationPolicy) -> LinkInfoMessage {
-    LinkInfoMessage {
-        max_creation_order: creation.next_index(),
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: creation.is_indexed().then_some(None),
-    }
+    LinkInfoMessage::compact(
+        super::OFFSET_WIDTH,
+        creation.next_index(),
+        creation.is_indexed(),
+    )
 }
 
 fn link_storage(
     links: Vec<OwnedLink>,
     creation: LinkCreationPolicy,
 ) -> Result<GroupLinkStorage, FormatError> {
-    GroupLinkStorage::new(&compact_link_info(creation), links, super::OFFSET_WIDTH)
-        .map_err(super::link_storage_error)
+    GroupLinkStorage::new(&compact_link_info(creation), links).map_err(super::link_storage_error)
 }
 
 fn group_header(
@@ -1859,9 +1856,9 @@ mod tests {
     use hdf5_pure_format::__private::DenseLinkPlan;
     use hdf5_pure_format::__private::IndexSlots;
     use hdf5_pure_format::__private::LinkCreationPolicy;
-    use hdf5_pure_format::__private::LinkInfoMessage;
     use hdf5_pure_format::__private::OwnedLink;
     use hdf5_pure_format::__private::OwnedLinkTarget;
+    use hdf5_pure_format::__private::{LinkCreationOrderIndex, LinkInfoMessage};
     use rstest::rstest;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use test_util::allocation;
@@ -1953,18 +1950,13 @@ mod tests {
             plan.link_info(span.address).unwrap()
         );
         assert_eq!(
-            geometry.link_info(span).unwrap().max_creation_order,
+            geometry.link_info(span).unwrap().max_creation_order(),
             Some(17)
         );
     }
 
     fn tracked_dense_plan(indexed: bool) -> DenseLinkPlan {
-        let info = LinkInfoMessage {
-            max_creation_order: Some(17),
-            fractal_heap_address: None,
-            btree_name_index_address: None,
-            btree_creation_order_address: indexed.then_some(None),
-        };
+        let info = LinkInfoMessage::compact(super::super::OFFSET_WIDTH, Some(17), indexed);
         let links = (0..9)
             .map(|index| {
                 OwnedLink::new(
@@ -1991,12 +1983,17 @@ mod tests {
     fn dense_link_geometry_rejects_an_unmeasured_creation_index(
         #[case] creation: Option<StoredAddress>,
     ) {
-        let info = LinkInfoMessage {
-            max_creation_order: Some(17),
-            fractal_heap_address: Some(StoredAddress::ZERO),
-            btree_name_index_address: Some(StoredAddress::new(512)),
-            btree_creation_order_address: Some(creation),
-        };
+        let info = LinkInfoMessage::new(
+            super::super::OFFSET_WIDTH,
+            Some(17),
+            Some(StoredAddress::ZERO),
+            Some(StoredAddress::new(512)),
+            creation.map_or(
+                LinkCreationOrderIndex::Undefined,
+                LinkCreationOrderIndex::Defined,
+            ),
+        )
+        .unwrap();
         assert_eq!(
             DenseLinks::new(&info, LinkPhaseChange::default().group_phase_change(),)
                 .map(|_| ())
@@ -2012,12 +2009,14 @@ mod tests {
     #[case::at_creation_index(1024)]
     fn dense_link_geometry_rejects_a_creation_index_outside_the_reservation(#[case] length: u64) {
         let geometry = DenseLinks::new(
-            &LinkInfoMessage {
-                max_creation_order: Some(17),
-                fractal_heap_address: Some(StoredAddress::ZERO),
-                btree_name_index_address: Some(StoredAddress::new(512)),
-                btree_creation_order_address: Some(Some(StoredAddress::new(1024))),
-            },
+            &LinkInfoMessage::new(
+                super::super::OFFSET_WIDTH,
+                Some(17),
+                Some(StoredAddress::ZERO),
+                Some(StoredAddress::new(512)),
+                LinkCreationOrderIndex::Defined(StoredAddress::new(1024)),
+            )
+            .unwrap(),
             LinkPhaseChange::default().group_phase_change(),
         )
         .unwrap();

@@ -5,7 +5,7 @@ expression: creation_report
 Operation: Create an unlimited f64 dataset in memory
 Elements: 16,384
 Chunk elements: 512
-Allocation count:            131
-Cumulative bytes:        407,208
+Allocation count:            129
+Cumulative bytes:        407,140
 Peak bytes:              402,627
 Retained bytes:          133,966

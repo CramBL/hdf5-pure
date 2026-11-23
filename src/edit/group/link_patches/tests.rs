@@ -56,8 +56,8 @@ fn link_batches_keep_region_widths_and_reject_undefined_targets(
     assert_eq!(region.widths(), widths);
     let fresh = group::fresh_group_region(widths).unwrap();
     let (_, _, info) = group::find_link_info(&fresh).unwrap().unwrap();
-    assert_eq!(info.fractal_heap_address, None);
-    assert_eq!(info.btree_name_index_address, None);
+    assert_eq!(info.fractal_heap_address(), None);
+    assert_eq!(info.btree_name_index_address(), None);
     assert_eq!(fresh.widths(), widths);
 }
 

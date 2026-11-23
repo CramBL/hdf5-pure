@@ -866,6 +866,20 @@ impl OhRegion {
         self.bytes.extend_from_slice(record);
     }
 
+    /// Appends a Link Info record using this region's message record layout.
+    ///
+    /// The caller supplies `info` at this region's offset width.
+    ///
+    /// # Errors
+    ///
+    /// Propagates allocation errors from [`MessageRecordLayout::write_link_info`].
+    pub(super) fn push_link_info(
+        &mut self,
+        info: &crate::link_info::LinkInfoMessage,
+    ) -> Result<(), FormatError> {
+        self.layout().write_link_info(&mut self.bytes, info)
+    }
+
     /// Appends the spliced region with `info` encoded into the selected record's body.
     ///
     /// The caller passes a splice for an Attribute Info record and a message checked at this

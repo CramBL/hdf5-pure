@@ -108,14 +108,7 @@ fn parsing_ten_thousand_hard_link_messages_has_bounded_allocations() {
         expected.push((name.into_bytes(), StoredAddress::new(address)));
     }
 
-    let info_bytes = LinkInfoMessage {
-        max_creation_order: None,
-        fractal_heap_address: None,
-        btree_name_index_address: None,
-        btree_creation_order_address: None,
-    }
-    .serialize(OffsetWidth::Eight)
-    .unwrap();
+    let info_bytes = LinkInfoMessage::compact(OffsetWidth::Eight, None, false).to_bytes();
 
     let (storage, measured) = allocation::measure("hard_link_messages_parse_and_assemble", || {
         let mut links = Vec::with_capacity(LINK_COUNT);

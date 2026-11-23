@@ -297,7 +297,7 @@ pub use crate::group_info::GroupInfo;
 pub use crate::group_info::GroupInfoOutputTooSmall;
 pub use crate::group_info::GroupPhaseChange;
 pub use crate::group_info::GroupThresholds;
-pub use crate::link_info::LinkInfoMessage;
+pub use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
 pub use crate::link_message::LinkMessage;
 pub use crate::link_message::LinkTarget;
 pub use crate::link_message::SymbolicLinkTarget;
