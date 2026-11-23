@@ -159,6 +159,7 @@ fn interrupted_append_can_be_reopened_with_different_values(
     let max_index = |bytes: &[u8]| {
         ExtensibleArrayHeader::parse(bytes, header, 8, 8)
             .unwrap()
+            .stored_statistics()
             .max_idx_set
     };
     assert_eq!(max_index(&recording.base), 50);

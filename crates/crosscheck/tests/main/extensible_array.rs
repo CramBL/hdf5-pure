@@ -24,6 +24,7 @@ use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::ExtensibleArrayInitialization;
+use hdf5_pure_format::__private::ExtensibleArrayStats;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::LengthWidth;
 use hdf5_pure_format::__private::ObjectHeader;
@@ -127,9 +128,18 @@ fn pure_initialization_supports_native_first_writes(
         ExtensibleArrayHeader::parse(&image, usize::try_from(address.get()).unwrap(), 8, 8)
             .unwrap();
     assert_eq!(header.max_index_bits().get(), parameters[0]);
-    assert_eq!(header.idx_blk_elmts, parameters[1]);
-    assert_eq!(header.super_blk_min_data_ptrs, parameters[2]);
-    assert_eq!(header.min_dblk_nelmts, parameters[3]);
+    assert_eq!(
+        header.creation_parameters().inline_elements(),
+        parameters[1]
+    );
+    assert_eq!(
+        header.creation_parameters().min_data_blocks().get(),
+        parameters[2]
+    );
+    assert_eq!(
+        header.creation_parameters().min_elements().get(),
+        parameters[3]
+    );
     assert_eq!(header.page_nelmts().get(), 1u64 << parameters[4]);
 }
 
@@ -189,6 +199,31 @@ fn c_writes_pure_reads() {
         assert_eq!(values.len(), n, "hdf5-pure read wrong length for n={n}");
         assert_eq!(values, expected, "hdf5-pure read wrong data for n={n}");
     }
+}
+
+#[rstest]
+#[case::direct(20)]
+#[case::secondary(2_000)]
+#[case::paged(140_000)]
+fn c_header_statistics_are_retained(#[case] count: usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ea.h5");
+    write_with_c(&path, count);
+    let expected = extensible_array::header_stats(&path);
+    let image = std::fs::read(&path).unwrap();
+    let at = bytes::sole_signature(&image, extensible_array::SIGNATURE);
+    let header = ExtensibleArrayHeader::parse(&image, at, 8, 8).unwrap();
+    assert_eq!(
+        *header.stored_statistics(),
+        ExtensibleArrayStats {
+            nsuper_blks: expected.secondary_block_count,
+            super_blk_size: expected.secondary_block_size,
+            ndata_blks: expected.data_block_count,
+            data_blk_size: expected.data_block_size,
+            max_idx_set: expected.max_index_set,
+            nelmts: expected.element_count,
+        },
+    );
 }
 
 #[test]

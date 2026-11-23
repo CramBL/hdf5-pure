@@ -950,7 +950,7 @@ impl Located {
         let array = metadata::read_header(file, ea_addr)?;
         let ea_header = array.header();
         let has_filters = filter_msg.is_some();
-        if (ea_header.client_id == 1) != has_filters {
+        if array.is_filtered() != has_filters {
             return Err(unsupported(
                 "dataset filter metadata is inconsistent (chunk-index client id \
                  disagrees with the filter pipeline)",
@@ -958,19 +958,19 @@ impl Located {
         }
         // Immediate append writes a stored-size field of one to eight bytes.
         // The header parser accepts an empty size field as well.
-        let elem_w = ea_header.element_size as usize;
-        if ea_header.client_id == 1 && !(os as usize + 5..=os as usize + 12).contains(&elem_w) {
+        let elem_w = usize::from(ea_header.element_size());
+        if has_filters && !(os as usize + 5..=os as usize + 12).contains(&elem_w) {
             return Err(unsupported(
                 "malformed filtered extensible-array element width",
             ));
         }
-        if ea_header.client_id == EA_CLIENT_ID_UNFILTERED && elem_w != os as usize {
+        if !has_filters && elem_w != usize::from(os) {
             return Err(unsupported(
                 "malformed unfiltered extensible-array element width",
             ));
         }
         let geom = array.geometry()?;
-        let index_block_addr = ea_header.index_block_address;
+        let index_block_addr = ea_header.index_block_address();
         // The dataspace dimension is the single commit point; the EA element
         // count is published one step earlier. If a prior writer crashed between
         // the two, the on-disk EA count is ahead of the committed dimension. Seed
@@ -987,12 +987,12 @@ impl Located {
             chunk_elems,
             elem_bytes,
             chunk_bytes,
-            client_id: ea_header.client_id,
+            client_id: ea_header.client_id(),
             ea_addr,
             offset_width: widths.offsets,
             geom,
-            idx_blk_elmts: ea_header.idx_blk_elmts as u64,
-            ea_elem_size: ea_header.element_size as usize,
+            idx_blk_elmts: u64::from(ea_header.creation_parameters().inline_elements()),
+            ea_elem_size: elem_w,
             ea_bits: ea_header.bit_geometry(),
             index_block_addr,
             num_chunks,
@@ -3747,7 +3747,7 @@ mod tests {
         #[case] local: usize,
     ) {
         let header = range_header(32, 4, 16);
-        let geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        let geom = ExtensibleArrayGeometry::from_header(&header).unwrap();
         let region = locate_data_block(&geom, 4, element).unwrap();
         assert_eq!(
             (
@@ -3777,7 +3777,7 @@ mod tests {
         #[case] element: u64,
     ) {
         let header = range_header(bits, inline, minimum);
-        let geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        let geom = ExtensibleArrayGeometry::from_header(&header).unwrap();
         let inline = u64::from(inline);
         let error = match locate_data_block(&geom, inline, element) {
             Ok(_) => panic!("expected a range error"),
@@ -3795,7 +3795,7 @@ mod tests {
     #[test]
     fn the_last_representable_secondary_range_has_the_expected_location() {
         let header = range_header(64, 4, 16);
-        let geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        let geom = ExtensibleArrayGeometry::from_header(&header).unwrap();
         let end = (1u128 << 64) - 12;
         let elements = 1u64 << 34;
         let region = locate_data_block(&geom, 4, u64::try_from(end - 1).unwrap()).unwrap();
@@ -3848,7 +3848,7 @@ mod tests {
         let original = store.data.clone();
         let (mut loc, datatype) = locate(&store);
         let header = range_header(bits, 4, 16);
-        loc.geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        loc.geom = ExtensibleArrayGeometry::from_header(&header).unwrap();
         loc.ea_bits = header.bit_geometry();
         loc.current_dim = dimension;
         store.reset_counters();
@@ -4616,7 +4616,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            array.header().element_size,
+            array.header().element_size(),
             store.widths.offsets.get() + EA_FILTER_MASK_BYTES
         );
         let Err(error) = Located::locate_at(&store, address, Error::AppendUnsupported) else {

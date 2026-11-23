@@ -234,7 +234,7 @@ fn append_to_malformed_ea_bit_geometry_returns_a_format_error_and_preserves_the_
         .unwrap();
     let header_len = ExtensibleArrayHeader::serialized_size(8, 8);
     let header = ExtensibleArrayHeader::parse(&bytes, at, 8, 8).unwrap();
-    assert_eq!(header.max_idx_set, 1);
+    assert_eq!(header.stored_statistics().max_idx_set, 1);
     bytes[at + byte] = value;
     checksum::restamp(&mut bytes, at, header_len);
     fs::write(&path, &bytes).unwrap();

@@ -155,7 +155,7 @@ fn writes_complete_blocks_at_disjoint_addresses(
                 .parse(region)
                 .unwrap();
             assert_eq!(header.range(), ranges[0]);
-            assert_eq!(header.header().index_block_address, addresses[1]);
+            assert_eq!(header.header().index_block_address(), addresses[1]);
             let index = header.index_block().unwrap();
             assert_eq!(index.range(), ranges[1]);
             let index = index.parse(region).unwrap();

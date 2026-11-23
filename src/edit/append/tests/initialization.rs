@@ -84,7 +84,10 @@ fn empty_index_blocks_use_complete_metadata_allocations(
         .parse(FileRegion::new(ranges[0], &bytes).unwrap())
         .unwrap();
     assert_eq!(view.index_block().unwrap().range(), ranges[1]);
-    assert_eq!(view.header().idx_blk_elmts, parameters[1]);
+    assert_eq!(
+        view.header().creation_parameters().inline_elements(),
+        parameters[1]
+    );
     let error = engine.context.allocations.before_reference().unwrap_err();
     assert!(
         matches!(&error, Error::Format(FormatError::Internal(reason)) if reason == "reference publication precedes allocation ownership publication"),
