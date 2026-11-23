@@ -10,6 +10,7 @@ use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ObjectHeaderAllocation;
+use hdf5_pure_format::__private::PreparedSuperblock;
 use hdf5_pure_space::__private as free_space;
 #[cfg(doc)]
 use hdf5_pure_space::__private::SessionSpace;
@@ -362,21 +363,21 @@ impl WriteEngine {
     /// Returns [`Error::EditUnsupported`] if the file bytes differ from the accepted image or
     /// superblock framing. Returns the read, serialization, or parsing error if recovery fails.
     pub(in crate::edit) fn recover_page_publication(&mut self) -> Result<(), Error> {
-        let len =
-            hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?.len();
+        let len = PreparedSuperblock::new(self.context.superblock())?.encoded_size();
         let accepted = self
             .image
             .read_exact_at(self.context.signature().get(), len)?;
-        let mut published = vec![0; len];
+        let mut bytes = [0; PreparedSuperblock::MAX_ENCODED_SIZE];
+        let published = &mut bytes[..len];
         self.image
-            .read_disk_at(self.context.signature().get(), &mut published)?;
-        if published != accepted {
+            .read_disk_at(self.context.signature().get(), published)?;
+        if *published != accepted {
             return Err(Error::EditUnsupported(
                 "PAGE publication bytes differ from the session image after a failed write; \
                  close and reopen the file before editing again",
             ));
         }
-        let proposed = self.context.recover(&published)?;
+        let proposed = self.context.recover(published)?;
         self.context.adopt(proposed)?;
         Ok(())
     }

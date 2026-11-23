@@ -13,7 +13,6 @@ use std::collections::HashMap;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileSpaceSettingsExt;
-use hdf5_pure_core::__private::SuperblockFields;
 #[cfg(test)]
 use hdf5_pure_format::__private::DENSE_ATTR_MAX_MANAGED_OBJECT;
 use hdf5_pure_format::__private::DenseAttrBlob;
@@ -31,9 +30,11 @@ use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::ManagedHeapPlanError;
+use hdf5_pure_format::__private::ModernSuperblockLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::PreparedSuperblock;
 use hdf5_pure_format::__private::{PreparedDenseAttrs, PreparedLink, PreparedLinkRecord};
 use hdf5_pure_space::__private::AllocationClass;
 
@@ -47,7 +48,7 @@ use crate::DeflateLevel;
 use crate::FileSpaceSettings;
 use crate::FillTime;
 use crate::LinkPhaseChange;
-use crate::SuperblockVersion;
+use crate::SuperblockStatus;
 use crate::UserblockSize;
 #[cfg(test)]
 use crate::VariableLengthType;
@@ -95,7 +96,6 @@ use crate::type_builders::{
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
-use crate::{SuperblockStatus, SuperblockStatusFlags};
 
 // `AttrValue` lives in `type_builders`; `types` and `mat` reference it through
 // this module's path, so keep it re-exported here.
@@ -124,8 +124,8 @@ pub(crate) const OFFSET_SIZE: u8 = OFFSET_WIDTH.get();
 /// [`LENGTH_WIDTH`] as the `u8` width the writers take.
 #[cfg(test)]
 pub(crate) const LENGTH_SIZE: u8 = LENGTH_WIDTH.get();
-const SUPERBLOCK_SIZE: usize =
-    hdf5_pure_format::__private::superblock_serialized_size(OFFSET_WIDTH);
+#[cfg(test)]
+const SUPERBLOCK_SIZE: usize = ModernSuperblockLayout::new(WIDTHS).encoded_size();
 
 /// Constructs Link Info for untracked compact links at the file's offset width.
 pub(crate) fn compact_link_info(offset_width: OffsetWidth) -> LinkInfoMessage {
@@ -172,7 +172,7 @@ pub(crate) fn build_chunked_dataset_oh(
     w.serialize()
 }
 
-/// The superblock version the given on-disk format writes.
+/// Returns the superblock version and zero consistency flags for `libver`.
 ///
 /// Version 3 arrived with HDF5 1.10. Its only difference from version 2 is the
 /// meaning of the file-consistency-flags byte, which 1.10 uses to mark a file
@@ -180,12 +180,26 @@ pub(crate) fn build_chunked_dataset_oh(
 /// format writes the same fields under the version number a 1.8 library
 /// understands. That byte is why a SWMR writer needs the newer superblock, and
 /// why [`File::open_swmr_writer`](crate::File::open_swmr_writer) requires one.
-pub(crate) fn superblock_version(libver: LibVer) -> SuperblockVersion {
+fn superblock_status(libver: LibVer) -> SuperblockStatus {
     if libver >= LibVer::V110 {
-        SuperblockVersion::Three
+        SuperblockStatus::Three(0)
     } else {
-        SuperblockVersion::Two
+        SuperblockStatus::Two(0)
     }
+}
+
+/// Writes the complete prepared superblock to the sink using a stack buffer.
+///
+/// # Errors
+///
+/// Propagates the sink's write error as [`EmissionError::Sink`].
+fn put_superblock<S: ByteSink>(
+    sink: &mut S,
+    superblock: &PreparedSuperblock,
+) -> Result<(), EmissionError<S::Error>> {
+    let mut bytes = [0; PreparedSuperblock::MAX_ENCODED_SIZE];
+    let len = superblock.write_into(&mut bytes)?;
+    sink.put(&bytes[..len]).map_err(EmissionError::Sink)
 }
 
 /// The data-layout message version the given on-disk format emits for a
@@ -959,8 +973,8 @@ impl FileWriter {
         sink: &mut S,
     ) -> Result<(), EmissionError<S::Error>> {
         let widths = self.widths;
-        let superblock_size =
-            hdf5_pure_format::__private::superblock_serialized_size(widths.offsets);
+        let superblock_layout = ModernSuperblockLayout::new(widths);
+        let superblock_size = superblock_layout.encoded_size();
         let target = self.resolve_libver()?;
         let libver = target.profile();
         let file_space = self.file_space_settings;
@@ -2326,29 +2340,16 @@ impl FileWriter {
             };
             debug_assert_eq!(ByteLength::new(real_ext_oh.len().to_u64()), ext_len);
 
+            let superblock = superblock_layout.prepare(
+                superblock_status(libver),
+                base,
+                Some(ext_addr),
+                eof_addr2,
+                root_group_addr,
+            )?;
             sink.reserve(ByteLength::new(eof_addr2.get()))?;
             Self::put_userblock(sink, ub, &self.userblock_content)?;
-            let sb = SuperblockFields {
-                status: SuperblockStatus::new(
-                    superblock_version(libver),
-                    SuperblockStatusFlags::new(),
-                )?,
-                offset_size: widths.offsets,
-                length_size: widths.lengths,
-                base_address: base,
-                eof_address: eof_addr2.get(),
-                root_group_address: root_group_addr,
-                group_leaf_node_k: None,
-                group_internal_node_k: None,
-                indexed_storage_internal_node_k: None,
-                free_space_address: None,
-                driver_info_address: None,
-                superblock_extension_address: Some(ext_addr),
-                checksum: None,
-            }
-            .build();
-            sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)
-                .map_err(EmissionError::Sink)?;
+            put_superblock(sink, &superblock)?;
 
             let collections = core::iter::once(&attr_collections)
                 .chain(early_gcol.iter().filter_map(|&i| {
@@ -2640,35 +2641,20 @@ impl FileWriter {
         let base = BaseAddress::new(ub as u64);
         let eof_addr2 = base.resolve(cursor2)?;
 
+        let superblock = superblock_layout.prepare(
+            superblock_status(libver),
+            base,
+            ext_addr,
+            eof_addr2,
+            root_group_addr,
+        )?;
+
         // Buffered sinks reserve the complete output capacity. Streaming sinks ignore the hint.
         sink.reserve(ByteLength::new(eof_addr2.get()))?;
 
         // Userblock: the caller's header bytes, then zeros.
         Self::put_userblock(sink, ub, &self.userblock_content)?;
-
-        let sb = SuperblockFields {
-            status: SuperblockStatus::new(
-                superblock_version(libver),
-                SuperblockStatusFlags::new(),
-            )?,
-            offset_size: widths.offsets,
-            length_size: widths.lengths,
-            base_address: base,
-            eof_address: eof_addr2.get(),
-            root_group_address: root_group_addr,
-            group_leaf_node_k: None,
-            group_internal_node_k: None,
-            indexed_storage_internal_node_k: None,
-            free_space_address: None,
-            driver_info_address: None,
-            superblock_extension_address: Some(
-                ext_addr.unwrap_or(StoredAddress::undefined(OffsetWidth::Eight)),
-            ),
-            checksum: None,
-        }
-        .build();
-        sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)
-            .map_err(EmissionError::Sink)?;
+        put_superblock(sink, &superblock)?;
 
         /// Identifies borrowed bytes or a deferred dataset or group serialization.
         enum FileData<'a> {

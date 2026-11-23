@@ -288,6 +288,7 @@ use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::ObjectHeaderChunk;
+use hdf5_pure_format::__private::PreparedSuperblock;
 use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
 #[cfg(doc)]
@@ -1799,8 +1800,7 @@ impl WriteEngine {
             && !info.persist
         {
             let stored_eoa = addresses.relative(PhysicalAddress::new(superblock.eof_address))?;
-            let superblock_len =
-                hdf5_pure_format::__private::serialize_superblock(superblock)?.len() as u64;
+            let superblock_len = PreparedSuperblock::new(superblock)?.encoded_size().to_u64();
             let superblock_end =
                 sb_sig_off
                     .checked_add(superblock_len)

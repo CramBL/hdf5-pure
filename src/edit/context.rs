@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::PreparedSuperblock;
 
 use crate::address::{AddressContext, StoredAddress};
 use crate::error::{Error, FormatError};
@@ -88,7 +89,9 @@ impl FileContext {
         let mut expected = self.superblock.clone();
         expected.root_group_address = recovered.root_group_address;
         expected.eof_address = recovered.eof_address;
-        if hdf5_pure_format::__private::serialize_superblock(&expected)? != published {
+        let mut bytes = [0; PreparedSuperblock::MAX_ENCODED_SIZE];
+        let len = PreparedSuperblock::new(&expected)?.write_into(&mut bytes)?;
+        if bytes[..len] != *published {
             return Err(Error::EditUnsupported(
                 "PAGE superblock framing changed after a failed publication; \
                  close and reopen the file before editing again",

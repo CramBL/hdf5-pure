@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
+use hdf5_pure_format::__private::PreparedSuperblock;
 use hdf5_pure_space::__private::Extent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageClassEvidence;
@@ -179,10 +180,8 @@ impl WriteEngine {
             .then(|| FileRange::new(PhysicalAddress::new(0), self.context.signature().get()))
             .transpose()?;
 
-        let superblock_len = u64::try_from(
-            hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?.len(),
-        )
-        .map_err(|_err| FormatError::Internal("superblock length does not fit u64".into()))?;
+        let superblock_len =
+            PreparedSuperblock::new(self.context.superblock())?.encoded_size() as u64;
         live_metadata_space.push(FileRange::new(self.context.signature(), superblock_len)?);
 
         if let Some(extension) = self.context.superblock().superblock_extension_address

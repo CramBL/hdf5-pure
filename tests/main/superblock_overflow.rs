@@ -3,19 +3,19 @@ use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use hdf5_pure::Source;
 use rstest::rstest;
+use test_util::superblock::SIGNATURE;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
 use test_util_hdf5::reader::ReadBackend;
 
 fn overflowing_root_address_file() -> Vec<u8> {
+    let mut superblock = Superblock::new(Widths::EIGHT)
+        .base_address(512)
+        .eof_address(1024)
+        .build();
+    set_address_field_and_recompute_checksum(&mut superblock, ROOT_FIELD, u64::MAX);
     let mut image = vec![0; 512];
-    image.extend_from_slice(
-        &Superblock::new(Widths::EIGHT)
-            .base_address(512)
-            .eof_address(1024)
-            .root_header_address(u64::MAX)
-            .build(),
-    );
+    image.extend_from_slice(&superblock);
     image.resize(1024, 0);
     image
 }
@@ -67,18 +67,30 @@ fn opening_reports_eof_relocation_arithmetic_failure(
     #[case] expected: FormatError,
 ) {
     let mut image = vec![0; signature_offset];
-    image.extend_from_slice(
-        &Superblock::new(Widths::EIGHT)
-            .base_address(stored_base)
-            .eof_address(stored_eof)
-            .build(),
-    );
+    let mut superblock = Superblock::new(Widths::EIGHT)
+        .base_address(stored_base)
+        .build();
+    set_address_field_and_recompute_checksum(&mut superblock, EOF_FIELD, stored_eof);
+    image.extend_from_slice(&superblock);
     let error = backend.open_image(image).unwrap_err();
     let Error::Format(format_error) = error else {
         panic!("expected a format error, got {error:?}");
     };
     assert_eq!(format_error, expected);
 }
+
+fn set_address_field_and_recompute_checksum(superblock: &mut Vec<u8>, index: usize, address: u64) {
+    let width = Widths::EIGHT.offset;
+    let at = SIGNATURE.len() + DIRECT_PREFIX_LEN + index * width;
+    test_util::bytes::set_uint_at(superblock, at, width, address);
+    superblock.truncate(superblock.len() - CHECKSUM_LEN);
+    test_util::checksum::append(superblock);
+}
+
+const DIRECT_PREFIX_LEN: usize = 4;
+const EOF_FIELD: usize = 2;
+const ROOT_FIELD: usize = 3;
+const CHECKSUM_LEN: usize = 4;
 
 #[rstest]
 #[case::short((1_u64 << 40) - 1)]

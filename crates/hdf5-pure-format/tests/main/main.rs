@@ -29,6 +29,7 @@ mod object_header_splice;
 mod object_reference_count;
 mod opaque_tags;
 mod prepared_global_heap;
+mod superblock;
 mod symbol_table_message;
 mod variable_length_descriptor;
 mod width_encoding;

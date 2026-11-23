@@ -15,7 +15,6 @@ use std::path::Path;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileSpaceSettingsExt;
-use hdf5_pure_core::__private::SuperblockFields;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::DenseAttrCreationOrder;
 use hdf5_pure_format::__private::DenseAttrFixup;
@@ -25,6 +24,7 @@ use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::LinkCreationOrderIndex;
 use hdf5_pure_format::__private::LinkCreationPolicy;
+use hdf5_pure_format::__private::ModernSuperblockLayout;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use hdf5_pure_format::__private::PreparedDenseAttrs;
@@ -39,8 +39,6 @@ use super::preparation::PreparedAttributes;
 use super::preparation::PreparedDataset;
 use super::preparation::VlPatch;
 use crate::FileSpaceSettings;
-use crate::SuperblockStatus;
-use crate::SuperblockStatusFlags;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
@@ -663,6 +661,8 @@ pub(crate) struct Plan<S> {
     end: StoredAddress,
 }
 
+const SUPERBLOCK_LAYOUT: ModernSuperblockLayout = ModernSuperblockLayout::new(super::WIDTHS);
+
 impl<S: ObjectSource> Plan<S> {
     /// Plans object allocations, resolves references, and checks metadata before output.
     ///
@@ -697,17 +697,10 @@ impl<S: ObjectSource> Plan<S> {
         let aggregated = paged.is_none()
             && (threshold.is_some()
                 || settings.is_some_and(|settings| settings.strategy() == FileSpaceStrategy::Aggr));
-        let mut allocation = FileAllocation::new(
-            StoredAddress::new(super::SUPERBLOCK_SIZE as u64),
-            aggregated,
-            threshold,
-        );
-        let mut collections = paged.map(|settings| {
-            layout::PagedCollections::new(
-                StoredAddress::new(super::SUPERBLOCK_SIZE as u64),
-                settings.page_size(),
-            )
-        });
+        let first_allocation = StoredAddress::new(SUPERBLOCK_LAYOUT.encoded_size().to_u64());
+        let mut allocation = FileAllocation::new(first_allocation, aggregated, threshold);
+        let mut collections = paged
+            .map(|settings| layout::PagedCollections::new(first_allocation, settings.page_size()));
         let mut records = Vec::with_capacity(source.len());
         let mut references = vec![1u32; source.len()];
         for index in 0..source.len() {
@@ -813,35 +806,21 @@ impl<S: ObjectSource> Plan<S> {
             managers,
             end,
         } = &self;
-        let mut sink = WriteSink::new(BufWriter::new(writer));
         let eof = BaseAddress::ZERO.resolve(*end)?;
-        let superblock = SuperblockFields {
-            status: SuperblockStatus::new(
-                super::superblock_version(*libver),
-                SuperblockStatusFlags::new(),
-            )?,
-            offset_size: super::OFFSET_WIDTH,
-            length_size: super::LENGTH_WIDTH,
-            base_address: BaseAddress::ZERO,
-            eof_address: eof.get(),
-            root_group_address: records
+        let superblock = SUPERBLOCK_LAYOUT.prepare(
+            super::superblock_status(*libver),
+            BaseAddress::ZERO,
+            extension.as_ref().map(|(span, _)| span.address),
+            eof,
+            records
                 .last()
                 .ok_or_else(inconsistent)?
                 .metadata
                 .header
                 .address,
-            group_leaf_node_k: None,
-            group_internal_node_k: None,
-            indexed_storage_internal_node_k: None,
-            free_space_address: None,
-            driver_info_address: None,
-            superblock_extension_address: extension.as_ref().map(|(span, _)| span.address),
-            checksum: None,
-        }
-        .build();
-        sink.put(&hdf5_pure_format::__private::serialize_superblock(
-            &superblock,
-        )?)?;
+        )?;
+        let mut sink = WriteSink::new(BufWriter::new(writer));
+        super::put_superblock(&mut sink, &superblock).map_err(emission_error)?;
         let mut spans = Vec::new();
         for (index, record) in records.iter().enumerate() {
             spans.push(
@@ -1862,6 +1841,8 @@ mod tests {
     use rstest::rstest;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use test_util::allocation;
+    use test_util::superblock::{VERSION_2, VERSION_3, v2};
+    use test_util::widths::Widths;
 
     use super::Allocation;
     use super::DenseLinks;
@@ -2232,6 +2213,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1; count]
         );
+    }
+
+    #[rstest]
+    #[case::version_two(LibVer::V18, VERSION_2)]
+    #[case::version_three(LibVer::V110, VERSION_3)]
+    fn source_writer_places_the_root_immediately_after_the_superblock(
+        #[case] libver: LibVer,
+        #[case] version: u8,
+    ) {
+        let source = EmptyTree {
+            count: 0,
+            filtered: false,
+            unallocated: false,
+            loads: Arc::new(vec![AtomicUsize::new(0)]),
+        };
+        let image = Plan::new(source, None, Some((libver, libver)), libver)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let fixture = v2::Superblock::new(Widths::EIGHT)
+            .version(version)
+            .eof_address(u64::try_from(image.len()).unwrap());
+        let root = fixture.build().len();
+        let expected = fixture
+            .root_header_address(u64::try_from(root).unwrap())
+            .build();
+        assert_eq!(&image[..root], expected);
+        let file = File::from_bytes(image).unwrap();
+        assert_eq!(file.root().groups().unwrap(), Vec::<String>::new());
     }
 
     struct EmptyTree {

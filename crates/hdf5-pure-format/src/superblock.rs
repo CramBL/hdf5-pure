@@ -11,6 +11,7 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 
 use alloc::format;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::FileRange;
@@ -22,68 +23,243 @@ use hdf5_pure_core::{SuperblockStatus, SuperblockVersion};
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::bytes;
 use crate::checksum;
+use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::signature::HDF5_SIGNATURE;
 use crate::width::FormatWidths;
 use crate::width::OffsetWidth;
 
-/// Serializes `superblock` in the version 2 and 3 layout.
+/// The address and length widths of a version 2 or 3 superblock.
 ///
-/// Writes the two width bytes, the consistency flags, the four addresses at
-/// [`offset_size`](Superblock::offset_size), and the Jenkins lookup3 checksum over the preceding
-/// bytes. Encodes an absent superblock extension address as undefined.
-/// Writes base and end-of-file addresses as absolute values, and root and extension addresses
-/// as encoded base-relative values.
+/// The writer records both widths and uses the address width for all four address fields.
+/// These fields are defined in "Format Signature and Superblock" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModernSuperblockLayout {
+    widths: FormatWidths,
+}
+
+impl ModernSuperblockLayout {
+    /// Selects the file widths for size planning and encoding.
+    pub const fn new(widths: FormatWidths) -> Self {
+        Self { widths }
+    }
+
+    /// Checks the fields needed to write a version 2 or 3 superblock.
+    ///
+    /// Preserves the version and all eight consistency flag bits. The base and end-of-file
+    /// addresses are absolute file addresses. The root and extension addresses are stored
+    /// relative to `base`.
+    /// For `extension`, [`None`], the offset width's undefined marker, and [`u64::MAX`]
+    /// all represent an absent extension.
+    ///
+    /// Checks the version first, then the base, extension, end-of-file, and root addresses
+    /// in their stored order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedVersion`] for version 0 or 1,
+    /// [`FormatError::AddressTooLarge`] if a required address or defined extension exceeds the
+    /// offset width, or [`FormatError::DefinedAddressIsUndefined`] if the base, end-of-file, or
+    /// root address equals that width's undefined marker.
+    ///
+    /// # Examples
+    ///
+    /// See [`PreparedSuperblock::write_into`] for an example with independent widths and a
+    /// nonzero base address.
+    pub fn prepare(
+        self,
+        status: SuperblockStatus,
+        base: BaseAddress,
+        extension: Option<StoredAddress>,
+        eof: PhysicalAddress,
+        root: StoredAddress,
+    ) -> Result<PreparedSuperblock, FormatError> {
+        let flags = match status {
+            SuperblockStatus::Two(flags) | SuperblockStatus::Three(flags) => flags,
+            SuperblockStatus::Zero(_) | SuperblockStatus::One(_) => {
+                return Err(FormatError::UnsupportedVersion(status.version().get()));
+            }
+        };
+        let width = self.widths.offsets;
+        bytes::require_defined_offset(base.get(), width)?;
+        let extension = match extension {
+            None => DecodedStoredAddress::Undefined,
+            Some(address) if address.is_undefined(width) || address.get() == u64::MAX => {
+                DecodedStoredAddress::Undefined
+            }
+            Some(address) => DecodedStoredAddress::Defined(address),
+        }
+        .to_stored(width)?;
+        bytes::require_defined_offset(eof.get(), width)?;
+        bytes::require_defined_offset(root.get(), width)?;
+        Ok(PreparedSuperblock {
+            layout: self,
+            version: status.version().get(),
+            flags,
+            addresses: [base.get(), extension.get(), eof.get(), root.get()],
+        })
+    }
+
+    /// Returns the complete encoded length including the checksum.
+    ///
+    /// The signature, version, widths, flags, and checksum occupy 16 bytes. Each of the four
+    /// addresses occupies the selected offset width.
+    pub const fn encoded_size(self) -> usize {
+        modern_superblock_size(self.widths.offsets)
+    }
+}
+
+/// A version 2 or 3 superblock with checked fields ready for encoding.
+///
+/// Preparation retains the fields by value and checks the addresses once. Repeated calls to
+/// [`Self::write_into`] allocate no memory.
+#[derive(Debug)]
+pub struct PreparedSuperblock {
+    layout: ModernSuperblockLayout,
+    version: u8,
+    flags: u8,
+    addresses: [u64; ADDRESS_COUNT],
+}
+
+impl PreparedSuperblock {
+    /// Prepares the modern fields of `superblock` for bounded encoding.
+    ///
+    /// # Errors
+    ///
+    /// Propagates version and address errors from [`ModernSuperblockLayout::prepare`].
+    pub fn new(superblock: &Superblock) -> Result<Self, FormatError> {
+        ModernSuperblockLayout::new(FormatWidths {
+            offsets: superblock.offset_size,
+            lengths: superblock.length_size,
+        })
+        .prepare(
+            superblock.status(),
+            superblock.base_address,
+            superblock.superblock_extension_address,
+            PhysicalAddress::new(superblock.eof_address),
+            superblock.root_group_address,
+        )
+    }
+
+    /// Returns the exact byte count required to write this superblock, including its checksum.
+    pub fn encoded_size(&self) -> usize {
+        self.encoded_len()
+    }
+
+    /// Writes the superblock at the start of `output` and returns its encoded length.
+    ///
+    /// Always writes the Jenkins lookup3 checksum over the preceding bytes. Leaves bytes after
+    /// the superblock unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `output` is shorter than [`Self::encoded_size`].
+    /// The error reports the encoded length as `expected` and `output.len()` as `available`.
+    /// Leaves the destination unchanged on error.
+    ///
+    /// # Examples
+    ///
+    /// Writes a version 3 superblock with two-byte addresses and four-byte lengths.
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
+    /// use hdf5_pure_core::{BaseAddress, PhysicalAddress, StoredAddress, SuperblockStatus};
+    /// use hdf5_pure_format::FormatError;
+    /// use hdf5_pure_format::__private::{FormatWidths, ModernSuperblockLayout, PreparedSuperblock};
+    ///
+    /// let layout = ModernSuperblockLayout::new(FormatWidths::from_sizes(2, 4)?);
+    /// let prepared = layout.prepare(
+    ///     SuperblockStatus::Three(0),
+    ///     BaseAddress::new(512),
+    ///     None,
+    ///     PhysicalAddress::new(640),
+    ///     StoredAddress::new(24),
+    /// )?;
+    /// let mut output = [0xa5; PreparedSuperblock::MAX_ENCODED_SIZE];
+    /// let written = prepared.write_into(&mut output)?;
+    /// assert_eq!(written, layout.encoded_size());
+    /// let expected = [
+    ///     0x89, b'H', b'D', b'F', b'\r', b'\n', 0x1a, b'\n',
+    ///     3, 2, 4, 0,
+    ///     0, 2, 0xff, 0xff, 0x80, 2, 24, 0,
+    ///     0xd7, 0x50, 0x50, 0x81,
+    /// ];
+    /// assert_eq!(&output[..written], &expected);
+    /// assert!(output[written..].iter().all(|&byte| byte == 0xa5));
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        Ok(self.encode_into(output)?)
+    }
+
+    /// Writes the fields and checksum into a slice of exactly [`Self::encoded_size`] bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `output` is shorter than the fixed prefix and checksum.
+    fn write_superblock(&self, output: &mut [u8]) {
+        let (content, checksum_field) = output.split_at_mut(output.len() - CHECKSUM_LEN);
+        let (prefix, addresses) = content.split_at_mut(V2_V3_FIXED_LEN);
+        let (signature, fields) = prefix.split_at_mut(HDF5_SIGNATURE.len());
+        let widths = self.layout.widths;
+        signature.copy_from_slice(&HDF5_SIGNATURE);
+        fields.copy_from_slice(&[
+            self.version,
+            widths.offsets.get(),
+            widths.lengths.get(),
+            self.flags,
+        ]);
+        let width = usize::from(widths.offsets.get());
+        for (field, address) in addresses.chunks_exact_mut(width).zip(self.addresses) {
+            field.copy_from_slice(&address.to_le_bytes()[..width]);
+        }
+        checksum_field.copy_from_slice(&checksum::jenkins_lookup3(content).to_le_bytes());
+    }
+
+    /// The complete encoded length of a superblock with eight-byte addresses.
+    pub const MAX_ENCODED_SIZE: usize = modern_superblock_size(OffsetWidth::Eight);
+}
+
+impl Encode for PreparedSuperblock {
+    type Error = bytes::UnexpectedEof;
+
+    fn encoded_len(&self) -> usize {
+        self.layout.encoded_size()
+    }
+
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let required = self.encoded_len();
+        let available = output.len();
+        let superblock = output
+            .get_mut(..required)
+            .ok_or_else(|| bytes::UnexpectedEof::new(required, available))?;
+        self.write_superblock(superblock);
+        Ok(required)
+    }
+}
+
+/// Encodes a version 2 or 3 superblock into an owned buffer, including its checksum.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedVersion`] if the version is 0 or 1,
-/// [`FormatError::AddressTooLarge`] if an address exceeds the offset width, or
-/// [`FormatError::DefinedAddressIsUndefined`] if the base, end-of-file, or root address equals
-/// that width's undefined marker. An extension address of [`u64::MAX`] is encoded as undefined.
+/// Propagates version and address errors from [`PreparedSuperblock::new`].
 pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatError> {
-    let status = superblock.status();
-    let flags = match status {
-        SuperblockStatus::Zero(_) | SuperblockStatus::One(_) => {
-            return Err(FormatError::UnsupportedVersion(status.version().get()));
-        }
-        SuperblockStatus::Two(flags) | SuperblockStatus::Three(flags) => flags,
-    };
-    let offset_width = superblock.offset_size;
-    let mut buf = Vec::with_capacity(superblock_serialized_size(superblock.offset_size));
-    buf.extend_from_slice(&HDF5_SIGNATURE);
-    buf.push(superblock.version().get());
-    buf.push(offset_width.get());
-    buf.push(superblock.length_size.get());
-    buf.push(flags);
-    write_address(&mut buf, offset_width, superblock.base_address.get())?;
-    bytes::try_write_offset(
-        &mut buf,
-        superblock
-            .superblock_extension_address
-            .unwrap_or(StoredAddress::undefined(offset_width))
-            .get(),
-        offset_width,
-    )?;
-    write_address(&mut buf, offset_width, superblock.eof_address)?;
-    write_address(&mut buf, offset_width, superblock.root_group_address.get())?;
-    // checksum
-    let checksum = checksum::jenkins_lookup3(&buf);
-    buf.extend_from_slice(&checksum.to_le_bytes());
-    Ok(buf)
+    let prepared = PreparedSuperblock::new(superblock)?;
+    let mut bytes = vec![0; prepared.encoded_size()];
+    prepared.write_superblock(&mut bytes);
+    Ok(bytes)
 }
 
-/// Returns the serialized length of a version 2 or 3 superblock, including its checksum.
-///
-/// Both versions store four addresses at `offsets`, as defined in "Format Signature and
-/// Superblock" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
-pub const fn superblock_serialized_size(offsets: OffsetWidth) -> usize {
+// Section `subsec_fmt4_boot_super`, version 4.0, specifies four offset-width addresses.
+const fn modern_superblock_size(offsets: OffsetWidth) -> usize {
     V2_V3_FIXED_LEN + ADDRESS_COUNT * offsets.get() as usize + CHECKSUM_LEN
 }
 
@@ -350,7 +526,7 @@ impl SuperblockCandidateFields {
             SuperblockVersion::Zero => V0_V1_FIXED_LEN + addresses + root_entry,
             SuperblockVersion::One => V0_V1_FIXED_LEN + V1_FIELDS_LEN + addresses + root_entry,
             SuperblockVersion::Two | SuperblockVersion::Three => {
-                V2_V3_FIXED_LEN + addresses + CHECKSUM_LEN
+                modern_superblock_size(self.widths.offsets)
             }
         }
     }
@@ -428,10 +604,6 @@ impl SuperblockCandidateFields {
         }
         .build())
     }
-}
-
-fn write_address(buf: &mut Vec<u8>, width: OffsetWidth, address: u64) -> Result<(), FormatError> {
-    bytes::try_write_defined_offset(buf, address, width)
 }
 
 const FIRST_CANDIDATE: u64 = 0;
@@ -780,58 +952,15 @@ mod tests {
         assert_eq!(parsed.superblock_extension_address, None);
         let root_at = fields.eof_address_at + LEGACY_ROOT_FIELDS_AFTER_EOF * width_bytes;
         let mut encoded = Vec::new();
-        write_address(&mut encoded, width, parsed.root_group_address.get()).unwrap();
+        bytes::try_write_defined_offset(&mut encoded, parsed.root_group_address.get(), width)
+            .unwrap();
         assert_eq!(encoded, data[root_at..root_at + width_bytes]);
         encoded.clear();
-        write_address(&mut encoded, width, parsed.eof_address).unwrap();
+        bytes::try_write_defined_offset(&mut encoded, parsed.eof_address, width).unwrap();
         assert_eq!(
             encoded,
             data[fields.eof_address_at..fields.eof_address_at + width_bytes]
         );
-    }
-
-    #[rstest]
-    #[case::v2_extension_absent(SuperblockVersion::Two, false)]
-    #[case::v2_extension_defined(SuperblockVersion::Two, true)]
-    #[case::v3_extension_absent(SuperblockVersion::Three, false)]
-    #[case::v3_extension_defined(SuperblockVersion::Three, true)]
-    fn direct_address_fields_roundtrip_in_stored_coordinates(
-        #[case] version: SuperblockVersion,
-        #[case] defined: bool,
-        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
-    ) {
-        let mut data = v2::Superblock::new(Widths::new(
-            usize::from(width.get()),
-            usize::from(width.get()),
-        ))
-        .version(version.get())
-        .base_address(512)
-        .eof_address(2048)
-        .root_header_address(96)
-        .build();
-        if defined {
-            let width_bytes = usize::from(width.get());
-            let extension_at = HDF5_SIGNATURE.len() + DIRECT_PREFIX_LEN + width_bytes;
-            data[extension_at..extension_at + width_bytes]
-                .copy_from_slice(&64u64.to_le_bytes()[..width_bytes]);
-            data.truncate(data.len() - CHECKSUM_LEN);
-            test_util::checksum::append(&mut data);
-        }
-        let parsed = parse(&data);
-        assert_eq!(parsed.base_address.get(), 512);
-        assert_eq!(parsed.eof_address, 2048);
-        assert_eq!(parsed.root_group_address.get(), 96);
-        assert_eq!(parsed.free_space_address, None);
-        assert_eq!(parsed.driver_info_address, None);
-        assert_eq!(
-            parsed.superblock_extension_address,
-            Some(if defined {
-                StoredAddress::new(64)
-            } else {
-                StoredAddress::undefined(width)
-            })
-        );
-        assert_eq!(serialize_superblock(&parsed).unwrap(), data);
     }
 
     #[rstest]
@@ -886,99 +1015,6 @@ mod tests {
 
         assert_eq!(sb.base_address, BaseAddress::ZERO);
         assert_eq!(sb.eof_address, data.len() as u64);
-    }
-
-    #[test]
-    fn a_superblock_whose_two_widths_differ_round_trips_to_the_same_bytes() {
-        let data = build(SuperblockVersion::Two, OffsetWidth::Two, LengthWidth::Four);
-        assert_eq!(serialize_superblock(&parse(&data)).unwrap(), data);
-    }
-
-    #[rstest]
-    #[case::version_zero(SuperblockVersion::Zero)]
-    #[case::version_one(SuperblockVersion::One)]
-    fn a_legacy_superblock_version_is_rejected_by_the_serializer(
-        #[case] version: SuperblockVersion,
-    ) {
-        let mut sb = parse(&build(
-            SuperblockVersion::Two,
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-        ));
-        sb.set_version(version).unwrap();
-        assert_eq!(
-            serialize_superblock(&sb),
-            Err(FormatError::UnsupportedVersion(version.get()))
-        );
-    }
-
-    #[rstest]
-    #[case::base_address_beyond(
-        |sb: &mut Superblock| sb.base_address = BaseAddress::new(0x1_0000),
-        FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 }
-    )]
-    #[case::base_address_marker(
-        |sb: &mut Superblock| sb.base_address = BaseAddress::new(0xffff),
-        FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 }
-    )]
-    #[case::base_address_maximum(
-        |sb: &mut Superblock| sb.base_address = BaseAddress::new(u64::MAX),
-        FormatError::AddressTooLarge { address: u64::MAX, offset_size: 2 }
-    )]
-    #[case::eof_address_beyond(
-        |sb: &mut Superblock| sb.eof_address = 0x1_0000,
-        FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 }
-    )]
-    #[case::eof_address_marker(
-        |sb: &mut Superblock| sb.eof_address = 0xffff,
-        FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 }
-    )]
-    #[case::eof_address_maximum(
-        |sb: &mut Superblock| sb.eof_address = u64::MAX,
-        FormatError::AddressTooLarge { address: u64::MAX, offset_size: 2 }
-    )]
-    #[case::root_group_address_beyond(
-        |sb: &mut Superblock| sb.root_group_address = StoredAddress::new(0x1_0000),
-        FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 }
-    )]
-    #[case::root_group_address_marker(
-        |sb: &mut Superblock| sb.root_group_address = StoredAddress::new(0xffff),
-        FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 }
-    )]
-    #[case::root_group_address_maximum(
-        |sb: &mut Superblock| sb.root_group_address = StoredAddress::new(u64::MAX),
-        FormatError::AddressTooLarge { address: u64::MAX, offset_size: 2 }
-    )]
-    fn mandatory_addresses_outside_the_defined_range_are_rejected(
-        #[case] set_address: fn(&mut Superblock),
-        #[case] expected: FormatError,
-    ) {
-        let mut sb = parse(&build(
-            SuperblockVersion::Two,
-            OffsetWidth::Two,
-            LengthWidth::Two,
-        ));
-        set_address(&mut sb);
-        assert_eq!(serialize_superblock(&sb), Err(expected));
-    }
-
-    #[rstest]
-    #[case::base(|sb: &mut Superblock, value| sb.base_address = BaseAddress::new(value))]
-    #[case::end_of_file(|sb: &mut Superblock, value| sb.eof_address = value)]
-    #[case::root(|sb: &mut Superblock, value| sb.root_group_address = StoredAddress::new(value))]
-    fn mandatory_addresses_preserve_the_largest_defined_value(
-        #[case] set_address: fn(&mut Superblock, u64),
-        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
-    ) {
-        let mut superblock = parse(&build(SuperblockVersion::Two, width, LengthWidth::Eight));
-        let value = StoredAddress::undefined(width).get() - 1;
-        set_address(&mut superblock, value);
-        let encoded = serialize_superblock(&superblock).unwrap();
-        superblock.checksum = Some(test_util::checksum::lookup3(
-            &encoded[..encoded.len() - CHECKSUM_LEN],
-        ));
-        assert_eq!(parse(&encoded), superblock);
-        checksum::verify_trailing(&encoded).unwrap();
     }
 
     #[rstest]
@@ -1267,8 +1303,6 @@ mod tests {
     // EOF, driver information and link name precede the root header: sections
     // `subsec_fmt4_boot_super` and `subsec_fmt4_infra_symboltableentry`, version 4.0.
     const LEGACY_ROOT_FIELDS_AFTER_EOF: usize = 3;
-    // Version, widths and flags precede addresses: section `subsec_fmt4_boot_super`, version 4.0.
-    const DIRECT_PREFIX_LEN: usize = 4;
     /// The reserved bits of the version 3 file consistency field, defined in "Format Signature
     /// and Superblock" of the [format specification, version 4.0][spec].
     ///

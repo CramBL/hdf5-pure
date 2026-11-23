@@ -56,6 +56,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- Reduced allocations when `FileBuilder::finish` writes a version 2 or 3 superblock ([#1331](https://github.com/CramBL/hdf5-pure/pull/1331)).
 - Reduced allocations when `FileBuilder` writes compact group links ([#1329](https://github.com/CramBL/hdf5-pure/pull/1329)).
 - Reduced dimension-list decoding time in `Dataspace::parse` for nonempty shapes ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
 - `parse_file_space_info` in `hdf5-pure-format` allocates persistent manager lists once ([#1236](https://github.com/CramBL/hdf5-pure/pull/1236)).
