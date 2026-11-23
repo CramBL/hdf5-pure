@@ -844,7 +844,7 @@ mod tests {
     fn link_creation_order_rejects_reserved_link_info_flags() {
         let widths = hdf5_pure_format::__private::FormatWidths::from_sizes(2, 8).unwrap();
         let mut region = OhRegion::empty(widths, ObjectHeaderPrefix::PLAIN);
-        region.push(MessageType::LINK_INFO, &[0, 0x80, 0xff, 0xff, 0xff, 0xff]);
+        region.push_fixture_message(MessageType::LINK_INFO, &[0, 0x80, 0xff, 0xff, 0xff, 0xff]);
         let Err(Error::Format(error)) = super::LinkCreationOrder::for_region(&region) else {
             panic!("expected a Link Info format error");
         };
@@ -862,16 +862,17 @@ mod tests {
         let source = Body::new(Width::Two, None, None, None, CreationIndex::Absent)
             .unwrap()
             .build();
-        region.push(MessageType::GROUP_INFO, b"before");
+        region.push_fixture_message(MessageType::GROUP_INFO, b"before");
         let before = region.len();
-        region.push_bytes(&layout.record_with_creation_index(
+        region.push_bytes(&edit_test_util::fixture_record(
+            layout,
             MessageType::LINK_INFO,
             MessageFlags::FORBID_SHARING,
             7,
             &source,
         ));
         let after = region.len();
-        region.push(MessageType::GROUP_INFO, b"after");
+        region.push_fixture_message(MessageType::GROUP_INFO, b"after");
         let original = region.clone();
 
         let expected = Body::new(Width::Two, Some(3), None, None, CreationIndex::Undefined)
@@ -902,7 +903,7 @@ mod tests {
             crate::file_writer::WIDTHS,
             ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
         );
-        before.push(MessageType::ATTRIBUTE, b"retained\0");
+        before.push_fixture_message(MessageType::ATTRIBUTE, b"retained\0");
         let mut expected = before.clone();
         for name in ["a", "b", "c"] {
             before

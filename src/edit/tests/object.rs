@@ -64,6 +64,7 @@ use crate::edit::copy::CopyTreeBuilder;
 use crate::edit::copy::ObjModel;
 use crate::edit::group::GROUP_INFO_BODY;
 use crate::edit::staging::StagedOp;
+use crate::edit::test_util as edit_test_util;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
@@ -1024,7 +1025,13 @@ fn a_heap_reference_is_rewrapped_as_a_heap_reference() {
 #[test]
 fn a_rewrapped_shared_message_keeps_its_flag() {
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-    region.push_shared(MessageType::ATTRIBUTE, &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    region.push_bytes(&edit_test_util::fixture_record(
+        region.layout(),
+        MessageType::ATTRIBUTE,
+        MessageFlags::SHARED,
+        0,
+        &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+    ));
     assert_eq!(region[3], MessageFlags::SHARED.get());
     assert!(edit::attributes::region_has_shared_attr(&region).unwrap());
 }
@@ -1292,14 +1299,16 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
     };
     let records = |max, indexed: bool| {
         let info = AttributeInfoMessage::compact(OFFSET_WIDTH, Some(max), indexed).to_bytes();
-        let first_info = layout.record_with_creation_index(
+        let first_info = edit_test_util::fixture_record(
+            layout,
             MessageType::ATTRIBUTE_INFO,
             MessageFlags::FORBID_SHARING,
             9,
             &info,
         );
         let second_info = if repeated {
-            layout.record_with_creation_index(
+            edit_test_util::fixture_record(
+                layout,
                 MessageType::ATTRIBUTE_INFO,
                 MessageFlags::CONSTANT,
                 12,
@@ -1309,14 +1318,16 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
             Vec::new()
         };
         [
-            layout.record_with_creation_index(
+            edit_test_util::fixture_record(
+                layout,
                 UNKNOWN_MESSAGE_TYPE,
                 MessageFlags::CONSTANT,
                 4,
                 &[0xAB; 3],
             ),
             first_info,
-            layout.record_with_creation_index(
+            edit_test_util::fixture_record(
+                layout,
                 MessageType::ATTRIBUTE,
                 MessageFlags::NONE,
                 0,
@@ -1346,7 +1357,8 @@ fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
         &out[..],
         &[
             records(2, layout.indexes_creation_order()),
-            layout.record_with_creation_index(
+            edit_test_util::fixture_record(
+                layout,
                 MessageType::ATTRIBUTE,
                 MessageFlags::NONE,
                 1,
@@ -1434,7 +1446,8 @@ fn a_tracked_header_without_an_info_message_gains_one() {
         ObjectHeaderPrefix::with_layout(TRACKED),
     );
     for (name, index) in [("alpha", 0u16), ("beta", 4)] {
-        let record = TRACKED.record_with_creation_index(
+        let record = edit_test_util::fixture_record(
+            TRACKED,
             MessageType::ATTRIBUTE,
             MessageFlags::NONE,
             index,
@@ -1469,14 +1482,16 @@ fn rebuild_compact_layout_replaces_only_the_first_layout(
 ) {
     let region = |inline: &[u8]| {
         [
-            record_layout.record_with_creation_index(
+            edit_test_util::fixture_record(
+                record_layout,
                 UNKNOWN_MESSAGE_TYPE,
                 MessageFlags::CONSTANT,
                 1,
                 &[0xAB; 3],
             ),
-            record_layout.record(MessageType::DATASPACE, &[0xAB; 8]),
-            record_layout.record_with_creation_index(
+            edit_test_util::fixture_message(record_layout, MessageType::DATASPACE, &[0xAB; 8]),
+            edit_test_util::fixture_record(
+                record_layout,
                 MessageType::DATA_LAYOUT,
                 MessageFlags::CONSTANT,
                 7,
@@ -1484,9 +1499,11 @@ fn rebuild_compact_layout_replaces_only_the_first_layout(
             ),
             later_layout
                 .as_deref()
-                .map(|later| record_layout.record(MessageType::DATA_LAYOUT, later))
+                .map(|later| {
+                    edit_test_util::fixture_message(record_layout, MessageType::DATA_LAYOUT, later)
+                })
                 .unwrap_or_default(),
-            record_layout.record(MessageType::ATTRIBUTE, &[0xCD; 5]),
+            edit_test_util::fixture_message(record_layout, MessageType::ATTRIBUTE, &[0xCD; 5]),
         ]
         .concat()
     };
@@ -1569,7 +1586,7 @@ fn replace_layout_message_replaces_only_the_first_layout_record(
     let expected = records_around(
         record_layout,
         dataspace_record(record_layout),
-        record_layout.record(MessageType::DATA_LAYOUT, &body),
+        edit_test_util::fixture_message(record_layout, MessageType::DATA_LAYOUT, &body),
     );
     assert_eq!((out.props(), &out[..]), (region.props(), &expected[..]));
 }
@@ -1592,7 +1609,7 @@ fn replace_dataspace_message_replaces_only_the_first_dataspace_record(
 
     let expected = records_around(
         record_layout,
-        record_layout.record(MessageType::DATASPACE, &body),
+        edit_test_util::fixture_message(record_layout, MessageType::DATASPACE, &body),
         compact_layout_record(record_layout, &[1, 2, 3, 4]),
     );
     assert_eq!((out.props(), &out[..]), (region.props(), &expected[..]));
@@ -1987,7 +2004,7 @@ fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
     };
     let root = (0..depth).fold(leaf, |child, _| {
         let mut region = edit::group::fresh_group_region(crate::file_writer::WIDTHS).unwrap();
-        region.push(
+        region.push_fixture_message(
             MessageType::LINK,
             &HardLink::new("g", UNDEF).build(Widths::EIGHT),
         );
@@ -2023,7 +2040,7 @@ fn link_bodies(region: &OhRegion) -> Vec<&[u8]> {
 }
 
 fn message_record(msg_type: MessageType, body: &[u8]) -> Vec<u8> {
-    MessageRecordLayout::PLAIN.record(msg_type, body)
+    edit_test_util::fixture_message(MessageRecordLayout::PLAIN, msg_type, body)
 }
 
 fn plain_region(bytes: Vec<u8>) -> OhRegion {
@@ -2093,8 +2110,8 @@ fn link_tracked_region(max: u64, indexed: bool, links: &[&str]) -> OhRegion {
         li.extend_from_slice(&u64::MAX.to_le_bytes()); // b-tree creation order
     }
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
-    region.push(MessageType::LINK_INFO, &li);
-    region.push(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
+    region.push_fixture_message(MessageType::LINK_INFO, &li);
+    region.push_fixture_message(MessageType::GROUP_INFO, &GROUP_INFO_BODY);
     for (i, name) in links.iter().enumerate() {
         region
             .push_link(name, StoredAddress::new(0x100 + i as u64), Some(i as u64))
@@ -2150,11 +2167,13 @@ fn attr_region_in(props: ObjectHeaderPrefix, attrs: &[(&str, u16)], max: u16) ->
         layout.tracks_creation_order().then_some(max),
         layout.indexes_creation_order(),
     );
-    let mut record = layout.record(MessageType::ATTRIBUTE_INFO, &info.to_bytes());
+    let mut record =
+        edit_test_util::fixture_message(layout, MessageType::ATTRIBUTE_INFO, &info.to_bytes());
     record[3] = MessageFlags::FORBID_SHARING.get();
     region.push_bytes(&record);
     for (name, index) in attrs {
-        let record = layout.record_with_creation_index(
+        let record = edit_test_util::fixture_record(
+            layout,
             MessageType::ATTRIBUTE,
             MessageFlags::NONE,
             *index,
@@ -2248,7 +2267,8 @@ fn records_around(
     data_layout: Vec<u8>,
 ) -> Vec<u8> {
     [
-        record_layout.record_with_creation_index(
+        edit_test_util::fixture_record(
+            record_layout,
             UNKNOWN_MESSAGE_TYPE,
             MessageFlags::CONSTANT,
             1,
@@ -2256,14 +2276,16 @@ fn records_around(
         ),
         dataspace,
         data_layout,
-        record_layout.record_with_creation_index(
+        edit_test_util::fixture_record(
+            record_layout,
             MessageType::ATTRIBUTE,
             MessageFlags::NONE,
             2,
             &[0xCD; 5],
         ),
-        record_layout.record(MessageType::DATASPACE, &[0xEE; 8]),
-        record_layout.record(
+        edit_test_util::fixture_message(record_layout, MessageType::DATASPACE, &[0xEE; 8]),
+        edit_test_util::fixture_message(
+            record_layout,
             MessageType::DATA_LAYOUT,
             &layout_bytes::contiguous(0x800, 4),
         ),
@@ -2272,7 +2294,8 @@ fn records_around(
 }
 
 fn dataspace_record(record_layout: MessageRecordLayout) -> Vec<u8> {
-    record_layout.record_with_creation_index(
+    edit_test_util::fixture_record(
+        record_layout,
         MessageType::DATASPACE,
         MessageFlags::CONSTANT,
         3,
@@ -2281,7 +2304,8 @@ fn dataspace_record(record_layout: MessageRecordLayout) -> Vec<u8> {
 }
 
 fn compact_layout_record(record_layout: MessageRecordLayout, inline: &[u8]) -> Vec<u8> {
-    record_layout.record_with_creation_index(
+    edit_test_util::fixture_record(
+        record_layout,
         MessageType::DATA_LAYOUT,
         MessageFlags::CONSTANT,
         4,

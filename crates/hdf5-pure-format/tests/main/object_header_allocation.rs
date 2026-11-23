@@ -1,11 +1,12 @@
 use hdf5_pure_core::__private::StoredAddressExt;
-use hdf5_pure_core::{MessageType, StoredAddress};
+use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::{
     AccessMode, AttributePhaseChange, FormatWidths, MessageFlags, MessageRecordLayout,
     ObjectHeader, ObjectHeaderAllocationGeometry, ObjectHeaderPrefix, ObjectTimes,
 };
 use rstest::rstest;
-use test_util::object_header::v2::HeaderFlags;
+use test_util::object_header::v2::{self, HeaderFlags};
+use test_util::object_header::{Message, MessageFlags as FixtureFlags, MessageType as FixtureType};
 
 #[rstest]
 #[case::plain(MessageRecordLayout::PLAIN)]
@@ -26,11 +27,16 @@ fn chosen_page_chunks_preserve_prefix_properties(#[case] layout: MessageRecordLa
         }),
         layout,
     };
-    let records = layout.record_with_creation_index(
-        MessageType::DATATYPE,
-        MessageFlags::CONSTANT,
-        17,
-        &[5, 6],
+    let flags = if layout.tracks_creation_order() {
+        HeaderFlags::TRACKS_CREATION_ORDER
+    } else {
+        HeaderFlags::default()
+    };
+    let records = v2::message_record(
+        &Message::new(FixtureType::DATATYPE, &[5, 6])
+            .with_flags(FixtureFlags::CONSTANT)
+            .with_creation_order(17),
+        flags,
     );
     let geometry = ObjectHeaderAllocationGeometry::new(
         prefix,

@@ -24,10 +24,10 @@ fn compact_batches_copy_unrelated_records_a_bounded_number_of_times(
     let engine = edit_test_util::open_engine(&path);
     let mut region = OhRegion::empty(crate::file_writer::WIDTHS, ObjectHeaderPrefix::PLAIN);
     for _ in 0..16 {
-        region.push(MessageType::from_u16(0xff), &vec![0x5a; 48_000]);
+        region.push_fixture_message(MessageType::from_u16(0xff), &vec![0x5a; 48_000]);
     }
     let unrelated = region.len();
-    region.push(
+    region.push_fixture_message(
         MessageType::ATTRIBUTE,
         &encode_attr_body("changed", &AttrValue::I64(-1)).unwrap(),
     );

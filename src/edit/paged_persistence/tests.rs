@@ -10,6 +10,7 @@ use test_util::snapshot::text::{Report, Value};
 
 use crate::AddressRange;
 use crate::address::{StoredAddress, StoredAddressExt};
+use crate::edit::test_util as edit_test_util;
 use crate::edit::test_util::decode_manager_sections;
 use crate::file_space_info::{FileSpacePageSize, FileSpaceStrategy};
 use crate::free_space_manager;
@@ -785,7 +786,8 @@ fn plan_persistence(
 }
 
 fn extension_records(extension: u64) -> Vec<u8> {
-    format::ObjectHeaderPrefix::PLAIN.layout.record(
+    edit_test_util::fixture_message(
+        format::ObjectHeaderPrefix::PLAIN.layout,
         MessageType::DATATYPE,
         &vec![0; usize::try_from(extension - 15).unwrap()],
     )

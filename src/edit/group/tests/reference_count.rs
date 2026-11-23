@@ -32,7 +32,7 @@ fn converted_group_records_preserve_supported_prefix_counts(#[case] count: u32) 
     assert_eq!(region.reference_count_mut().unwrap().count(), count);
     let mut expected = original;
     if count != 1 {
-        expected.push(
+        expected.push_fixture_message(
             MessageType::OBJECT_REFERENCE_COUNT,
             &Message::reference_count(count).data,
         );

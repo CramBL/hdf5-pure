@@ -3,7 +3,7 @@ use core::slice;
 
 use rstest::rstest;
 use test_util::object_header::v2::{self as independent, HeaderFlags};
-use test_util::object_header::{Message, MessageType as RecordType};
+use test_util::object_header::{Message, MessageFlags as RecordFlags, MessageType as RecordType};
 use test_util::widths::Widths;
 
 use crate::access_mode::AccessMode;
@@ -156,9 +156,12 @@ fn prefix_growth_uses_owned_capacity(
     #[values(0, 1, 2, 3, 4, 5, 6, 7)] extra: usize,
 ) {
     let prefix = ObjectHeaderPrefix::PLAIN;
-    let records = prefix.layout.record(
-        MessageType::DATATYPE,
-        &vec![7; len.min(OBJECT_HEADER_MESSAGE_MAX)],
+    let records = independent::message_record(
+        &Message::new(
+            RecordType::DATATYPE,
+            &vec![7; len.min(OBJECT_HEADER_MESSAGE_MAX)],
+        ),
+        HeaderFlags::default(),
     );
     let allocation = prefix.encode_header(&records).len() + extra;
     let plan = ObjectHeaderAllocation::new(
@@ -187,16 +190,19 @@ fn padding_keeps_optional_fields_and_discards_old_nil_records(
         attribute_phase_change: phase,
         layout,
     };
-    let mut records = prefix
-        .layout
-        .record(MessageType::NIL, &vec![0; OBJECT_HEADER_MESSAGE_MAX]);
-    records.extend(prefix.layout.record_with_creation_index(
-        MessageType::DATATYPE,
-        MessageFlags::CONSTANT,
-        0,
-        &[5, 6],
-    ));
-    records.extend(prefix.layout.record(MessageType::NIL, &[0; 3]));
+    let flags = if layout.tracks_creation_order() {
+        HeaderFlags::TRACKS_CREATION_ORDER
+    } else {
+        HeaderFlags::default()
+    };
+    let records = independent::message_records(
+        &[
+            Message::nil(OBJECT_HEADER_MESSAGE_MAX),
+            Message::new(RecordType::DATATYPE, &[5, 6]).with_flags(RecordFlags::CONSTANT),
+            Message::nil(3),
+        ],
+        flags,
+    );
     let plan = ObjectHeaderAllocation::new(
         prefix,
         FormatWidths::from_sizes(8, 8).unwrap(),
@@ -279,9 +285,10 @@ fn chunk_geometry_is_bounded_independently_of_native_coalescing(
     #[case] allocation: u64,
     #[case] count: usize,
 ) {
-    let records = ObjectHeaderPrefix::PLAIN
-        .layout
-        .record(MessageType::DATATYPE, &[5, 6]);
+    let records = independent::message_record(
+        &Message::new(RecordType::DATATYPE, &[5, 6]),
+        HeaderFlags::default(),
+    );
     let plan = ObjectHeaderAllocation::new(
         ObjectHeaderPrefix::PLAIN,
         FormatWidths::from_sizes(8, 8).unwrap(),
@@ -350,9 +357,10 @@ fn addresses_are_bound_to_the_output_width(
 
 #[test]
 fn malformed_later_records_are_rejected_before_encoding() {
-    let mut records = ObjectHeaderPrefix::PLAIN
-        .layout
-        .record(MessageType::NIL, &[0; 4]);
+    let mut records = independent::message_record(
+        &Message::new(RecordType::NIL, &[0; 4]),
+        HeaderFlags::default(),
+    );
     records.extend([1, 4, 0, 0, 1]);
     let err = ObjectHeaderAllocation::new(
         ObjectHeaderPrefix::PLAIN,
@@ -374,9 +382,10 @@ fn malformed_later_records_are_rejected_before_encoding() {
 
 #[test]
 fn external_continuation_records_require_flattening() {
-    let records = ObjectHeaderPrefix::PLAIN
-        .layout
-        .record(MessageType::OBJECT_HEADER_CONTINUATION, &[0; 16]);
+    let records = independent::message_record(
+        &Message::new(RecordType::OBJECT_HEADER_CONTINUATION, &[0; 16]),
+        HeaderFlags::default(),
+    );
     let err = ObjectHeaderAllocation::new(
         ObjectHeaderPrefix::PLAIN,
         FormatWidths::from_sizes(8, 8).unwrap(),
@@ -396,9 +405,10 @@ fn external_continuation_records_require_flattening() {
 
 #[test]
 fn insufficient_capacity_is_rejected() {
-    let records = ObjectHeaderPrefix::PLAIN
-        .layout
-        .record(MessageType::DATATYPE, &[5, 6]);
+    let records = independent::message_record(
+        &Message::new(RecordType::DATATYPE, &[5, 6]),
+        HeaderFlags::default(),
+    );
     let err = ObjectHeaderAllocation::new(
         ObjectHeaderPrefix::PLAIN,
         FormatWidths::from_sizes(8, 8).unwrap(),
@@ -426,9 +436,10 @@ fn root_size_width_matches_independent_thresholds(
     #[case] allocation: u64,
     #[case] expected: UintWidth,
 ) {
-    let records = ObjectHeaderPrefix::PLAIN
-        .layout
-        .record(MessageType::DATATYPE, &[5, 6]);
+    let records = independent::message_record(
+        &Message::new(RecordType::DATATYPE, &[5, 6]),
+        HeaderFlags::default(),
+    );
     let plan = ObjectHeaderAllocation::new(
         ObjectHeaderPrefix::PLAIN,
         FormatWidths::from_sizes(8, 8).unwrap(),
@@ -491,9 +502,10 @@ fn the_first_continuation_has_independently_measured_geometry(
 
 #[test]
 fn the_last_supported_chunk_fits_without_materializing_its_payload() {
-    let records = ObjectHeaderPrefix::PLAIN
-        .layout
-        .record(MessageType::DATATYPE, &[5, 6]);
+    let records = independent::message_record(
+        &Message::new(RecordType::DATATYPE, &[5, 6]),
+        HeaderFlags::default(),
+    );
     let plan = ObjectHeaderAllocation::new(
         ObjectHeaderPrefix::PLAIN,
         FormatWidths::from_sizes(8, 8).unwrap(),
