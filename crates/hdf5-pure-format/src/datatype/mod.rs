@@ -1,4 +1,4 @@
-//! HDF5 Datatype message parsing (message type 0x0003).
+//! Parsing and serialization of HDF5 Datatype messages.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -531,7 +531,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 /// bytes, recording that complete property length in the class bit field. Writes an empty tag
 /// with a zero-length property. Preserves non-ASCII tag bytes.
 ///
-/// Encodes nested descriptions into the returned buffer with eight-byte heap addresses.
+/// Sizes variable-length descriptors for an eight-byte offset width at every level.
 /// Computes array sizes while encoding their base types.
 ///
 /// Canonical serialization accepts empty compound or enumeration member sets and zero
@@ -541,14 +541,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::ZeroSizedDatatype`] for a zero-sized string or opaque type,
-/// including in nested descriptions.
-/// Returns [`FormatError::OpaqueTagTooLong`] if an opaque tag exceeds 247 bytes, or
-/// [`FormatError::InvalidOpaqueTagByte`] if it contains a NUL byte, including in nested types.
-/// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field, or
-/// [`FormatError::ValueTooLargeForRepresentation`] if an array rank or member count exceeds its
-/// encoded field. Returns [`FormatError::CompoundFieldOutOfBounds`] if a compound member extends
-/// past the declared record size.
+/// Returns the errors of [`message::PreparedDatatype::new`].
 ///
 /// # Examples
 ///
@@ -567,16 +560,15 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
     serialize_datatype_with_offset_width(datatype, OffsetWidth::Eight)
 }
 
-/// Serializes a datatype with `offset_width`-byte heap addresses in variable-length references.
+/// Serializes a datatype using the file's offset width.
 ///
-/// Encodes nested types at the same offset width. Selects member-offset field widths from the
-/// declared compound size, and computes array sizes from their encoded base types.
+/// Sizes variable-length descriptors at every level using `offset_width`. Selects member-offset
+/// field widths from the declared compound size, and computes array sizes from their encoded base
+/// types.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`serialize_datatype`] for zero-sized string or opaque types,
-/// invalid opaque tags, oversized array sizes, array ranks or member counts that exceed their
-/// encoded fields, or out-of-bounds compound members.
+/// Returns the errors of [`message::PreparedDatatype::new`].
 ///
 /// # Examples
 ///
@@ -602,37 +594,7 @@ pub fn serialize_datatype_with_offset_width(
     datatype: &Datatype,
     offset_width: OffsetWidth,
 ) -> Result<Vec<u8>, FormatError> {
-    let mut output = Vec::new();
-    message::encode_canonical(&mut output, offset_width, datatype)?;
-    Ok(output)
-}
-
-/// The effective version and element size of a completely serialized datatype.
-struct EncodedNode {
-    version: u8,
-    type_size: u32,
-}
-
-/// A header's destination offset and pending version and element size.
-///
-/// The offset remains valid as the destination grows.
-struct DatatypeHeader {
-    offset: usize,
-    version: u8,
-    type_size: u32,
-}
-
-impl DatatypeHeader {
-    fn finish(self, output: &mut [u8]) -> EncodedNode {
-        output[self.offset] =
-            (output[self.offset] & DATATYPE_CLASS_MASK) | (self.version << DATATYPE_VERSION_SHIFT);
-        output[self.offset + 4..self.offset + DATATYPE_HEADER_SIZE]
-            .copy_from_slice(&self.type_size.to_le_bytes());
-        EncodedNode {
-            version: self.version,
-            type_size: self.type_size,
-        }
-    }
+    Ok(message::PreparedDatatype::new(datatype, offset_width)?.to_bytes())
 }
 
 /// An opaque tag with a checked aligned property length and borrowed logical bytes.
@@ -696,19 +658,24 @@ impl<'a> OpaqueTagWire<'a> {
                 byte: logical[offset],
             });
         }
-        let encoded_len = if logical.is_empty() {
-            0
-        } else {
-            let length = (logical.len() + usize::from(OPAQUE_TAG_ALIGNMENT))
-                & !(usize::from(OPAQUE_TAG_ALIGNMENT) - 1);
-            u8::try_from(length).map_err(|_error| FormatError::OpaqueTagTooLong {
+        let encoded_len = u8::try_from(Self::property_size(logical.len())).map_err(|_error| {
+            FormatError::OpaqueTagTooLong {
                 length: logical.len(),
-            })?
-        };
+            }
+        })?;
         Ok(Self {
             encoded_len,
             logical,
         })
+    }
+
+    fn property_size(tag_len: usize) -> usize {
+        if tag_len == 0 {
+            0
+        } else {
+            let alignment = usize::from(OPAQUE_TAG_ALIGNMENT);
+            (tag_len + alignment) & !(alignment - 1)
+        }
     }
 }
 
@@ -864,28 +831,6 @@ const HIGH_PADDING_BIT: u8 = 0x04;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const FLOAT_INTERNAL_PADDING_BIT: u8 = 0x08;
-
-fn append_header(
-    output: &mut Vec<u8>,
-    class: u8,
-    version: u8,
-    bf: [u8; 3],
-    size: u32,
-) -> DatatypeHeader {
-    let offset = output.len();
-    output.extend_from_slice(&[
-        (class & 0x0F) | ((version & 0x0F) << 4),
-        bf[0],
-        bf[1],
-        bf[2],
-    ]);
-    output.extend_from_slice(&size.to_le_bytes());
-    DatatypeHeader {
-        offset,
-        version,
-        type_size: size,
-    }
-}
 
 enum VariableLengthMetadata {
     Sequence,

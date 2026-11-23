@@ -7,6 +7,7 @@ use test_util::allocation;
 use test_util::datatype::Class;
 
 #[rstest]
+#[case::atomic(Shape::Sequence(0))]
 #[case::vl_depth_16(Shape::Sequence(16))]
 #[case::vl_depth_64(Shape::Sequence(64))]
 #[case::vl_depth_256(Shape::Sequence(256))]
@@ -14,7 +15,7 @@ use test_util::datatype::Class;
 #[case::array_depth_64(Shape::Array(64))]
 #[case::array_depth_256(Shape::Array(256))]
 #[case::wide_compound(Shape::Compound(256))]
-fn datatype_encoding_allocations_follow_output_growth(#[case] shape: Shape) {
+fn canonical_datatype_encoding_allocates_only_for_owned_output(#[case] shape: Shape) {
     let datatype = shape.datatype();
     let names = match &datatype {
         Datatype::Compound { members, .. } => members
@@ -45,28 +46,14 @@ fn datatype_encoding_allocations_follow_output_growth(#[case] shape: Shape) {
     );
     let (encoded, measured) =
         allocation::measure(&region, || format::serialize_datatype(&datatype).unwrap());
+    eprintln!("{region}: {measured}");
     assert_eq!(encoded, expected);
     assert_eq!(encoded.len(), shape.encoded_len());
-    let capacity = encoded.capacity() as u64;
-    let length = encoded.len() as u64;
-    // Earlier allocation requests bound potential destination growth copies.
-    let growth_bound = measured.bytes - capacity;
-    eprintln!(
-        "{region}: output {length}, capacity {capacity}, destination growth copy bound \
-         {growth_bound}, child-buffer copies {copied}"
-    );
-    assert!(capacity >= length);
-    assert!(capacity <= 4 * length);
-    assert!(measured.blocks > 0, "{measured}");
-    assert!(
-        measured.blocks <= 2 * u64::from(u64::BITS - capacity.leading_zeros()) + 4,
-        "{measured}"
-    );
-    assert_eq!(measured.live_bytes, capacity, "{measured}");
-    assert!(measured.peak_bytes >= capacity, "{measured}");
-    assert!(measured.peak_bytes <= 2 * capacity, "{measured}");
-    assert!(measured.bytes >= measured.peak_bytes, "{measured}");
-    assert!(measured.bytes <= 4 * capacity, "{measured}");
+    let length = u64::try_from(expected.len()).unwrap();
+    assert_eq!(measured.blocks, 1, "{measured}");
+    assert_eq!(measured.bytes, length, "{measured}");
+    assert_eq!(measured.live_bytes, length, "{measured}");
+    assert_eq!(measured.peak_bytes, length, "{measured}");
     assert!(
         measured.blocks < control_metrics.blocks,
         "{measured}; {control_metrics}"
@@ -77,8 +64,42 @@ fn datatype_encoding_allocations_follow_output_growth(#[case] shape: Shape) {
     );
     if let Shape::Sequence(depth) | Shape::Array(depth) = shape {
         assert!(copied >= length * depth as u64 / 3);
-        assert!(growth_bound + length < copied);
     }
+
+    let mut destination = vec![0xa5; expected.len()];
+    let (written, measured) = allocation::measure(&format!("{region}_bounded"), || {
+        format::PreparedDatatype::new(&datatype, format::OffsetWidth::Eight)
+            .unwrap()
+            .write_into(&mut destination)
+            .unwrap()
+    });
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(written, expected.len());
+    assert_eq!(destination, expected);
+}
+
+#[test]
+fn retained_compound_encoding_matches_fixture_and_retains_only_output() {
+    let shape = Shape::Compound(256);
+    let Datatype::Compound { members, .. } = shape.datatype() else {
+        panic!("the compound fixture must have members");
+    };
+    let names = members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect::<Vec<_>>();
+    let (expected, _) = encode_with_child_buffers(shape, &names);
+    let (datatype, consumed) = format::DatatypeMessage::parse(&expected).unwrap();
+    assert_eq!(consumed, expected.len());
+
+    let region = "datatype_metadata_retained_compound";
+    let (bytes, measured) = allocation::measure(region, || {
+        datatype.serialize(format::OffsetWidth::Eight).unwrap()
+    });
+    eprintln!("{region}: {measured}");
+    assert_eq!(measured.live_bytes, u64::try_from(expected.len()).unwrap());
+    assert_eq!(bytes, expected);
 }
 
 #[derive(Clone, Copy, Debug)]

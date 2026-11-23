@@ -5,7 +5,6 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
-use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::{
@@ -13,194 +12,16 @@ use hdf5_pure_core::{
     MantissaNormalization, StringPadding, TimeType,
 };
 
-use super::codec;
+use super::codec::{self, NodeHeader, Output};
 use super::{DatatypeVersion, FloatingPointByteOrder};
 use crate::datatype::{
-    self, BIT_FIELD_CLASS, DATATYPE_HEADER_SIZE, EncodedNode, FIXED_POINT_CLASS,
-    FLOAT_INTERNAL_PADDING_BIT, FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
-    FLOAT_NORMALIZATION_LEADING_ONE, FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
-    FLOATING_POINT_CLASS, OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS,
+    self, BIT_FIELD_CLASS, FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT,
+    FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE, FLOAT_NORMALIZATION_LEADING_ONE,
+    FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS,
+    OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS,
 };
 
-/// A borrowed atomic description with a checked version, class flags, and positive size.
-pub(in crate::datatype) struct AtomicMessage<'a> {
-    /// The selected message version.
-    version: DatatypeVersion,
-    /// The three class-specific bytes derived from the checked properties.
-    flags: [u8; 3],
-    /// The element size in bytes.
-    size: NonZeroU32,
-    /// The borrowed properties used to encode the body.
-    properties: AtomicProperties<'a>,
-}
-
-impl<'a> AtomicMessage<'a> {
-    /// Constructs a description at version 3 for VAX or version 1 for other atomic types.
-    ///
-    /// # Errors
-    ///
-    /// Propagates size and opaque-tag errors from [`new`](Self::new).
-    pub(in crate::datatype) fn canonical(
-        properties: AtomicProperties<'a>,
-    ) -> Result<Self, FormatError> {
-        let version = match &properties {
-            AtomicProperties::FloatingPoint(datatype)
-                if datatype.byte_order() == DatatypeByteOrder::Vax =>
-            {
-                DatatypeVersion::Three
-            }
-            _ => DatatypeVersion::One,
-        };
-        Self::new(version, properties)
-    }
-
-    /// Constructs a description with checked size and class flags at `version`.
-    ///
-    /// The class fields are defined in "The Datatype Message" of the [format specification,
-    /// version 4.0][spec]. Floating-point version/order compatibility is checked through
-    /// [`FloatingPointByteOrder::new`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::ZeroSizedDatatype`] for a zero-sized string or opaque type,
-    /// and [`FormatError::InvalidDatatypeVersion`] for VAX order before version 3.
-    /// Returns [`FormatError::OpaqueTagTooLong`] for a tag longer than 247 bytes, and
-    /// [`FormatError::InvalidOpaqueTagByte`] for a tag containing a NUL byte.
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-    pub(super) fn new(
-        version: DatatypeVersion,
-        properties: AtomicProperties<'a>,
-    ) -> Result<Self, FormatError> {
-        let size = NonZeroU32::new(properties.size()).ok_or(FormatError::ZeroSizedDatatype {
-            class: properties.class(),
-        })?;
-        let flags = match &properties {
-            AtomicProperties::FixedPoint(datatype) => [
-                codec::binary_order_bit(datatype.byte_order())
-                    | datatype::padding_bits(
-                        datatype.layout().low_padding(),
-                        datatype.layout().high_padding(),
-                    )
-                    | if datatype.layout().signed() {
-                        codec::SIGNED_BIT
-                    } else {
-                        0
-                    },
-                0,
-                0,
-            ],
-            AtomicProperties::FloatingPoint(datatype) => {
-                let layout = datatype.layout();
-                let normalization = match layout.mantissa_normalization() {
-                    MantissaNormalization::Unnormalized => FLOAT_NORMALIZATION_UNNORMALIZED,
-                    MantissaNormalization::LeadingOne => FLOAT_NORMALIZATION_LEADING_ONE,
-                    MantissaNormalization::ImpliedLeadingOne => {
-                        FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE
-                    }
-                };
-                [
-                    FloatingPointByteOrder::new(version, datatype.byte_order())?.bits()
-                        | datatype::padding_bits(layout.low_padding(), layout.high_padding())
-                        | if layout.internal_padding() {
-                            FLOAT_INTERNAL_PADDING_BIT
-                        } else {
-                            0
-                        }
-                        | (normalization << FLOAT_NORMALIZATION_SHIFT),
-                    layout.sign_location(),
-                    0,
-                ]
-            }
-            AtomicProperties::Time(datatype) => {
-                [codec::binary_order_bit(datatype.byte_order()), 0, 0]
-            }
-            AtomicProperties::String {
-                size: _,
-                padding,
-                charset,
-            } => [
-                codec::padding_code(padding)
-                    | (codec::charset_code(charset) << codec::STRING_CHARSET_SHIFT),
-                0,
-                0,
-            ],
-            AtomicProperties::BitField(datatype) => [
-                codec::binary_order_bit(datatype.byte_order())
-                    | datatype::padding_bits(datatype.low_padding(), datatype.high_padding()),
-                0,
-                0,
-            ],
-            AtomicProperties::Opaque { size: _, tag } => {
-                [OpaqueTagWire::encode(tag)?.encoded_len, 0, 0]
-            }
-        };
-        Ok(Self {
-            version,
-            flags,
-            size,
-            properties,
-        })
-    }
-
-    /// Appends the complete message and returns its encoded header metadata.
-    ///
-    /// Writes borrowed properties directly into `output`. The property layouts are defined
-    /// in "The Datatype Message" of the [format specification, version 4.0][spec].
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-    pub(in crate::datatype) fn encode_into(&self, output: &mut Vec<u8>) -> EncodedNode {
-        let Self {
-            version,
-            flags,
-            size,
-            properties,
-        } = self;
-        let header = datatype::append_header(
-            output,
-            properties.class(),
-            version.get(),
-            *flags,
-            size.get(),
-        );
-        match properties {
-            AtomicProperties::FixedPoint(datatype) => {
-                output.extend_from_slice(&datatype.layout().bit_offset().to_le_bytes());
-                output.extend_from_slice(&datatype.layout().bit_precision().to_le_bytes());
-            }
-            AtomicProperties::FloatingPoint(datatype) => {
-                let layout = datatype.layout();
-                output.extend_from_slice(&layout.bit_offset().to_le_bytes());
-                output.extend_from_slice(&layout.bit_precision().to_le_bytes());
-                output.extend_from_slice(&[
-                    layout.exponent_location(),
-                    layout.exponent_size(),
-                    layout.mantissa_location(),
-                    layout.mantissa_size(),
-                ]);
-                output.extend_from_slice(&layout.exponent_bias().to_le_bytes());
-            }
-            AtomicProperties::Time(datatype) => {
-                output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
-            }
-            AtomicProperties::String { .. } => {}
-            AtomicProperties::BitField(datatype) => {
-                output.extend_from_slice(&datatype.bit_offset().to_le_bytes());
-                output.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
-            }
-            AtomicProperties::Opaque { size: _, tag } => {
-                output.extend_from_slice(tag);
-                output.resize(
-                    header.offset + DATATYPE_HEADER_SIZE + usize::from(flags[0]),
-                    0,
-                );
-            }
-        }
-        header.finish(output)
-    }
-}
-
-/// Borrowed properties supplied when constructing an [`AtomicMessage`].
+/// Borrowed atomic properties.
 pub(in crate::datatype) enum AtomicProperties<'a> {
     /// Fixed-point layout and byte order.
     FixedPoint(&'a FixedPointType),
@@ -229,6 +50,155 @@ pub(in crate::datatype) enum AtomicProperties<'a> {
 }
 
 impl AtomicProperties<'_> {
+    /// Returns the stored element size and encoded property length, in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ZeroSizedDatatype`] if the type has no element bytes. Propagates
+    /// errors from checking an opaque tag or a floating-point order at the supplied version.
+    pub(super) fn prepare(
+        &self,
+        version: Option<DatatypeVersion>,
+    ) -> Result<(u32, usize), FormatError> {
+        let size = NonZeroU32::new(self.size()).ok_or_else(|| FormatError::ZeroSizedDatatype {
+            class: self.class(),
+        })?;
+        let property_size = match self {
+            Self::FixedPoint(_) | Self::BitField(_) => BIT_RANGE_SIZE,
+            Self::FloatingPoint(datatype) => {
+                if let Some(version) = version {
+                    FloatingPointByteOrder::new(version, datatype.byte_order())?;
+                }
+                FLOATING_POINT_PROPERTIES_SIZE
+            }
+            Self::Time(_) => TIME_PROPERTIES_SIZE,
+            Self::String { .. } => 0,
+            Self::Opaque { tag, .. } => usize::from(OpaqueTagWire::encode(tag)?.encoded_len),
+        };
+        Ok((size.get(), property_size))
+    }
+
+    /// Writes the checked property fields and returns the header that describes them.
+    pub(super) fn write(
+        &self,
+        output: &mut Output<'_>,
+        version: Option<DatatypeVersion>,
+    ) -> NodeHeader {
+        let flags = match self {
+            Self::FixedPoint(datatype) => {
+                let layout = datatype.layout();
+                output.write(&bit_range(layout.bit_offset(), layout.bit_precision()));
+                [
+                    codec::binary_order_bit(datatype.byte_order())
+                        | datatype::padding_bits(layout.low_padding(), layout.high_padding())
+                        | if layout.signed() {
+                            codec::SIGNED_BIT
+                        } else {
+                            0
+                        },
+                    0,
+                    0,
+                ]
+            }
+            Self::FloatingPoint(datatype) => {
+                let layout = datatype.layout();
+                let [offset_low, offset_high, precision_low, precision_high] =
+                    bit_range(layout.bit_offset(), layout.bit_precision());
+                let [bias_low, bias_middle_low, bias_middle_high, bias_high] =
+                    layout.exponent_bias().to_le_bytes();
+                let properties: [u8; FLOATING_POINT_PROPERTIES_SIZE] = [
+                    offset_low,
+                    offset_high,
+                    precision_low,
+                    precision_high,
+                    layout.exponent_location(),
+                    layout.exponent_size(),
+                    layout.mantissa_location(),
+                    layout.mantissa_size(),
+                    bias_low,
+                    bias_middle_low,
+                    bias_middle_high,
+                    bias_high,
+                ];
+                output.write(&properties);
+                let normalization = match layout.mantissa_normalization() {
+                    MantissaNormalization::Unnormalized => FLOAT_NORMALIZATION_UNNORMALIZED,
+                    MantissaNormalization::LeadingOne => FLOAT_NORMALIZATION_LEADING_ONE,
+                    MantissaNormalization::ImpliedLeadingOne => {
+                        FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE
+                    }
+                };
+                [
+                    FloatingPointByteOrder::bits_for(datatype.byte_order())
+                        | datatype::padding_bits(layout.low_padding(), layout.high_padding())
+                        | if layout.internal_padding() {
+                            FLOAT_INTERNAL_PADDING_BIT
+                        } else {
+                            0
+                        }
+                        | (normalization << FLOAT_NORMALIZATION_SHIFT),
+                    layout.sign_location(),
+                    0,
+                ]
+            }
+            Self::Time(datatype) => {
+                let properties: [u8; TIME_PROPERTIES_SIZE] =
+                    datatype.bit_precision().get().to_le_bytes();
+                output.write(&properties);
+                [codec::binary_order_bit(datatype.byte_order()), 0, 0]
+            }
+            Self::String {
+                padding,
+                charset,
+                size: _,
+            } => [
+                codec::padding_code(padding)
+                    | (codec::charset_code(charset) << codec::STRING_CHARSET_SHIFT),
+                0,
+                0,
+            ],
+            Self::BitField(datatype) => {
+                output.write(&bit_range(
+                    datatype.bit_offset(),
+                    datatype.bit_precision().get(),
+                ));
+                [
+                    codec::binary_order_bit(datatype.byte_order())
+                        | datatype::padding_bits(datatype.low_padding(), datatype.high_padding()),
+                    0,
+                    0,
+                ]
+            }
+            Self::Opaque { size: _, tag } => {
+                let property_size = OpaqueTagWire::property_size(tag.len());
+                let (value, padding) = output.take(property_size).split_at_mut(tag.len());
+                value.copy_from_slice(tag);
+                padding.fill(0);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the prepared padded tag length fits the one-byte property field"
+                )]
+                let property_size = property_size as u8;
+                [property_size, 0, 0]
+            }
+        };
+        NodeHeader {
+            class: self.class(),
+            version: version.unwrap_or_else(|| self.canonical_version()),
+            flags,
+            size: self.size(),
+        }
+    }
+
+    fn canonical_version(&self) -> DatatypeVersion {
+        match self {
+            Self::FloatingPoint(datatype) if datatype.byte_order() == DatatypeByteOrder::Vax => {
+                DatatypeVersion::Three
+            }
+            _ => DatatypeVersion::One,
+        }
+    }
+
     fn class(&self) -> u8 {
         match self {
             Self::FixedPoint(_) => FIXED_POINT_CLASS,
@@ -250,3 +220,14 @@ impl AtomicProperties<'_> {
         }
     }
 }
+
+fn bit_range(offset: u16, precision: u16) -> [u8; BIT_RANGE_SIZE] {
+    let [offset_low, offset_high] = offset.to_le_bytes();
+    let [precision_low, precision_high] = precision.to_le_bytes();
+    [offset_low, offset_high, precision_low, precision_high]
+}
+
+const BIT_RANGE_SIZE: usize = 2 * size_of::<u16>();
+const FLOATING_POINT_PROPERTIES_SIZE: usize =
+    BIT_RANGE_SIZE + size_of::<[u8; 4]>() + size_of::<u32>();
+const TIME_PROPERTIES_SIZE: usize = size_of::<u16>();
