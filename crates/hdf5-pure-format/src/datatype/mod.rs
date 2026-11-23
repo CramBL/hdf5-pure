@@ -15,20 +15,19 @@ use hdf5_pure_core::__private;
 pub(crate) use hdf5_pure_core::CharacterSet;
 use hdf5_pure_core::ComplexType;
 pub(crate) use hdf5_pure_core::Datatype;
-use hdf5_pure_core::DatatypeByteOrder;
-
-#[cfg(test)]
-use hdf5_pure_core::FloatingPointLayout;
-use hdf5_pure_core::MantissaNormalization;
 pub(crate) use hdf5_pure_core::ReferenceType;
 pub(crate) use hdf5_pure_core::StringPadding;
 use hdf5_pure_core::VariableLengthStringType;
 use hdf5_pure_core::VariableLengthType;
-use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
+#[cfg(test)]
+use hdf5_pure_core::{
+    BitFieldType, DatatypeByteOrder, FixedPointType, FloatingPointLayout, FloatingPointType,
+    MantissaNormalization, TimeType,
+};
 
 use self::header::{Context, DatatypeClass, Header};
 use self::message::DatatypeVersion;
-use self::message::FloatingPointByteOrder;
+use self::message::atomic::{self, AtomicReservedFlagPolicy};
 use crate::bytes::{self, ByteCursor};
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -135,6 +134,11 @@ pub fn stored_element_size_usize(
 ///
 /// Reads each complete eight-byte header before checking its version or class. Checks version
 /// before class, except in a complex datatype's parent, where it checks class first.
+/// Reads fixed-size atomic property blocks in full before checking class flags. Ignores
+/// reserved class bits in fixed-point, time, string, and bitfield descriptions.
+///
+/// Accepts legacy object and dataset-region reference kinds at every supported message
+/// version and preserves their declared element sizes.
 ///
 /// Reads an opaque tag's complete recorded property and copies its logical bytes into
 /// [`Datatype::Opaque`]. Reads a zero-length property as an absent tag and strips the first NUL
@@ -143,7 +147,7 @@ pub fn stored_element_size_usize(
 /// multiple of eight (H5Odtype.c, HDF5 2.2.0).
 ///
 /// Parses floating-point message versions and byte-order bits together through
-/// [`FloatingPointByteOrder::parse`], including nested descriptions in legacy containers.
+/// [`message::FloatingPointByteOrder::parse`], including nested descriptions in legacy containers.
 /// Accepts little- and big-endian order at versions 1 through 5 and VAX order at versions
 /// 3 through 5, subject to the numeric layout checks.
 ///
@@ -194,154 +198,27 @@ pub fn stored_element_size_usize(
 /// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
-    let header = Header::parse(&mut ByteCursor::new(data), Context::Description)?;
-    parse_properties(data, header)
-}
-
-/// Parses the properties in `data` after the already parsed `header`.
-///
-/// Pass the slice starting at the beginning of the datatype message.
-///
-/// # Errors
-///
-/// Returns the property errors of [`parse_datatype`].
-fn parse_properties(data: &[u8], header: Header) -> Result<(Datatype, usize), FormatError> {
+    let mut cursor = ByteCursor::new(data);
+    let header = Header::parse(&mut cursor, Context::Description)?;
     let Header {
         class,
         version,
         flags: [bf0, bf1, bf2],
         size,
     } = header;
-    let mut pos = DATATYPE_HEADER_SIZE;
+    let mut pos = cursor.position();
 
     let parsed = match class {
-        DatatypeClass::FixedPoint => {
-            // Fixed-Point
-            bytes::ensure_len(data, pos, 4)?;
-            let byte_order = if bf0 & 0x01 == 0 {
-                DatatypeByteOrder::LittleEndian
-            } else {
-                DatatypeByteOrder::BigEndian
-            };
-            let signed = (bf0 >> 3) & 0x01 == 1;
-            let bit_offset = LittleEndian::read_u16(&data[pos..pos + 2]);
-            let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
-            pos += 4;
-            Ok((
-                Datatype::FixedPoint(
-                    FixedPointType::new(size, byte_order, signed, bit_offset, bit_precision)?
-                        .with_padding(bf0 & LOW_PADDING_BIT != 0, bf0 & HIGH_PADDING_BIT != 0),
-                ),
-                pos,
-            ))
-        }
-        DatatypeClass::FloatingPoint => {
-            // Floating-Point
-            bytes::ensure_len(data, pos, 12)?;
-            let byte_order = FloatingPointByteOrder::parse(version, [bf0, bf1, bf2])?.order();
-            let mantissa_normalization = match (bf0 >> FLOAT_NORMALIZATION_SHIFT)
-                & FLOAT_NORMALIZATION_MASK
-            {
-                FLOAT_NORMALIZATION_UNNORMALIZED => MantissaNormalization::Unnormalized,
-                FLOAT_NORMALIZATION_LEADING_ONE => MantissaNormalization::LeadingOne,
-                FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE => MantissaNormalization::ImpliedLeadingOne,
-                value => return Err(FormatError::InvalidMantissaNormalization(value)),
-            };
-            let sign_location = bf1;
-            let bit_offset = LittleEndian::read_u16(&data[pos..pos + 2]);
-            let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
-            let exponent_location = data[pos + 4];
-            let exponent_size = data[pos + 5];
-            let mantissa_location = data[pos + 6];
-            let mantissa_size = data[pos + 7];
-            let exponent_bias = LittleEndian::read_u32(&data[pos + 8..pos + 12]);
-            pos += 12;
-            Ok((
-                Datatype::FloatingPoint(
-                    FloatingPointType::new(
-                        size,
-                        byte_order,
-                        mantissa_normalization,
-                        sign_location,
-                        bit_offset,
-                        bit_precision,
-                        exponent_location,
-                        exponent_size,
-                        mantissa_location,
-                        mantissa_size,
-                        exponent_bias,
-                    )?
-                    .with_padding(
-                        bf0 & LOW_PADDING_BIT != 0,
-                        bf0 & HIGH_PADDING_BIT != 0,
-                        bf0 & FLOAT_INTERNAL_PADDING_BIT != 0,
-                    ),
-                ),
-                pos,
-            ))
-        }
-        DatatypeClass::Time => {
-            // Time
-            bytes::ensure_len(data, pos, 2)?;
-            let byte_order = if bf0 & 0x01 == 0 {
-                DatatypeByteOrder::LittleEndian
-            } else {
-                DatatypeByteOrder::BigEndian
-            };
-            let bit_precision = LittleEndian::read_u16(&data[pos..pos + 2]);
-            pos += 2;
-            Ok((
-                Datatype::Time(TimeType::new(size, byte_order, bit_precision)?),
-                pos,
-            ))
-        }
-        DatatypeClass::String => {
-            // String
-            let padding_val = bf0 & 0x0F;
-            let charset_val = (bf0 >> 4) & 0x0F;
-            let padding = parse_string_padding(padding_val)?;
-            let charset = parse_charset(charset_val)?;
-            Ok((
-                Datatype::String {
-                    size,
-                    padding,
-                    charset,
-                },
-                pos,
-            ))
-        }
-        DatatypeClass::BitField => {
-            // Bit Field
-            bytes::ensure_len(data, pos, 4)?;
-            let byte_order = if bf0 & 0x01 == 0 {
-                DatatypeByteOrder::LittleEndian
-            } else {
-                DatatypeByteOrder::BigEndian
-            };
-            let bit_offset = LittleEndian::read_u16(&data[pos..pos + 2]);
-            let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
-            pos += 4;
-            Ok((
-                Datatype::BitField(
-                    BitFieldType::new(size, byte_order, bit_offset, bit_precision)?
-                        .with_padding(bf0 & LOW_PADDING_BIT != 0, bf0 & HIGH_PADDING_BIT != 0),
-                ),
-                pos,
-            ))
-        }
-        DatatypeClass::Opaque => {
-            let reserved = u16::from_le_bytes([bf1, bf2]);
-            if reserved != 0 {
-                return Err(FormatError::InvalidOpaqueReservedBits { bits: reserved });
-            }
-            let tag = OpaqueTagWire::parse(bf0, &data[pos..])?;
-            Ok((
-                Datatype::Opaque {
-                    size,
-                    tag: tag.logical.to_vec(),
-                },
-                pos + usize::from(tag.encoded_len),
-            ))
+        DatatypeClass::Atomic(class) => {
+            let datatype = class
+                .decode(
+                    &mut cursor,
+                    header.fields(),
+                    Context::Description,
+                    AtomicReservedFlagPolicy::Ignore,
+                )?
+                .into_datatype();
+            return Ok((datatype, cursor.position()));
         }
         DatatypeClass::Compound => {
             // Compound
@@ -397,16 +274,7 @@ fn parse_properties(data: &[u8], header: Header) -> Result<(Datatype, usize), Fo
 
             Ok((Datatype::Compound { size, members }, pos))
         }
-        DatatypeClass::Reference => {
-            // Reference
-            let ref_type_val = bf0 & 0x0F;
-            let ref_type = match ref_type_val {
-                0 => ReferenceType::Object,
-                1 => ReferenceType::DatasetRegion,
-                _ => return Err(FormatError::InvalidReferenceType(ref_type_val)),
-            };
-            Ok((Datatype::Reference { size, ref_type }, pos))
-        }
+        DatatypeClass::Reference => return Ok((atomic::decode_reference(&header)?, pos)),
         DatatypeClass::Enumeration => {
             // Enumeration
             let num_members = (bf0 as u16) | ((bf1 as u16) << 8);
@@ -507,7 +375,7 @@ fn parse_properties(data: &[u8], header: Header) -> Result<(Datatype, usize), Fo
                 })
             }
         }
-        DatatypeClass::Complex => parse_complex(data, version, [bf0, bf1, bf2], size),
+        DatatypeClass::Complex => parse_complex(&mut cursor, version, [bf0, bf1, bf2], size),
     };
 
     // Array types compute their size from their base type and dimensions. A zero dimension
@@ -606,21 +474,29 @@ struct OpaqueTagWire<'a> {
 }
 
 impl<'a> OpaqueTagWire<'a> {
-    fn parse(encoded_len: u8, data: &'a [u8]) -> Result<Self, FormatError> {
+    /// Borrows the logical tag bytes from a complete aligned property.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidOpaqueTagLength`] if the declared length is not a multiple
+    /// of eight, then [`FormatError::UnexpectedEof`] if that many bytes are unavailable. For
+    /// truncation, `expected` is the recorded property length and `available` is the number of
+    /// bytes remaining at the start of the property. Returns
+    /// [`FormatError::InvalidOpaqueTagPadding`] for a nonzero byte after the first NUL, with its
+    /// offset relative to the start of the property.
+    fn parse(encoded_len: u8, cursor: &mut ByteCursor<'a>) -> Result<Self, FormatError> {
         if !encoded_len.is_multiple_of(OPAQUE_TAG_ALIGNMENT) {
             return Err(FormatError::InvalidOpaqueTagLength {
                 length: encoded_len,
             });
         }
         let length = usize::from(encoded_len);
-        bytes::ensure_len(data, 0, length)?;
-        let property = &data[..length];
-        if property.is_empty() {
-            return Ok(Self {
-                encoded_len,
-                logical: property,
-            });
-        }
+        let property = cursor
+            .take(length)
+            .map_err(|_error| FormatError::UnexpectedEof {
+                expected: length,
+                available: cursor.remaining().len(),
+            })?;
         // `H5O__dtype_encode_helper` fills aligned tags without a terminator
         // (H5Odtype.c, HDF5 2.2.0).
         let terminator = property.iter().position(|&byte| byte == 0);
@@ -693,8 +569,14 @@ const OPAQUE_TAG_ALIGNMENT: u8 = 8;
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const OPAQUE_TAG_MAX_LEN: usize = 247;
 
+/// Parses a complex datatype from a cursor positioned at its floating-point parent.
+///
+/// # Errors
+///
+/// Returns the complex datatype errors of [`parse_datatype`]. The coordinates for incomplete
+/// floating-point properties are relative to the start of the parent description.
 fn parse_complex(
-    data: &[u8],
+    cursor: &mut ByteCursor<'_>,
     version: DatatypeVersion,
     flags: [u8; 3],
     size: u32,
@@ -715,15 +597,23 @@ fn parse_complex(
         return Err(FormatError::UnsupportedComplexForm { homogeneous, form });
     }
     let context = Context::ComplexParent;
-    let mut cursor = ByteCursor::with_position(data, DATATYPE_HEADER_SIZE)?;
-    let parent = Header::parse(&mut cursor, context)?;
-    FloatingPointByteOrder::parse(parent.version, parent.flags)
-        .map_err(|error| context.map_floating_point_flags_error(&parent, error))?;
-    let class = parent.class.code();
-    let (parent, consumed) = parse_properties(&data[DATATYPE_HEADER_SIZE..], parent)?;
-    let Datatype::FloatingPoint(component) = parent else {
-        return Err(FormatError::InvalidComplexParent { class });
-    };
+    let parent_start = cursor.position();
+    let parent = Header::parse(cursor, context)?;
+    let component = atomic::decode_floating_point(cursor, parent.fields(), context).map_err(
+        |error| match error {
+            FormatError::UnexpectedEof {
+                expected,
+                available,
+            } => {
+                // The complete parent header lies before the attempted property extent.
+                FormatError::UnexpectedEof {
+                    expected: expected - parent_start,
+                    available: available - parent_start,
+                }
+            }
+            error => error,
+        },
+    )?;
     let complex = ComplexType::new(component)?;
     if size != complex.size().get() {
         return Err(FormatError::InvalidComplexSize {
@@ -731,7 +621,7 @@ fn parse_complex(
             component_size: component.size().get(),
         });
     }
-    Ok((Datatype::Complex(complex), DATATYPE_HEADER_SIZE + consumed))
+    Ok((Datatype::Complex(complex), cursor.position()))
 }
 
 /// The byte length of the common datatype message header.

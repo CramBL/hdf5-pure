@@ -1,25 +1,299 @@
-//! Borrowed atomic datatype descriptions and their encoding.
+//! Atomic datatype property parsing and encoding, and legacy reference parsing.
 //!
-//! The property layouts are defined in "The Datatype Message" of the [format
-//! specification, version 4.0][spec].
+//! The atomic property layouts for datatype message versions 1 through 5 are defined in
+//! "The Datatype Message" of the [format specification, version 4.0][spec].
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, DatatypeByteOrder, FixedPointType, FloatingPointType, FormatError,
-    MantissaNormalization, StringPadding, TimeType,
+    BitFieldType, CharacterSet, Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType,
+    FormatError, MantissaNormalization, ReferenceType, StringPadding, TimeType,
 };
 
 use super::codec::{self, NodeHeader, Output};
-use super::{DatatypeVersion, FloatingPointByteOrder};
+use super::{DatatypeProperties, DatatypeVersion, FloatingPointByteOrder};
+use crate::bytes::{ByteCursor, UnexpectedEof};
+use crate::datatype::header::{AtomicClass, Context, Header, HeaderFields};
 use crate::datatype::{
     self, BIT_FIELD_CLASS, FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT,
     FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE, FLOAT_NORMALIZATION_LEADING_ONE,
-    FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED, FLOATING_POINT_CLASS,
-    OPAQUE_CLASS, OpaqueTagWire, STRING_CLASS, TIME_CLASS,
+    FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
+    FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT, OPAQUE_CLASS, OpaqueTagWire,
+    STRING_CLASS, TIME_CLASS,
 };
+
+impl AtomicClass {
+    /// Decodes atomic properties from a cursor positioned after their header.
+    ///
+    /// Reads a complete fixed-size property block before checking class flags. Applies
+    /// `flag_policy` to fixed-point, time, string, and bitfield descriptions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a property block is incomplete. Propagates
+    /// class flag, element size, numeric layout, string metadata, and opaque tag errors.
+    pub(in crate::datatype) fn decode<'input>(
+        self,
+        cursor: &mut ByteCursor<'input>,
+        fields: HeaderFields,
+        context: Context,
+        flag_policy: AtomicReservedFlagPolicy,
+    ) -> Result<DecodedAtomic<'input>, FormatError> {
+        let [flags, middle, high] = fields.flags;
+        Ok(match self {
+            Self::FixedPoint => {
+                let (offset, precision) = read_bit_range(cursor)?;
+                flag_policy.check(self, fields, codec::FIXED_RESERVED)?;
+                let datatype = FixedPointType::new(
+                    fields.size,
+                    binary_order(flags),
+                    flags & codec::SIGNED_BIT != 0,
+                    offset,
+                    precision,
+                )?
+                .with_padding(flags & LOW_PADDING_BIT != 0, flags & HIGH_PADDING_BIT != 0);
+                DecodedAtomic::FixedPoint(datatype)
+            }
+            Self::FloatingPoint => {
+                DecodedAtomic::FloatingPoint(decode_floating_point(cursor, fields, context)?)
+            }
+            Self::Time => {
+                let precision = u16::from_le_bytes(cursor.array::<TIME_PROPERTIES_SIZE>()?);
+                flag_policy.check(self, fields, codec::TIME_RESERVED)?;
+                DecodedAtomic::Time(TimeType::new(fields.size, binary_order(flags), precision)?)
+            }
+            Self::String => {
+                flag_policy.check(self, fields, codec::STRING_RESERVED)?;
+                let padding = datatype::parse_string_padding(flags & codec::STRING_PADDING_MASK)?;
+                let charset = datatype::parse_charset(flags >> codec::STRING_CHARSET_SHIFT)?;
+                DecodedAtomic::String {
+                    size: super::positive_size(self as u8, fields.size)?,
+                    padding,
+                    charset,
+                }
+            }
+            Self::BitField => {
+                let (offset, precision) = read_bit_range(cursor)?;
+                flag_policy.check(self, fields, codec::BITFIELD_RESERVED)?;
+                let datatype =
+                    BitFieldType::new(fields.size, binary_order(flags), offset, precision)?
+                        .with_padding(flags & LOW_PADDING_BIT != 0, flags & HIGH_PADDING_BIT != 0);
+                DecodedAtomic::BitField(datatype)
+            }
+            Self::Opaque => {
+                let reserved = u16::from_le_bytes([middle, high]);
+                if reserved != 0 {
+                    return Err(FormatError::InvalidOpaqueReservedBits { bits: reserved });
+                }
+                let tag = OpaqueTagWire::parse(flags, cursor)?;
+                DecodedAtomic::Opaque {
+                    size: super::positive_size(self as u8, fields.size)?,
+                    tag,
+                }
+            }
+        })
+    }
+}
+
+/// How to handle reserved bits in fixed-point, time, string, and bitfield descriptions.
+pub(in crate::datatype) enum AtomicReservedFlagPolicy {
+    /// Ignores the reserved bits when decoding a semantic datatype.
+    Ignore,
+    /// Rejects set reserved bits when decoding a retained-version description.
+    Reject,
+}
+
+impl AtomicReservedFlagPolicy {
+    /// Applies the selected policy to reserved bits in the class bit field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidDatatypeFlags`] under [`Self::Reject`] if any bit in
+    /// `mask` is set.
+    fn check(self, class: AtomicClass, fields: HeaderFields, mask: u32) -> Result<(), FormatError> {
+        match self {
+            Self::Ignore => Ok(()),
+            Self::Reject => fields.reject_reserved_flags(class as u8, mask),
+        }
+    }
+}
+
+/// Checked properties shared by the semantic and retained-version parsers.
+///
+/// The decoder borrows an opaque tag's logical bytes until constructing an owned description.
+pub(in crate::datatype) enum DecodedAtomic<'input> {
+    FixedPoint(FixedPointType),
+    FloatingPoint(FloatingPointType),
+    Time(TimeType),
+    String {
+        size: NonZeroU32,
+        padding: StringPadding,
+        charset: CharacterSet,
+    },
+    BitField(BitFieldType),
+    Opaque {
+        size: NonZeroU32,
+        tag: OpaqueTagWire<'input>,
+    },
+}
+
+impl DecodedAtomic<'_> {
+    /// Returns the semantic datatype, copying any opaque tag bytes.
+    pub(in crate::datatype) fn into_datatype(self) -> Datatype {
+        match self {
+            Self::FixedPoint(datatype) => Datatype::FixedPoint(datatype),
+            Self::FloatingPoint(datatype) => Datatype::FloatingPoint(datatype),
+            Self::Time(datatype) => Datatype::Time(datatype),
+            Self::String {
+                size,
+                padding,
+                charset,
+            } => Datatype::String {
+                size: size.get(),
+                padding,
+                charset,
+            },
+            Self::BitField(datatype) => Datatype::BitField(datatype),
+            Self::Opaque { size, tag } => Datatype::Opaque {
+                size: size.get(),
+                tag: tag.logical.to_vec(),
+            },
+        }
+    }
+
+    /// Returns the properties for a retained-version description, copying any opaque tag bytes.
+    pub(super) fn into_properties(self) -> DatatypeProperties {
+        match self {
+            Self::FixedPoint(datatype) => DatatypeProperties::FixedPoint(datatype),
+            Self::FloatingPoint(datatype) => DatatypeProperties::FloatingPoint(datatype),
+            Self::Time(datatype) => DatatypeProperties::Time(datatype),
+            Self::String {
+                size,
+                padding,
+                charset,
+            } => DatatypeProperties::String {
+                size: size.get(),
+                padding,
+                charset,
+            },
+            Self::BitField(datatype) => DatatypeProperties::BitField(datatype),
+            Self::Opaque { size, tag } => DatatypeProperties::Opaque {
+                size: size.get(),
+                tag: tag.logical.to_vec(),
+            },
+        }
+    }
+}
+
+/// Reads the complete floating-point property block before checking the class bit field.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if the property block is incomplete. Propagates errors
+/// from [`FloatingPointByteOrder::parse`], mapping those errors through `context`, and errors
+/// checking the numeric layout and mantissa normalization.
+pub(in crate::datatype) fn decode_floating_point(
+    cursor: &mut ByteCursor<'_>,
+    fields: HeaderFields,
+    context: Context,
+) -> Result<FloatingPointType, FormatError> {
+    let &[
+        offset_low,
+        offset_high,
+        precision_low,
+        precision_high,
+        exponent_at,
+        exponent_size,
+        mantissa_at,
+        mantissa_size,
+        bias0,
+        bias1,
+        bias2,
+        bias3,
+    ] = cursor.take_array::<FLOATING_POINT_PROPERTIES_SIZE>()?;
+    let HeaderFields {
+        version,
+        flags,
+        size,
+    } = fields;
+    let order = FloatingPointByteOrder::parse(version, flags)
+        .map_err(|error| context.map_floating_point_flags_error(fields, error))?;
+    let [flags, sign_at, _] = flags;
+    let normalization = match (flags >> FLOAT_NORMALIZATION_SHIFT) & FLOAT_NORMALIZATION_MASK {
+        FLOAT_NORMALIZATION_UNNORMALIZED => MantissaNormalization::Unnormalized,
+        FLOAT_NORMALIZATION_LEADING_ONE => MantissaNormalization::LeadingOne,
+        FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE => MantissaNormalization::ImpliedLeadingOne,
+        value => return Err(FormatError::InvalidMantissaNormalization(value)),
+    };
+    Ok(FloatingPointType::new(
+        size,
+        order.order(),
+        normalization,
+        sign_at,
+        u16::from_le_bytes([offset_low, offset_high]),
+        u16::from_le_bytes([precision_low, precision_high]),
+        exponent_at,
+        exponent_size,
+        mantissa_at,
+        mantissa_size,
+        u32::from_le_bytes([bias0, bias1, bias2, bias3]),
+    )?
+    .with_padding(
+        flags & LOW_PADDING_BIT != 0,
+        flags & HIGH_PADDING_BIT != 0,
+        flags & FLOAT_INTERNAL_PADDING_BIT != 0,
+    ))
+}
+
+/// Decodes a legacy object or dataset-region datatype from its common header.
+///
+/// Retains the declared element size.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidReferenceType`] for a kind other than legacy object or dataset
+/// region, or [`FormatError::ZeroSizedDatatype`] for a zero element size.
+pub(in crate::datatype) fn decode_reference(header: &Header) -> Result<Datatype, FormatError> {
+    // `H5O__dtype_decode_helper` reads legacy kinds at every supported datatype message version
+    // (H5Odtype.c, HDF5 2.2.0).
+    let ref_type = match header.flags[0] & REFERENCE_KIND_MASK {
+        codec::OBJECT_REFERENCE_KIND => ReferenceType::Object,
+        codec::REGION_REFERENCE_KIND => ReferenceType::DatasetRegion,
+        kind => return Err(FormatError::InvalidReferenceType(kind)),
+    };
+    Ok(Datatype::Reference {
+        size: super::positive_size(header.class.code(), header.size)?.get(),
+        ref_type,
+    })
+}
+
+/// Reads the bit offset and precision as one four-byte block.
+///
+/// # Errors
+///
+/// Returns [`UnexpectedEof`] if the block is incomplete.
+fn read_bit_range(cursor: &mut ByteCursor<'_>) -> Result<(u16, u16), UnexpectedEof> {
+    let &[offset_low, offset_high, precision_low, precision_high] =
+        cursor.take_array::<BIT_RANGE_SIZE>()?;
+    Ok((
+        u16::from_le_bytes([offset_low, offset_high]),
+        u16::from_le_bytes([precision_low, precision_high]),
+    ))
+}
+
+fn binary_order(flags: u8) -> DatatypeByteOrder {
+    if flags & codec::BINARY_ORDER_BIT == 0 {
+        DatatypeByteOrder::LittleEndian
+    } else {
+        DatatypeByteOrder::BigEndian
+    }
+}
+
+// "The Datatype Message" in format specification version 4.0 assigns bits 0 through 3
+// of the reference class bit field to the reference kind.
+const REFERENCE_KIND_MASK: u8 = 0x0f;
 
 /// Borrowed atomic properties.
 pub(in crate::datatype) enum AtomicProperties<'a> {

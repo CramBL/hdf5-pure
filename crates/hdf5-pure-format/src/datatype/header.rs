@@ -72,6 +72,53 @@ impl Header {
 
     /// Interprets the class bit field bytes in little-endian order.
     pub(super) fn flag_bits(&self) -> u32 {
+        self.fields().flag_bits()
+    }
+
+    /// Copies the fields used after class dispatch.
+    pub(super) fn fields(&self) -> HeaderFields {
+        let &Self {
+            class: _,
+            version,
+            flags,
+            size,
+        } = self;
+        HeaderFields {
+            version,
+            flags,
+            size,
+        }
+    }
+}
+
+/// The version, class bit field, and element size passed to a property decoder.
+#[derive(Clone, Copy)]
+pub(super) struct HeaderFields {
+    pub(super) version: DatatypeVersion,
+    pub(super) flags: [u8; 3],
+    pub(super) size: u32,
+}
+
+impl HeaderFields {
+    /// Checks the class bit field against a reserved-bit mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidDatatypeFlags`] with the complete class bit field if any
+    /// bit in `mask` is set.
+    pub(super) fn reject_reserved_flags(&self, class: u8, mask: u32) -> Result<(), FormatError> {
+        let flags = self.flag_bits();
+        if flags & mask != 0 {
+            return Err(FormatError::InvalidDatatypeFlags {
+                class,
+                version: self.version.get(),
+                flags,
+            });
+        }
+        Ok(())
+    }
+
+    fn flag_bits(&self) -> u32 {
         u32::from_le_bytes([self.flags[0], self.flags[1], self.flags[2], 0])
     }
 }
@@ -90,13 +137,13 @@ impl Context {
     /// for [`Self::ComplexParent`], or the supplied `error` for [`Self::Description`].
     pub(super) fn map_floating_point_flags_error(
         self,
-        header: &Header,
+        fields: HeaderFields,
         error: FormatError,
     ) -> FormatError {
         match self {
             Self::ComplexParent => FormatError::InvalidComplexParentFlags {
-                version: header.version.get(),
-                flags: header.flag_bits(),
+                version: fields.version.get(),
+                flags: fields.flag_bits(),
             },
             Self::Description => error,
         }
@@ -105,20 +152,14 @@ impl Context {
 
 /// A supported class from the low four bits of the header's first byte.
 #[derive(Clone, Copy)]
-#[repr(u8)]
 pub(super) enum DatatypeClass {
-    FixedPoint = FIXED_POINT_CLASS,
-    FloatingPoint = FLOATING_POINT_CLASS,
-    Time = TIME_CLASS,
-    String = STRING_CLASS,
-    BitField = BIT_FIELD_CLASS,
-    Opaque = OPAQUE_CLASS,
-    Compound = COMPOUND_CLASS,
-    Reference = REFERENCE_CLASS,
-    Enumeration = ENUMERATION_CLASS,
-    VariableLength = VARIABLE_LENGTH_CLASS,
-    Array = ARRAY_CLASS,
-    Complex = COMPLEX_CLASS,
+    Atomic(AtomicClass),
+    Compound,
+    Reference,
+    Enumeration,
+    VariableLength,
+    Array,
+    Complex,
 }
 
 impl DatatypeClass {
@@ -129,12 +170,12 @@ impl DatatypeClass {
     /// Returns [`FormatError::InvalidDatatypeClass`] for an unknown code.
     fn parse(class: u8) -> Result<Self, FormatError> {
         Ok(match class {
-            FIXED_POINT_CLASS => Self::FixedPoint,
-            FLOATING_POINT_CLASS => Self::FloatingPoint,
-            TIME_CLASS => Self::Time,
-            STRING_CLASS => Self::String,
-            BIT_FIELD_CLASS => Self::BitField,
-            OPAQUE_CLASS => Self::Opaque,
+            FIXED_POINT_CLASS => Self::Atomic(AtomicClass::FixedPoint),
+            FLOATING_POINT_CLASS => Self::Atomic(AtomicClass::FloatingPoint),
+            TIME_CLASS => Self::Atomic(AtomicClass::Time),
+            STRING_CLASS => Self::Atomic(AtomicClass::String),
+            BIT_FIELD_CLASS => Self::Atomic(AtomicClass::BitField),
+            OPAQUE_CLASS => Self::Atomic(AtomicClass::Opaque),
             COMPOUND_CLASS => Self::Compound,
             REFERENCE_CLASS => Self::Reference,
             ENUMERATION_CLASS => Self::Enumeration,
@@ -147,6 +188,26 @@ impl DatatypeClass {
 
     /// Returns the class code as stored in the header.
     pub(super) const fn code(self) -> u8 {
-        self as u8
+        match self {
+            Self::Atomic(class) => class as u8,
+            Self::Compound => COMPOUND_CLASS,
+            Self::Reference => REFERENCE_CLASS,
+            Self::Enumeration => ENUMERATION_CLASS,
+            Self::VariableLength => VARIABLE_LENGTH_CLASS,
+            Self::Array => ARRAY_CLASS,
+            Self::Complex => COMPLEX_CLASS,
+        }
     }
+}
+
+/// The datatype classes with atomic property layouts.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(super) enum AtomicClass {
+    FixedPoint = FIXED_POINT_CLASS,
+    FloatingPoint = FLOATING_POINT_CLASS,
+    Time = TIME_CLASS,
+    String = STRING_CLASS,
+    BitField = BIT_FIELD_CLASS,
+    Opaque = OPAQUE_CLASS,
 }

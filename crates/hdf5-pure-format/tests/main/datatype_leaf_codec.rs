@@ -7,10 +7,11 @@ use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
 use rstest::rstest;
+use test_util::datatype::float_context::Context;
 use test_util::datatype::leaf::{
     self, Charset, FullOpaqueProperty, Leaf, OpaqueTag, Order, Padding, VaxVersion, Version,
 };
-use test_util::datatype::{self, Class};
+use test_util::datatype::{Class, LegacyReference};
 
 #[rstest]
 #[case::integer(Leaf::Integer)]
@@ -159,14 +160,14 @@ fn datatype_leaf_parser_preserves_property_errors(
 #[case::flags_end(3, 8)]
 #[case::size(4, 8)]
 #[case::size_end(7, 8)]
-#[case::offset(8, 10)]
-#[case::offset_end(9, 10)]
-#[case::precision(10, 12)]
-#[case::precision_end(11, 12)]
-#[case::exponent_location(12, 13)]
-#[case::exponent_size(13, 14)]
-#[case::mantissa_location(14, 15)]
-#[case::mantissa_size(15, 16)]
+#[case::offset(8, 20)]
+#[case::offset_end(9, 20)]
+#[case::precision(10, 20)]
+#[case::precision_end(11, 20)]
+#[case::exponent_location(12, 20)]
+#[case::exponent_size(13, 20)]
+#[case::mantissa_location(14, 20)]
+#[case::mantissa_size(15, 20)]
 #[case::bias(16, 20)]
 #[case::bias_end(19, 20)]
 fn datatype_leaf_parser_reports_truncated_fields(
@@ -174,12 +175,53 @@ fn datatype_leaf_parser_reports_truncated_fields(
     #[case] expected: usize,
 ) {
     let bytes = Leaf::Float(Order::Little).bytes(Version::Three);
-    assert_eq!(
-        DatatypeMessage::parse(&bytes[..available]).unwrap_err(),
+    assert_leaf_errors(
+        &bytes[..available],
         FormatError::UnexpectedEof {
             expected,
-            available
-        }
+            available,
+        },
+    );
+}
+
+#[rstest]
+#[case::fixed_point(Leaf::Integer)]
+#[case::floating_point(Leaf::Float(Order::Little))]
+#[case::time(Leaf::Time)]
+#[case::bitfield(Leaf::Bitfield)]
+fn incomplete_atomic_property_blocks_report_eof_with_reserved_bits_set(#[case] leaf: Leaf) {
+    let mut bytes = leaf.bytes(Version::One);
+    bytes[3] = 0x01;
+    assert_leaf_errors(
+        &bytes[..bytes.len() - 1],
+        FormatError::UnexpectedEof {
+            expected: bytes.len(),
+            available: bytes.len() - 1,
+        },
+    );
+}
+
+#[rstest]
+#[case::fixed_point(Leaf::Integer, Class::FIXED_POINT)]
+#[case::time(Leaf::Time, Class::TIME)]
+#[case::string(Leaf::string(), Class::STRING)]
+#[case::bitfield(Leaf::Bitfield, Class::BIT_FIELD)]
+fn retained_parser_rejects_reserved_bits_accepted_by_semantic_parser(
+    #[case] leaf: Leaf,
+    #[case] class: Class,
+) {
+    let version = Version::One;
+    let mut bytes = leaf.bytes(version);
+    let expected = format::parse_datatype(&bytes).unwrap();
+    bytes[3] = 0x01;
+    assert_eq!(format::parse_datatype(&bytes).unwrap(), expected);
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::InvalidDatatypeFlags {
+            class: class.0,
+            version: version.get(),
+            flags: u32::from_le_bytes([bytes[1], bytes[2], bytes[3], 0]),
+        },
     );
 }
 
@@ -193,10 +235,7 @@ fn datatype_leaf_parser_reports_truncated_fields(
 fn datatype_leaf_parser_rejects_zero_element_sizes(#[case] leaf: Leaf, #[case] class: u8) {
     let mut bytes = leaf.bytes(Version::Three);
     bytes[4..8].fill(0);
-    assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
-        FormatError::ZeroSizedDatatype { class }
-    );
+    assert_leaf_errors(&bytes, FormatError::ZeroSizedDatatype { class });
 }
 
 #[test]
@@ -224,22 +263,142 @@ fn datatype_leaf_parser_rejects_nonzero_opaque_padding() {
 }
 
 #[test]
-fn semantic_parser_accepts_and_retained_parser_rejects_an_object_reference() {
-    let bytes = datatype::object_reference(8);
+fn incomplete_opaque_property_precedes_invalid_padding() {
+    let mut bytes = Leaf::Opaque(OpaqueTag::NonAscii).bytes(Version::One);
+    bytes[11] = 1;
+    let expected = usize::from(bytes[1]);
+    bytes.truncate(bytes.len() - 1);
+    assert_leaf_errors(
+        &bytes,
+        FormatError::UnexpectedEof {
+            expected,
+            available: expected - 1,
+        },
+    );
+}
+
+#[test]
+fn invalid_opaque_length_precedes_property_acquisition() {
+    let mut bytes = Leaf::Opaque(OpaqueTag::Empty).bytes(Version::One);
+    bytes[1] = 9;
+    assert_leaf_errors(&bytes, FormatError::InvalidOpaqueTagLength { length: 9 });
+}
+
+#[test]
+fn incomplete_complex_parent_properties_precede_invalid_flags() {
+    let mut parent = Leaf::Float(Order::Little).bytes(Version::One);
+    parent[3] = 1;
+    let parent_size = parent.len();
+    let bytes = Context::Complex.bytes(&parent[..parent_size - 1]);
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: parent_size,
+            available: parent_size - 1
+        },
+    );
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap_err(),
-        FormatError::InvalidDatatypeClass(7)
+        FormatError::UnexpectedEof {
+            expected: bytes.len() + 1,
+            available: bytes.len()
+        },
+    );
+}
+
+#[rstest]
+#[case::object(LegacyReference::Object, ReferenceType::Object)]
+#[case::dataset_region(LegacyReference::DatasetRegion, ReferenceType::DatasetRegion)]
+fn semantic_parser_accepts_and_retained_parser_rejects_legacy_references(
+    #[case] fixture: LegacyReference,
+    #[case] ref_type: ReferenceType,
+    #[values(
+        Version::One,
+        Version::Two,
+        Version::Three,
+        Version::Four,
+        Version::Five
+    )]
+    version: Version,
+) {
+    let mut bytes = fixture.bytes(version);
+    let consumed = bytes.len();
+    bytes.push(0xa5);
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::InvalidDatatypeClass(Class::REFERENCE.0),
     );
     assert_eq!(
         format::parse_datatype(&bytes).unwrap(),
         (
             Datatype::Reference {
-                size: 8,
-                ref_type: ReferenceType::Object,
+                size: fixture.size(),
+                ref_type,
             },
-            bytes.len(),
+            consumed,
         )
     );
+}
+
+#[rstest]
+#[case::revised_object(REVISED_OBJECT_REFERENCE_FLAGS, REVISED_OBJECT_REFERENCE_KIND)]
+#[case::unknown_kind(0x0f, 15)]
+fn semantic_reference_kind_error_precedes_zero_size(#[case] flags: u8, #[case] kind: u8) {
+    let mut bytes = LegacyReference::Object.bytes(Version::Four);
+    bytes[1] = flags;
+    bytes[4..8].fill(0);
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap_err(),
+        FormatError::InvalidReferenceType(kind)
+    );
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::InvalidDatatypeClass(Class::REFERENCE.0)
+    );
+}
+
+#[test]
+fn incomplete_reference_header_reports_eof_in_both_parsers() {
+    let mut bytes = LegacyReference::Object.bytes(Version::One);
+    let expected = bytes.len();
+    bytes.truncate(expected - 1);
+    assert_leaf_errors(
+        &bytes,
+        FormatError::UnexpectedEof {
+            expected,
+            available: bytes.len(),
+        },
+    );
+}
+
+#[test]
+fn zero_size_reference_reports_semantic_size_and_retained_class_errors() {
+    let mut bytes = LegacyReference::Object.bytes(Version::One);
+    bytes[4..8].fill(0);
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap_err(),
+        FormatError::ZeroSizedDatatype {
+            class: Class::REFERENCE.0
+        },
+    );
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::InvalidDatatypeClass(Class::REFERENCE.0),
+    );
+}
+
+// "The Datatype Message" in format specification version 4.0 defines the revised object
+// reference kind and its encoding version for datatype message version 4.
+const REVISED_OBJECT_REFERENCE_KIND: u8 = 2;
+const REVISED_REFERENCE_ENCODING_VERSION: u8 = 1;
+const REFERENCE_ENCODING_VERSION_SHIFT: u8 = 4;
+const REVISED_OBJECT_REFERENCE_FLAGS: u8 = (REVISED_REFERENCE_ENCODING_VERSION
+    << REFERENCE_ENCODING_VERSION_SHIFT)
+    | REVISED_OBJECT_REFERENCE_KIND;
+
+fn assert_leaf_errors(bytes: &[u8], expected: FormatError) {
+    assert_eq!(format::parse_datatype(bytes).unwrap_err(), expected);
+    assert_eq!(DatatypeMessage::parse(bytes).unwrap_err(), expected);
 }
 
 #[rstest]

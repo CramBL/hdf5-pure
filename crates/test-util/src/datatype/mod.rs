@@ -132,6 +132,42 @@ pub fn object_reference(size: u32) -> Vec<u8> {
     header(Class::REFERENCE, DATATYPE_VERSION, OBJECT_REFERENCE, size)
 }
 
+/// A legacy object or dataset-region reference datatype fixture.
+#[derive(Clone, Copy, Debug)]
+pub enum LegacyReference {
+    /// An object reference with an eight-byte element size.
+    Object,
+    /// A dataset-region reference with a twelve-byte element size.
+    DatasetRegion,
+}
+
+impl LegacyReference {
+    /// Writes the reference datatype header with the supplied message version.
+    pub fn bytes(self, version: leaf::Version) -> Vec<u8> {
+        let flags = match self {
+            Self::Object => OBJECT_REFERENCE,
+            Self::DatasetRegion => DATASET_REGION_REFERENCE,
+        };
+        header(Class::REFERENCE, version.get(), flags, self.size())
+    }
+
+    /// Returns the element size used by the fixture.
+    pub const fn size(self) -> u32 {
+        match self {
+            Self::Object => LEGACY_OBJECT_REFERENCE_SIZE,
+            Self::DatasetRegion => LEGACY_DATASET_REGION_REFERENCE_SIZE,
+        }
+    }
+}
+
+// "The Datatype Message" in format specification version 4.0 defines kind 1 as a
+// legacy dataset-region reference for datatype message versions before 4.
+const DATASET_REGION_REFERENCE: [u8; 3] = [1, 0, 0];
+// `H5T__ref_set_loc` uses the file offset width and adds a heap index for a region reference
+// (H5Tref.c, HDF5 2.2.0).
+const LEGACY_OBJECT_REFERENCE_SIZE: u32 = 8;
+const LEGACY_DATASET_REGION_REFERENCE_SIZE: u32 = LEGACY_OBJECT_REFERENCE_SIZE + HEAP_INDEX_SIZE;
+
 /// A reference to a committed datatype, which stands where an encoding
 /// usually is when the message's shared flag is set.
 pub fn committed_reference(address: u64) -> Vec<u8> {
