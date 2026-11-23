@@ -1508,7 +1508,7 @@ pub enum HugeObjectTrackerRecord {
 /// # heap.filtering = FractalHeapFiltering::Filtered {
 /// #     root_direct_block_size: 0,
 /// #     root_filter_mask: 0,
-/// #     pipeline: FilterPipeline { version: FILTER_PIPELINE_VERSION_TWO, filters: vec![] },
+/// #     pipeline: FilterPipeline::new(FILTER_PIPELINE_VERSION_TWO, Vec::new())?,
 /// # };
 /// # let widths = FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Two };
 /// # let tracker = BTreeV2Header {
@@ -1540,7 +1540,7 @@ impl HugeObjectRecordContext {
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidFractalHeapGeometry`] if the tracker address is undefined
-    /// or exceeds the address width, or the heap's pipeline contains more than 32 filters.
+    /// or exceeds the address width.
     pub fn new(header: &FractalHeapHeader, widths: FormatWidths) -> Result<Self, FormatError> {
         if header.btree_huge_objects_address.get() >= StoredAddress::undefined(widths.offsets).get()
         {
@@ -1556,10 +1556,7 @@ impl HugeObjectRecordContext {
                 }
             }
             FractalHeapFiltering::Filtered { pipeline, .. } => {
-                let filter_count = pipeline.filters.len();
-                if filter_count > u32::BITS as usize {
-                    return Err(FormatError::InvalidFractalHeapGeometry);
-                }
+                let filter_count = pipeline.filters().len();
                 if direct {
                     HugeObjectRecordEncoding::FilteredDirect { filter_count }
                 } else {
@@ -2906,9 +2903,9 @@ mod tests {
             header.filtering = crate::fractal_heap::FractalHeapFiltering::Filtered {
                 root_direct_block_size: 0,
                 root_filter_mask: 0,
-                pipeline: crate::filter_pipeline::FilterPipeline {
-                    version: crate::filter_pipeline::VERSION_TWO,
-                    filters: vec![
+                pipeline: crate::filter_pipeline::FilterPipeline::new(
+                    crate::filter_pipeline::VERSION_TWO,
+                    vec![
                         crate::filter_pipeline::FilterDescription {
                             filter_id: FILTER_DEFLATE,
                             name: None,
@@ -2917,7 +2914,8 @@ mod tests {
                         };
                         filter_count
                     ],
-                },
+                )
+                .unwrap(),
             };
         }
         let widths = FormatWidths { offsets, lengths };

@@ -42,8 +42,8 @@ impl FractalHeapHugeObjectLayout {
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidFractalHeapGeometry`] if the tracker address is undefined
-    /// or exceeds the offset width, or the pipeline contains more than 32 filters. Returns
-    /// [`FormatError::OffsetOverflow`] if the physical tracker header range exceeds [`u64::MAX`].
+    /// or exceeds the offset width. Returns [`FormatError::OffsetOverflow`] if the physical
+    /// tracker header range exceeds [`u64::MAX`].
     pub fn new(
         header: &FractalHeapHeader,
         widths: FormatWidths,
@@ -210,7 +210,7 @@ impl FractalHeapHugeObjectLayout {
                     .pipeline
                     .as_ref()
                     .ok_or(FormatError::InvalidFractalHeapGeometry)?
-                    .filters
+                    .filters()
                     .len();
                 if count < u32::BITS as usize && location.filter_mask() >> count != 0 {
                     return Err(FormatError::InvalidFractalHeapGeometry);
@@ -362,7 +362,7 @@ impl FractalHeapHugeObjectLayout {
     /// # header.btree_huge_objects_address = hdf5_pure_core::StoredAddress::new(256);
     /// # header.filtering = FractalHeapFiltering::Filtered {
     /// #     root_direct_block_size: 0, root_filter_mask: 0,
-    /// #     pipeline: FilterPipeline { version: FILTER_PIPELINE_VERSION_TWO, filters: vec![] },
+    /// #     pipeline: FilterPipeline::new(FILTER_PIPELINE_VERSION_TWO, Vec::new())?,
     /// # };
     /// # let widths = FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Eight };
     /// # let objects = FractalHeapHugeObjectLayout::new(

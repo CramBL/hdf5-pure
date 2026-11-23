@@ -8,8 +8,6 @@ use hdf5_pure::ReadSeekSource;
 use hdf5_pure_filter::__private::FILTER_SHUFFLE;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::FillValueMessage;
-use hdf5_pure_format::__private::FilterDescription;
-use hdf5_pure_format::__private::FilterPipeline;
 use rstest::rstest;
 use test_util::btree::v1 as btree_v1;
 use test_util::data_layout;
@@ -189,18 +187,12 @@ fn chunk_file(stored: Option<&[u8]>, extent: u64, skipped: bool, fill: i32) -> V
             &data_layout::chunked(index, &[2], 4),
         ));
     if skipped {
-        let pipeline = FilterPipeline {
-            version: FILTER_PIPELINE_VERSION,
-            filters: vec![FilterDescription {
-                filter_id: FILTER_SHUFFLE,
-                name: None,
-                flags: 0,
-                client_data: vec![4],
-            }],
-        };
+        let mut pipeline =
+            test_util::filter_pipeline::Pipeline::new(test_util::filter_pipeline::Version::Two);
+        pipeline.push(FILTER_SHUFFLE, None, 0, &[4]).unwrap();
         header = header.message(Message::new(
             MessageType::FILTER_PIPELINE,
-            &pipeline.serialize().unwrap(),
+            &pipeline.build(),
         ));
     }
     if fill != 0 {
@@ -233,9 +225,6 @@ const SUPERBLOCK_VERSION: u8 = 3;
 // "Appendix A: Definitions" in format specification, version 4.0, defines an
 // undefined address as all bits set.
 const UNDEFINED_ADDRESS: u64 = u64::MAX;
-// "The Data Storage - Filter Pipeline Message" in format specification, version 4.0,
-// defines pipeline message version 2.
-const FILTER_PIPELINE_VERSION: u8 = 2;
 // "Version 1 B-trees" in format specification, version 4.0, defines the filter mask
 // of a raw data chunk key, with one bit per pipeline entry, starting at bit zero.
 const SHUFFLE_FILTER_MASK: u32 = 1;

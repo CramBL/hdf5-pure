@@ -104,11 +104,11 @@ fn writer_pipeline_matches_h5py() {
             .unwrap_or_else(|e| panic!("{}: build_pipeline: {e:?}", fix.name))
             .unwrap_or_else(|| panic!("{}: writer produced no pipeline", fix.name));
 
-        let ids: Vec<u16> = pipeline.filters.iter().map(|f| f.filter_id).collect();
+        let ids: Vec<u16> = pipeline.filters().iter().map(|f| f.filter_id).collect();
         assert_eq!(ids, fix.filters, "{}: filter ids or order", fix.name);
 
         let ours = pipeline
-            .filters
+            .filters()
             .iter()
             .find(|f| f.filter_id == FILTER_LZF)
             .expect("lzf requested");

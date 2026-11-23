@@ -18,6 +18,7 @@ use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
+use hdf5_pure_format::__private::FILTER_PIPELINE_VERSION_TWO;
 use hdf5_pure_format::__private::FilteredSingleChunk;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::SlotOccupancy;
@@ -41,7 +42,7 @@ use crate::file_emission::EmissionError;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
-    FilterDescription, FilterPipeline, H5Z_FLAG_OPTIONAL,
+    FilterDescription, FilterPipeline, H5Z_FLAG_OPTIONAL, RetainedFilterPipeline,
 };
 use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
@@ -176,7 +177,7 @@ pub struct ChunkOptions {
     /// The source filter message to copy when storage is unallocated.
     ///
     /// The writer uses this message in place of rebuilding the pipeline from [`Self::filters`].
-    pub(crate) unallocated_pipeline: Option<Vec<u8>>,
+    pub(crate) unallocated_pipeline: Option<RetainedFilterPipeline<'static>>,
     /// Whether the filter pipeline applies to a partial edge chunk, a chunk that extends past the
     /// dataset's extent, or `None` where the caller sets no policy.
     ///
@@ -417,10 +418,9 @@ impl ChunkOptions {
         if filters.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(FilterPipeline {
-                version: 2,
-                filters,
-            }))
+            FilterPipeline::new(FILTER_PIPELINE_VERSION_TWO, filters)
+                .map(Some)
+                .map_err(crate::filter_pipeline::map_filter_pipeline_error)
         }
     }
 
@@ -491,11 +491,7 @@ impl ChunkOptions {
                 StoredAddress::new(0),
                 pipeline.is_some(),
             )?,
-            pipeline_message: pipeline
-                .as_ref()
-                .map(FilterPipeline::serialize)
-                .transpose()
-                .map_err(crate::filter_pipeline::map_filter_pipeline_error)?,
+            pipeline_message: pipeline.as_ref().map(FilterPipeline::to_bytes),
         })
     }
 
@@ -1379,14 +1375,11 @@ pub(crate) fn compress_chunks(
         StorageAllocation::Unallocated => options.build_pipeline(&ctx, fill)?,
     };
     let pipeline_message = match allocation {
-        StorageAllocation::Unallocated if options.unallocated_pipeline.is_some() => {
-            options.unallocated_pipeline.clone()
-        }
-        _ => pipeline
+        StorageAllocation::Unallocated if options.unallocated_pipeline.is_some() => options
+            .unallocated_pipeline
             .as_ref()
-            .map(FilterPipeline::serialize)
-            .transpose()
-            .map_err(crate::filter_pipeline::map_filter_pipeline_error)?,
+            .map(|pipeline| pipeline.as_bytes().to_vec()),
+        _ => pipeline.as_ref().map(FilterPipeline::to_bytes),
     };
 
     // Decided from the geometry alone, and decided first: it is the step that

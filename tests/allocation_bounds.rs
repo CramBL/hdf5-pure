@@ -2565,6 +2565,79 @@ fn borrowed_external_link_encoding_allocates_nothing() {
 }
 
 #[test]
+fn filter_pipeline_preparation_and_bounded_encoding_allocate_nothing() {
+    use hdf5_pure_format::__private::PreparedFilterPipeline;
+
+    let (version, filters, expected) = named_filter_pipeline();
+    let (control, measured) = allocation::measure("filter_pipeline_bounded_control", || {
+        std::hint::black_box(expected.clone())
+    });
+    assert!(measured.blocks > 0, "{measured}");
+    assert_eq!(
+        measured.live_bytes,
+        u64::try_from(expected.len()).unwrap(),
+        "{measured}"
+    );
+    drop(control);
+
+    let mut output = vec![0xa5; expected.len()];
+    let (written, measured) = allocation::measure("filter_pipeline_bounded", || {
+        PreparedFilterPipeline::new(version, &filters)
+            .unwrap()
+            .write_into(&mut output)
+            .unwrap()
+    });
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn owned_filter_pipeline_encoding_allocates_only_the_output() {
+    use hdf5_pure_format::__private::FilterPipeline;
+
+    let (version, filters, expected) = named_filter_pipeline();
+    let pipeline = FilterPipeline::new(version, filters).unwrap();
+    let (output, measured) = allocation::measure("filter_pipeline_owned", || pipeline.to_bytes());
+    assert_eq!(measured.blocks, 1, "{measured}");
+    assert_eq!(
+        measured.bytes,
+        u64::try_from(expected.len()).unwrap(),
+        "{measured}"
+    );
+    assert_eq!(measured.live_bytes, measured.bytes, "{measured}");
+    assert_eq!(output, expected);
+}
+
+fn named_filter_pipeline() -> (
+    u8,
+    Vec<hdf5_pure_format::__private::FilterDescription>,
+    Vec<u8>,
+) {
+    use hdf5_pure_format::__private::FilterDescription;
+    use test_util::filter_pipeline::{Pipeline, Version};
+
+    let name = "filter".repeat(200);
+    let mut fixture = Pipeline::new(Version::One);
+    fixture.push(300, Some(&name), 0x83, &[7]).unwrap();
+    fixture
+        .push(301, Some("second"), 0x40, &[0, u32::MAX])
+        .unwrap();
+    let filters = fixture
+        .filters()
+        .iter()
+        .map(|filter| FilterDescription {
+            filter_id: filter.id(),
+            name: filter.name().map(str::to_owned),
+            flags: u16::from(filter.flags()),
+            client_data: filter.client_data().to_vec(),
+        })
+        .collect();
+    (fixture.version().byte(), filters, fixture.build())
+}
+
+#[test]
 fn direct_link_conversion_omits_a_temporary_body_allocation() {
     let bytes = SymbolicLink::external("x", "source.h5", &"/target".repeat(256)).build();
     let link = LinkMessage::parse_with_offset_width(&bytes, OffsetWidth::Eight).unwrap();

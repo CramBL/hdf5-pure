@@ -2625,7 +2625,7 @@ fn filter_attribute_heap(
     } else {
         block[..UNENCODED_BLOCK_LEN].to_vec()
     };
-    let pipeline = pipeline.serialize().unwrap();
+    let pipeline = pipeline.to_bytes();
     let filtered_header = |root: u64| {
         let unfiltered = FractalHeapHeader {
             root_block_address: StoredAddress::new(root),

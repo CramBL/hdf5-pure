@@ -13,6 +13,7 @@ use crate::checksum;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
+use crate::filter_pipeline::FilterPipeline;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message_write::PreparedLink;
 use crate::message_flags::MessageFlags;
@@ -727,6 +728,52 @@ impl MessageRecordLayout {
                 source,
             })?;
         self.append_link_info(buf, info);
+        Ok(())
+    }
+
+    /// Appends a Filter Pipeline record with a creation index of zero when tracked.
+    ///
+    /// Sets [`MessageFlags::CONSTANT`] if `constant` is `true`. Writes the body directly
+    /// after the record prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the body exceeds
+    /// [`OBJECT_HEADER_MESSAGE_MAX`], or [`FormatError::AllocationFailed`] if reserving space
+    /// fails. Leaves the buffer's contents unchanged on error.
+    pub fn write_filter_pipeline(
+        self,
+        buf: &mut Vec<u8>,
+        constant: bool,
+        pipeline: &FilterPipeline,
+    ) -> Result<(), FormatError> {
+        let pipeline = pipeline.prepare();
+        let size = pipeline.encoded_size();
+        let body_len =
+            u16::try_from(size).map_err(|_error| FormatError::ObjectHeaderMessageTooLarge {
+                message_type: MessageType::FILTER_PIPELINE.to_u16(),
+                size,
+            })?;
+        let extent = self.prefix_len() + size;
+        buf.try_reserve(extent)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: extent,
+                source,
+            })?;
+        let type_byte = const {
+            let [low, high] = MessageType::FILTER_PIPELINE.to_u16().to_le_bytes();
+            assert!(high == 0);
+            low
+        };
+        let flags = if constant {
+            MessageFlags::CONSTANT
+        } else {
+            MessageFlags::NONE
+        };
+        self.write_record_prefix(buf, type_byte, flags, 0, body_len);
+        let start = buf.len();
+        buf.resize(start + size, 0);
+        pipeline.write_body(&mut buf[start..]);
         Ok(())
     }
 

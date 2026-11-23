@@ -108,11 +108,6 @@ impl FractalHeapBlockLayout {
         if header.current_rows_in_root_indirect_block > layout.max_root_rows() {
             return Err(FormatError::InvalidFractalHeapGeometry);
         }
-        if matches!(&header.filtering, FractalHeapFiltering::Filtered { pipeline, .. }
-            if pipeline.filters.len() > u32::BITS as usize)
-        {
-            return Err(FormatError::InvalidFractalHeapGeometry);
-        }
         let heap = Self {
             layout,
             owner,
@@ -186,7 +181,7 @@ impl FractalHeapBlockLayout {
         if let (Some(mask), FractalHeapFiltering::Filtered { pipeline, .. }) =
             (filter_mask, &self.filtering)
         {
-            let count = pipeline.filters.len();
+            let count = pipeline.filters().len();
             if count < u32::BITS as usize && mask >> count != 0 {
                 return Err(FormatError::InvalidFractalHeapGeometry);
             }
@@ -1002,7 +997,7 @@ mod tests {
 
     use crate::address::StoredAddressExt;
     use crate::filter_pipeline::FilterDescription;
-    use crate::filter_pipeline::FilterPipeline;
+    use crate::filter_pipeline::{FilterPipeline, VERSION_TWO};
 
     use super::*;
 
@@ -1026,15 +1021,16 @@ mod tests {
             header.filtering = FractalHeapFiltering::Filtered {
                 root_direct_block_size: 47,
                 root_filter_mask: 1,
-                pipeline: FilterPipeline {
-                    version: 2,
-                    filters: vec![FilterDescription {
-                        filter_id: 1,
+                pipeline: FilterPipeline::new(
+                    VERSION_TWO,
+                    vec![FilterDescription {
+                        filter_id: FILTER_DEFLATE,
                         name: None,
                         flags: 1,
                         client_data: vec![6],
                     }],
-                },
+                )
+                .unwrap(),
             };
         }
         FractalHeapBlockLayout::new(&header, offsets, LengthWidth::Eight, StoredAddress::new(96))
@@ -1665,7 +1661,6 @@ mod tests {
     #[case::zero_encoded_root(4, 96)]
     #[case::invalid_root_mask(5, 96)]
     #[case::small_direct_root(6, 96)]
-    #[case::filter_count(7, 96)]
     fn block_layout_rejects_invalid_header_geometry(#[case] mutation: u8, #[case] owner: u64) {
         let encoded = fractal_heap::Header::new(256).build(Widths::EIGHT);
         let mut header =
@@ -1676,22 +1671,20 @@ mod tests {
             1 => header.root_block_address = StoredAddress::new(0x1_0000),
             2 => header.current_rows_in_root_indirect_block = 9,
             3 => header.table_width = 3,
-            4 | 5 | 7 => {
+            4 | 5 => {
                 header.filtering = FractalHeapFiltering::Filtered {
                     root_direct_block_size: if mutation == 4 { 0 } else { 47 },
                     root_filter_mask: if mutation == 5 { 2 } else { 0 },
-                    pipeline: FilterPipeline {
-                        version: 2,
-                        filters: vec![
-                            FilterDescription {
-                                filter_id: 1,
-                                name: None,
-                                flags: 1,
-                                client_data: vec![6],
-                            };
-                            if mutation == 7 { 33 } else { 1 }
-                        ],
-                    },
+                    pipeline: FilterPipeline::new(
+                        VERSION_TWO,
+                        vec![FilterDescription {
+                            filter_id: FILTER_DEFLATE,
+                            name: None,
+                            flags: 1,
+                            client_data: vec![6],
+                        }],
+                    )
+                    .unwrap(),
                 }
             }
             6 => {
@@ -1770,4 +1763,6 @@ mod tests {
     // The fixture heaps store eight-byte offsets, so the block offset follows an eight-byte owner.
     const OWNER_AT: usize = SIGNATURE_LEN + 1;
     const BLOCK_OFFSET_AT: usize = OWNER_AT + 8;
+
+    const FILTER_DEFLATE: u16 = 1;
 }

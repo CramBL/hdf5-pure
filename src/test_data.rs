@@ -9,10 +9,7 @@ use crate::filters::ChunkContext;
 
 /// Returns a version 2 filter pipeline of `filters`.
 pub fn filter_pipeline(filters: Vec<FilterDescription>) -> FilterPipeline {
-    FilterPipeline {
-        version: PIPELINE_VERSION_TWO,
-        filters,
-    }
+    FilterPipeline::new(PIPELINE_VERSION_TWO, filters).unwrap()
 }
 
 /// Returns a version 2 filter pipeline of one deflate filter at level 6.

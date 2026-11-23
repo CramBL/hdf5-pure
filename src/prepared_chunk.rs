@@ -115,8 +115,6 @@ impl PreparedChunk {
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if `logical` is not the size of a whole chunk of `ctx`.
-    /// Returns [`FormatError::InvalidFilterPipelineField`] if `encoding` is
-    /// [`ChunkEncoding::FiltersSkipped`] and `pipeline` has more than 32 filters.
     /// Returns the errors of [`chunked_read::bounded_chunk_len`] for the chunk size, and of
     /// [`filters::compress_chunk_with`] for a filtered chunk.
     pub(crate) fn encode(
@@ -255,13 +253,11 @@ impl ChunkEncoding {
 /// mask is defined in "The Extensible Array Index" of the [format specification, version
 /// 4.0][spec].
 ///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidFilterPipelineField`] if `pipeline` has more than 32 filters.
+/// The checked filter count fits the 32-bit mask. Returns zero if `pipeline` is [`None`].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
 fn every_filter_skipped(pipeline: Option<&FilterPipeline>) -> Result<u32, FormatError> {
-    PipelineFilterMask::all_skipped(pipeline.map_or(0, |pipeline| pipeline.filters.len()))
+    PipelineFilterMask::all_skipped(pipeline.map_or(0, |pipeline| pipeline.filters().len()))
         .map(|mask| mask.recorded_mask().raw_bits())
 }
 
@@ -330,26 +326,6 @@ mod tests {
         assert_eq!(detail, reason);
     }
 
-    #[test]
-    fn a_pipeline_larger_than_the_mask_is_rejected_before_storage() {
-        let error = PreparedChunk::encode(
-            &mut FilterScratch::new(),
-            Some(&shuffles(33)),
-            ChunkContext::basic(&[4], 4),
-            ChunkEncoding::FiltersSkipped,
-            vec![7; 16],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error,
-            FormatError::InvalidFilterPipelineField {
-                field: "filter count",
-                value: 33,
-                maximum: 32,
-            }
-        );
-    }
-
     #[rstest]
     #[case::raw(ChunkEncoding::Raw, false, 0)]
     #[case::skipped(ChunkEncoding::FiltersSkipped, true, 1)]
@@ -395,9 +371,9 @@ mod tests {
     }
 
     fn shuffles(count: usize) -> FilterPipeline {
-        FilterPipeline {
-            version: FILTER_PIPELINE_VERSION_TWO,
-            filters: vec![
+        FilterPipeline::new(
+            FILTER_PIPELINE_VERSION_TWO,
+            vec![
                 FilterDescription {
                     filter_id: FILTER_SHUFFLE,
                     name: None,
@@ -406,6 +382,7 @@ mod tests {
                 };
                 count
             ],
-        }
+        )
+        .unwrap()
     }
 }

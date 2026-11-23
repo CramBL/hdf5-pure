@@ -35,6 +35,7 @@ use crate::datatype::StringPadding;
 use crate::datatype::byte_order::DatatypeByteOrder;
 use crate::display;
 use crate::error::FormatError;
+use crate::filter_pipeline::RetainedFilterPipeline;
 use crate::object_path::LinkName;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
@@ -2438,7 +2439,7 @@ pub(crate) struct RawChunkPayload {
     /// The layout flags of the source, which the destination layout message stores.
     pub(crate) flags: ChunkedLayoutFlags,
     /// The verbatim source `FilterPipeline` message bytes, if the source had one.
-    pub(crate) pipeline_message: Option<Vec<u8>>,
+    pub(crate) pipeline_message: Option<RetainedFilterPipeline<'static>>,
     /// Per-chunk sizes + filter masks in dense row-major grid order, one per slot.
     pub(crate) meta: Vec<ChunkMeta>,
     /// Yields each chunk's compressed bytes on demand during the write, so no
@@ -3131,7 +3132,7 @@ impl DatasetBuilder {
         chunk_dims: &[u64],
         element_size: NonZeroUsize,
         flags: ChunkedLayoutFlags,
-        pipeline_message: Option<Vec<u8>>,
+        pipeline_message: Option<RetainedFilterPipeline<'static>>,
         meta: Vec<ChunkMeta>,
         provider: Box<dyn ChunkProvider>,
     ) -> &mut Self {

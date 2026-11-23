@@ -18,7 +18,6 @@ use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::filter_pipeline::FilterPipeline;
-use crate::filter_pipeline::FilterPipelineError;
 use crate::fractal_heap_geometry::FractalHeapGeometry;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
@@ -1022,12 +1021,12 @@ pub enum FractalHeapFiltering {
 impl FractalHeapFiltering {
     /// Parses optional root filter fields and `encoded_len` bytes of filter information at `offset`.
     ///
+    /// The parser reads the full embedded pipeline body before parsing its fields.
+    ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a field or the pipeline is incomplete,
-    /// [`FormatError::InvalidFilterPipelineVersion`] if its version is not 1 or 2,
-    /// [`FormatError::InvalidFilterPipelineField`] if a pipeline field exceeds its format limit,
-    /// and [`FormatError::InvalidFilterName`] if a stored name is malformed.
+    /// Returns [`FormatError::UnexpectedEof`] if the root filter fields or declared pipeline
+    /// body are incomplete. Converts errors from [`FilterPipeline::parse`] to [`FormatError`].
     fn parse(
         data: &[u8],
         lengths: LengthWidth,
@@ -1040,37 +1039,11 @@ impl FractalHeapFiltering {
         let mut cursor = bytes::ByteCursor::with_position(data, offset)?;
         let root_direct_block_size = cursor.length(lengths)?;
         let root_filter_mask = cursor.u32()?;
-        let end = cursor
-            .position()
-            .checked_add(usize::from(encoded_len))
-            .ok_or(FormatError::UnexpectedEof {
-                expected: usize::MAX,
-                available: data.len(),
-            })?;
-        let pipeline_bytes =
-            data.get(cursor.position()..end)
-                .ok_or(FormatError::UnexpectedEof {
-                    expected: end,
-                    available: data.len(),
-                })?;
+        let pipeline_bytes = cursor.take(usize::from(encoded_len))?;
         Ok(Self::Filtered {
             root_direct_block_size,
             root_filter_mask,
-            pipeline: FilterPipeline::parse(pipeline_bytes).map_err(|error| match error {
-                FilterPipelineError::Format(error) => error,
-                FilterPipelineError::FieldTooLarge {
-                    field,
-                    value,
-                    maximum,
-                } => FormatError::InvalidFilterPipelineField {
-                    field,
-                    value,
-                    maximum,
-                },
-                FilterPipelineError::InvalidName { filter_id, reason } => {
-                    FormatError::InvalidFilterName { filter_id, reason }
-                }
-            })?,
+            pipeline: FilterPipeline::parse(pipeline_bytes)?,
         })
     }
 
@@ -1389,7 +1362,7 @@ impl FractalHeapIdLayout {
             tracker: header.btree_huge_objects_address,
             filter_count: match &header.filtering {
                 FractalHeapFiltering::Unfiltered => None,
-                FractalHeapFiltering::Filtered { pipeline, .. } => Some(pipeline.filters.len()),
+                FractalHeapFiltering::Filtered { pipeline, .. } => Some(pipeline.filters().len()),
             },
             encoding,
             key_width: match encoding {
@@ -1517,9 +1490,6 @@ impl FractalHeapIdLayout {
             }
         } else {
             if key_width == 0 || key_width > payload.len() {
-                return Err(FormatError::InvalidFractalHeapGeometry);
-            }
-            if filter_count.is_some_and(|count| count > u32::BITS as usize) {
                 return Err(FormatError::InvalidFractalHeapGeometry);
             }
             let key = bytes::ByteCursor::new(payload).uint(key_width)?;
@@ -2146,14 +2116,14 @@ mod tests {
         };
         let mut builder = fractal_heap::Header::new(0x100).managed_object_count(3);
         if filtering.is_filtered() {
-            builder = builder.filtering(91, 1, pipeline.serialize().unwrap());
+            builder = builder.filtering(91, 1, pipeline.to_bytes());
         }
         let bytes = builder.build(widths);
         let frame = FractalHeapHeaderFrame::parse(&bytes, offsets, lengths).unwrap();
         let extension_len = if filtering.is_filtered() {
             usize::from(lengths.get())
                 + FRACTAL_HEAP_FILTER_MASK_LEN.to_usize().unwrap()
-                + pipeline.serialize().unwrap().len()
+                + pipeline.to_bytes().len()
         } else {
             0
         };
@@ -2218,7 +2188,7 @@ mod tests {
         #[case] filtered_prefix: bool,
     ) {
         let pipeline = filter_pipeline(PIPELINE_VERSION_TWO, 1);
-        let encoded_pipeline = pipeline.serialize().unwrap();
+        let encoded_pipeline = pipeline.to_bytes();
         let mut builder = fractal_heap::Header::new(256);
         let mut expected = unfiltered_header();
         if filtered_header {
@@ -2281,9 +2251,7 @@ mod tests {
             builder = builder.filtering(
                 91,
                 1,
-                filter_pipeline(PIPELINE_VERSION_TWO, client_count)
-                    .serialize()
-                    .unwrap(),
+                filter_pipeline(PIPELINE_VERSION_TWO, client_count).to_bytes(),
             );
         }
         let mut bytes = builder.build(Widths::EIGHT);
@@ -2334,13 +2302,7 @@ mod tests {
     fn a_header_checksum_error_reports_the_final_checksum(#[case] filtered: bool) {
         let mut builder = fractal_heap::Header::new(0x100);
         if filtered {
-            builder = builder.filtering(
-                91,
-                1,
-                filter_pipeline(PIPELINE_VERSION_TWO, 1)
-                    .serialize()
-                    .unwrap(),
-            );
+            builder = builder.filtering(91, 1, filter_pipeline(PIPELINE_VERSION_TWO, 1).to_bytes());
         }
         let mut bytes = builder.build(Widths::EIGHT);
         let checksum_pos = bytes.len() - FRACTAL_HEAP_CHECKSUM_LEN;
@@ -2813,33 +2775,6 @@ mod tests {
         }
     }
 
-    #[rstest]
-    #[case::excessive_pipeline(usize::from(FILTER_COUNT_MAXIMUM) + 1)]
-    fn filtered_huge_ids_reject_impossible_pipeline_sizes(#[case] count: usize) {
-        let mut header = FractalHeapHeader {
-            filtering: filtered_heap(),
-            ..attribute_heap_header()
-        };
-        let FractalHeapFiltering::Filtered { pipeline, .. } = &mut header.filtering else {
-            panic!("expected filtered heap")
-        };
-        pipeline.filters.resize(
-            count,
-            FilterDescription {
-                filter_id: FILTER_DEFLATE,
-                name: None,
-                flags: 0,
-                client_data: vec![],
-            },
-        );
-        assert_eq!(
-            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                .parse(&[FractalHeapIdType::Huge.first_byte(), 5, 0, 0, 0, 0, 0, 0])
-                .unwrap_err(),
-            FormatError::InvalidFractalHeapGeometry
-        );
-    }
-
     fn filtered_huge_location(
         offsets: OffsetWidth,
         lengths: LengthWidth,
@@ -3271,9 +3206,9 @@ mod tests {
     }
 
     fn filter_pipeline(version: u8, client_count: usize) -> FilterPipeline {
-        FilterPipeline {
+        FilterPipeline::new(
             version,
-            filters: vec![FilterDescription {
+            vec![FilterDescription {
                 filter_id: FILTER_DEFLATE,
                 name: if version == PIPELINE_VERSION_ONE {
                     Some("deflate".into())
@@ -3283,22 +3218,24 @@ mod tests {
                 flags: 0,
                 client_data: vec![6; client_count],
             }],
-        }
+        )
+        .unwrap()
     }
 
     fn filtered_heap() -> FractalHeapFiltering {
         FractalHeapFiltering::Filtered {
             root_direct_block_size: 91,
             root_filter_mask: 1,
-            pipeline: FilterPipeline {
-                version: PIPELINE_VERSION_TWO,
-                filters: vec![FilterDescription {
+            pipeline: FilterPipeline::new(
+                PIPELINE_VERSION_TWO,
+                vec![FilterDescription {
                     filter_id: FILTER_DEFLATE,
                     name: None,
                     flags: 0,
                     client_data: vec![6],
                 }],
-            },
+            )
+            .unwrap(),
         }
     }
 

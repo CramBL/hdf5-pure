@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -80,11 +81,16 @@ impl Source for CountedSource {
 }
 
 #[rstest]
-#[case::mandatory(false)]
-#[case::optional(true)]
-fn repack_preserves_an_unallocated_unknown_filter(#[case] optional: bool) {
-    let pipeline = test_util::filter_pipeline::user_filter(optional);
-    let source = File::from_bytes(unallocated_user_filter_source(optional, &[17], &[8])).unwrap();
+#[case::mandatory(false, &[])]
+#[case::optional_with_trailing_bytes(true, &[0xa5, 0, 0])]
+fn repack_preserves_an_unallocated_unknown_filter(
+    #[case] optional: bool,
+    #[case] trailing_bytes: &[u8],
+) {
+    let mut pipeline = test_util::filter_pipeline::user_filter(optional);
+    pipeline.extend_from_slice(trailing_bytes);
+    let source =
+        File::from_bytes(unallocated_pipeline_source(pipeline.clone(), &[17], &[8])).unwrap();
     assert_eq!(source.dataset("d").unwrap().chunks().unwrap(), []);
 
     let destination = File::from_bytes(
@@ -98,10 +104,9 @@ fn repack_preserves_an_unallocated_unknown_filter(#[case] optional: bool) {
     assert_eq!(dataset.chunks().unwrap(), []);
     assert_eq!(dataset.shape().unwrap(), [17]);
     assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![8]));
-    assert_eq!(
-        dataset.filter_pipeline_message_bytes().unwrap(),
-        Some(pipeline)
-    );
+    let pipeline_source = dataset.filter_pipeline_source().unwrap();
+    let (_, body) = pipeline_source.read().unwrap().unwrap();
+    assert_eq!(body.as_bytes(), pipeline);
     assert_eq!(dataset.read_f64().unwrap(), vec![0.0; 17]);
 }
 
@@ -109,7 +114,8 @@ fn repack_preserves_an_unallocated_unknown_filter(#[case] optional: bool) {
 #[case::mandatory(false)]
 #[case::optional(true)]
 fn repack_rejects_an_unallocated_contiguous_filter(#[case] optional: bool) {
-    let mut bytes = unallocated_user_filter_source(optional, &[17, 1], &[8, 1]);
+    let pipeline = test_util::filter_pipeline::user_filter(optional);
+    let mut bytes = unallocated_pipeline_source(pipeline.clone(), &[17, 1], &[8, 1]);
     let source = File::from_bytes(bytes.clone()).unwrap();
     let header = source.dataset("d").unwrap().header_address().unwrap();
     drop(source);
@@ -127,14 +133,13 @@ fn repack_rejects_an_unallocated_contiguous_filter(#[case] optional: bool) {
             size: 136
         },
     );
-    assert_eq!(
-        source
-            .dataset("d")
-            .unwrap()
-            .filter_pipeline_message_bytes()
-            .unwrap(),
-        Some(test_util::filter_pipeline::user_filter(optional)),
-    );
+    let dataset = source.dataset("d").unwrap();
+    let pipeline_source = dataset.filter_pipeline_source().unwrap();
+    let (_, body) = pipeline_source.read().unwrap().unwrap();
+    assert_eq!(body.as_bytes(), pipeline);
+    drop(body);
+    drop(pipeline_source);
+    drop(dataset);
     drop(source);
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.h5");
@@ -153,14 +158,48 @@ fn repack_rejects_an_unallocated_contiguous_filter(#[case] optional: bool) {
     assert!(!dst.exists());
 }
 
-fn unallocated_user_filter_source(optional: bool, shape: &[u64], chunks: &[u64]) -> Vec<u8> {
+#[test]
+fn repack_rejects_an_unallocated_pipeline_with_reserved_flags() {
+    let mut pipeline = test_util::filter_pipeline::user_filter(false);
+    let mut bytes = unallocated_pipeline_source(pipeline.clone(), &[17], &[8]);
+    let source = File::from_bytes(bytes.clone()).unwrap();
+    let header_at = source.dataset("d").unwrap().header_address().unwrap();
+    drop(source);
+    pipeline[7] = 1;
+    v2::replace_message(
+        &mut bytes,
+        usize::try_from(header_at).unwrap(),
+        MessageType::FILTER_PIPELINE,
+        &pipeline,
+    );
+    let source = File::from_bytes(bytes).unwrap();
+
+    let error = stage(&source, &RepackOptions::new(), REPACK_BUDGET)
+        .map(|_| ())
+        .unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected Format, got {error:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::InvalidFilterFlags {
+            filter_id: 40_500,
+            flags: 0x0100
+        }
+    );
+}
+
+fn unallocated_pipeline_source(pipeline: Vec<u8>, shape: &[u64], chunks: &[u64]) -> Vec<u8> {
     let mut builder = FileBuilder::new();
     let dataset = builder.create_dataset("d");
     dataset
         .with_unallocated_storage(crate::make_f64_type(), shape)
         .with_chunks(chunks);
-    dataset.chunk_options.unallocated_pipeline =
-        Some(test_util::filter_pipeline::user_filter(optional));
+    dataset.chunk_options.unallocated_pipeline = Some(
+        RetainedFilterPipeline::parse(Cow::Owned(pipeline))
+            .unwrap()
+            .1,
+    );
     builder.finish().unwrap()
 }
 
@@ -401,15 +440,16 @@ fn rejects_invalid_deflate_metadata_without_truncation(#[case] level: u32) {
 }
 
 fn deflate_pipeline(level: Option<u32>) -> FilterPipeline {
-    FilterPipeline {
-        version: FILTER_PIPELINE_VERSION_TWO,
-        filters: vec![FilterDescription {
+    FilterPipeline::new(
+        FILTER_PIPELINE_VERSION_TWO,
+        vec![FilterDescription {
             filter_id: FILTER_DEFLATE,
             name: None,
             flags: 0,
             client_data: level.into_iter().collect(),
         }],
-    }
+    )
+    .unwrap()
 }
 
 // Synthetic filter parameters cover both defined and undefined fill availability.
@@ -418,16 +458,25 @@ fn a_repacked_scale_offset_filter_keeps_the_sources_fill_availability() {
     let ty = crate::scaleoffset::scale_offset_type_from_datatype(&crate::make_i32_type())
         .expect("i32 is a scale-offset type");
     let carried = |fill: ScaleOffsetFill<'_>| {
-        let pipeline = Some(FilterPipeline {
-            version: 2,
-            filters: vec![FilterDescription {
-                filter_id: FILTER_SCALEOFFSET,
-                name: None,
-                flags: 0,
-                client_data: scaleoffset::build_cd_values(ScaleOffset::Integer(0), ty, 4, 16, fill)
+        let pipeline = Some(
+            FilterPipeline::new(
+                FILTER_PIPELINE_VERSION_TWO,
+                vec![FilterDescription {
+                    filter_id: FILTER_SCALEOFFSET,
+                    name: None,
+                    flags: 0,
+                    client_data: scaleoffset::build_cd_values(
+                        ScaleOffset::Integer(0),
+                        ty,
+                        4,
+                        16,
+                        fill,
+                    )
                     .unwrap(),
-            }],
-        });
+                }],
+            )
+            .unwrap(),
+        );
         let mut db = DatasetBuilder::new("d");
         carry_shape_and_pipeline(
             &mut db,
@@ -476,9 +525,9 @@ fn a_repacked_scale_offset_filter_keeps_the_sources_fill_availability() {
 // A synthetic pipeline represents a combination rejected by the public builder.
 #[test]
 fn lzf_plus_deflate_pipeline_is_refused() {
-    let pipeline = FilterPipeline {
-        version: 2,
-        filters: vec![
+    let pipeline = FilterPipeline::new(
+        FILTER_PIPELINE_VERSION_TWO,
+        vec![
             FilterDescription {
                 filter_id: FILTER_LZF,
                 name: Some("lzf".into()),
@@ -492,7 +541,8 @@ fn lzf_plus_deflate_pipeline_is_refused() {
                 client_data: vec![6],
             },
         ],
-    };
+    )
+    .unwrap();
     let err = check_pipeline(Some(&pipeline), &ObjectPathBuf::parse("d")).unwrap_err();
     let Error::RepackUnsupported(reason) = err else {
         panic!("expected RepackUnsupported, got {err:?}");

@@ -73,15 +73,16 @@ fn a_c_written_filtered_link_heap_is_parsed_and_its_links_are_listed(
     assert_eq!(*root_filter_mask, 0);
     assert_eq!(
         *pipeline,
-        FilterPipeline {
-            version: PIPELINE_VERSION_TWO,
-            filters: vec![FilterDescription {
+        FilterPipeline::new(
+            PIPELINE_VERSION_TWO,
+            vec![FilterDescription {
                 filter_id: FILTER_DEFLATE,
                 name: None,
                 flags: FILTER_OPTIONAL,
                 client_data: vec![6],
-            }],
-        }
+            }]
+        )
+        .unwrap()
     );
     let region = FileRegion::new(
         FileRange::new(PhysicalAddress::new(0), bytes.len() as u64).unwrap(),
