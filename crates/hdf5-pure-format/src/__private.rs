@@ -102,7 +102,7 @@ pub use crate::datatype::layout::StandardNumericLayout;
 pub use crate::datatype::layout::StandardWidth;
 pub use crate::datatype::message::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
-    FloatingPointByteOrder,
+    FloatingPointByteOrder, PreparedDatatype,
 };
 pub use crate::datatype::parse_datatype;
 pub use crate::datatype::serialize_datatype;

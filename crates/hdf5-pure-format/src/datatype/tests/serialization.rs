@@ -145,47 +145,34 @@ fn constructed_enum_bases_propagate_versions(
 }
 
 #[rstest]
-#[case::vax(
-    sequence_bytes(vax_float(), DATATYPE_VERSION_THREE),
-    DATATYPE_VERSION_THREE
-)]
-#[case::complex(mixed_bytes(), DATATYPE_VERSION_FIVE)]
-fn appending_after_a_prefix_preserves_earlier_headers(
-    #[case] message: Vec<u8>,
-    #[case] version: u8,
-) {
-    let prefix = [0xa5, 0x5a, 0xff];
-    let mut output = prefix.to_vec();
+#[case::vax(sequence_bytes(vax_float(), DATATYPE_VERSION_THREE))]
+#[case::complex(mixed_bytes())]
+fn bounded_datatype_writes_preserve_earlier_headers(#[case] nested: Vec<u8>) {
+    use crate::codec::Encode;
+
     let first = Datatype::Opaque {
         size: 4,
         tag: b"first".to_vec(),
     };
-    let first_node = message::encode_canonical(&mut output, OffsetWidth::Eight, &first).unwrap();
-    assert_eq!(first_node.version, DATATYPE_VERSION_ONE);
-    assert_eq!(first_node.type_size, 4);
+    let mut first_bytes = build_dt_header(OPAQUE_CLASS, DATATYPE_VERSION_ONE, [8, 0, 0], 4);
+    first_bytes.extend_from_slice(b"first\0\0\0");
+    let cases = [
+        (first, first_bytes),
+        (parse_datatype(&nested).unwrap().0, nested),
+        (byte_member_type(), build_fixed_point(1, false, false, 0, 8)),
+    ];
+    let prefix = [0xa5, 0x5a, 0xff];
+    let total = prefix.len() + cases.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
+    let mut output = vec![0; total];
+    output[..prefix.len()].copy_from_slice(&prefix);
     let mut expected = prefix.to_vec();
-    expected.extend_from_slice(&build_dt_header(
-        OPAQUE_CLASS,
-        DATATYPE_VERSION_ONE,
-        [8, 0, 0],
-        4,
-    ));
-    expected.extend_from_slice(b"first\0\0\0");
-    assert_eq!(output, expected);
-
-    let datatype = parse_datatype(&message).unwrap().0;
-    let node = message::encode_canonical(&mut output, OffsetWidth::Eight, &datatype).unwrap();
-    assert_eq!(node.version, version);
-    assert_eq!(node.type_size, datatype.type_size());
-    expected.extend_from_slice(&message);
-    assert_eq!(output, expected);
-
-    let final_node =
-        message::encode_canonical(&mut output, OffsetWidth::Eight, &byte_member_type()).unwrap();
-    assert_eq!(final_node.version, DATATYPE_VERSION_ONE);
-    assert_eq!(final_node.type_size, 1);
-    expected.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
-    assert_eq!(output, expected);
+    for (datatype, bytes) in cases {
+        let prepared = message::PreparedDatatype::new(&datatype, OffsetWidth::Eight).unwrap();
+        let written = prepared.encode_into(&mut output[expected.len()..]).unwrap();
+        assert_eq!(written, bytes.len());
+        expected.extend_from_slice(&bytes);
+        assert_eq!(&output[..expected.len()], expected);
+    }
 }
 
 #[rstest]

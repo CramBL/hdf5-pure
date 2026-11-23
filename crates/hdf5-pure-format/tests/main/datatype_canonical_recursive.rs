@@ -46,6 +46,162 @@ fn datatype_canonical_recursive_preserves_properties_and_minimal_versions(
 }
 
 #[rstest]
+fn prepared_atomic_datatype_checks_capacity_before_writing(
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+) {
+    let leaf = Leaf::Integer;
+    let source = leaf.bytes(Version::Five);
+    let datatype = DatatypeMessage::parse(&source)
+        .unwrap()
+        .0
+        .to_datatype()
+        .unwrap();
+    assert_prepared_capacity(&datatype, width, &leaf.bytes(Version::One));
+}
+
+#[rstest]
+fn prepared_nested_datatype_checks_capacity_before_writing(
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+) {
+    let parent = Parent::Sequence;
+    let wrapper = Wrapper::Compound;
+    let source = parent.bytes(OffsetWidth::Eight, true);
+    let semantic = DatatypeMessage::parse(&source)
+        .unwrap()
+        .0
+        .to_datatype()
+        .unwrap();
+    let expected = wrapper.bytes(
+        width,
+        &parent.bytes(width, false),
+        parent.size(width),
+        parent.version(false),
+    );
+    assert_prepared_capacity(&wrapper.wrap(semantic), width, &expected);
+}
+
+fn assert_prepared_capacity(datatype: &Datatype, width: OffsetWidth, expected: &[u8]) {
+    let prepared = format::PreparedDatatype::new(datatype, width).unwrap();
+    assert_eq!(prepared.encoded_size(), expected.len());
+    assert_eq!(prepared.to_bytes(), expected);
+
+    #[repr(C, align(8))]
+    struct Aligned([u8; 128]);
+
+    let guard = 0xa5;
+    let mut storage = Aligned([guard; 128]);
+    let output = &mut storage.0[..expected.len() + 3];
+    for available in [0, expected.len() - 1] {
+        assert_eq!(
+            prepared
+                .write_into(&mut output[1..1 + available])
+                .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: expected.len(),
+                available,
+            },
+        );
+        assert_eq!(output, &[guard; 128][..expected.len() + 3]);
+    }
+    assert_eq!(
+        prepared.write_into(&mut output[1..]).unwrap(),
+        expected.len()
+    );
+    assert_eq!(output[0], guard);
+    assert_eq!(&output[1..1 + expected.len()], expected);
+    assert_eq!(output[1 + expected.len()..], [guard; 2]);
+}
+
+#[rstest]
+#[case::invalid_child(0, FormatError::InvalidOpaqueTagByte { offset: 0, byte: 0 })]
+#[case::invalid_range_and_child(4, FormatError::CompoundFieldOutOfBounds {
+    name: "tagged".into(),
+    offset: 4,
+    field_size: 1,
+    compound_size: 4,
+})]
+fn compound_member_bounds_error_precedes_an_invalid_opaque_tag(
+    #[case] offset: u64,
+    #[case] expected: FormatError,
+) {
+    let datatype = Datatype::Compound {
+        size: 4,
+        members: vec![__private::compound_member(
+            "tagged".into(),
+            offset,
+            Datatype::Opaque {
+                size: 1,
+                tag: vec![0],
+            },
+        )],
+    };
+    assert_eq!(
+        format::PreparedDatatype::new(&datatype, OffsetWidth::Eight).unwrap_err(),
+        expected,
+    );
+}
+
+#[test]
+fn sequence_member_bounds_error_precedes_an_invalid_base() {
+    let base = Datatype::Opaque {
+        size: 1,
+        tag: vec![0],
+    };
+    let datatype = Datatype::Compound {
+        size: 4,
+        members: vec![__private::compound_member(
+            "sequence".into(),
+            0,
+            Datatype::VariableLength(VariableLengthType::sequence(base)),
+        )],
+    };
+    assert_eq!(
+        format::PreparedDatatype::new(&datatype, OffsetWidth::Two).unwrap_err(),
+        FormatError::CompoundFieldOutOfBounds {
+            name: "sequence".into(),
+            offset: 0,
+            field_size: 10,
+            compound_size: 4,
+        },
+    );
+}
+
+#[rstest]
+#[case::out_of_bounds_member(3, FormatError::CompoundFieldOutOfBounds {
+    name: "array".into(),
+    offset: 0,
+    field_size: 6,
+    compound_size: 4,
+})]
+#[case::unrepresentable_array_size(u32::MAX, FormatError::LengthTooLarge {
+    length: 8_589_934_590,
+    length_size: 4,
+})]
+fn array_member_size_and_bounds_errors_precede_an_invalid_base(
+    #[case] dimension: u32,
+    #[case] expected: FormatError,
+) {
+    let datatype = Datatype::Compound {
+        size: 4,
+        members: vec![__private::compound_member(
+            "array".into(),
+            0,
+            Datatype::Array {
+                base_type: Box::new(Datatype::Opaque {
+                    size: 2,
+                    tag: vec![0],
+                }),
+                dimensions: vec![dimension],
+            },
+        )],
+    };
+    assert_eq!(
+        format::PreparedDatatype::new(&datatype, OffsetWidth::Eight).unwrap_err(),
+        expected,
+    );
+}
+
+#[rstest]
 #[case::object(ReferenceType::Object, [0; 3], 8)]
 #[case::region(ReferenceType::DatasetRegion, REGION_REFERENCE, 12)]
 fn datatype_canonical_recursive_preserves_legacy_reference_parents(

@@ -26,7 +26,7 @@ use super::{
 use crate::convert::Narrow;
 use crate::width::OffsetWidth;
 
-pub(super) use self::codec::encode_canonical;
+pub use self::codec::PreparedDatatype;
 
 mod atomic;
 mod codec;
@@ -180,7 +180,11 @@ impl FloatingPointByteOrder {
 
     /// Returns bits 6 and 0 for this byte order, with all other bits clear.
     pub const fn bits(self) -> u8 {
-        match self.order {
+        Self::bits_for(self.order)
+    }
+
+    const fn bits_for(order: DatatypeByteOrder) -> u8 {
+        match order {
             DatatypeByteOrder::LittleEndian => 0,
             DatatypeByteOrder::BigEndian => FLOAT_BYTE_ORDER_LOW_BIT,
             DatatypeByteOrder::Vax => FLOAT_BYTE_ORDER_LOW_BIT | FLOAT_BYTE_ORDER_HIGH_BIT,
