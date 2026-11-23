@@ -152,7 +152,7 @@ pub(crate) struct InheritedHeader {
 #[cfg(test)]
 mod tests {
     use hdf5_pure_format::__private::{
-        AttributePhaseChange, MessageRecordLayout, ObjectHeaderWriter,
+        AttributePhaseChange, MessageFlags, MessageRecordLayout, ObjectHeaderWriter,
     };
     use rstest::rstest;
     use test_util::object_header::v2::HeaderFlags;
@@ -271,12 +271,14 @@ mod tests {
         let stored = index
             .map(|index| {
                 let message = type_builders::build_attr_message("a", &AttrValue::I64(71)).unwrap();
-                writer.add_message_record(
-                    MessageType::ATTRIBUTE,
-                    message.serialize(OffsetWidth::Eight, 8).unwrap(),
-                    crate::message_flags::MessageFlags::NONE,
-                    index,
-                );
+                writer
+                    .append_raw_record(
+                        MessageType::ATTRIBUTE,
+                        &message.serialize(OffsetWidth::Eight, 8).unwrap(),
+                        MessageFlags::NONE,
+                        index,
+                    )
+                    .unwrap();
                 StoredAttribute {
                     message,
                     creation_index: Some(index),
@@ -320,15 +322,17 @@ mod tests {
         let prefix =
             ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0));
         let mut writer = ObjectHeaderWriter::with_prefix(prefix);
-        writer.add_message(
-            MessageType::ATTRIBUTE_INFO,
-            AttributeInfoMessage::compact(
-                OffsetWidth::Eight,
-                max_creation_index,
-                indexes_creation_order,
+        writer
+            .append_message(
+                AttributeInfoMessage::compact(
+                    OffsetWidth::Eight,
+                    max_creation_index,
+                    indexes_creation_order,
+                ),
+                MessageFlags::NONE,
+                0,
             )
-            .to_bytes(),
-        );
+            .unwrap();
         let bytes = writer.serialize().unwrap();
         let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         let Err(error) = AttributeReconstruction::new(&header, Vec::new(), OffsetWidth::Eight)
@@ -357,8 +361,7 @@ mod tests {
             ))
         };
         let mut writer = ObjectHeaderWriter::with_prefix(prefix);
-        writer.add_message(
-            MessageType::ATTRIBUTE_INFO,
+        writer.append_message(
             AttributeInfoMessage::new(
                 OffsetWidth::Eight,
                 Some(next),
@@ -369,9 +372,10 @@ mod tests {
                 },
                 DecodedStoredAddress::Undefined,
                 AttributeCreationOrderIndex::Undefined,
-            )?
-            .to_bytes(),
-        );
+            )?,
+            MessageFlags::NONE,
+            0,
+        )?;
         let bytes = writer.serialize().unwrap();
         let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8).unwrap();
         AttributeReconstruction::new(

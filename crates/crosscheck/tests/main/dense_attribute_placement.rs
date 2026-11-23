@@ -1,11 +1,12 @@
 #![cfg(feature = "__libhdf5-1.10")]
 
-use hdf5_pure::{Datatype, DatatypeByteOrder, File, FixedPointType, MessageType};
+use hdf5_pure::{Datatype, DatatypeByteOrder, File, FixedPointType};
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::{
     AttributeMessage, Dataspace, DataspaceType, DatatypeLocation, DenseAttrCreationOrder,
-    LinkInfoMessage, ObjectHeaderPrefix, ObjectHeaderWriter, PreparedDenseAttrs,
+    GroupInfo, LinkInfoMessage, MessageFlags, ObjectHeaderPrefix, ObjectHeaderWriter,
+    PreparedDenseAttrs,
 };
 use libhdf5::file::LibraryVersion;
 use libhdf5::plist::group_create::AttrCreationOrder;
@@ -139,16 +140,16 @@ fn libhdf5_reads_independently_placed_dense_attributes(
     );
     let root_at = usize::try_from(superblock.root_group_address.get() + userblock).unwrap();
     let prefix = ObjectHeaderPrefix::parse(&bytes[root_at..]).unwrap().prefix;
-    let mut header = ObjectHeaderWriter::with_prefix(prefix);
-    header.add_message(
-        MessageType::ATTRIBUTE_INFO,
-        placement.attribute_info().to_bytes(),
-    );
-    header.add_message(MessageType::GROUP_INFO, vec![0, 0]);
-    header.add_message(
-        MessageType::LINK_INFO,
-        LinkInfoMessage::compact(superblock.offset_size, None, false).to_bytes(),
-    );
+    let mut header = ObjectHeaderWriter::for_group(
+        prefix,
+        &LinkInfoMessage::compact(superblock.offset_size, None, false),
+        &GroupInfo::DEFAULT,
+        core::iter::empty(),
+    )
+    .unwrap();
+    header
+        .append_message(placement.attribute_info(), MessageFlags::NONE, 0)
+        .unwrap();
     superblock.root_group_address = StoredAddress::new(bytes.len() as u64 - userblock);
     bytes.extend(header.serialize().unwrap());
     superblock.eof_address = bytes.len() as u64;

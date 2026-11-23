@@ -1,16 +1,21 @@
+use std::cell::Cell;
+
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{FormatError, OffsetWidth, StoredAddress};
-use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::{
-    LinkCreationOrderIndex, LinkInfoMessage, MessageFlags, MessageRecordLayout, ObjectHeaderPrefix,
-    ObjectHeaderWriter, PreparedLink, PreparedLinkRecord,
+    AttributeInfoMessage, GroupEstimates, GroupInfo, GroupPhaseChange, LinkCreationOrderIndex,
+    LinkInfoMessage, MessageFlags, MessageRecordLayout, ObjectHeaderPrefix, ObjectHeaderWriter,
+    PreparedLink,
 };
 use hdf5_pure_format::CharacterSet;
 use hdf5_pure_format::MessageType;
 use rstest::rstest;
+use test_util::attribute_info::{AttributeInfo, CreationOrderIndex, Width as AttributeWidth};
+use test_util::group_info::{Estimates, GroupInfo as GroupInfoBytes, PhaseChange};
 use test_util::link_info::{Body, CreationIndex, Width};
 use test_util::link_message::HardLink;
 use test_util::object_header::Message;
+use test_util::object_header::MessageFlags as FixtureFlags;
 use test_util::object_header::MessageType as FixtureMessageType;
 use test_util::object_header::v2::{Header, HeaderFlags};
 use test_util::widths::Widths;
@@ -206,44 +211,103 @@ fn link_info_bounded_output_preserves_guards_and_supports_reuse(
 #[rstest]
 #[case::one_byte_chunk_size(HeaderFlags::default(), 16)]
 #[case::two_byte_chunk_size(HeaderFlags(1) | HeaderFlags::TRACKS_CREATION_ORDER, 225)]
-fn group_header_writes_link_info_and_group_info_before_supplemental_records(
+fn group_header_records_match_independent_bytes_in_wire_order(
     #[case] flags: HeaderFlags,
     #[case] padding: usize,
 ) {
-    let body = Body::new(Width::Four, Some(42), None, None, CreationIndex::Undefined)
+    let link_info_bytes = Body::new(Width::Four, Some(42), None, None, CreationIndex::Undefined)
         .unwrap()
         .build();
+    let phase_change = PhaseChange::new(12, 8).unwrap();
+    let (max_compact, min_dense) = phase_change.thresholds();
+    let estimates = Estimates {
+        entries: 21,
+        name_length: 34,
+    };
+    let group_info_bytes = GroupInfoBytes {
+        phase_change: Some(phase_change),
+        estimates: Some(estimates),
+    }
+    .build();
+    let link_bytes = HardLink::new("child", 0x4321)
+        .creation_order(13)
+        .build(Widths::new(4, 8));
+    let attr_maximum = flags.tracks_creation_order().then_some(5);
+    let attribute_info_bytes = AttributeInfo::new(
+        AttributeWidth::Four,
+        attr_maximum,
+        None,
+        None,
+        CreationOrderIndex::Absent,
+    )
+    .build();
     let padding = vec![0; padding];
     let expected = Header::new()
         .flags(flags)
-        .message(Message::new(FixtureMessageType::LINK_INFO, &body))
-        .message(Message::new(FixtureMessageType::GROUP_INFO, &[0, 0]))
+        .message(Message::new(
+            FixtureMessageType::LINK_INFO,
+            &link_info_bytes,
+        ))
+        .message(Message::new(
+            FixtureMessageType::GROUP_INFO,
+            &group_info_bytes,
+        ))
+        .message(Message::new(FixtureMessageType::LINK, &link_bytes))
+        .message(
+            Message::new(FixtureMessageType::ATTRIBUTE_INFO, &attribute_info_bytes)
+                .with_flags(FixtureFlags::CONSTANT)
+                .with_creation_order(23),
+        )
         .message(Message::new(FixtureMessageType::NIL, &padding).with_creation_order(17))
         .build();
-    let mut writer = ObjectHeaderWriter::with_prefix(ObjectHeaderPrefix {
-        layout: MessageRecordLayout::from_header_flags(flags.0),
-        ..ObjectHeaderPrefix::PLAIN
-    });
-    writer.add_message_record(MessageType::NIL, padding, MessageFlags::NONE, 17);
-
-    let info = LinkInfoMessage::compact(OffsetWidth::Four, Some(42), true);
-    assert_eq!(
-        writer
-            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::empty())
-            .unwrap(),
-        expected
+    let link_info = LinkInfoMessage::compact(OffsetWidth::Four, Some(42), true);
+    let group_info = GroupInfo::new(
+        Some(GroupPhaseChange::new(max_compact, min_dense).unwrap()),
+        Some(GroupEstimates {
+            entries: estimates.entries,
+            name_length: estimates.name_length,
+        }),
     );
+    let mut writer = ObjectHeaderWriter::for_group(
+        ObjectHeaderPrefix::with_layout(MessageRecordLayout::from_header_flags(flags.0)),
+        &link_info,
+        &group_info,
+        core::iter::once(PreparedLink::hard(
+            OffsetWidth::Four,
+            "child",
+            StoredAddress::new(0x4321),
+            Some(13),
+            CharacterSet::Ascii,
+        )),
+    )
+    .unwrap();
+    writer
+        .append_message(
+            AttributeInfoMessage::compact(OffsetWidth::Four, attr_maximum, false),
+            MessageFlags::CONSTANT,
+            23,
+        )
+        .unwrap();
+    writer
+        .append_raw_record(MessageType::NIL, &padding, MessageFlags::NONE, 17)
+        .unwrap();
+
+    assert_eq!(writer.serialize().unwrap(), expected);
 }
 
 #[test]
 fn a_group_header_rejects_a_hard_link_at_a_different_offset_width() {
     let info = LinkInfoMessage::compact(OffsetWidth::Four, None, false);
-    let link = hard_link_record(OffsetWidth::Two);
+    let link = hard_link(OffsetWidth::Two);
 
     assert_eq!(
-        ObjectHeaderWriter::new()
-            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::once(Ok(link)))
-            .unwrap_err(),
+        ObjectHeaderWriter::for_group(
+            ObjectHeaderPrefix::PLAIN,
+            &info,
+            &GroupInfo::DEFAULT,
+            core::iter::once(Ok(link))
+        )
+        .unwrap_err(),
         FormatError::LinkOffsetWidthMismatch {
             group_width: 4,
             link_width: 2,
@@ -261,15 +325,69 @@ fn a_group_header_rejects_inline_links_with_dense_storage() {
         LinkCreationOrderIndex::Absent,
     )
     .unwrap();
-    let link = hard_link_record(OffsetWidth::Four);
+    let link = hard_link(OffsetWidth::Four);
 
     assert_eq!(
-        ObjectHeaderWriter::new()
-            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::once(Ok(link)))
-            .unwrap_err(),
+        ObjectHeaderWriter::for_group(
+            ObjectHeaderPrefix::PLAIN,
+            &info,
+            &GroupInfo::DEFAULT,
+            core::iter::once(Ok(link))
+        )
+        .unwrap_err(),
         FormatError::InlineLinksWithDenseStorage {
             heap_address: 0x1234,
         }
+    );
+}
+
+#[rstest]
+#[case::record(
+    Ok(hard_link(OffsetWidth::Two)),
+    FormatError::LinkOffsetWidthMismatch {
+        group_width: 4,
+        link_width: 2,
+    },
+)]
+#[case::iterator(
+    Err(FormatError::InvalidLinkName("broken".into())),
+    FormatError::InvalidLinkName("broken".into()),
+)]
+fn group_writer_stops_consuming_links_at_the_first_error(
+    #[case] bad_link: Result<PreparedLink<'static>, FormatError>,
+    #[case] expected: FormatError,
+) {
+    let info = LinkInfoMessage::compact(OffsetWidth::Four, None, false);
+    let read = Cell::new(0);
+    let links = [
+        Ok(hard_link(OffsetWidth::Four)),
+        bad_link,
+        Ok(hard_link(OffsetWidth::Four)),
+    ]
+    .into_iter()
+    .inspect(|_| read.set(read.get() + 1));
+
+    let error =
+        ObjectHeaderWriter::for_group(ObjectHeaderPrefix::PLAIN, &info, &GroupInfo::DEFAULT, links)
+            .unwrap_err();
+    assert_eq!(error, expected);
+    assert_eq!(read.get(), 2);
+}
+
+#[test]
+fn group_writer_rejects_supplemental_typed_group_info() {
+    let mut writer = ObjectHeaderWriter::for_group(
+        ObjectHeaderPrefix::PLAIN,
+        &LinkInfoMessage::compact(OffsetWidth::Four, None, false),
+        &GroupInfo::DEFAULT,
+        core::iter::empty(),
+    )
+    .unwrap();
+    assert_eq!(
+        writer.append_message(GroupInfo::DEFAULT, MessageFlags::NONE, 0),
+        Err(FormatError::QueuedGroupLinkMessage(
+            FixtureMessageType::GROUP_INFO.0
+        ))
     );
 }
 
@@ -290,7 +408,7 @@ fn a_group_header_rejects_inline_links_with_dense_storage() {
     FixtureMessageType::SYMBOL_TABLE,
     vec![0x12, 0, 0, 0, 0x34, 0, 0, 0],
 )]
-fn ordinary_serialization_accepts_queued_group_records_that_group_serialization_rejects(
+fn ordinary_writer_accepts_raw_records_rejected_as_group_supplemental_records(
     #[case] message_type: MessageType,
     #[case] fixture_type: FixtureMessageType,
     #[case] body: Vec<u8>,
@@ -299,28 +417,30 @@ fn ordinary_serialization_accepts_queued_group_records_that_group_serialization_
         .message(Message::new(fixture_type, &body))
         .build();
     let info = LinkInfoMessage::compact(OffsetWidth::Four, None, false);
-    let mut writer = ObjectHeaderWriter::new();
-    writer.add_message(message_type, body);
-
+    let mut group = ObjectHeaderWriter::for_group(
+        ObjectHeaderPrefix::PLAIN,
+        &info,
+        &GroupInfo::DEFAULT,
+        core::iter::empty(),
+    )
+    .unwrap();
     assert_eq!(
-        writer
-            .serialize_group(&info, &GroupInfo::DEFAULT, core::iter::empty())
-            .unwrap_err(),
-        FormatError::QueuedGroupLinkMessage(fixture_type.0)
+        group.append_raw_message(message_type, &body),
+        Err(FormatError::QueuedGroupLinkMessage(fixture_type.0)),
     );
-    assert_eq!(writer.serialize().unwrap(), expected);
+
+    let mut ordinary = ObjectHeaderWriter::new();
+    ordinary.append_raw_message(message_type, &body).unwrap();
+    assert_eq!(ordinary.serialize().unwrap(), expected);
 }
 
-fn hard_link_record(offset_width: OffsetWidth) -> PreparedLinkRecord<'static> {
-    PreparedLinkRecord::new(
-        PreparedLink::hard(
-            offset_width,
-            "child",
-            StoredAddress::new(0x4321),
-            None,
-            CharacterSet::Ascii,
-        )
-        .unwrap(),
+fn hard_link(offset_width: OffsetWidth) -> PreparedLink<'static> {
+    PreparedLink::hard(
+        offset_width,
+        "child",
+        StoredAddress::new(0x4321),
+        None,
+        CharacterSet::Ascii,
     )
     .unwrap()
 }

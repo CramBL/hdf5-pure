@@ -35,7 +35,7 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::PreparedSuperblock;
-use hdf5_pure_format::__private::{PreparedDenseAttrs, PreparedLink, PreparedLinkRecord};
+use hdf5_pure_format::__private::{PreparedDenseAttrs, PreparedLink};
 use hdf5_pure_space::__private::AllocationClass;
 
 use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
@@ -85,7 +85,7 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::object_header_writer::ObjectHeaderWriter;
+use crate::object_header_writer::{ObjectHeaderWriter, RawMessageRecord};
 use crate::object_path::ObjectTarget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
@@ -153,21 +153,8 @@ pub(crate) fn build_chunked_dataset_oh(
     fill: Option<&[u8]>,
     header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
-    add_datatype(&mut w, dt, dt_location, header.widths.offsets)?;
-    w.add_message(
-        MessageType::DATASPACE,
-        ds.serialize(header.widths.lengths.get())?,
-    );
-    w.add_message_with_flags(
-        MessageType::FILL_VALUE,
-        crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
-        MessageFlags::CONSTANT,
-    );
-    w.add_message(MessageType::DATA_LAYOUT, layout_message.to_vec());
-    if let Some(pm) = pipeline_message {
-        w.add_message(MessageType::FILTER_PIPELINE, pm.to_vec());
-    }
+    let mut w = DatasetHeaderRecords::new(dt, dt_location, ds, fill_time, fill, header.widths)?
+        .into_writer(header.prefix, layout_message, pipeline_message)?;
     add_attributes(&mut w, attrs, attr_info, header)?;
     w.serialize()
 }
@@ -236,60 +223,113 @@ pub(crate) fn build_dataset_oh(
     libver: LibVer,
     header: HeaderOptions<'_>,
 ) -> Result<Vec<u8>, FormatError> {
-    let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
-    add_datatype(&mut w, dt, dt_location, header.widths.offsets)?;
-    w.add_message(
-        MessageType::DATASPACE,
-        ds.serialize(header.widths.lengths.get())?,
-    );
-    w.add_message_with_flags(
-        MessageType::FILL_VALUE,
-        crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
-        MessageFlags::CONSTANT,
-    );
-    w.add_message(
-        MessageType::DATA_LAYOUT,
-        DataLayout::encode_contiguous(
-            contiguous_layout_version(libver),
-            data_addr,
-            data_size,
-            header.widths.offsets,
-            header.widths.lengths,
-        )?,
-    );
+    let records = DatasetHeaderRecords::new(dt, dt_location, ds, fill_time, fill, header.widths)?;
+    let layout = DataLayout::encode_contiguous(
+        contiguous_layout_version(libver),
+        data_addr,
+        data_size,
+        header.widths.offsets,
+        header.widths.lengths,
+    )?;
+    let mut w = records.into_writer(header.prefix, &layout, None)?;
     add_attributes(&mut w, attrs, attr_info, header)?;
     w.serialize()
 }
 
-/// Adds an inline datatype or a shared reference to a committed datatype.
-///
-/// Writes a committed reference with the shared-message flag.
-///
-/// # Errors
-///
-/// Returns [`FormatError::OpaqueTagTooLong`] if an inline datatype contains an opaque tag longer
-/// than 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte.
-fn add_datatype(
-    w: &mut ObjectHeaderWriter,
-    dt: &Datatype,
-    location: &DatatypeLocation,
-    offset_width: OffsetWidth,
-) -> Result<(), FormatError> {
-    match location.reference_bytes(offset_width)? {
-        Some(reference) => {
-            w.add_message_with_flags(
-                MessageType::DATATYPE,
-                reference,
-                MessageFlags::CONSTANT | MessageFlags::SHARED,
-            );
-        }
-        None => w.add_message_with_flags(
-            MessageType::DATATYPE,
-            hdf5_pure_format::__private::serialize_datatype_with_offset_width(dt, offset_width)?,
-            MessageFlags::CONSTANT,
-        ),
+/// Encoded dataset bodies whose sizes are known before composing the header.
+struct DatasetHeaderRecords {
+    datatype: Vec<u8>,
+    datatype_flags: MessageFlags,
+    dataspace: Vec<u8>,
+    fill_value: Vec<u8>,
+}
+
+impl DatasetHeaderRecords {
+    /// Encodes the datatype, dataspace, and fill value bodies.
+    ///
+    /// Uses the offset width for the datatype or its committed reference and the length width
+    /// for the dataspace. Sets the shared-message flag for a committed reference.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from encoding the bodies or the committed datatype reference.
+    fn new(
+        dt: &Datatype,
+        location: &DatatypeLocation,
+        ds: &Dataspace,
+        fill_time: FillTime,
+        fill: Option<&[u8]>,
+        widths: FormatWidths,
+    ) -> Result<Self, FormatError> {
+        let (datatype, datatype_flags) = match location.reference_bytes(widths.offsets)? {
+            Some(reference) => (reference, MessageFlags::CONSTANT | MessageFlags::SHARED),
+            None => (
+                hdf5_pure_format::__private::serialize_datatype_with_offset_width(
+                    dt,
+                    widths.offsets,
+                )?,
+                MessageFlags::CONSTANT,
+            ),
+        };
+        Ok(Self {
+            datatype,
+            datatype_flags,
+            dataspace: ds.serialize(widths.lengths.get())?,
+            fill_value: crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
+        })
     }
-    Ok(())
+
+    /// Starts the header with the datatype, dataspace, fill value, and layout, followed by
+    /// the filter pipeline when present.
+    ///
+    /// # Errors
+    ///
+    /// Propagates record and allocation errors from [`ObjectHeaderWriter::with_raw_records`].
+    fn into_writer(
+        self,
+        prefix: ObjectHeaderPrefix,
+        layout: &[u8],
+        pipeline: Option<&[u8]>,
+    ) -> Result<ObjectHeaderWriter, FormatError> {
+        let Self {
+            datatype,
+            datatype_flags,
+            dataspace,
+            fill_value,
+        } = self;
+        ObjectHeaderWriter::with_raw_records(
+            prefix,
+            [
+                Some(RawMessageRecord::new(
+                    MessageType::DATATYPE,
+                    &datatype,
+                    datatype_flags,
+                    0,
+                )),
+                Some(RawMessageRecord::new(
+                    MessageType::DATASPACE,
+                    &dataspace,
+                    MessageFlags::NONE,
+                    0,
+                )),
+                Some(RawMessageRecord::new(
+                    MessageType::FILL_VALUE,
+                    &fill_value,
+                    MessageFlags::CONSTANT,
+                    0,
+                )),
+                Some(RawMessageRecord::new(
+                    MessageType::DATA_LAYOUT,
+                    layout,
+                    MessageFlags::NONE,
+                    0,
+                )),
+                pipeline.map(|body| {
+                    RawMessageRecord::new(MessageType::FILTER_PIPELINE, body, MessageFlags::NONE, 0)
+                }),
+            ],
+        )
+    }
 }
 
 /// Builds an object header for a committed datatype.
@@ -310,22 +350,29 @@ pub(crate) fn build_committed_datatype_oh(
     references: u32,
 ) -> Result<Vec<u8>, FormatError> {
     preparation::require_reference_width(widths, dt)?;
-    let mut w = ObjectHeaderWriter::new();
-    w.add_message_with_flags(
-        MessageType::DATATYPE,
-        hdf5_pure_format::__private::serialize_datatype_with_offset_width(dt, widths.offsets)?,
-        MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
-    );
-    if references > 1 {
-        w.add_message_with_flags(
-            MessageType::OBJECT_REFERENCE_COUNT,
-            ObjectReferenceCountMessage::new(references)
-                .encode()
-                .to_vec(),
-            MessageFlags::FORBID_SHARING,
-        );
-    }
-    w.serialize()
+    let datatype =
+        hdf5_pure_format::__private::serialize_datatype_with_offset_width(dt, widths.offsets)?;
+    let count = (references > 1).then(|| ObjectReferenceCountMessage::new(references).encode());
+    ObjectHeaderWriter::with_raw_records(
+        ObjectHeaderPrefix::PLAIN,
+        [
+            Some(RawMessageRecord::new(
+                MessageType::DATATYPE,
+                &datatype,
+                MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
+                0,
+            )),
+            count.as_ref().map(|body| {
+                RawMessageRecord::new(
+                    MessageType::OBJECT_REFERENCE_COUNT,
+                    body,
+                    MessageFlags::FORBID_SHARING,
+                    0,
+                )
+            }),
+        ],
+    )?
+    .serialize()
 }
 
 /// Builds a version 2 group header with compact or dense link storage.
@@ -340,8 +387,9 @@ pub(crate) fn build_committed_datatype_oh(
 /// Returns [`FormatError::AttributeFieldTooLong`] if a compact attribute field exceeds its
 /// encoding, [`FormatError::ObjectHeaderMessageTooLarge`] if a message exceeds the
 /// object-header message size limit, or [`FormatError::Internal`] if the Link Info offset
-/// width differs from the file's. Propagates errors from [`LinkMessage::prepare`] for inline
-/// links and header serialization errors from [`ObjectHeaderWriter::serialize_group`].
+/// width differs from the file's. Propagates inline link preparation errors from
+/// [`LinkMessage::prepare`] and header errors from [`ObjectHeaderWriter::for_group`] and
+/// [`ObjectHeaderWriter::serialize`].
 pub(crate) fn build_group_oh(
     widths: FormatWidths,
     links: &[LinkMessage],
@@ -373,7 +421,6 @@ fn group_header<'a>(
             "the Link Info encoding uses a different offset width from its file".into(),
         ));
     }
-    let mut w = ObjectHeaderWriter::with_prefix(header.prefix);
     // libhdf5 requires Group Info when inserting a link into a group with Link Info
     // (`H5G_obj_insert` in `H5Gobj.c`, HDF5 2.2.0).
     let count = if link_info.fractal_heap_address().is_none() {
@@ -381,9 +428,10 @@ fn group_header<'a>(
     } else {
         0
     };
-    let records = links.take(count).map(|link| PreparedLinkRecord::new(link?));
+    let mut w =
+        ObjectHeaderWriter::for_group(header.prefix, link_info, &group_info, links.take(count))?;
     add_attributes(&mut w, attrs, attr_info, header)?;
-    w.serialize_group(link_info, &group_info, records)
+    w.serialize()
 }
 
 /// Serializes dense links at the reserved address and checks the reserved length.
@@ -507,22 +555,22 @@ fn add_attributes(
     header: HeaderOptions<'_>,
 ) -> Result<(), FormatError> {
     if let Some(message) = attr_info {
-        w.add_message(MessageType::ATTRIBUTE_INFO, message.to_bytes());
-        return Ok(());
+        return w.append_message(message, MessageFlags::NONE, 0);
     }
     if !attrs.is_empty() || matches!(header.creation, DenseAttrCreationOrder::Tracked { .. }) {
-        w.add_message(
-            MessageType::ATTRIBUTE_INFO,
-            compact_attribute_info(header.creation, header.widths.offsets).to_bytes(),
-        );
+        w.append_message(
+            compact_attribute_info(header.creation, header.widths.offsets),
+            MessageFlags::NONE,
+            0,
+        )?;
     }
     for (index, attr) in attrs.iter().enumerate() {
-        w.add_message_record(
+        w.append_raw_record(
             MessageType::ATTRIBUTE,
-            attr.serialize(header.widths.offsets, header.widths.lengths.get())?,
+            &attr.serialize(header.widths.offsets, header.widths.lengths.get())?,
             MessageFlags::NONE,
             header.creation.index_at(index).unwrap_or_default(),
-        );
+        )?;
     }
     Ok(())
 }
@@ -2326,13 +2374,7 @@ impl FileWriter {
                     slots,
                     eoa_pre_fsm,
                 );
-                let mut oh = ObjectHeaderWriter::new();
-                oh.add_message_with_flags(
-                    MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info_v1(widths, &info)?,
-                    MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
-                );
-                oh.serialize()?
+                file_space_extension_oh(widths, &info)?
             } else {
                 ext_oh
                     .clone()
@@ -2875,13 +2917,7 @@ impl FileWriter {
                         cursor2,
                     ),
                 };
-                let mut oh = ObjectHeaderWriter::new();
-                oh.add_message_with_flags(
-                    MessageType::FILE_SPACE_INFO,
-                    hdf5_pure_format::__private::serialize_file_space_info_v1(widths, &info)?,
-                    MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
-                );
-                Some(oh.serialize()?)
+                Some(file_space_extension_oh(widths, &info)?)
             }
             (other, _) => other.clone(),
         };
@@ -3033,11 +3069,11 @@ fn file_space_extension_oh(
     // The flags libhdf5 writes for this message (`H5Fsuper.c`,
     // HDF5 2.2.0). Neither must-understand bit is among them, so an older reader
     // still opens the file.
-    oh.add_message_with_flags(
+    oh.append_raw_message_with_flags(
         MessageType::FILE_SPACE_INFO,
-        hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info)?,
+        &hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info)?,
         MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
-    );
+    )?;
     oh.serialize()
 }
 

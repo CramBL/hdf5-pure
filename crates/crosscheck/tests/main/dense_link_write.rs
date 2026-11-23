@@ -26,9 +26,11 @@ use hdf5_pure_format::__private::FractalHeapBlockLayout;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FractalHeapIdKind;
 use hdf5_pure_format::__private::FractalHeapIdLayout;
+use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::ObjectHeader;
+use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectHeaderWriter;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
@@ -149,9 +151,13 @@ fn libhdf5_reads_planned_dense_links_and_creation_indexes(
         bytes.extend_from_slice(&image.bytes);
         image.info
     };
-    let mut writer = ObjectHeaderWriter::new();
-    writer.add_message(MessageType::LINK_INFO, info.to_bytes());
-    writer.add_message(MessageType::GROUP_INFO, GROUP_INFO.to_vec());
+    let writer = ObjectHeaderWriter::for_group(
+        ObjectHeaderPrefix::PLAIN,
+        &info,
+        &GroupInfo::DEFAULT,
+        core::iter::empty(),
+    )
+    .unwrap();
     let new_root = bytes.len() as u64 - userblock;
     bytes.extend_from_slice(&writer.serialize().unwrap());
     superblock.root_group_address = StoredAddress::new(new_root);
@@ -647,8 +653,6 @@ fn dense_links(
         .collect()
 }
 
-// "The Group Info Message", format specification version 4.0, defines the version and flags.
-const GROUP_INFO: [u8; 2] = [0, 0];
 // "Version 2 B-trees", format specification version 4.0, defines the type-5 hash field.
 const NAME_HASH_LEN: usize = 4;
 

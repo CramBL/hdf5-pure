@@ -28,6 +28,7 @@ use std::path::Path;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::ChunkIndex;
+use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
@@ -74,6 +75,7 @@ use test_util::widths::Widths;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::reader::ReadBackend;
+use test_util_hdf5::storage;
 
 #[test]
 fn superblock_preparation_and_stack_encoding_allocate_nothing() {
@@ -2517,6 +2519,87 @@ fn encoded_chunk_finish_avoids_a_payload_sized_assembly_allocation(
     assert_eq!(dataset.shape().unwrap(), &[PAYLOAD as u64]);
     assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![65_536]));
     assert_eq!(dataset.read_raw().unwrap(), data);
+}
+
+#[test]
+fn writing_attributed_headers_has_bounded_allocations() {
+    let mut builder = FileBuilder::new();
+    let mut group = builder.create_group("group");
+    group.set_attr("group_index", AttrValue::I32(17));
+    group
+        .create_dataset("data")
+        .with_i32_data(&[3, 5, 8, 13])
+        .with_chunks(&[2])
+        .with_deflate(DeflateLevel::Three)
+        .set_attr("dataset_index", AttrValue::I32(23));
+    builder.add_group(group.finish());
+
+    let (image, measured) = allocation::measure("attributed_headers", || builder.finish().unwrap());
+    assert!(measured.live_bytes >= image.len() as u64, "{measured}");
+    assert!(measured.blocks <= 206, "{measured}");
+
+    let file = File::from_bytes(image).unwrap();
+    let written_group = file.group("group").unwrap();
+    assert_eq!(
+        written_group.attrs().unwrap()["group_index"],
+        AttrValue::I32(17)
+    );
+    let dataset = written_group.dataset("data").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), [3, 5, 8, 13]);
+    assert_eq!(
+        dataset.attrs().unwrap()["dataset_index"],
+        AttrValue::I32(23)
+    );
+}
+
+#[test]
+fn writing_a_large_referenced_datatype_has_bounded_allocations() {
+    const MEMBER_COUNT: u32 = 512;
+    const BYTE_BUDGET: u64 = 325 * 1024;
+    let datatype = (0..MEMBER_COUNT)
+        .fold(CompoundTypeBuilder::new(), |builder, index| {
+            builder.u32_field(&format!("record_member_with_a_long_name_{index:03}"))
+        })
+        .build()
+        .unwrap();
+    let data: Vec<_> = (0..MEMBER_COUNT).flat_map(u32::to_le_bytes).collect();
+    let mut builder = FileBuilder::new();
+    builder.commit_datatype("schema", datatype.clone());
+    builder
+        .create_dataset("typed")
+        .with_raw_data(datatype.clone(), data.clone(), 1)
+        .with_committed_datatype("schema");
+
+    let (image, measured) =
+        allocation::measure("referenced_datatype", || builder.finish().unwrap());
+    assert!(measured.live_bytes >= image.len() as u64, "{measured}");
+    assert!(measured.bytes < BYTE_BUDGET, "{measured}");
+
+    let file = File::from_bytes(image.clone()).unwrap();
+    let dataset = file.dataset("typed").unwrap();
+    assert_eq!(dataset.datatype().unwrap(), datatype);
+    assert_eq!(dataset.read_raw().unwrap(), data);
+
+    let address = storage::root_object_address(&file, &image, "schema");
+    let superblock = file.superblock();
+    let header = ObjectHeader::parse(
+        &image,
+        AccessMode::ReadOnly,
+        usize::try_from(address.get()).unwrap(),
+        superblock.offset_size.get(),
+        superblock.length_size.get(),
+    )
+    .unwrap();
+    let [datatype, reference_count] = header.messages.as_slice() else {
+        panic!("expected a datatype and a reference count");
+    };
+    assert_eq!(datatype.msg_type, ParsedMessageType::DATATYPE);
+    assert!(datatype.data.len() > 16 * 1024);
+    assert_eq!(
+        reference_count.msg_type,
+        ParsedMessageType::OBJECT_REFERENCE_COUNT
+    );
+    assert_eq!(reference_count.data, Message::reference_count(2).data);
 }
 
 enum OutputDestination {
