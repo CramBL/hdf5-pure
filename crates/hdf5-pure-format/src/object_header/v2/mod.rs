@@ -40,7 +40,7 @@ mod worklist;
 
 pub use allocation::ObjectHeaderAllocation;
 pub use allocation::ObjectHeaderAllocationGeometry;
-pub use record::{MessageBody, PreparedMessageRecord};
+pub use record::{MessageBody, PreparedMessageRecord, PreparedRecordRef};
 pub use splice::RecordSplice;
 
 impl ObjectHeader {

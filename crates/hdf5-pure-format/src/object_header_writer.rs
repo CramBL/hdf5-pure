@@ -11,7 +11,9 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message_write::PreparedLink;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::object_header::{MessageBody, ObjectHeaderPrefix, PreparedMessageRecord};
+use crate::object_header::{
+    MessageBody, ObjectHeaderPrefix, PreparedMessageRecord, PreparedRecordRef,
+};
 use crate::width::OffsetWidth;
 
 /// A writer for checksummed version 2 object headers.
@@ -67,70 +69,65 @@ impl ObjectHeaderWriter {
         }
     }
 
-    /// Creates a writer with a batch of already encoded message bodies.
+    /// Starts a header with a batch of typed or raw prepared records.
     ///
-    /// Checks the supplied records in array order, skipping [`None`] entries. Reserves the
-    /// space needed for the batch, then copies the records into the header buffer.
+    /// Skips [`None`] entries and writes the remaining records in slice order. Reserves space
+    /// for the complete batch before writing any record.
     ///
     /// # Errors
     ///
-    /// Propagates errors from [raw record preparation].
-    /// Returns [`FormatError::OffsetOverflow`] if the combined extent exceeds [`usize::MAX`],
-    /// or [`FormatError::AllocationFailed`] if reserving output space fails.
+    /// Returns [`FormatError::Internal`] if a record and the header disagree on whether to write
+    /// a creation index, [`FormatError::OffsetOverflow`] if the header extent exceeds
+    /// [`usize::MAX`], or [`FormatError::AllocationFailed`] if reserving space fails.
+    /// Propagates body encoding errors.
     ///
     /// # Examples
     ///
-    /// Starts a header with an encoded Group Info body and an absent optional record.
+    /// Writes a typed Group Info record and an already encoded Object Reference Count record.
     ///
     /// ```
     /// use hdf5_pure_format::__private::{
-    ///     AccessMode, MessageFlags, ObjectHeader, ObjectHeaderPrefix, ObjectHeaderWriter,
-    ///     RawMessageRecord,
+    ///     AccessMode, GroupInfo, MessageFlags, ObjectHeader, ObjectHeaderPrefix, ObjectHeaderWriter,
+    ///     ObjectReferenceCountMessage,
     /// };
     /// use hdf5_pure_format::{FormatError, MessageType};
     ///
-    /// let group_info =
-    ///     RawMessageRecord::new(MessageType::GROUP_INFO, &[0, 0], MessageFlags::NONE, 0);
-    /// let writer = ObjectHeaderWriter::with_raw_records(
-    ///     ObjectHeaderPrefix::PLAIN,
-    ///     [Some(group_info), None],
+    /// let prefix = ObjectHeaderPrefix::PLAIN;
+    /// let group_info = prefix.layout.prepare_record(MessageFlags::NONE, 0, GroupInfo::DEFAULT)?;
+    /// let count_body = ObjectReferenceCountMessage::new(2).encode();
+    /// let count = prefix.layout.prepare_raw_record(
+    ///     MessageType::OBJECT_REFERENCE_COUNT,
+    ///     MessageFlags::FORBID_SHARING,
+    ///     0,
+    ///     &count_body,
     /// )?;
-    /// let bytes = writer.serialize()?;
+    /// let records = [Some(group_info.as_record()), None, Some(count.as_record())];
+    /// let bytes = ObjectHeaderWriter::with_prepared_records(prefix, &records)?.serialize()?;
     /// let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, 8, 8)?;
-    /// assert_eq!(header.messages.len(), 1);
+    /// assert_eq!(header.messages.len(), 2);
     /// assert_eq!(header.messages[0].msg_type, MessageType::GROUP_INFO);
     /// assert_eq!(header.messages[0].data, [0, 0]);
+    /// assert_eq!(header.messages[1].msg_type, MessageType::OBJECT_REFERENCE_COUNT);
+    /// assert_eq!(header.messages[1].data, count_body);
     /// # Ok::<(), FormatError>(())
     /// ```
-    ///
-    /// [raw record preparation]: crate::object_header::MessageRecordLayout::prepare_raw_record
-    pub fn with_raw_records<const N: usize>(
+    pub fn with_prepared_records(
         prefix: ObjectHeaderPrefix,
-        messages: [Option<RawMessageRecord<'_>>; N],
+        records: &[Option<PreparedRecordRef<'_>>],
     ) -> Result<Self, FormatError> {
-        let mut records = [const { None }; N];
-        let mut records_len = 0;
-        for (slot, message) in records.iter_mut().zip(messages) {
-            let Some(RawMessageRecord {
-                message_type,
-                body,
-                flags,
-                creation_index,
-            }) = message
-            else {
-                continue;
-            };
-            let record =
-                prefix
-                    .layout
-                    .prepare_raw_record(message_type, flags, creation_index, body)?;
-            records_len = add_extent(records_len, record.encoded_size())?;
-            *slot = Some(record);
-        }
+        let records_len = records.iter().flatten().try_fold(0, |len, record| {
+            record.require_layout(prefix.layout)?;
+            add_extent(len, record.encoded_size())
+        })?;
         let mut writer = Self::with_prefix(prefix);
         writer.reserve_prefix_for(records_len)?;
+        let start = writer.messages_start;
+        writer.buffer.resize(start + records_len, 0);
+        let mut remaining = &mut writer.buffer[start..];
         for record in records.iter().flatten() {
-            writer.append_prepared(record)?;
+            let (destination, rest) = remaining.split_at_mut(record.encoded_size());
+            record.write_into(destination)?;
+            remaining = rest;
         }
         Ok(writer)
     }
@@ -403,34 +400,6 @@ impl Default for ObjectHeaderWriter {
     }
 }
 
-/// A borrowed record body and its metadata for [`ObjectHeaderWriter::with_raw_records`].
-pub struct RawMessageRecord<'a> {
-    message_type: MessageType,
-    body: &'a [u8],
-    flags: MessageFlags,
-    creation_index: u16,
-}
-
-impl<'a> RawMessageRecord<'a> {
-    /// Borrows the already encoded body and retains the supplied record fields.
-    ///
-    /// [`ObjectHeaderWriter::with_raw_records`] checks the type and body length and writes the
-    /// creation index when the layout tracks creation order.
-    pub fn new(
-        message_type: MessageType,
-        body: &'a [u8],
-        flags: MessageFlags,
-        creation_index: u16,
-    ) -> Self {
-        Self {
-            message_type,
-            body,
-            flags,
-            creation_index,
-        }
-    }
-}
-
 #[derive(Debug)]
 enum RecordSet {
     All,
@@ -506,23 +475,17 @@ mod tests {
             )
             .message(Message::new(FixtureType::ATTRIBUTE, &[19]).with_creation_order(31))
             .build();
-        let writer = ObjectHeaderWriter::with_raw_records(
+        let first = prefix
+            .layout
+            .prepare_raw_record(MessageType::ATTRIBUTE, MessageFlags::CONSTANT, 17, &[7, 11])
+            .unwrap();
+        let second = prefix
+            .layout
+            .prepare_raw_record(MessageType::ATTRIBUTE, MessageFlags::NONE, 31, &[19])
+            .unwrap();
+        let writer = ObjectHeaderWriter::with_prepared_records(
             prefix,
-            [
-                Some(RawMessageRecord::new(
-                    MessageType::ATTRIBUTE,
-                    &[7, 11],
-                    MessageFlags::CONSTANT,
-                    17,
-                )),
-                None,
-                Some(RawMessageRecord::new(
-                    MessageType::ATTRIBUTE,
-                    &[19],
-                    MessageFlags::NONE,
-                    31,
-                )),
-            ],
+            &[Some(first.as_record()), None, Some(second.as_record())],
         )
         .unwrap();
         let bytes = writer.serialize().unwrap();
@@ -537,6 +500,31 @@ mod tests {
         assert_eq!(
             parsed.messages[1].creation_order,
             flags.tracks_creation_order().then_some(31)
+        );
+    }
+
+    #[test]
+    fn prepared_records_reject_different_creation_index_presence() {
+        let tracked = ObjectHeaderPrefix {
+            layout: MessageRecordLayout::from_header_flags(
+                v2_bytes::HeaderFlags::TRACKS_CREATION_ORDER.0,
+            ),
+            ..ObjectHeaderPrefix::PLAIN
+        };
+        let record = tracked
+            .layout
+            .prepare_raw_record(MessageType::ATTRIBUTE, MessageFlags::NONE, 1, &[7])
+            .unwrap();
+        let error = ObjectHeaderWriter::with_prepared_records(
+            ObjectHeaderPrefix::PLAIN,
+            &[Some(record.as_record())],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::Internal(
+                "prepared record and header disagree on creation index presence".into()
+            )
         );
     }
 

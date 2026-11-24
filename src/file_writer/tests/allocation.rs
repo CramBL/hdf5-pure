@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use rstest::rstest;
 use test_util::allocation;
 
-use super::super::FileWriter;
+use super::super::{DatatypeLocation, FileWriter, WIDTHS};
 use crate::File;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
@@ -15,6 +15,31 @@ use crate::FileSpaceStrategy;
 use crate::Layout;
 use crate::chunked_write::ChunkProvider;
 use crate::error::FormatError;
+use crate::type_builders;
+
+#[test]
+fn dataset_header_bounds_allocations() {
+    let datatype = type_builders::make_u8_type();
+    let dataspace = super::test_dataset_space();
+    let location = DatatypeLocation::Inline;
+    let (header, measured) = allocation::measure("inline_dataset_header", || {
+        super::test_dataset_header(&datatype, &location, &dataspace)
+    });
+    assert_eq!(header, super::expected_dataset_header(&location));
+    assert_eq!(measured.live_bytes, u64::try_from(header.len()).unwrap());
+    assert!((1..=3).contains(&measured.blocks), "{measured}");
+}
+
+#[test]
+fn committed_datatype_header_allocates_only_its_output() {
+    let datatype = type_builders::make_u8_type();
+    let (header, measured) = allocation::measure("committed_datatype_header", || {
+        super::super::build_committed_datatype_oh(WIDTHS, &datatype, 4).unwrap()
+    });
+    assert_eq!(header, super::expected_committed_datatype_header(4));
+    assert_eq!(measured.live_bytes, u64::try_from(header.len()).unwrap());
+    assert_eq!(measured.blocks, 1, "{measured}");
+}
 
 #[rstest]
 #[case::allocated_small(256, false, "page_small_creation", "page_small_control")]

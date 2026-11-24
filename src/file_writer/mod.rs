@@ -34,6 +34,9 @@ use hdf5_pure_format::__private::ModernSuperblockLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::ObjectReferenceCountMessage;
 use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::PreparedDataspace;
+use hdf5_pure_format::__private::PreparedDatatype;
+use hdf5_pure_format::__private::PreparedMessageRecord;
 use hdf5_pure_format::__private::PreparedSuperblock;
 use hdf5_pure_format::__private::{PreparedDenseAttrs, PreparedLink};
 use hdf5_pure_space::__private::AllocationClass;
@@ -85,7 +88,7 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
-use crate::object_header_writer::{ObjectHeaderWriter, RawMessageRecord};
+use crate::object_header_writer::ObjectHeaderWriter;
 use crate::object_path::ObjectTarget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
@@ -236,45 +239,43 @@ pub(crate) fn build_dataset_oh(
     w.serialize()
 }
 
-/// Encoded dataset bodies whose sizes are known before composing the header.
-struct DatasetHeaderRecords {
-    datatype: Vec<u8>,
-    datatype_flags: MessageFlags,
-    dataspace: Vec<u8>,
+/// Prepared bodies for a dataset's datatype, dataspace, and fill value records.
+struct DatasetHeaderRecords<'a> {
+    datatype: DatasetDatatype<'a>,
+    dataspace: PreparedDataspace<'a>,
     fill_value: Vec<u8>,
 }
 
-impl DatasetHeaderRecords {
-    /// Encodes the datatype, dataspace, and fill value bodies.
+/// A dataset's inline type or its encoded reference to a committed datatype.
+enum DatasetDatatype<'a> {
+    Committed(Vec<u8>),
+    Inline(PreparedDatatype<'a>),
+}
+
+impl<'a> DatasetHeaderRecords<'a> {
+    /// Prepares the datatype and dataspace and encodes the fill value.
     ///
     /// Uses the offset width for the datatype or its committed reference and the length width
-    /// for the dataspace. Sets the shared-message flag for a committed reference.
+    /// for the dataspace.
     ///
     /// # Errors
     ///
-    /// Propagates errors from encoding the bodies or the committed datatype reference.
+    /// Propagates errors preparing the inline bodies or encoding the reference and fill value.
     fn new(
-        dt: &Datatype,
+        dt: &'a Datatype,
         location: &DatatypeLocation,
-        ds: &Dataspace,
+        ds: &'a Dataspace,
         fill_time: FillTime,
         fill: Option<&[u8]>,
         widths: FormatWidths,
     ) -> Result<Self, FormatError> {
-        let (datatype, datatype_flags) = match location.reference_bytes(widths.offsets)? {
-            Some(reference) => (reference, MessageFlags::CONSTANT | MessageFlags::SHARED),
-            None => (
-                hdf5_pure_format::__private::serialize_datatype_with_offset_width(
-                    dt,
-                    widths.offsets,
-                )?,
-                MessageFlags::CONSTANT,
-            ),
+        let datatype = match location.reference_bytes(widths.offsets)? {
+            Some(reference) => DatasetDatatype::Committed(reference),
+            None => DatasetDatatype::Inline(PreparedDatatype::new(dt, widths.offsets)?),
         };
         Ok(Self {
             datatype,
-            datatype_flags,
-            dataspace: ds.serialize(widths.lengths.get())?,
+            dataspace: ds.prepare(widths.lengths)?,
             fill_value: crate::fill_value::serialize_fill_value_message_v3(fill_time, fill)?,
         })
     }
@@ -282,9 +283,12 @@ impl DatasetHeaderRecords {
     /// Starts the header with the datatype, dataspace, fill value, and layout, followed by
     /// the filter pipeline when present.
     ///
+    /// Writes a committed datatype reference with [`MessageFlags::SHARED`].
+    ///
     /// # Errors
     ///
-    /// Propagates record and allocation errors from [`ObjectHeaderWriter::with_raw_records`].
+    /// Propagates record preparation errors and errors from
+    /// [`ObjectHeaderWriter::with_prepared_records`].
     fn into_writer(
         self,
         prefix: ObjectHeaderPrefix,
@@ -293,40 +297,58 @@ impl DatasetHeaderRecords {
     ) -> Result<ObjectHeaderWriter, FormatError> {
         let Self {
             datatype,
-            datatype_flags,
             dataspace,
             fill_value,
         } = self;
-        ObjectHeaderWriter::with_raw_records(
-            prefix,
-            [
-                Some(RawMessageRecord::new(
+        let record_layout = prefix.layout;
+        let committed;
+        let inline;
+        let datatype = match &datatype {
+            DatasetDatatype::Committed(reference) => {
+                committed = record_layout.prepare_raw_record(
                     MessageType::DATATYPE,
-                    &datatype,
-                    datatype_flags,
+                    MessageFlags::CONSTANT | MessageFlags::SHARED,
                     0,
-                )),
-                Some(RawMessageRecord::new(
-                    MessageType::DATASPACE,
-                    &dataspace,
+                    reference,
+                )?;
+                committed.as_record()
+            }
+            DatasetDatatype::Inline(datatype) => {
+                inline = record_layout.prepare_record(MessageFlags::CONSTANT, 0, datatype)?;
+                inline.as_record()
+            }
+        };
+        let dataspace = record_layout.prepare_record(MessageFlags::NONE, 0, dataspace)?;
+        let fill = record_layout.prepare_raw_record(
+            MessageType::FILL_VALUE,
+            MessageFlags::CONSTANT,
+            0,
+            &fill_value,
+        )?;
+        let layout = record_layout.prepare_raw_record(
+            MessageType::DATA_LAYOUT,
+            MessageFlags::NONE,
+            0,
+            layout,
+        )?;
+        let pipeline = pipeline
+            .map(|body| {
+                record_layout.prepare_raw_record(
+                    MessageType::FILTER_PIPELINE,
                     MessageFlags::NONE,
                     0,
-                )),
-                Some(RawMessageRecord::new(
-                    MessageType::FILL_VALUE,
-                    &fill_value,
-                    MessageFlags::CONSTANT,
-                    0,
-                )),
-                Some(RawMessageRecord::new(
-                    MessageType::DATA_LAYOUT,
-                    layout,
-                    MessageFlags::NONE,
-                    0,
-                )),
-                pipeline.map(|body| {
-                    RawMessageRecord::new(MessageType::FILTER_PIPELINE, body, MessageFlags::NONE, 0)
-                }),
+                    body,
+                )
+            })
+            .transpose()?;
+        ObjectHeaderWriter::with_prepared_records(
+            prefix,
+            &[
+                Some(datatype),
+                Some(dataspace.as_record()),
+                Some(fill.as_record()),
+                Some(layout.as_record()),
+                pipeline.as_ref().map(PreparedMessageRecord::as_record),
             ],
         )
     }
@@ -350,26 +372,29 @@ pub(crate) fn build_committed_datatype_oh(
     references: u32,
 ) -> Result<Vec<u8>, FormatError> {
     preparation::require_reference_width(widths, dt)?;
-    let datatype =
-        hdf5_pure_format::__private::serialize_datatype_with_offset_width(dt, widths.offsets)?;
+    let prefix = ObjectHeaderPrefix::PLAIN;
+    let datatype = prefix.layout.prepare_record(
+        MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
+        0,
+        PreparedDatatype::new(dt, widths.offsets)?,
+    )?;
     let count = (references > 1).then(|| ObjectReferenceCountMessage::new(references).encode());
-    ObjectHeaderWriter::with_raw_records(
-        ObjectHeaderPrefix::PLAIN,
-        [
-            Some(RawMessageRecord::new(
-                MessageType::DATATYPE,
-                &datatype,
-                MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
+    let count = count
+        .as_ref()
+        .map(|body| {
+            prefix.layout.prepare_raw_record(
+                MessageType::OBJECT_REFERENCE_COUNT,
+                MessageFlags::FORBID_SHARING,
                 0,
-            )),
-            count.as_ref().map(|body| {
-                RawMessageRecord::new(
-                    MessageType::OBJECT_REFERENCE_COUNT,
-                    body,
-                    MessageFlags::FORBID_SHARING,
-                    0,
-                )
-            }),
+                body,
+            )
+        })
+        .transpose()?;
+    ObjectHeaderWriter::with_prepared_records(
+        prefix,
+        &[
+            Some(datatype.as_record()),
+            count.as_ref().map(PreparedMessageRecord::as_record),
         ],
     )?
     .serialize()
