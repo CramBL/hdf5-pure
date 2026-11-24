@@ -41,22 +41,34 @@ enum FractalHeapIdType {
 }
 
 impl FractalHeapIdType {
-    /// Returns the type of the heap ID from bits 4 and 5 of its first byte.
+    /// Reads the type bits of a version 0 heap ID.
     ///
-    /// Bits 6 and 7 hold the version of the heap ID format, which the specification defines as 0,
-    /// and the function reads the type whatever they hold.
+    /// The caller supplies the first byte of a complete ID. Bits 6 and 7 hold the version, and
+    /// bits 4 and 5 hold the type. The low four bits hold part or all of a tiny object's length
+    /// encoding. In managed and huge IDs, those bits are reserved.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidHeapIdType`] if the type bits hold 3, a type the format does
-    /// not define.
+    /// Returns [`FormatError::UnsupportedFractalHeapIdVersion`] if the version is not 0,
+    /// [`FormatError::InvalidHeapIdType`] if the type bits hold 3, or
+    /// [`FormatError::InvalidFractalHeapIdFlags`] if a managed or huge ID has set reserved bits.
+    /// Checks these conditions in that order.
     fn from_first_byte(byte0: u8) -> Result<Self, FormatError> {
-        match (byte0 >> HEAP_ID_TYPE_SHIFT) & HEAP_ID_TYPE_MASK {
-            HEAP_ID_TYPE_MANAGED => Ok(FractalHeapIdType::Managed),
-            HEAP_ID_TYPE_HUGE => Ok(FractalHeapIdType::Huge),
-            HEAP_ID_TYPE_TINY => Ok(FractalHeapIdType::Tiny),
-            other => Err(FormatError::InvalidHeapIdType(other)),
+        let version = byte0 >> HEAP_ID_VERSION_SHIFT;
+        if version != HEAP_ID_VERSION {
+            return Err(FormatError::UnsupportedFractalHeapIdVersion(version));
         }
+        let kind = match (byte0 >> HEAP_ID_TYPE_SHIFT) & HEAP_ID_TYPE_MASK {
+            HEAP_ID_TYPE_MANAGED => Self::Managed,
+            HEAP_ID_TYPE_HUGE => Self::Huge,
+            HEAP_ID_TYPE_TINY => return Ok(Self::Tiny),
+            other => return Err(FormatError::InvalidHeapIdType(other)),
+        };
+        let flags = byte0 & HEAP_ID_RESERVED_MASK;
+        if flags != 0 {
+            return Err(FormatError::InvalidFractalHeapIdFlags(flags));
+        }
+        Ok(kind)
     }
 
     /// Returns the first byte of a heap ID of this type, whose version bits are 0.
@@ -1379,24 +1391,30 @@ impl FractalHeapIdLayout {
         }
     }
 
-    /// Parses a complete heap ID using this heap's decoding parameters.
+    /// Parses one version 0 heap ID at the width declared by the heap header.
     ///
-    /// Reads the managed object's heap offset and length, the huge object's location, or the
-    /// tiny object's bytes. Managed offset and length fields are byte-aligned. The reader ignores
-    /// any padding after them. Filtered huge IDs require version 0 and zero reserved bits.
+    /// Checks the ID's length, version, type, and any reserved prefix bits before reading its
+    /// type-specific fields. Reads a managed object's offset and length as byte-aligned fields
+    /// and ignores any padding after them.
     ///
-    /// For a tiny ID, returns the object as a slice borrowed from `bytes`. The object starts
-    /// after a one-byte prefix for ID widths of at most 18 bytes, and a two-byte prefix for
-    /// larger widths. Ignores the tiny ID's version bits and any bytes after the object.
+    /// Borrows a tiny object's bytes from `bytes`. The object starts after a one-byte prefix
+    /// for ID widths of at most 18 bytes, and a two-byte prefix for larger widths. Ignores any
+    /// bytes after the object.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidFractalHeapIdLength`] if `bytes` has a different length
     /// from [`encoded_len`](Self::encoded_len), before reading its contents. Returns
-    /// [`FormatError::InvalidHeapIdType`] if its type bits hold 3, or
-    /// [`FormatError::UnexpectedEof`] if the declared ID length is zero or a tiny object's
-    /// length extends past the ID. For a truncated tiny object, the error reports the
-    /// required object end relative to the start of `bytes` and the supplied ID length.
+    /// [`FormatError::UnexpectedEof`] if the supplied and declared ID lengths are both zero.
+    ///
+    /// Returns [`FormatError::UnsupportedFractalHeapIdVersion`] if the version is not 0,
+    /// [`FormatError::InvalidHeapIdType`] if the type bits hold 3, or
+    /// [`FormatError::InvalidFractalHeapIdFlags`] if a managed or huge ID has set reserved bits.
+    /// Checks these conditions in that order.
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a tiny object's length extends past the ID.
+    /// The error reports the required object end from the start of `bytes` and the supplied
+    /// ID length.
     ///
     /// Returns [`FormatError::InvalidFractalHeapGeometry`] for a managed ID if its header cannot
     /// describe the required fields, or its offset requires more bits than the heap permits.
@@ -1409,10 +1427,6 @@ impl FractalHeapIdLayout {
     /// Returns [`FormatError::OffsetOverflow`] if a huge object's encoded range exceeds
     /// [`u64::MAX`], and [`FormatError::ValueTooLargeForRepresentation`] if an indirect key
     /// exceeds the tracker's numeric domain.
-    ///
-    /// Returns [`FormatError::UnsupportedFractalHeapIdVersion`] for a filtered huge ID with a
-    /// version other than 0, and [`FormatError::InvalidFractalHeapIdFlags`] if its reserved bits
-    /// are set.
     pub fn parse<'a>(&self, bytes: &'a [u8]) -> Result<FractalHeapIdView<'a>, FormatError> {
         if bytes.len() != self.encoded_len {
             return Err(FormatError::InvalidFractalHeapIdLength {
@@ -1429,7 +1443,7 @@ impl FractalHeapIdLayout {
                     .ok_or(FormatError::InvalidFractalHeapGeometry)?
                     .parse(cursor.remaining())?,
                 FractalHeapIdType::Huge => {
-                    FractalHeapIdKind::Huge(self.parse_huge(first, cursor.remaining())?)
+                    FractalHeapIdKind::Huge(self.parse_huge(cursor.remaining())?)
                 }
                 FractalHeapIdType::Tiny => FractalHeapIdKind::Tiny {
                     bytes: TinyIdForm::for_width(self.encoded_len).parse(first, &mut cursor)?,
@@ -1443,7 +1457,7 @@ impl FractalHeapIdLayout {
         self.encoded_len
     }
 
-    fn parse_huge(&self, first: u8, payload: &[u8]) -> Result<HugeObjectReference, FormatError> {
+    fn parse_huge(&self, payload: &[u8]) -> Result<HugeObjectReference, FormatError> {
         let HugeIdLayout {
             direct,
             offsets,
@@ -1453,16 +1467,6 @@ impl FractalHeapIdLayout {
             encoding,
             key_width,
         } = self.huge;
-        if filter_count.is_some() {
-            let version = first >> HEAP_ID_VERSION_SHIFT;
-            if version != HEAP_ID_VERSION {
-                return Err(FormatError::UnsupportedFractalHeapIdVersion(version));
-            }
-            let flags = first & HUGE_ID_RESERVED_MASK;
-            if flags != 0 {
-                return Err(FormatError::InvalidFractalHeapIdFlags(flags));
-            }
-        }
         if tracker.get() >= StoredAddress::undefined(offsets).get() {
             return Err(FormatError::InvalidFractalHeapGeometry);
         }
@@ -1769,10 +1773,10 @@ impl ManagedHeapIdLayout {
     }
 }
 
-/// A heap ID parsed against the decoding parameters of a fractal heap.
+/// A decoded version 0 heap ID.
 ///
-/// Obtained through [`FractalHeapIdLayout::parse`], which checks the encoded length and decodes
-/// the type-specific fields. Only a tiny object's bytes are borrowed from the encoded ID.
+/// [`FractalHeapIdLayout::parse`] checks the encoded length and prefix before reading the
+/// type-specific fields. Only a tiny object's bytes are borrowed from the encoded ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FractalHeapIdView<'a> {
     kind: FractalHeapIdKind<'a>,
@@ -1845,8 +1849,9 @@ const HEAP_ID_TYPE_SHIFT: u8 = 4;
 const HEAP_ID_VERSION_SHIFT: u8 = 6;
 /// The heap-ID version defined in the same section as [`FRACTAL_HEAP_SIGNATURE`].
 const HEAP_ID_VERSION: u8 = 0;
-/// The reserved low four bits of a huge ID, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
-const HUGE_ID_RESERVED_MASK: u8 = 0x0F;
+/// The reserved low four bits of managed and huge IDs, from the same section as
+/// [`FRACTAL_HEAP_SIGNATURE`].
+const HEAP_ID_RESERVED_MASK: u8 = 0x0F;
 
 /// The mask of the two type bits once shifted down by [`HEAP_ID_TYPE_SHIFT`].
 const HEAP_ID_TYPE_MASK: u8 = 0x03;
@@ -2385,6 +2390,8 @@ mod tests {
     #[case::too_short(9, vec![0; 8])]
     #[case::too_long(7, vec![0; 8])]
     #[case::empty(8, vec![])]
+    #[case::short_with_unsupported_version(2, vec![0x60])]
+    #[case::long_with_reserved_flags(7, vec![0x01, 0, 0, 0, 0, 0, 0, 0])]
     fn an_id_must_have_the_declared_length(#[case] declared: u16, #[case] bytes: Vec<u8>) {
         let header = FractalHeapHeader {
             heap_id_length: declared,
@@ -2809,70 +2816,69 @@ mod tests {
     }
 
     #[rstest]
-    #[case::managed(0x00, FractalHeapIdKind::Managed { heap_offset: 0, object_length: 0 })]
-    #[case::huge(0x10, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(HugeIndirectKey { value: 0, encoding: HugeIndirectKeyEncoding::Libhdf5 })))]
-    #[case::tiny(0x20, FractalHeapIdKind::Tiny { bytes: &[0] })]
-    #[case::version_bits(0xD0, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(HugeIndirectKey { value: 0, encoding: HugeIndirectKeyEncoding::Libhdf5 })))]
-    fn the_parser_reads_type_bits_independently_of_version_bits(
-        #[case] first: u8,
-        #[case] expected: FractalHeapIdKind<'_>,
+    #[case::managed(MANAGED_ID, false)]
+    #[case::tiny_normal(&[0x20, 0xAB], false)]
+    #[case::tiny_extended(b"\x20\x01ab...............", false)]
+    #[case::huge_indirect(INDIRECT_HUGE_ID, false)]
+    #[case::huge_direct(DIRECT_HUGE_ID, false)]
+    #[case::filtered_huge_indirect(INDIRECT_HUGE_ID, true)]
+    #[case::filtered_huge_direct(FILTERED_DIRECT_HUGE_ID, true)]
+    #[case::reserved_type(&[0x3F], false)]
+    fn heap_id_parser_checks_the_version_before_the_type(
+        #[case] id: &[u8],
+        #[case] filtered: bool,
+        #[values((0x40, 1), (0x80, 2), (0xC0, 3))] version: (u8, u8),
     ) {
-        let mut bytes = [0; 8];
-        bytes[0] = first;
+        let layout = heap_id_fixture_layout(id.len(), filtered);
+        let (version_bits, version) = version;
+        let mut id = id.to_vec();
+        id[0] |= version_bits;
         assert_eq!(
-            FractalHeapIdLayout::new(
-                &attribute_heap_header(),
-                OffsetWidth::Eight,
-                LengthWidth::Eight
-            )
-            .parse(&bytes)
-            .unwrap()
-            .kind(),
-            expected
+            layout.parse(&id),
+            Err(FormatError::UnsupportedFractalHeapIdVersion(version))
         );
     }
 
     #[rstest]
-    #[case::reserved_bit(0x11, FormatError::InvalidFractalHeapIdFlags(0x01))]
-    #[case::reserved_nibble(0x1F, FormatError::InvalidFractalHeapIdFlags(0x0F))]
-    #[case::version_one(0x50, FormatError::UnsupportedFractalHeapIdVersion(1))]
-    #[case::version_two(0x90, FormatError::UnsupportedFractalHeapIdVersion(2))]
-    #[case::version_three(0xD0, FormatError::UnsupportedFractalHeapIdVersion(3))]
-    fn filtered_huge_ids_validate_version_and_reserved_bits(
-        #[case] first: u8,
-        #[case] expected: FormatError,
-        #[values(false, true)] direct: bool,
+    #[case::managed(MANAGED_ID, false)]
+    #[case::huge_indirect(INDIRECT_HUGE_ID, false)]
+    #[case::huge_direct(DIRECT_HUGE_ID, false)]
+    #[case::filtered_huge_indirect(INDIRECT_HUGE_ID, true)]
+    #[case::filtered_huge_direct(FILTERED_DIRECT_HUGE_ID, true)]
+    fn heap_id_parser_rejects_reserved_bits_in_managed_and_huge_ids(
+        #[case] id: &[u8],
+        #[case] filtered: bool,
+        #[values(0x01, 0x0F)] flags: u8,
     ) {
-        let header = FractalHeapHeader {
-            heap_id_length: if direct { 29 } else { 8 },
-            filtering: filtered_heap(),
-            ..attribute_heap_header()
-        };
-        let id = if direct {
-            let mut id = vec![first];
-            id.extend(filtered_huge_location(
-                OffsetWidth::Eight,
-                LengthWidth::Eight,
-                0x1234,
-                17,
-                0,
-                1024,
-            ));
-            id
-        } else {
-            vec![first, 5, 0, 0, 0, 0, 0, 0]
-        };
+        let layout = heap_id_fixture_layout(id.len(), filtered);
+        let mut id = id.to_vec();
+        id[0] |= flags;
         assert_eq!(
-            FractalHeapIdType::from_first_byte(id[0]).unwrap(),
-            FractalHeapIdType::Huge
-        );
-        assert_eq!(
-            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                .parse(&id)
-                .unwrap_err(),
-            expected
+            layout.parse(&id),
+            Err(FormatError::InvalidFractalHeapIdFlags(flags))
         );
     }
+
+    fn heap_id_fixture_layout(length: usize, filtered: bool) -> FractalHeapIdLayout {
+        let header = FractalHeapHeader {
+            heap_id_length: u16::try_from(length).unwrap(),
+            filtering: if filtered {
+                filtered_heap()
+            } else {
+                FractalHeapFiltering::Unfiltered
+            },
+            ..attribute_heap_header()
+        };
+        FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+    }
+
+    const MANAGED_ID: &[u8] = &[0x00, 42, 0, 0, 0, 0, 13, 0];
+    const INDIRECT_HUGE_ID: &[u8] = &[0x10, 5, 0, 0, 0, 0, 0, 0];
+    const DIRECT_HUGE_ID: &[u8] = &[0x10, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0];
+    const FILTERED_DIRECT_HUGE_ID: &[u8] = &[
+        0x10, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0,
+        0, 0,
+    ];
 
     #[test]
     fn huge_ids_direct_matches_hdf5_rule() {
