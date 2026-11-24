@@ -38,6 +38,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::chunks` and related metadata reads reporting signature or version errors for
+  truncated version 2 B-tree headers and accepting headers with incomplete checksum fields when
+  checksum verification was disabled ([#1361](https://github.com/CramBL/hdf5-pure/pull/1361)).
 - Fixed `File::dataset` and related metadata reads accepting version 1 object header
   continuations with incomplete address or length fields ([#1360](https://github.com/CramBL/hdf5-pure/pull/1360)).
 - Fixed `Group::groups` and related metadata reads accepting version 2 object header records

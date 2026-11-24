@@ -4216,10 +4216,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::header(33, 32, false)]
-    #[case::child(1025, 1024, true)]
+    #[case::header(33, 71, 32, false)]
+    #[case::child(1025, 1025, 1024, true)]
     fn resident_btree_v2_metadata_bounds_use_stored_coordinates(
         #[case] invalid_address: u64,
+        #[case] expected: u64,
         #[case] available: usize,
         #[case] child: bool,
     ) {
@@ -4275,7 +4276,7 @@ mod tests {
             )
             .unwrap_err(),
             FormatError::UnexpectedSourceEof {
-                expected: invalid_address,
+                expected,
                 available: available.to_u64(),
             },
         );
