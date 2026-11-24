@@ -27,6 +27,7 @@ use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::ModernSuperblockLayout;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
+use hdf5_pure_format::__private::PreparedDatatype;
 use hdf5_pure_format::__private::PreparedDenseAttrs;
 use hdf5_pure_space::__private::AllocationClass;
 
@@ -268,23 +269,21 @@ impl Object {
 
     /// Adds dataset and attribute uses of committed datatypes to `references`.
     ///
+    /// Compares the encoded bodies at the destination's eight-byte offset width.
+    ///
     /// # Errors
     ///
-    /// Returns [`FormatError::CommittedDatatypeMismatch`] if a use differs from its committed
-    /// datatype. Returns [`FormatError::Internal`] if a target is not a committed datatype or its
-    /// index is outside `references`. Returns [`FormatError::OpaqueTagTooLong`] if a compared
-    /// datatype contains an opaque tag longer than 247 bytes, or
-    /// [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte. Propagates source
-    /// loading and path resolution errors.
+    /// Returns [`FormatError::CommittedDatatypeMismatch`] if the encoded bodies differ, or
+    /// [`FormatError::Internal`] if the target is a group or dataset or its index is outside
+    /// `references`. Propagates errors from source loading, path resolution, and datatype preparation.
     fn count_uses(&self, source: &impl ObjectSource, references: &mut [u32]) -> Result<(), Error> {
         let mut use_type = |target: &ObjectTarget, datatype: &Datatype| -> Result<(), Error> {
             let index = source.datatype_index(target)?;
             let Kind::Committed(committed) = source.load(index)?.kind else {
                 return Err(inconsistent().into());
             };
-            if hdf5_pure_format::__private::serialize_datatype(&committed)?
-                != hdf5_pure_format::__private::serialize_datatype(datatype)?
-            {
+            let committed = PreparedDatatype::new(&committed, super::OFFSET_WIDTH)?;
+            if !committed.matches_datatype(datatype)? {
                 return Err(FormatError::CommittedDatatypeMismatch {
                     path: target.to_string(),
                     user: "a repacked object".into(),
@@ -1170,7 +1169,8 @@ impl<S: ObjectSource> Plan<S> {
                 )?
             }
             Kind::Committed(datatype) => {
-                super::build_committed_datatype_oh(super::WIDTHS, datatype, record.references)?
+                let datatype = PreparedDatatype::new(datatype, super::OFFSET_WIDTH)?;
+                super::build_committed_datatype_oh(datatype, record.references)?
             }
         })
     }
@@ -1541,8 +1541,9 @@ fn reserve_metadata(
             let Kind::Committed(datatype) = source.load(index)?.kind else {
                 return Err(inconsistent().into());
             };
+            let datatype = PreparedDatatype::new(&datatype, super::OFFSET_WIDTH)?;
             record.metadata.header.length = ByteLength::new(
-                super::build_committed_datatype_oh(super::WIDTHS, &datatype, record.references)?
+                super::build_committed_datatype_oh(datatype, record.references)?
                     .len()
                     .to_u64(),
             );

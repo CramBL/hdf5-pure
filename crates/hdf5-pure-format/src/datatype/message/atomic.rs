@@ -20,8 +20,8 @@ use crate::datatype::{
     self, BIT_FIELD_CLASS, FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT,
     FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE, FLOAT_NORMALIZATION_LEADING_ONE,
     FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
-    FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT, OPAQUE_CLASS, OpaqueTagWire,
-    STRING_CLASS, TIME_CLASS,
+    FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT, OPAQUE_CLASS, OPAQUE_TAG_ALIGNMENT,
+    OpaqueTagWire, STRING_CLASS, TIME_CLASS,
 };
 
 impl AtomicClass {
@@ -355,7 +355,7 @@ impl AtomicProperties<'_> {
     /// Writes the checked property fields and returns the header that describes them.
     pub(super) fn write(
         &self,
-        output: &mut Output<'_>,
+        output: &mut Output<'_, impl FnMut(usize, &[u8])>,
         version: Option<DatatypeVersion>,
     ) -> NodeHeader {
         let flags = match self {
@@ -445,9 +445,8 @@ impl AtomicProperties<'_> {
             }
             Self::Opaque { size: _, tag } => {
                 let property_size = OpaqueTagWire::property_size(tag.len());
-                let (value, padding) = output.take(property_size).split_at_mut(tag.len());
-                value.copy_from_slice(tag);
-                padding.fill(0);
+                output.write(tag);
+                output.write(&[0; OPAQUE_TAG_ALIGNMENT as usize][..property_size - tag.len()]);
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "the prepared padded tag length fits the one-byte property field"

@@ -794,8 +794,9 @@ fn expected_dataset_header(location: &DatatypeLocation) -> Vec<u8> {
 #[case::one_reference(1)]
 #[case::four_references(4)]
 fn committed_datatype_header_matches_independent_bytes(#[case] references: u32) {
-    let bytes =
-        build_committed_datatype_oh(WIDTHS, &type_builders::make_u8_type(), references).unwrap();
+    let datatype = type_builders::make_u8_type();
+    let datatype = PreparedDatatype::new(&datatype, WIDTHS.offsets).unwrap();
+    let bytes = build_committed_datatype_oh(datatype, references).unwrap();
     assert_eq!(bytes, expected_committed_datatype_header(references));
 }
 
