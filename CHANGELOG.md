@@ -38,8 +38,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::dataset` and related metadata reads accepting version 1 object header
+  continuations with incomplete address or length fields ([#1360](https://github.com/CramBL/hdf5-pure/pull/1360)).
 - Fixed `Group::groups` and related metadata reads accepting version 2 object header records
-  whose bodies exceed the chunk's message region.
+  whose bodies exceed the chunk's message region ([#1360](https://github.com/CramBL/hdf5-pure/pull/1360)).
 - Fixed `Dataset::datatype` accepting inconsistent array sizes, unsupported variable-length
   descriptor sizes, and more than 64 descriptions on one nesting path. Truncation errors report
   the required byte extent for complex components and enumeration value lists ([#1359](https://github.com/CramBL/hdf5-pure/pull/1359)).

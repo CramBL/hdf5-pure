@@ -170,9 +170,12 @@ impl ObjectHeader {
     /// this parser cannot name and [`MessageFlags::must_be_understood`] returns
     /// `true` for `access_mode`.
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a version 2 message record has a complete prefix
-    /// and its body extends into the chunk checksum or beyond it, or if a version 2 continuation
-    /// message body is shorter than the combined offset and length widths.
+    /// Returns [`FormatError::UnexpectedEof`] if a continuation body is too short to hold the
+    /// address and length fields at the supplied widths, after checking record framing. In this
+    /// case, `expected` is the combined field width and `available` is the body length.
+    ///
+    /// Also returns [`FormatError::UnexpectedEof`] if a version 2 record has a complete prefix
+    /// and its body extends into the chunk checksum or beyond it.
     ///
     /// Returns [`FormatError::UndefinedContinuationAddress`] if a complete continuation body
     /// stores an undefined address, in either header version.

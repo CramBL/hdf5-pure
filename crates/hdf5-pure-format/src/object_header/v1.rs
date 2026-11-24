@@ -10,17 +10,17 @@ use super::HeaderMessage;
 use super::MessageFilter;
 use super::ObjectHeader;
 use super::ObjectHeaderChunk;
+use super::ObjectHeaderContinuation;
 use super::ParseContext;
 use crate::access_mode::AccessMode;
+use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
-use crate::address::DecodedStoredAddress;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::metadata_source::MetadataSource;
-use crate::width;
 
 /// Defines the fixed prefix width of a version 1 object header message.
 ///
@@ -40,9 +40,10 @@ impl ObjectHeader {
     /// # Errors
     ///
     /// Returns [`FormatError::NestingDepthExceeded`] if traversal exceeds 256 continuation
-    /// visits or 32 continuation hops after the root. Returns
-    /// [`FormatError::UndefinedContinuationAddress`] if a continuation body contains complete
-    /// address and length fields and stores the undefined address.
+    /// visits or 32 continuation hops after the root.
+    /// Returns [`FormatError::UnexpectedEof`] if the body of a framed continuation record is
+    /// shorter than the combined offset and length widths, or
+    /// [`FormatError::UndefinedContinuationAddress`] if its address is undefined.
     /// Propagates record, address-conversion, and buffer-bound errors.
     pub(super) fn parse_v1(
         data: &[u8],
@@ -199,8 +200,8 @@ impl HeaderCollector<'_, '_> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a continuation ends inside a message prefix.
-    /// Propagates record, admission, and target-access errors.
+    /// Returns [`FormatError::UnexpectedEof`] if a continuation chunk ends inside a message
+    /// prefix. Propagates record, continuation, and target-access errors.
     fn collect_buffered(
         &mut self,
         data: &[u8],
@@ -221,12 +222,9 @@ impl HeaderCollector<'_, '_> {
                 }
                 break;
             };
-            self.keep(record);
             records = &records[record_len..];
             count += 1;
-            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && let Some(permit) = self.traversal.admit(self.context, record.body, depth)?
-            {
+            if let Some(permit) = self.ingest(record, depth)? {
                 self.follow_buffered(data, permit)?;
             }
         }
@@ -251,8 +249,8 @@ impl HeaderCollector<'_, '_> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a continuation ends inside a message prefix.
-    /// Propagates record, admission, address-conversion, and source-read errors.
+    /// Returns [`FormatError::UnexpectedEof`] if a continuation chunk ends inside a message
+    /// prefix. Propagates record, continuation, address-conversion, and source-read errors.
     fn collect_from_source<S: MetadataSource + ?Sized>(
         &mut self,
         source: &S,
@@ -274,12 +272,9 @@ impl HeaderCollector<'_, '_> {
                 }
                 break;
             };
-            self.keep(record);
             records = &records[record_len..];
             count += 1;
-            if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION
-                && let Some(permit) = self.traversal.admit(self.context, record.body, depth)?
-            {
+            if let Some(permit) = self.ingest(record, depth)? {
                 self.follow_from_source(source, permit, observer)?;
             }
         }
@@ -296,6 +291,36 @@ impl HeaderCollector<'_, '_> {
         let region = source.read_metadata(range.start().get(), range.length().to_usize()?)?;
         observe_chunk(&region, range, range, observer)?;
         self.collect_from_source(source, &region, None, depth, observer)
+    }
+
+    /// Parses continuation fields before applying the message filter.
+    ///
+    /// Admits the continuation to traversal independently of whether the filter keeps the record.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`ObjectHeaderContinuation::parse_with_widths`] and
+    /// [`Traversal::admit`].
+    fn ingest(
+        &mut self,
+        record: MessageRecord<'_>,
+        depth: u16,
+    ) -> Result<Option<ContinuationVisit>, FormatError> {
+        let continuation = if record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION {
+            Some(ObjectHeaderContinuation::parse_with_widths(
+                record.body,
+                self.context.widths,
+            )?)
+        } else {
+            None
+        };
+        self.keep(record);
+        continuation
+            .map(|continuation| {
+                self.traversal
+                    .admit(self.context.base_address, continuation, depth)
+            })
+            .transpose()
     }
 
     fn keep(&mut self, record: MessageRecord<'_>) {
@@ -341,41 +366,28 @@ impl Traversal {
 
     /// Charges one visit and checks depth and target geometry before issuing a permit.
     ///
-    /// Returns `Ok(None)` if the body is too short to decode both fields.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UndefinedContinuationAddress`] for an undefined target and
-    /// [`FormatError::NestingDepthExceeded`] if the visit or depth allowance is exhausted.
+    /// Returns [`FormatError::NestingDepthExceeded`] if the visit or depth allowance is exhausted.
     /// Propagates address-resolution and range-overflow errors.
     fn admit(
         &mut self,
-        context: ParseContext,
-        data: &[u8],
+        base_address: BaseAddress,
+        continuation: ObjectHeaderContinuation,
         parent_depth: u16,
-    ) -> Result<Option<ContinuationVisit>, FormatError> {
-        let required_len =
-            usize::from(context.widths.offsets.get()) + usize::from(context.widths.lengths.get());
-        if data.len() < required_len {
-            return Ok(None);
-        }
-        let address = width::decode_stored_address(context.widths.offsets, data, 0)?;
-        let length = bytes::read_length_width(
-            data,
-            usize::from(context.widths.offsets.get()),
-            context.widths.lengths,
-        )?;
-        let DecodedStoredAddress::Defined(address) = address else {
-            return Err(FormatError::UndefinedContinuationAddress);
-        };
+    ) -> Result<ContinuationVisit, FormatError> {
         if parent_depth >= MAX_V1_CONTINUATION_DEPTH || self.visits >= MAX_V1_CONTINUATION_VISITS {
             return Err(FormatError::NestingDepthExceeded);
         }
         self.visits += 1;
-        Ok(Some(ContinuationVisit {
-            range: FileRange::new(context.base_address.resolve(address)?, length)?,
+        Ok(ContinuationVisit {
+            range: FileRange::new(
+                base_address.resolve(continuation.address())?,
+                continuation.length(),
+            )?,
             depth: parent_depth + 1,
-        }))
+        })
     }
 }
 
