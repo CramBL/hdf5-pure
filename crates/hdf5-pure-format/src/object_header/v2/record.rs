@@ -12,6 +12,8 @@ use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_message::PreparedAttributeBody;
 use crate::bytes::UnexpectedEof;
 use crate::codec::Encode;
+use crate::dataspace::PreparedDataspace;
+use crate::datatype::message::PreparedDatatype;
 use crate::error::FormatError;
 use crate::filter_pipeline::PreparedFilterPipeline;
 use crate::group_info::GroupInfo;
@@ -60,6 +62,14 @@ impl MessageBody for AttributeInfoMessage {
 
 impl MessageBody for PreparedAttributeBody<'_> {
     const MESSAGE_TYPE: MessageType = MessageType::ATTRIBUTE;
+}
+
+impl MessageBody for PreparedDataspace<'_> {
+    const MESSAGE_TYPE: MessageType = MessageType::DATASPACE;
+}
+
+impl MessageBody for PreparedDatatype<'_> {
+    const MESSAGE_TYPE: MessageType = MessageType::DATATYPE;
 }
 
 impl MessageRecordLayout {
@@ -180,6 +190,14 @@ impl<B> PreparedMessageRecord<B> {
     reason = "the record dispatches through the private encoding contract of its admitted body"
 )]
 impl<B: Encode<Error: Into<FormatError>>> PreparedMessageRecord<B> {
+    /// Borrows the record for a batch containing different body types.
+    pub fn as_record(&self) -> PreparedRecordRef<'_> {
+        PreparedRecordRef {
+            prefix: &self.prefix,
+            encoding: self,
+        }
+    }
+
     /// Encodes the complete record into an owned buffer.
     ///
     /// # Errors
@@ -258,6 +276,47 @@ impl<B: Encode<Error: Into<FormatError>>> Encode for PreparedMessageRecord<B> {
         let len = self.encoded_len();
         self.write_record(destination(output, len)?)?;
         Ok(len)
+    }
+}
+
+/// A borrowed version 2 record with its checked prefix and body length.
+///
+/// Obtain one through [`PreparedMessageRecord::as_record`] and pass it to
+/// [`ObjectHeaderWriter::with_prepared_records`][batch].
+///
+/// [batch]: crate::object_header_writer::ObjectHeaderWriter::with_prepared_records
+pub struct PreparedRecordRef<'a> {
+    prefix: &'a RecordPrefix,
+    encoding: &'a dyn Encode<Error = FormatError>,
+}
+
+impl PreparedRecordRef<'_> {
+    /// Checks whether the record and header agree on including a creation index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if only one layout includes a creation index.
+    pub(crate) fn require_layout(&self, layout: MessageRecordLayout) -> Result<(), FormatError> {
+        if self.prefix.layout.tracks_creation_order() != layout.tracks_creation_order() {
+            return Err(FormatError::Internal(
+                "prepared record and header disagree on creation index presence".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encoded_size(&self) -> usize {
+        self.prefix.encoded_size()
+    }
+
+    /// Writes the prefix and body at the start of `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if the complete record exceeds `output.len()`
+    /// and propagates body encoding errors. Leaves `output` unchanged on error.
+    pub(crate) fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        self.encoding.encode_into(output)
     }
 }
 

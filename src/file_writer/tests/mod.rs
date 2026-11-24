@@ -1,14 +1,21 @@
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private as dense_attribute_write;
-use hdf5_pure_format::__private::BTreeV2Header;
+use hdf5_pure_format::__private::{BTreeV2Header, MessageRecordLayout};
 use rstest::rstest;
 use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
+use test_util::dataspace::VersionTwo;
+use test_util::object_header::Message as FixtureMessage;
+use test_util::object_header::MessageFlags as FixtureFlags;
+use test_util::object_header::MessageType as FixtureType;
+use test_util::object_header::v2::{Header, HeaderFlags};
+use test_util::widths::Widths;
 
 use super::*;
 use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
 use crate::attribute_info::AttributeCreationOrderIndex;
 use crate::attribute_policy;
+use crate::dataspace::DataspaceType;
 use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
@@ -28,10 +35,6 @@ mod paged_arrays;
 #[test]
 fn compact_group_writer_emits_prepared_links_in_record_order() {
     use test_util::link_message::{HardLink, SymbolicLink};
-    use test_util::object_header::Message as FixtureMessage;
-    use test_util::object_header::MessageType as FixtureType;
-    use test_util::object_header::v2::Header;
-    use test_util::widths::Widths;
 
     let widths = FormatWidths {
         offsets: OffsetWidth::Two,
@@ -684,48 +687,101 @@ impl ByteSink for SparseSink {
     }
 }
 
-#[test]
-fn a_committed_datatype_header_holds_only_its_type() {
-    let bytes = build_committed_datatype_oh(WIDTHS, &type_builders::make_i32_type(), 1).unwrap();
-    let hdr =
-        ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
-
-    let types: Vec<MessageType> = hdr.messages.iter().map(|m| m.msg_type).collect();
-    assert_eq!(
-        types,
-        vec![MessageType::DATATYPE],
-        "a singly referenced committed type carries its datatype and nothing else"
-    );
-    assert_eq!(
-        hdf5_pure_format::__private::parse_datatype(&hdr.messages[0].data)
-            .unwrap()
-            .0,
-        type_builders::make_i32_type()
-    );
-    assert_eq!(
-        hdr.messages[0].flags,
-        MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
-        "the type of a committed object never changes and must not be shared onward"
-    );
+#[rstest]
+#[case::inline(DatatypeLocation::Inline)]
+#[case::committed(DatatypeLocation::Committed(StoredAddress::new(0x1234)))]
+fn dataset_header_matches_independent_bytes(#[case] location: DatatypeLocation) {
+    let datatype = type_builders::make_u8_type();
+    let dataspace = test_dataset_space();
+    let actual = test_dataset_header(&datatype, &location, &dataspace);
+    assert_eq!(actual, expected_dataset_header(&location));
 }
 
-#[test]
-fn a_committed_datatype_header_records_a_count_above_one() {
-    let bytes = build_committed_datatype_oh(WIDTHS, &type_builders::make_i32_type(), 4).unwrap();
-    let hdr =
-        ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
-
-    let refcount = hdr
-        .messages
-        .iter()
-        .find(|m| m.msg_type == MessageType::OBJECT_REFERENCE_COUNT)
-        .expect("a count above one is stored");
-    assert_eq!(
-        refcount.data,
-        vec![0, 4, 0, 0, 0],
-        "version 0 followed by the 4-byte count"
-    );
+fn test_dataset_space() -> Dataspace {
+    Dataspace {
+        space_type: DataspaceType::Simple,
+        rank: 1,
+        dimensions: vec![3],
+        max_dimensions: None,
+    }
 }
+
+fn test_dataset_header(dt: &Datatype, location: &DatatypeLocation, ds: &Dataspace) -> Vec<u8> {
+    let prefix = ObjectHeaderPrefix {
+        layout: MessageRecordLayout::from_header_flags(HeaderFlags::TRACKS_CREATION_ORDER.0),
+        ..ObjectHeaderPrefix::PLAIN
+    };
+    let header = HeaderOptions {
+        prefix,
+        ..HeaderOptions::PLAIN.with_widths(FormatWidths {
+            offsets: OffsetWidth::Two,
+            lengths: LengthWidth::Two,
+        })
+    };
+    build_dataset_oh(
+        dt,
+        location,
+        ds,
+        StoredAddress::new(0x4321),
+        3,
+        &[],
+        None,
+        FillTime::IfSet,
+        None,
+        LibVer::V18,
+        header,
+    )
+    .unwrap()
+}
+
+fn expected_dataset_header(location: &DatatypeLocation) -> Vec<u8> {
+    let datatype = match location {
+        DatatypeLocation::Inline => FixtureMessage::new(FixtureType::DATATYPE, &UNSIGNED_BYTE)
+            .with_flags(FixtureFlags::CONSTANT),
+        DatatypeLocation::Committed(_) => {
+            FixtureMessage::new(FixtureType::DATATYPE, &[2, 2, 0x34, 0x12])
+                .with_flags(FixtureFlags::CONSTANT | FixtureFlags::SHARED)
+        }
+    };
+    let dataspace = VersionTwo::simple(Widths::new(2, 2), &[3], None).build();
+    Header::new()
+        .flags(HeaderFlags::TRACKS_CREATION_ORDER)
+        .message(datatype)
+        .message(FixtureMessage::new(FixtureType::DATASPACE, &dataspace))
+        .message(
+            FixtureMessage::new(FixtureType::FILL_VALUE, &[3, 0x0a])
+                .with_flags(FixtureFlags::CONSTANT),
+        )
+        .message(FixtureMessage::new(
+            FixtureType::DATA_LAYOUT,
+            &[3, 1, 0x21, 0x43, 3, 0],
+        ))
+        .build()
+}
+
+#[rstest]
+#[case::one_reference(1)]
+#[case::four_references(4)]
+fn committed_datatype_header_matches_independent_bytes(#[case] references: u32) {
+    let bytes =
+        build_committed_datatype_oh(WIDTHS, &type_builders::make_u8_type(), references).unwrap();
+    assert_eq!(bytes, expected_committed_datatype_header(references));
+}
+
+fn expected_committed_datatype_header(references: u32) -> Vec<u8> {
+    let mut header = Header::new().message(
+        FixtureMessage::new(FixtureType::DATATYPE, &UNSIGNED_BYTE)
+            .with_flags(FixtureFlags::CONSTANT | FixtureFlags::FORBID_SHARING),
+    );
+    if references > 1 {
+        header = header.message(
+            FixtureMessage::reference_count(references).with_flags(FixtureFlags::FORBID_SHARING),
+        );
+    }
+    header.build()
+}
+
+const UNSIGNED_BYTE: [u8; 12] = [0x10, 0, 0, 0, 1, 0, 0, 0, 0, 0, 8, 0];
 
 #[test]
 fn the_reference_count_is_the_link_plus_every_user() {
