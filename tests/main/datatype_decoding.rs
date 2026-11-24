@@ -1,7 +1,9 @@
-use hdf5_pure::{Error, File, FormatError};
-use test_util::datatype::leaf::{Leaf, Version};
+use hdf5_pure::{Datatype, Error, File, FixedPointType, FormatError, VariableLengthType};
+use rstest::rstest;
+use test_util::datatype::leaf::{self, Leaf, Version};
 use test_util::datatype::{self, Class};
 use test_util::image::Image;
+use test_util::legacy_compound::{self, SequenceMemberShape};
 use test_util::object_header::{Message, MessageType};
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
@@ -22,6 +24,79 @@ fn dataset_datatype_rejects_message_version_fifteen() {
         panic!("expected an unsupported datatype version, got {error:?}");
     };
     assert_eq!(error, FormatError::InvalidDatatypeMessageVersion(15));
+}
+
+#[test]
+fn dataset_datatype_rejects_an_array_size_that_disagrees_with_its_dimensions() {
+    let datatype = datatype::array(
+        Version::Three.get(),
+        [0; 3],
+        1,
+        1,
+        &[2],
+        &leaf::unsigned_byte(Version::One),
+    );
+    let file = dataset_file(
+        &datatype,
+        &dataspace::VersionTwo::scalar().build(),
+        &data_layout::compact(&[0; 2]),
+    );
+    let dataset = file.dataset("value").unwrap();
+    let error = dataset.datatype().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected an array size error, got {error:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::InvalidDatatypeSize {
+            class: Class::ARRAY.0,
+            size: 1,
+            expected: 2,
+        }
+    );
+}
+
+#[rstest]
+#[case::scalar(SequenceMemberShape::Scalar, 10)]
+#[case::implicit_array(SequenceMemberShape::ImplicitArray, 20)]
+#[case::explicit_array(SequenceMemberShape::ExplicitArray, 20)]
+fn dataset_datatype_reads_a_narrow_legacy_sequence_member(
+    #[case] shape: SequenceMemberShape,
+    #[case] size: u32,
+) {
+    let file = File::from_bytes(legacy_compound::narrow_sequence_file(shape)).unwrap();
+    let datatype = file.dataset("value").unwrap().datatype().unwrap();
+    let Datatype::Compound {
+        size: compound_size,
+        members,
+    } = datatype
+    else {
+        panic!("expected a compound datatype, got {datatype:?}");
+    };
+    let [member] = members.as_slice() else {
+        panic!("expected one member, got {members:?}");
+    };
+    let sequence = Datatype::VariableLength(VariableLengthType::sequence(Datatype::FixedPoint(
+        FixedPointType::u8(),
+    )));
+    let expected = match shape {
+        SequenceMemberShape::Scalar => sequence,
+        SequenceMemberShape::ExplicitArray | SequenceMemberShape::ImplicitArray => {
+            Datatype::Array {
+                base_type: Box::new(sequence),
+                dimensions: vec![2],
+            }
+        }
+    };
+    assert_eq!(
+        (
+            compound_size,
+            member.name.as_str(),
+            member.byte_offset,
+            &member.datatype
+        ),
+        (size, "arr", 0, &expected),
+    );
 }
 
 #[test]

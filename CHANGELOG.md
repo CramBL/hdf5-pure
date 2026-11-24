@@ -38,7 +38,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::datatype` accepting inconsistent array sizes and unsupported variable-length
+  descriptor sizes. Truncation errors report the required byte extent for complex components and
+  enumeration value lists ([#1359](https://github.com/CramBL/hdf5-pure/pull/1359)).
 - Fixed `Dataset::datatype` accepting datatype messages with unsupported version numbers ([#1358](https://github.com/CramBL/hdf5-pure/pull/1358)).
+- Fixed `Dataset::datatype` rejecting valid version 1 compounds with variable-length members
+  that use two- or four-byte heap addresses ([#1359](https://github.com/CramBL/hdf5-pure/pull/1359)).
 - Fixed `Group::attrs` reporting an undefined address when a version 2 object header's
   continuation message is missing all or part of its length field ([#1333](https://github.com/CramBL/hdf5-pure/pull/1333)).
 - Fixed `Dataset::filter_pipeline` accepting set bits in positions 8 through 15 of the filter

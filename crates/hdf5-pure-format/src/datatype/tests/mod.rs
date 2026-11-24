@@ -710,9 +710,9 @@ fn compound_v1_rejects_overflow_in_base_array() {
     let buf = test_util::legacy_compound::raw_member(u32::MAX, 0, 1, 0, [1, 0, 0, 0], &base);
     assert_eq!(
         parse_datatype(&buf).unwrap_err(),
-        FormatError::CompoundArraySizeOverflow {
-            size: 4,
-            extent: u32::MAX,
+        FormatError::LengthTooLarge {
+            length: u64::from(u32::MAX) * 4,
+            length_size: DATATYPE_SIZE_BYTES,
         }
     );
 }

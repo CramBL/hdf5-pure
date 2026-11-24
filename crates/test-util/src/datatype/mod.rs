@@ -210,6 +210,13 @@ const COMMITTED: u8 = 2;
 // Section `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
 const DATATYPE_VERSION: u8 = 1;
 
+/// The width of the Size field in datatype message versions 1 through 5.
+///
+/// The header is defined in "The Datatype Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub const DATATYPE_SIZE_BYTES: u8 = 4;
+
 // `H5T__vlen_disk_write` writes a four-byte sequence count (H5Tvlen.c, HDF5 2.2.0).
 const SEQUENCE_COUNT_SIZE: u32 = 4;
 

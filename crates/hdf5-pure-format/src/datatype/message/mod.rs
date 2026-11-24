@@ -31,6 +31,7 @@ pub use self::codec::PreparedDatatype;
 pub(super) mod atomic;
 mod codec;
 mod compound_layout;
+pub(super) mod decode;
 
 /// A datatype message version from 1 through 5.
 ///
@@ -677,7 +678,7 @@ fn compatible_child(
 /// # Errors
 ///
 /// Returns [`FormatError::ZeroSizedDatatype`] if `size` is zero.
-fn positive_size(class: u8, size: u32) -> Result<NonZeroU32, FormatError> {
+pub(super) fn positive_size(class: u8, size: u32) -> Result<NonZeroU32, FormatError> {
     NonZeroU32::new(size).ok_or(FormatError::ZeroSizedDatatype { class })
 }
 

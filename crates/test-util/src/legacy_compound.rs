@@ -4,12 +4,17 @@ use crate::data_layout;
 use crate::dataspace;
 use crate::dataspace::Flags;
 use crate::datatype;
-use crate::datatype::Class;
+use crate::datatype::leaf::{self, Version};
+use crate::datatype::{Class, VariableLengthSequence};
 use crate::image::Image;
 use crate::legacy;
+use crate::link_info::{self, CreationIndex, Width};
+use crate::link_message::HardLink;
 use crate::object_header::Message;
 use crate::object_header::MessageType;
-use crate::object_header::v1;
+use crate::object_header::{v1, v2};
+use crate::superblock::v2::Superblock;
+use crate::widths::Widths;
 
 /// Builds a version 1 compound message with one member named `arr` from raw metadata.
 ///
@@ -47,6 +52,101 @@ pub fn array_member() -> Vec<u8> {
     base.extend_from_slice(&0u16.to_le_bytes());
     base.extend_from_slice(&32u16.to_le_bytes());
     raw_member(16, 0, 1, 0, [4, 0, 0, 0], &base)
+}
+
+/// The shape of a sequence member in a version 1 compound fixture.
+#[derive(Clone, Copy)]
+pub enum SequenceMemberShape {
+    /// A version 3 array of two sequences as the member datatype.
+    ExplicitArray,
+    /// Two sequences with their extent in the member's dimension block.
+    ImplicitArray,
+    /// One sequence with zero member dimensionality.
+    Scalar,
+}
+
+/// Builds a version 1 compound with a variable-length byte sequence member.
+///
+/// The compound ends at the member's last byte, using the descriptor size for `offset_width`.
+///
+/// # Panics
+///
+/// Panics if `offset_width` is other than 2, 4, or 8, or if the member end exceeds [`u32::MAX`].
+pub fn sequence_member(offset_width: usize, offset: u32, shape: SequenceMemberShape) -> Vec<u8> {
+    let element = leaf::unsigned_byte(Version::One);
+    let sequence = VariableLengthSequence::new(Version::One, offset_width, &element);
+    let descriptor_size = sequence.descriptor_size();
+    let sequence = sequence.build();
+    let element_count = match shape {
+        SequenceMemberShape::Scalar => 1,
+        SequenceMemberShape::ExplicitArray | SequenceMemberShape::ImplicitArray => 2,
+    };
+    let member_size = descriptor_size
+        .checked_mul(element_count)
+        .expect("two descriptors fit in a member");
+    let compound_size = offset
+        .checked_add(member_size)
+        .expect("the member end fits in the compound size field");
+    match shape {
+        SequenceMemberShape::ExplicitArray => {
+            let array = datatype::array(
+                Version::Three.get(),
+                [0; 3],
+                member_size,
+                1,
+                &[element_count],
+                &sequence,
+            );
+            raw_member(compound_size, offset, 0, 0, [0; 4], &array)
+        }
+        SequenceMemberShape::ImplicitArray => raw_member(
+            compound_size,
+            offset,
+            1,
+            0,
+            [element_count, 0, 0, 0],
+            &sequence,
+        ),
+        SequenceMemberShape::Scalar => raw_member(compound_size, offset, 0, 0, [0; 4], &sequence),
+    }
+}
+
+/// Builds an empty `value` dataset with a sequence member and two-byte offsets and lengths.
+pub fn narrow_sequence_file(shape: SequenceMemberShape) -> Vec<u8> {
+    let widths = Widths::new(2, 2);
+    let datatype = sequence_member(widths.offset, 0, shape);
+    let superblock = Superblock::new(widths);
+    let mut image = Image::starting_with(&vec![0; superblock.build().len()]);
+    let dataset = image.append(
+        &v2::Header::new()
+            .messages([
+                Message::new(
+                    MessageType::DATASPACE,
+                    &dataspace::VersionTwo::simple(widths, &[0], None).build(),
+                ),
+                Message::new(MessageType::DATATYPE, &datatype),
+                Message::new(MessageType::DATA_LAYOUT, &data_layout::compact(&[])),
+            ])
+            .build(),
+    );
+    let link_info = link_info::Body::new(Width::Two, None, None, None, CreationIndex::Absent)
+        .unwrap()
+        .build();
+    let link = HardLink::new("value", u64::try_from(dataset).unwrap()).build(widths);
+    let root = image.append(
+        &v2::Header::new()
+            .messages([
+                Message::new(MessageType::LINK_INFO, &link_info),
+                Message::new(MessageType::LINK, &link),
+            ])
+            .build(),
+    );
+    let superblock = superblock
+        .root_header_address(u64::try_from(root).unwrap())
+        .eof_address(u64::try_from(image.as_bytes().len()).unwrap())
+        .build();
+    image.place(0, &superblock);
+    image.build()
 }
 
 /// Builds `data` with one compound element whose `arr` member contains `[11, 22, 33, 44]`.

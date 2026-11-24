@@ -1,10 +1,13 @@
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
 use hdf5_pure::VariableLengthType;
+use hdf5_pure_core::FormatError;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
 use test_util::allocation;
 use test_util::datatype::Class;
+use test_util::datatype::containers::{self, EnumValue};
+use test_util::datatype::leaf::{Leaf, Version};
 
 #[rstest]
 #[case::atomic(Shape::Sequence(0))]
@@ -100,6 +103,52 @@ fn retained_compound_encoding_matches_fixture_and_retains_only_output() {
     eprintln!("{region}: {measured}");
     assert_eq!(measured.live_bytes, u64::try_from(expected.len()).unwrap());
     assert_eq!(bytes, expected);
+}
+
+#[test]
+fn unterminated_first_enum_name_does_not_allocate_members() {
+    let version = Version::Three.get();
+    let parent = Leaf::Integer.bytes(Version::One);
+    let valid = containers::enumeration(
+        version,
+        [1, 0, 0],
+        4,
+        &parent,
+        &[EnumValue {
+            name: b"field",
+            value: &0xf000_000fu32.to_be_bytes(),
+        }],
+    );
+    let ((message, consumed), control) =
+        allocation::measure("valid_enum_allocates_members", || {
+            format::DatatypeMessage::parse(&valid).unwrap()
+        });
+    assert!(control.blocks > 0, "{control}");
+    assert_eq!(consumed, valid.len());
+    assert_eq!(
+        message.serialize(format::OffsetWidth::Eight).unwrap(),
+        valid
+    );
+
+    let count = u16::MAX;
+    let mut bytes = valid;
+    bytes[1..3].copy_from_slice(&count.to_le_bytes());
+    let first_name = bytes.len() - b"field\0".len() - size_of::<u32>();
+    bytes.truncate(first_name);
+    bytes.resize(first_name + usize::from(count), b'a');
+
+    let (result, measured) = allocation::measure("unterminated_enum_name", || {
+        format::DatatypeMessage::parse(&bytes)
+    });
+    assert_eq!(
+        result.unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: bytes.len() + 1,
+            available: bytes.len(),
+        },
+    );
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.peak_bytes, 0, "{measured}");
 }
 
 #[derive(Clone, Copy, Debug)]

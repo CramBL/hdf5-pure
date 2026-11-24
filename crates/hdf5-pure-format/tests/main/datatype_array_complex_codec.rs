@@ -1,10 +1,10 @@
-use hdf5_pure_core::FormatError;
+use hdf5_pure_core::{Datatype, FixedPointType, FormatError, VariableLengthType};
 use hdf5_pure_format::__private::{
-    DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    self as format, DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
 use rstest::rstest;
-use test_util::datatype;
 use test_util::datatype::leaf::{self, Leaf, OpaqueTag, Order, VaxVersion, Version};
+use test_util::datatype::{self, Class, VariableLengthSequence};
 
 #[rstest]
 #[case::integer(Leaf::Integer, 4)]
@@ -85,6 +85,36 @@ fn datatype_array_complex_codecs_derive_nested_array_sizes_from_selected_width(
     );
 }
 
+#[test]
+fn semantic_parser_accepts_nested_arrays_with_two_byte_heap_addresses() {
+    let base = leaf::unsigned_byte(Version::One);
+    let sequence = VariableLengthSequence::new(Version::Three, 2, &base);
+    let size = sequence.descriptor_size();
+    let inner = datatype::array(
+        Version::Four.get(),
+        [0; 3],
+        size * 2,
+        1,
+        &[2],
+        &sequence.build(),
+    );
+    let body = datatype::array(Version::Five.get(), [0; 3], size * 6, 1, &[3], &inner);
+    let expected = Datatype::Array {
+        base_type: Box::new(Datatype::Array {
+            base_type: Box::new(Datatype::VariableLength(VariableLengthType::sequence(
+                Datatype::FixedPoint(FixedPointType::u8()),
+            ))),
+            dimensions: vec![2],
+        }),
+        dimensions: vec![3],
+    };
+
+    assert_eq!(
+        format::parse_datatype(&body).unwrap(),
+        (expected, body.len())
+    );
+}
+
 #[rstest]
 #[case::little(Leaf::Float(Order::Little))]
 #[case::big(Leaf::Float(Order::Big))]
@@ -154,22 +184,39 @@ fn datatype_array_complex_parser_rejects_array_flags(#[case] flags: [u8; 3], #[c
 }
 
 #[rstest]
-#[case::size(7, &[2], FormatError::InvalidDatatypeSize { class: 10, size: 7, expected: 8 })]
-#[case::zero_dimension(0, &[0], FormatError::ZeroSizedDatatype { class: 10 })]
-#[case::overflow(4, &[u32::MAX], FormatError::LengthTooLarge { length: u64::from(u32::MAX) * 4, length_size: 4 })]
-fn datatype_array_complex_parser_rejects_array_geometry(
+#[case::size(1, &[2], FormatError::InvalidDatatypeSize { class: Class::ARRAY.0, size: 1, expected: 2 })]
+#[case::zero_dimension(1, &[0], FormatError::ZeroSizedDatatype { class: Class::ARRAY.0 })]
+#[case::zero_size_and_dimension(0, &[0], FormatError::ZeroSizedDatatype { class: Class::ARRAY.0 })]
+#[case::overflow(1, &[u32::MAX, 2], FormatError::LengthTooLarge { length: u64::from(u32::MAX) * 2, length_size: datatype::DATATYPE_SIZE_BYTES })]
+fn datatype_parsers_reject_invalid_array_geometry(
     #[case] size: u32,
     #[case] dimensions: &[u32],
     #[case] expected: FormatError,
 ) {
     let bytes = datatype::array(
-        3,
+        Version::Three.get(),
         [0; 3],
         size,
-        1,
+        u8::try_from(dimensions.len()).unwrap(),
         dimensions,
-        &Leaf::Integer.bytes(Version::One),
+        &leaf::unsigned_byte(Version::One),
     );
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
+}
+
+#[test]
+fn datatype_parsers_reject_array_size_based_on_a_wider_descriptor() {
+    let base = leaf::unsigned_byte(Version::One);
+    let sequence = VariableLengthSequence::new(Version::Three, 2, &base);
+    let expected_size = sequence.descriptor_size() * 2;
+    let bytes = datatype::array(Version::Three.get(), [0; 3], 32, 1, &[2], &sequence.build());
+    let expected = FormatError::InvalidDatatypeSize {
+        class: Class::ARRAY.0,
+        size: 32,
+        expected: expected_size,
+    };
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
 }
 

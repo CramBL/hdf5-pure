@@ -6,28 +6,26 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
-use core::str;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    CharacterSet, ComplexType, CompoundMember, Datatype, DatatypeByteOrder, EnumMember,
-    FloatingPointType, FormatError, ReferenceType, StringPadding, VariableLengthType,
+    CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, EnumMember, FloatingPointType,
+    FormatError, ReferenceType, StringPadding, VariableLengthType,
 };
 
 use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
 use super::compound_layout::CompoundLayout;
+use super::decode::{self, Decoded, Layout, Member, Projection};
 use super::{DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion};
 use crate::bytes::{self, ByteCursor};
 use crate::codec::Encode;
 use crate::convert::Narrow;
-use crate::datatype::header::{Context, DatatypeClass, Header};
+use crate::datatype::header::{Context, Header};
 use crate::datatype::{
-    self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
-    COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
+    self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_HOMOGENEOUS_BIT, COMPOUND_CLASS,
     DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, REFERENCE_CLASS,
     VARIABLE_LENGTH_CLASS, VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE,
     VARIABLE_LENGTH_STRING, VariableLengthMetadata,
@@ -40,6 +38,8 @@ impl DatatypeMessage {
     /// Reads each complete eight-byte header before checking its version or class. Checks version
     /// before class, except in a complex datatype's parent, where it checks class first.
     /// Reads fixed-size atomic property blocks in full before checking class flags.
+    /// Acquires all array dimensions before reading the base datatype. Reads all enumeration
+    /// names before acquiring the complete stored value list.
     ///
     /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
     /// descriptions at versions 1 through 5, compounds, enumerations, and arrays at versions
@@ -50,8 +50,9 @@ impl DatatypeMessage {
     /// [`super::FloatingPointByteOrder::parse`].
     ///
     /// Variable-length descriptor sizes must be 10, 12, or 16 bytes, corresponding to heap
-    /// address widths of 2, 4, or 8 bytes. The parser checks array element sizes against the
-    /// recorded parent size and dimensions, and complex sizes against twice the component size.
+    /// address widths of 2, 4, or 8 bytes. The parser checks each array size against the stored
+    /// base size multiplied by the dimension extents, and each complex size against twice the
+    /// component size.
     /// Compound member bounds and overlaps are checked using their declared source sizes.
     /// A compound must have at least one member, with unique UTF-8 names.
     /// Enumerations have a fixed-point parent and at least one member, with nonempty, unique
@@ -66,7 +67,9 @@ impl DatatypeMessage {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. Returns
+    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. For an
+    /// incomplete dimension or value list, `expected` is the list's end offset from the start
+    /// of `data`, including in nested descriptions. Returns
     /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
     /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported
     /// class, including references.
@@ -78,15 +81,16 @@ impl DatatypeMessage {
     /// Returns [`FormatError::InvalidVariableLengthSize`] for an unsupported descriptor size,
     /// [`FormatError::DatatypeChildVersion`] if a parent has a higher version than its container,
     /// and [`FormatError::NestingDepthExceeded`] if the parent chain exceeds the nesting limit.
-    /// Returns [`FormatError::InvalidDatatypeSize`] if an array size differs from its properties,
-    /// and [`FormatError::LengthTooLarge`] if the array dimension product exceeds the size field.
+    /// Returns [`FormatError::ZeroSizedDatatype`] if an array dimension is zero,
+    /// [`FormatError::LengthTooLarge`] if the computed array size exceeds the size field, or
+    /// [`FormatError::InvalidDatatypeSize`] if the declared array size differs from the computed size.
     ///
     /// Returns [`FormatError::InvalidCompoundMemberCount`] for a compound without members,
     /// [`FormatError::DuplicateCompoundField`] for duplicate names, and
     /// [`FormatError::CompoundFieldOutOfBounds`] for a member outside its compound element.
     /// Returns [`FormatError::CompoundFieldOverlap`] for overlapping member ranges.
     /// Returns [`FormatError::UnsupportedDatatypeMemberEncoding`] if a member name is not
-    /// UTF-8, retaining the name's byte offset and the original [`str::Utf8Error`].
+    /// UTF-8, retaining the name's byte offset and the original [`core::str::Utf8Error`].
     ///
     /// Returns [`FormatError::EnumBaseNotInteger`] for a non-fixed-point enumeration parent,
     /// and [`FormatError::EnumBaseSizeMismatch`] if its size differs from the enumeration size.
@@ -94,6 +98,7 @@ impl DatatypeMessage {
     /// [`FormatError::EmptyEnumMemberName`] for an empty name,
     /// [`FormatError::DuplicateEnumMemberName`] for duplicate names, and
     /// [`FormatError::DuplicateEnumMemberValue`] for duplicate raw values.
+    /// Returns [`FormatError::AllocationFailed`] if an enumeration member reservation fails.
     /// Propagates checked range and platform-conversion errors when reading values.
     ///
     /// Returns [`FormatError::InvalidComplexFlags`] for reserved complex class bits,
@@ -121,135 +126,80 @@ impl DatatypeMessage {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
     pub fn parse(data: &[u8]) -> Result<(Self, usize), FormatError> {
-        let Parsed {
-            message,
-            end,
-            size: _,
-        } = Self::parse_at(data, Context::Description, 0, 0)?;
-        Ok((message, end))
+        let mut cursor = ByteCursor::new(data);
+        let decoded = Self::parse_at(&mut cursor, MessageDepth::ROOT)?;
+        Ok((decoded.datatype, cursor.position()))
     }
 
-    /// Parses a description and its declared element size at `position`.
-    ///
-    /// The returned end position is relative to `data`. Complex-parent class checks and
-    /// diagnostics are applied according to `context`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`parse`](Self::parse). The nesting limit includes `depth`
-    /// enclosing descriptions.
     fn parse_at(
-        data: &[u8],
-        context: Context,
-        position: usize,
-        depth: u8,
-    ) -> Result<Parsed, FormatError> {
-        if depth >= MAX_MESSAGE_DEPTH {
-            return Err(FormatError::NestingDepthExceeded);
-        }
-        let mut cursor = ByteCursor::with_position(data, position)?;
-        let header = Header::parse(&mut cursor, context)?;
-        let (properties, consumed) = match header.class {
-            DatatypeClass::Atomic(class) => {
+        cursor: &mut ByteCursor<'_>,
+        depth: MessageDepth,
+    ) -> Result<Decoded<Self>, FormatError> {
+        let header = Header::parse(cursor, Context::Description)?;
+        let properties = match Layout::from_header(&header, Projection::Retained)? {
+            Layout::Atomic(class) => {
                 let properties = class
                     .decode(
-                        &mut cursor,
+                        cursor,
                         header.fields(),
-                        context,
+                        Context::Description,
                         AtomicReservedFlagPolicy::Reject,
                     )?
                     .into_properties();
-                return Ok(Parsed {
-                    message: Self {
+                return Ok(Decoded {
+                    datatype: Self {
                         version: header.version,
                         properties,
                     },
-                    end: cursor.position(),
-                    size: header.size,
+                    stored_size: super::positive_size(header.class.code(), header.size)?,
                 });
             }
-            DatatypeClass::Compound => {
-                let count = header.modern_member_count()?;
-                super::positive_size(COMPOUND_CLASS, header.size)?;
-                let offset_bytes = datatype::offset_bytes_for_size(header.size);
+            Layout::Compound(compound) => {
                 let mut members = Vec::new();
                 let mut layout = CompoundLayout::new(header.size);
-                for _ in 0..count {
-                    let (name, end) = member_name(data, COMPOUND_CLASS, cursor.position())?;
-                    cursor = ByteCursor::with_position(data, end)?;
-                    let offset = cursor.uint(offset_bytes)?;
-                    let Parsed {
-                        message: datatype,
-                        end,
-                        size: field_size,
-                    } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
+                for _ in 0..compound.member_count() {
+                    let Member {
+                        name,
+                        offset,
+                        shape: _,
+                    } = compound.member(cursor)?;
+                    let Decoded {
+                        datatype,
+                        stored_size: field_size,
+                    } = Self::parse_at(cursor, depth.child()?)?;
                     let index = members.len();
                     members.push(DatatypeMessageMember::new(name, offset, datatype)?);
-                    layout.insert(&members, index, field_size)?;
-                    cursor = ByteCursor::with_position(data, end)?;
+                    layout.insert(&members, index, field_size.get())?;
                 }
-                (
-                    DatatypeProperties::Compound {
-                        size: header.size,
-                        members,
-                    },
-                    cursor.position(),
-                )
+                DatatypeProperties::Compound {
+                    size: header.size,
+                    members,
+                }
             }
-            DatatypeClass::Reference => {
-                return Err(FormatError::InvalidDatatypeClass(REFERENCE_CLASS));
-            }
-            DatatypeClass::Enumeration => {
-                let count = header.modern_member_count()?;
-                let Parsed {
-                    message: base_type,
-                    end,
-                    size: base_size,
-                } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
-                if !matches!(base_type.properties, DatatypeProperties::FixedPoint(_)) {
+            Layout::Reference => return Err(FormatError::InvalidDatatypeClass(REFERENCE_CLASS)),
+            Layout::Enumeration(enumeration) => {
+                let Decoded {
+                    datatype: base_type,
+                    stored_size: base_size,
+                } = Self::parse_at(cursor, depth.child()?)?;
+                let DatatypeProperties::FixedPoint(integer) = base_type.properties else {
                     return Err(FormatError::EnumBaseNotInteger);
-                }
-                if header.size != base_size {
+                };
+                if header.size != base_size.get() {
                     return Err(FormatError::EnumBaseSizeMismatch {
                         size: header.size,
-                        base_size,
+                        base_size: base_size.get(),
                     });
                 }
-                cursor = ByteCursor::with_position(data, end)?;
-                let mut names = Vec::new();
-                for _ in 0..count {
-                    let (name, end) = member_name(data, ENUMERATION_CLASS, cursor.position())?;
-                    names.push(name);
-                    cursor = ByteCursor::with_position(data, end)?;
+                DatatypeProperties::Enumeration {
+                    members: enumeration.members(cursor, integer.size())?,
+                    base_type: Box::new(base_type),
                 }
-                let value_size = base_size.to_usize()?;
-                let members = names
-                    .into_iter()
-                    .map(|name| {
-                        Ok(__private::enum_member(
-                            name,
-                            cursor.slice(value_size)?.to_vec(),
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, FormatError>>()?;
-                (
-                    DatatypeProperties::Enumeration {
-                        base_type: Box::new(base_type),
-                        members,
-                    },
-                    cursor.position(),
-                )
             }
-            DatatypeClass::VariableLength => {
-                let metadata = datatype::parse_variable_length_metadata(header.flags)?;
-                descriptor_width(header.size)?;
-                let Parsed {
-                    message: base_type,
-                    end: consumed,
-                    size: _,
-                } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
+            Layout::VariableLength(metadata) => {
+                let base_type = Self::parse_at(cursor, depth.child()?)?.datatype;
                 let base_type = Box::new(base_type);
-                let properties = match metadata {
+                match metadata {
                     VariableLengthMetadata::Sequence => {
                         DatatypeProperties::VariableLengthSequence { base_type }
                     }
@@ -260,81 +210,41 @@ impl DatatypeMessage {
                             base_type,
                         }
                     }
-                };
-                (properties, consumed)
+                }
             }
-            DatatypeClass::Array => {
-                header
-                    .version
-                    .for_class(ARRAY_CLASS, DatatypeVersion::Three)?;
-                header.reserved(ARRAY_RESERVED)?;
-                let rank = cursor.u8()?;
-                let dimensions = (0..rank)
-                    .map(|_| cursor.u32())
-                    .collect::<Result<Vec<_>, _>>()?;
-                let Parsed {
-                    message: base_type,
-                    end,
-                    size: base_size,
-                } = Self::parse_at(data, Context::Description, cursor.position(), depth + 1)?;
-                let expected = datatype::array_type_size(base_size, &dimensions)?;
-                if header.size != expected {
-                    return Err(FormatError::InvalidDatatypeSize {
-                        class: ARRAY_CLASS,
-                        size: header.size,
-                        expected,
-                    });
-                }
-                (
-                    DatatypeProperties::Array {
-                        base_type: Box::new(base_type),
-                        dimensions,
+            Layout::Array(array) => {
+                let dimensions = array.dimensions(cursor)?;
+                let Decoded {
+                    datatype: base_type,
+                    stored_size: base_size,
+                } = Self::parse_at(cursor, depth.child()?)?;
+                let stored_size = decode::array_size(header.size, base_size, &dimensions)?;
+                super::compatible_child(header.version, ARRAY_CLASS, &base_type)?;
+                return Ok(Decoded {
+                    datatype: Self {
+                        version: header.version,
+                        properties: DatatypeProperties::Array {
+                            base_type: Box::new(base_type),
+                            dimensions,
+                        },
                     },
-                    end,
-                )
+                    stored_size,
+                });
             }
-            DatatypeClass::Complex => {
-                header
-                    .version
-                    .for_class(COMPLEX_CLASS, DatatypeVersion::Five)?;
-                let flags = header.flag_bits();
-                if flags & COMPLEX_RESERVED_MASK != 0 {
-                    return Err(FormatError::InvalidComplexFlags(flags));
+            Layout::Complex(complex) => {
+                depth.child()?;
+                let (datatype, version) = complex.component(cursor)?;
+                DatatypeProperties::Complex {
+                    component: Box::new(Self {
+                        version,
+                        properties: DatatypeProperties::FloatingPoint(datatype.component()),
+                    }),
                 }
-                let homogeneous = header.flags[0] & COMPLEX_HOMOGENEOUS_BIT != 0;
-                let form = (header.flags[0] & COMPLEX_FORM_MASK) >> COMPLEX_FORM_SHIFT;
-                if !homogeneous || form != COMPLEX_RECTANGULAR_FORM {
-                    return Err(FormatError::UnsupportedComplexForm { homogeneous, form });
-                }
-                let Parsed {
-                    message: parent,
-                    end,
-                    size: _,
-                } = Self::parse_at(data, Context::ComplexParent, cursor.position(), depth + 1)?;
-                let DatatypeProperties::FloatingPoint(component) = parent.properties() else {
-                    return Err(FormatError::Internal(
-                        "a checked complex parent is not floating point".into(),
-                    ));
-                };
-                let complex = ComplexType::new(*component)?;
-                if header.size != complex.size().get() {
-                    return Err(FormatError::InvalidComplexSize {
-                        size: header.size,
-                        component_size: component.size().get(),
-                    });
-                }
-                (
-                    DatatypeProperties::Complex {
-                        component: Box::new(parent),
-                    },
-                    end,
-                )
             }
         };
-        Ok(Parsed {
-            message: Self::new(header.version, properties)?,
-            end: consumed,
-            size: header.size,
+        Ok(Decoded {
+            datatype: Self::new(header.version, properties)?,
+            stored_size: super::positive_size(header.class.code(), header.size)?,
         })
     }
 
@@ -1297,50 +1207,6 @@ impl MessageDepth {
     const ROOT: Self = Self(0);
 }
 
-impl Header {
-    /// Checks the class flags against a mask of reserved bits.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidDatatypeFlags`] if any masked bit is set.
-    fn reserved(&self, mask: u32) -> Result<(), FormatError> {
-        self.fields().reject_reserved_flags(self.class.code(), mask)
-    }
-
-    /// Parses the member count for the property layouts of versions 3 through 5.
-    ///
-    /// The layouts are defined in "The Datatype Message" of the [format specification,
-    /// version 4.0][spec].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidDatatypeVersion`] for versions 1 or 2, and
-    /// [`FormatError::InvalidDatatypeFlags`] if bits 16 through 23 are set.
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-    fn modern_member_count(&self) -> Result<u16, FormatError> {
-        let Self {
-            class,
-            version,
-            flags,
-            size: _,
-        } = self;
-        version.for_class(class.code(), DatatypeVersion::Three)?;
-        self.reserved(MEMBER_COUNT_RESERVED)?;
-        Ok(u16::from_le_bytes([flags[0], flags[1]]))
-    }
-}
-
-/// A checked description with its source end position and declared element size.
-struct Parsed {
-    /// The description, including retained versions at each node.
-    message: DatatypeMessage,
-    /// The first byte after this description within the input slice.
-    end: usize,
-    /// The element size from the source header, in bytes.
-    size: u32,
-}
-
 /// Encodes a checked member count in the low two class flag bytes.
 ///
 /// The count field is defined in "The Datatype Message" of the [format specification,
@@ -1358,63 +1224,6 @@ fn member_flags(count: usize) -> [u8; 3] {
     )]
     let [low, high] = (count as u16).to_le_bytes();
     [low, high, 0]
-}
-
-/// Parses an unpadded UTF-8 name and the position after its NUL terminator.
-///
-/// The unpadded NUL-terminated name field is defined in "The Datatype Message" of the
-/// [format specification, version 4.0][spec]. This representation requires UTF-8 text.
-///
-/// # Errors
-///
-/// Returns [`FormatError::UnexpectedEof`] if the terminator is missing, and
-/// [`FormatError::UnsupportedDatatypeMemberEncoding`] if the name is not UTF-8.
-/// The encoding error includes `class`, `position`, and the original [`str::Utf8Error`].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-fn member_name(data: &[u8], class: u8, position: usize) -> Result<(String, usize), FormatError> {
-    let rest = data.get(position..).ok_or(FormatError::UnexpectedEof {
-        expected: position.saturating_add(1),
-        available: data.len(),
-    })?;
-    let length = rest
-        .iter()
-        .position(|&byte| byte == 0)
-        .ok_or(FormatError::UnexpectedEof {
-            expected: data.len().saturating_add(1),
-            available: data.len(),
-        })?;
-    let bytes = rest.get(..length).ok_or_else(|| {
-        FormatError::Internal("a terminated member name exceeds its input".into())
-    })?;
-    let name =
-        str::from_utf8(bytes).map_err(|source| FormatError::UnsupportedDatatypeMemberEncoding {
-            class,
-            offset: position,
-            source,
-        })?;
-    let end = position
-        .checked_add(length)
-        .and_then(|end| end.checked_add(1))
-        .ok_or(FormatError::UnexpectedEof {
-            expected: usize::MAX,
-            available: data.len(),
-        })?;
-    Ok((String::from(name), end))
-}
-
-/// Parses the heap-address width from a variable-length descriptor size.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidVariableLengthSize`] if `size` is not 10, 12, or 16 bytes.
-fn descriptor_width(size: u32) -> Result<OffsetWidth, FormatError> {
-    let width = size
-        .checked_sub(datatype::SEQUENCE_LENGTH_SIZE + datatype::HEAP_INDEX_SIZE)
-        .ok_or(FormatError::InvalidVariableLengthSize { size })?;
-    let width =
-        u8::try_from(width).map_err(|_err| FormatError::InvalidVariableLengthSize { size })?;
-    OffsetWidth::try_from(width).map_err(|_err| FormatError::InvalidVariableLengthSize { size })
 }
 
 /// Encodes the padding code for fixed- and variable-length strings.
@@ -1555,22 +1364,6 @@ const UTF8_CHARSET: u8 = 1;
 
 /// The maximum number of descriptions on a parsing or serialization path.
 const MAX_MESSAGE_DEPTH: u8 = 64;
-
-/// The mask for reserved array class bits 0 through 23.
-///
-/// Array descriptions at versions 3 through 5 have no class flags, as defined in "The
-/// Datatype Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const ARRAY_RESERVED: u32 = 0xff_ffff;
-
-/// The mask for reserved compound and enumeration class bits 16 through 23.
-///
-/// The fields are defined in "The Datatype Message" of the [format specification,
-/// version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const MEMBER_COUNT_RESERVED: u32 = 0xff_0000;
 
 /// The object-reference kind for datatype message versions 1 through 3.
 ///
