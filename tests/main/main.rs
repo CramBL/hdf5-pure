@@ -28,6 +28,7 @@ mod csr_multi_dataset;
 mod dataset_access_properties;
 mod dataset_create_properties;
 mod datatype_decoding;
+mod datatype_geometry;
 mod decoded_chunk_size;
 mod dense_attr_limits;
 mod dense_attr_vlen;

@@ -179,13 +179,7 @@ impl Enumeration {
         declared_size: u32,
         value_width: NonZeroU32,
     ) -> Result<Vec<EnumMember>, FormatError> {
-        // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks that the sizes agree.
-        if declared_size != value_width.get() {
-            return Err(FormatError::EnumBaseSizeMismatch {
-                size: declared_size,
-                base_size: value_width.get(),
-            });
-        }
+        super::check_enum_base_size(declared_size, value_width.get())?;
         let count = usize::from(self.0.count);
         let mut members = Vec::new();
         for index in 0..count {

@@ -38,9 +38,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `FileBuilder::finish_to` writing compounds with overlapping members and enumerations
+  whose declared size differs from their base datatype's stored size ([#1362](https://github.com/CramBL/hdf5-pure/pull/1362)).
 - Fixed `Dataset::datatype` accepting overlapping compound members, out-of-bounds members
   in version 2 and later compound messages, and enumerations whose declared size differs
-  from their base datatype's stored size.
+  from their base datatype's stored size ([#1362](https://github.com/CramBL/hdf5-pure/pull/1362)).
 - Fixed `Dataset::chunks` and related metadata reads reporting signature or version errors for
   truncated version 2 B-tree headers and accepting headers with incomplete checksum fields when
   checksum verification was disabled ([#1361](https://github.com/CramBL/hdf5-pure/pull/1361)).

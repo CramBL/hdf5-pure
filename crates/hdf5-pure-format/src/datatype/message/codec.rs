@@ -10,6 +10,8 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
+use core::num::NonZeroU32;
+use core::slice;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
@@ -262,13 +264,14 @@ impl DatatypeMessage {
     ///
     /// Serializes the classes accepted by [`parse`](Self::parse). The writer derives each
     /// variable-length descriptor size from `offset_width`, including nested descriptions.
-    /// Array sizes are derived from the encoded parent size and dimensions at that width.
+    /// The writer computes each array size from the dimensions and the base datatype's stored
+    /// element size at that width.
     /// Atomic element sizes are independent of it. Enumeration sizes are derived from the
     /// encoded integer parent. The writer appends unpadded, NUL-terminated names, followed
     /// by the raw values in the same member order. Values retain their stored bytes.
     /// Compound sizes and member offsets are retained. The writer checks member bounds and
-    /// overlaps using their encoded sizes at that width and writes each UTF-8 name with a NUL
-    /// terminator.
+    /// overlaps using the stored member sizes at that width and writes each UTF-8 name with a
+    /// NUL terminator.
     /// Member offsets occupy the minimum number of bytes needed for the compound size.
     /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
     ///
@@ -285,8 +288,9 @@ impl DatatypeMessage {
     /// compatibility and calculating the stored element size. Returns
     /// [`FormatError::CompoundFieldOutOfBounds`] if a member exceeds its compound element
     /// at `offset_width`, and [`FormatError::CompoundFieldOverlap`] if members overlap at that
-    /// width. Returns [`FormatError::OffsetOverflow`] if the message body would exceed
-    /// [`isize::MAX`] bytes.
+    /// width. Returns [`FormatError::AllocationFailed`] if allocation for computed array or
+    /// complex sizes fails, or [`FormatError::OffsetOverflow`] if the message body would
+    /// exceed [`isize::MAX`] bytes.
     ///
     /// # Examples
     ///
@@ -435,7 +439,8 @@ impl DatatypeMessage {
 #[derive(Debug)]
 pub struct PreparedDatatype<'a> {
     description: Description<'a>,
-    offset_width: OffsetWidth,
+    descriptor_size: u32,
+    computed_sizes: Vec<u32>,
     len: usize,
 }
 
@@ -443,10 +448,12 @@ impl<'a> PreparedDatatype<'a> {
     /// Prepares a datatype message with canonical versions and the file's offset width.
     ///
     /// Counts the encoded bytes without allocating an output buffer. Uses `offset_width` to size
-    /// variable-length descriptors at every level. The writer uses at least version 3 for
-    /// compounds, enumerations, and arrays, and at least version 1 for variable-length
-    /// descriptions. The writer raises each container's version to the highest child version
-    /// when necessary.
+    /// variable-length descriptors at every level. Checks compound member ranges at that width
+    /// and compares each enumeration's declared size with its base datatype's stored size.
+    ///
+    /// The writer uses at least version 3 for compounds, enumerations, and arrays, and at least
+    /// version 1 for variable-length descriptions. The writer raises each container's version
+    /// to the highest child version when necessary.
     /// See [`datatype::serialize_datatype`] for the canonical encoding rules.
     ///
     /// # Errors
@@ -457,8 +464,13 @@ impl<'a> PreparedDatatype<'a> {
     ///
     /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte size field,
     /// [`FormatError::ValueTooLargeForRepresentation`] if an array rank or member count exceeds
-    /// its encoded field, or [`FormatError::CompoundFieldOutOfBounds`] if a member extends past
-    /// the declared record size.
+    /// its encoded field, or [`FormatError::AllocationFailed`] if allocation for computed
+    /// array sizes fails.
+    ///
+    /// Returns [`FormatError::CompoundFieldOutOfBounds`] if a member extends past the end of
+    /// its compound element, [`FormatError::CompoundFieldOverlap`] if nonempty member ranges
+    /// overlap, or [`FormatError::EnumBaseSizeMismatch`] if an enumeration's declared size
+    /// differs from its base datatype's stored size.
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the message body would exceed [`isize::MAX`]
     /// bytes, or [`FormatError::Internal`] for a datatype or reference kind without a canonical
@@ -471,15 +483,19 @@ impl<'a> PreparedDatatype<'a> {
         description: Description<'a>,
         offset_width: OffsetWidth,
     ) -> Result<Self, FormatError> {
+        let descriptor_size = variable_length_size(offset_width);
         let mut preparation = Preparation {
             len: 0,
             offset_width,
+            descriptor_size,
+            computed_sizes: Vec::new(),
         };
         let depth = description.version().map(|_| MessageDepth::ROOT);
         description.prepare(&mut preparation, depth)?;
         Ok(Self {
             description,
-            offset_width,
+            descriptor_size,
+            computed_sizes: preparation.computed_sizes,
             len: preparation.len,
         })
     }
@@ -491,7 +507,7 @@ impl<'a> PreparedDatatype<'a> {
 
     /// Writes the entire body to the start of `output` and returns the number of bytes written.
     ///
-    /// Leaves bytes after the body untouched.
+    /// Writes without allocating and leaves bytes after the body untouched.
     ///
     /// # Errors
     ///
@@ -537,13 +553,17 @@ impl<'a> PreparedDatatype<'a> {
     pub(crate) fn write_body(&self, bytes: &mut [u8]) {
         let Self {
             description,
-            offset_width,
+            descriptor_size,
+            computed_sizes,
             len: _,
         } = self;
-        description.write(&mut Output {
+        let mut output = Output {
             bytes,
-            offset_width: *offset_width,
-        });
+            descriptor_size: *descriptor_size,
+            computed_sizes: computed_sizes.iter(),
+        };
+        description.write(&mut output);
+        debug_assert!(output.computed_sizes.as_slice().is_empty());
     }
 }
 
@@ -835,17 +855,20 @@ impl ContainerProperties<'_> {
             } => {
                 check_member_count(members.len(), child_depth.is_some())?;
                 let parent_size = base_type.prepare(preparation, child_depth)?;
+                if let Some(size) = declared_size {
+                    super::check_enum_base_size(*size, parent_size)?;
+                }
                 for member in *members {
                     let (name, value) = __private::enum_member_parts(member);
                     preparation.add(1)?;
                     preparation.add(name.len())?;
                     preparation.add(value.len())?;
                 }
-                Ok(declared_size.unwrap_or(parent_size))
+                Ok(parent_size)
             }
             Self::VariableLength { base_type, .. } => {
                 base_type.prepare(preparation, child_depth)?;
-                Ok(variable_length_size(preparation.offset_width))
+                Ok(preparation.descriptor_size)
             }
             Self::Array {
                 base_type,
@@ -863,15 +886,21 @@ impl ContainerProperties<'_> {
                 })?;
                 preparation.add(1 + usize::from(rank) * size_of::<u32>())?;
                 let parent_size = base_type.prepare(preparation, child_depth)?;
-                datatype::array_type_size(parent_size, dimensions)
+                let size = datatype::array_type_size(parent_size, dimensions)?;
+                preparation.record_size(size)?;
+                Ok(size)
             }
             Self::Complex { component, size } => {
                 let component_size = component.prepare(preparation, child_depth)?;
                 match size {
                     Some(size) => Ok(*size),
-                    None => component_size
-                        .checked_mul(2)
-                        .ok_or(FormatError::ComplexSizeOverflow { component_size }),
+                    None => {
+                        let size = component_size
+                            .checked_mul(2)
+                            .ok_or(FormatError::ComplexSizeOverflow { component_size })?;
+                        preparation.record_size(size)?;
+                        Ok(size)
+                    }
                 }
             }
         }
@@ -900,7 +929,7 @@ impl ContainerProperties<'_> {
             Self::Enumeration {
                 base_type,
                 members,
-                declared_size,
+                declared_size: _,
             } => {
                 let child = base_type.write(output);
                 for member in *members {
@@ -917,7 +946,7 @@ impl ContainerProperties<'_> {
                     DatatypeVersion::Three,
                     child.version,
                     member_flags(members.len()),
-                    declared_size.unwrap_or(child.size),
+                    child.size,
                 )
             }
             Self::VariableLength { base_type, string } => {
@@ -936,7 +965,7 @@ impl ContainerProperties<'_> {
                     DatatypeVersion::One,
                     child.version,
                     flags,
-                    variable_length_size(output.offset_width),
+                    output.descriptor_size,
                 )
             }
             Self::Array {
@@ -949,21 +978,16 @@ impl ContainerProperties<'_> {
                 )]
                 let rank = dimensions.len() as u8;
                 output.write(&[rank]);
-                let mut elements = 1u32;
                 for &dimension in *dimensions {
                     output.write(&dimension.to_le_bytes());
-                    elements = elements.wrapping_mul(dimension);
                 }
                 let child = base_type.write(output);
-                // Preparation establishes the product fits. A zero factor still gives an exact
-                // zero even when an earlier dimension product wraps.
-                let size = child.size.wrapping_mul(elements);
                 (
                     ARRAY_CLASS,
                     DatatypeVersion::Three,
                     child.version,
                     [0; 3],
-                    size,
+                    output.next_size(),
                 )
             }
             Self::Complex { component, size } => {
@@ -973,7 +997,7 @@ impl ContainerProperties<'_> {
                     DatatypeVersion::Five,
                     child.version,
                     [COMPLEX_HOMOGENEOUS_BIT, 0, 0],
-                    size.unwrap_or_else(|| child.size * 2),
+                    size.unwrap_or_else(|| output.next_size()),
                 )
             }
         };
@@ -1015,79 +1039,26 @@ impl CompoundMembers<'_> {
         child_depth: Option<MessageDepth>,
     ) -> Result<(), FormatError> {
         let width = datatype::offset_bytes_for_size(size);
-        match self {
-            Self::Canonical(members) => {
-                for member in *members {
-                    Self::prepare_canonical_member(preparation, size, width, member)?;
+        let mut layout = CompoundLayout::new(size);
+        for index in 0..self.len() {
+            let (name, offset, child) = self.member(index);
+            preparation.add_member_prefix(name, width)?;
+            let field_size = match child.prepare(preparation, child_depth) {
+                Ok(size) => size,
+                Err(error) => {
+                    // Check the canonical member's bounds before returning its preparation error.
+                    if let Description::Canonical(datatype) = child {
+                        let size = datatype::stored_type_size(datatype, preparation.offset_width)?;
+                        layout.member_end(offset, size, || Ok(name))?;
+                    }
+                    return Err(error);
                 }
+            };
+            if let Some(field_size) = NonZeroU32::new(field_size) {
+                layout.insert(offset, field_size, index, |index| self.member_name(index))?;
+            } else {
+                layout.member_end(offset, field_size, || Ok(name))?;
             }
-            Self::Preserved(members) => {
-                let mut layout = CompoundLayout::new(size);
-                for (index, member) in members.iter().enumerate() {
-                    let DatatypeMessageMember {
-                        name,
-                        byte_offset,
-                        datatype,
-                    } = member;
-                    preparation.add_member_prefix(name, width)?;
-                    let child_size =
-                        Description::Preserved(datatype).prepare(preparation, child_depth)?;
-                    let child_size = super::positive_size(datatype.properties.class(), child_size)?;
-                    layout.insert(*byte_offset, child_size, index, |index| {
-                        members.get(index).map(|member| member.name.as_str())
-                    })?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn prepare_canonical_member(
-        preparation: &mut Preparation,
-        compound_size: u32,
-        offset_bytes: usize,
-        member: &CompoundMember,
-    ) -> Result<(), FormatError> {
-        let (name, offset, datatype) = __private::compound_member_parts(member);
-        let width = preparation.offset_width;
-        let child = Description::Canonical(datatype);
-        if !matches!(datatype, Datatype::Array { .. }) {
-            let field_size = datatype::stored_type_size(datatype, width)?;
-            Self::check_member_range(compound_size, name, offset, field_size)?;
-            preparation.add_member_prefix(name, offset_bytes)?;
-            child.prepare(preparation, None)?;
-            return Ok(());
-        }
-
-        preparation.add_member_prefix(name, offset_bytes)?;
-        let prepared_size = child.prepare(preparation, None);
-        // On a child error, check the stored array size and member bounds before returning
-        // the child error.
-        let field_size = match &prepared_size {
-            Ok(size) => *size,
-            Err(_) => datatype::stored_type_size(datatype, width)?,
-        };
-        Self::check_member_range(compound_size, name, offset, field_size)?;
-        prepared_size?;
-        Ok(())
-    }
-
-    fn check_member_range(
-        compound_size: u32,
-        name: &str,
-        offset: u64,
-        field_size: u32,
-    ) -> Result<(), FormatError> {
-        if offset
-            .checked_add(u64::from(field_size))
-            .is_none_or(|end| end > u64::from(compound_size))
-        {
-            return Err(FormatError::CompoundFieldOutOfBounds {
-                name: name.into(),
-                offset,
-                field_size,
-                compound_size,
-            });
         }
         Ok(())
     }
@@ -1113,6 +1084,13 @@ impl CompoundMembers<'_> {
                 } = &members[index];
                 (name, *byte_offset, Description::Preserved(datatype))
             }
+        }
+    }
+
+    fn member_name(&self, index: usize) -> Option<&str> {
+        match self {
+            Self::Canonical(members) => members.get(index).map(|member| member.name.as_str()),
+            Self::Preserved(members) => members.get(index).map(|member| member.name.as_str()),
         }
     }
 }
@@ -1149,13 +1127,31 @@ impl NodeHeader {
     }
 }
 
-/// The encoded extent counted so far at the selected offset width.
+/// The body length and stored sizes computed at the selected offset width.
 struct Preparation {
     len: usize,
     offset_width: OffsetWidth,
+    descriptor_size: u32,
+    computed_sizes: Vec<u32>,
 }
 
 impl Preparation {
+    /// Records the element size of an array or a complex description with a retained version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AllocationFailed`] if reserving space for the size fails.
+    fn record_size(&mut self, size: u32) -> Result<(), FormatError> {
+        self.computed_sizes
+            .try_reserve(1)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: self.computed_sizes.len() + 1,
+                source,
+            })?;
+        self.computed_sizes.push(size);
+        Ok(())
+    }
+
     fn add_member_prefix(&mut self, name: &str, offset_bytes: usize) -> Result<(), FormatError> {
         self.add(name.len())?;
         self.add(1 + offset_bytes)
@@ -1174,10 +1170,11 @@ impl Preparation {
     }
 }
 
-/// The unwritten suffix of the body and the offset width used to size variable-length descriptors.
+/// The unwritten suffix of the body and the sizes selected during preparation.
 pub(super) struct Output<'a> {
     bytes: &'a mut [u8],
-    offset_width: OffsetWidth,
+    descriptor_size: u32,
+    computed_sizes: slice::Iter<'a, u32>,
 }
 
 impl<'a> Output<'a> {
@@ -1194,6 +1191,19 @@ impl<'a> Output<'a> {
 
     pub(super) fn write(&mut self, bytes: &[u8]) {
         self.take(bytes.len()).copy_from_slice(bytes);
+    }
+
+    /// Returns the next prepared element size in child-before-parent order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the writer has consumed every prepared size.
+    #[expect(
+        clippy::expect_used,
+        reason = "preparation records computed sizes in the same child-before-parent order"
+    )]
+    fn next_size(&mut self) -> u32 {
+        *self.computed_sizes.next().expect("a prepared size exists")
     }
 }
 
