@@ -80,6 +80,28 @@ fn prepared_nested_datatype_checks_capacity_before_writing(
     assert_prepared_capacity(&wrapper.wrap(semantic), width, &expected);
 }
 
+#[rstest]
+fn prepared_nested_array_datatype_checks_capacity_before_writing(
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+) {
+    let parent = Parent::Sequence;
+    let source = parent.bytes(OffsetWidth::Eight, true);
+    let semantic = DatatypeMessage::parse(&source)
+        .unwrap()
+        .0
+        .to_datatype()
+        .unwrap();
+    let array = Wrapper::Array.bytes(
+        width,
+        &parent.bytes(width, false),
+        parent.size(width),
+        parent.version(false),
+    );
+    let expected = Wrapper::Array.bytes(width, &array, parent.size(width) * 6, Version::Three);
+    let datatype = Wrapper::Array.wrap(Wrapper::Array.wrap(semantic));
+    assert_prepared_capacity(&datatype, width, &expected);
+}
+
 fn assert_prepared_capacity(datatype: &Datatype, width: OffsetWidth, expected: &[u8]) {
     let prepared = format::PreparedDatatype::new(datatype, width).unwrap();
     assert_eq!(prepared.encoded_size(), expected.len());
@@ -91,7 +113,7 @@ fn assert_prepared_capacity(datatype: &Datatype, width: OffsetWidth, expected: &
     let guard = 0xa5;
     let mut storage = Aligned([guard; 128]);
     let output = &mut storage.0[..expected.len() + 3];
-    for available in [0, expected.len() - 1] {
+    for available in 0..expected.len() {
         assert_eq!(
             prepared
                 .write_into(&mut output[1..1 + available])
@@ -281,16 +303,13 @@ fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
             },
         ],
     );
-    assert_eq!(
-        format::serialize_datatype_with_offset_width(&datatype, width).unwrap(),
-        expected
-    );
+    assert_prepared_capacity(&datatype, width, &expected);
 }
 
 #[rstest]
 #[case::zero(0)]
 #[case::mismatched(7)]
-fn datatype_canonical_enumeration_preserves_supplied_model_size_and_value_width(
+fn datatype_canonical_enumeration_rejects_a_size_different_from_its_integer_parent(
     #[case] size: u32,
     #[values(Wrapper::Array, Wrapper::Compound, Wrapper::Sequence)] wrapper: Wrapper,
     #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
@@ -304,25 +323,10 @@ fn datatype_canonical_enumeration_preserves_supplied_model_size_and_value_width(
     let datatype = Datatype::Enumeration {
         size,
         base_type: Box::new(base),
-        members: vec![__private::enum_member("raw".into(), vec![1, 2])],
+        members: vec![__private::enum_member("raw".into(), vec![1, 2, 3, 4])],
     };
-    let enumeration = containers::enumeration(
-        Version::Three.get(),
-        [1, 0, 0],
-        size,
-        &source,
-        &[EnumValue {
-            name: b"raw",
-            value: &[1, 2],
-        }],
-    );
-    let expected = wrapper.bytes(width, &enumeration, size, Version::Three);
     assert_eq!(
-        format::serialize_datatype_with_offset_width(&wrapper.wrap(datatype), width).unwrap(),
-        expected
-    );
-    assert_eq!(
-        DatatypeMessage::parse(&enumeration).unwrap_err(),
+        format::serialize_datatype_with_offset_width(&wrapper.wrap(datatype), width).unwrap_err(),
         FormatError::EnumBaseSizeMismatch { size, base_size: 4 }
     );
 }

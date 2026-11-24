@@ -45,24 +45,13 @@ impl CompoundLayout {
         index: usize,
         member_name: impl Fn(usize) -> Option<&'a str>,
     ) -> Result<(), FormatError> {
-        let Self { size, extents } = self;
         let name = |index| {
             member_name(index).ok_or_else(|| {
                 FormatError::Internal("a compound layout refers to a missing member".into())
             })
         };
-        // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks the member bounds.
-        let Some(end) = offset
-            .checked_add(u64::from(field_size.get()))
-            .filter(|&end| end <= u64::from(*size))
-        else {
-            return Err(FormatError::CompoundFieldOutOfBounds {
-                name: name(index)?.into(),
-                offset,
-                field_size: field_size.get(),
-                compound_size: *size,
-            });
-        };
+        let end = self.member_end(offset, field_size.get(), || name(index))?;
+        let extents = &mut self.extents;
         let conflict = if let Some((_, previous)) = extents.range(..=offset).next_back()
             && previous.end > offset
         {
@@ -82,6 +71,35 @@ impl CompoundLayout {
         }
         extents.insert(offset, MemberExtent { end, index });
         Ok(())
+    }
+
+    /// Returns the exclusive end of a member within the compound element.
+    ///
+    /// For a zero-sized member, returns `offset` if it is at or before the end of the element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::CompoundFieldOutOfBounds`] if the member exceeds the element.
+    /// Calls `name` only to report this error and propagates any error from that call.
+    pub(super) fn member_end<'a>(
+        &self,
+        offset: u64,
+        field_size: u32,
+        name: impl FnOnce() -> Result<&'a str, FormatError>,
+    ) -> Result<u64, FormatError> {
+        // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks the member bounds.
+        let Some(end) = offset
+            .checked_add(u64::from(field_size))
+            .filter(|&end| end <= u64::from(self.size))
+        else {
+            return Err(FormatError::CompoundFieldOutOfBounds {
+                name: name()?.into(),
+                offset,
+                field_size,
+                compound_size: self.size,
+            });
+        };
+        Ok(end)
     }
 }
 

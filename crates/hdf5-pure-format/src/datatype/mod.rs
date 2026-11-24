@@ -366,13 +366,12 @@ fn parse_nested_datatype(
 /// bytes, recording that complete property length in the class bit field. Writes an empty tag
 /// with a zero-length property. Preserves non-ASCII tag bytes.
 ///
-/// Sizes variable-length descriptors for an eight-byte offset width at every level.
-/// Computes array sizes while encoding their base types.
+/// Sizes variable-length descriptors for an eight-byte offset width at every level. Checks
+/// compound member ranges and computes array sizes from the stored element sizes at that width.
 ///
 /// Canonical serialization accepts empty compound or enumeration member sets and zero
-/// array extents. Enumeration serialization retains the supplied model size and raw value
-/// bytes. The checked [`message::DatatypeMessage`] codec requires nonempty member sets,
-/// nonzero element sizes, and enumeration values matching their integer parent's width.
+/// array extents. An enumeration's declared size must match its base datatype's stored size.
+/// Writes enumeration value bytes as supplied.
 ///
 /// # Errors
 ///

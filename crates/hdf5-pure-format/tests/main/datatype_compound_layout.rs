@@ -6,6 +6,7 @@ use hdf5_pure_format::__private::{
 use rstest::rstest;
 use test_util::datatype;
 use test_util::datatype::containers::{self, CompoundField, MemberOffset};
+use test_util::datatype::leaf::Version;
 
 #[rstest]
 #[case::same_start(4, 4, 4, 4, "left", "right")]
@@ -99,10 +100,17 @@ fn compound_layout_preserves_disjoint_members_and_record_order(#[case] spans: &[
     .unwrap();
     let [low, high] = u16::try_from(spans.len()).unwrap().to_le_bytes();
     let bytes = containers::compound(3, [low, high, 0], 32, MemberOffset::One, &fields);
+    let semantic = expected.to_datatype().unwrap();
     assert_eq!(expected.serialize(OffsetWidth::Eight).unwrap(), bytes);
     assert_eq!(
+        format::PreparedDatatype::new(&semantic, OffsetWidth::Eight)
+            .unwrap()
+            .to_bytes(),
+        bytes
+    );
+    assert_eq!(
         format::parse_datatype(&bytes).unwrap(),
-        (expected.to_datatype().unwrap(), bytes.len())
+        (semantic, bytes.len())
     );
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap(),
@@ -119,9 +127,10 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
     #[case] size: u32,
 ) {
     let parent = datatype::fixed_string(1);
-    let low = datatype::variable_length(3, [0; 3], 10, &parent);
-    let middle = datatype::variable_length(3, [0; 3], 12, &parent);
-    let high = datatype::variable_length(3, [0; 3], 16, &parent);
+    let version = Version::One.get();
+    let low = datatype::variable_length(version, [0; 3], 10, &parent);
+    let middle = datatype::variable_length(version, [0; 3], 12, &parent);
+    let high = datatype::variable_length(version, [0; 3], 16, &parent);
     let (low, middle, high) = if array {
         (
             datatype::array(3, [0; 3], 20, 1, &[2], &low),
@@ -205,6 +214,16 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
     assert_eq!(DatatypeMessage::parse(&high).unwrap_err(), expected);
     assert_eq!(format::parse_datatype(&high).unwrap_err(), expected);
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap_err(), expected);
+    let semantic = message.to_datatype().unwrap();
+    for (width, bytes) in [(OffsetWidth::Two, &low), (OffsetWidth::Four, &middle)] {
+        let prepared = format::PreparedDatatype::new(&semantic, width).unwrap();
+        assert_eq!(prepared.encoded_size(), bytes.len());
+        assert_eq!(&prepared.to_bytes(), bytes);
+    }
+    assert_eq!(
+        format::PreparedDatatype::new(&semantic, OffsetWidth::Eight).unwrap_err(),
+        expected,
+    );
     let outer = DatatypeMessage::new(
         DatatypeVersion::Three,
         DatatypeProperties::Compound {

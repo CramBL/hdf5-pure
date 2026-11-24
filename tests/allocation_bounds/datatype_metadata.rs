@@ -18,7 +18,7 @@ use test_util::datatype::leaf::{Leaf, Version};
 #[case::array_depth_64(Shape::Array(64))]
 #[case::array_depth_256(Shape::Array(256))]
 #[case::wide_compound(Shape::Compound(256))]
-fn canonical_datatype_encoding_allocates_only_for_owned_output(#[case] shape: Shape) {
+fn canonical_datatype_encoding_has_bounded_allocations(#[case] shape: Shape) {
     let datatype = shape.datatype();
     let names = match &datatype {
         Datatype::Compound { members, .. } => members
@@ -53,10 +53,7 @@ fn canonical_datatype_encoding_allocates_only_for_owned_output(#[case] shape: Sh
     assert_eq!(encoded, expected);
     assert_eq!(encoded.len(), shape.encoded_len());
     let length = u64::try_from(expected.len()).unwrap();
-    assert_eq!(measured.blocks, 1, "{measured}");
-    assert_eq!(measured.bytes, length, "{measured}");
     assert_eq!(measured.live_bytes, length, "{measured}");
-    assert_eq!(measured.peak_bytes, length, "{measured}");
     assert!(
         measured.blocks < control_metrics.blocks,
         "{measured}; {control_metrics}"
@@ -69,12 +66,37 @@ fn canonical_datatype_encoding_allocates_only_for_owned_output(#[case] shape: Sh
         assert!(copied >= length * depth as u64 / 3);
     }
 
+    let (prepared, preparation) = allocation::measure(&format!("{region}_prepare"), || {
+        format::PreparedDatatype::new(&datatype, format::OffsetWidth::Eight).unwrap()
+    });
+    match shape {
+        Shape::Sequence(_) => {
+            assert_eq!(preparation.blocks, 0, "{preparation}");
+            assert_eq!(measured.blocks, 1, "{measured}");
+            assert_eq!(measured.peak_bytes, length, "{measured}");
+        }
+        Shape::Array(depth) => {
+            let size_table = u64::try_from(depth * size_of::<u32>()).unwrap();
+            assert!(
+                preparation.blocks <= u64::from(depth.ilog2() + 1),
+                "{preparation}"
+            );
+            assert!(preparation.bytes <= 2 * size_table, "{preparation}");
+            assert!(preparation.live_bytes <= size_table, "{preparation}");
+            assert!(measured.peak_bytes <= length + size_table, "{measured}");
+        }
+        Shape::Compound(width) => {
+            let width = u64::try_from(width).unwrap();
+            assert!(preparation.blocks < width, "{preparation}");
+            assert!(preparation.bytes <= 64 * width, "{preparation}");
+            assert_eq!(preparation.live_bytes, 0, "{preparation}");
+            assert!(measured.peak_bytes <= length.max(64 * width), "{measured}");
+        }
+    }
+
     let mut destination = vec![0xa5; expected.len()];
     let (written, measured) = allocation::measure(&format!("{region}_bounded"), || {
-        format::PreparedDatatype::new(&datatype, format::OffsetWidth::Eight)
-            .unwrap()
-            .write_into(&mut destination)
-            .unwrap()
+        prepared.write_into(&mut destination).unwrap()
     });
     assert_eq!(measured.blocks, 0, "{measured}");
     assert_eq!(measured.bytes, 0, "{measured}");

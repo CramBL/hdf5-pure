@@ -695,6 +695,19 @@ pub(super) fn positive_size(class: u8, size: u32) -> Result<NonZeroU32, FormatEr
     NonZeroU32::new(size).ok_or(FormatError::ZeroSizedDatatype { class })
 }
 
+/// Checks a declared enumeration size against its base datatype's stored size.
+///
+/// # Errors
+///
+/// Returns [`FormatError::EnumBaseSizeMismatch`] if the sizes differ.
+fn check_enum_base_size(size: u32, base_size: u32) -> Result<(), FormatError> {
+    // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks that the sizes agree.
+    if size != base_size {
+        return Err(FormatError::EnumBaseSizeMismatch { size, base_size });
+    }
+    Ok(())
+}
+
 /// Converts a compound member count to a positive two-byte count.
 ///
 /// `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 2.2.0, rejects zero compound members.

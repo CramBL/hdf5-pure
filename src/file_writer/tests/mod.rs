@@ -66,6 +66,37 @@ fn compact_group_writer_emits_prepared_links_in_record_order() {
     assert_eq!(bytes, expected);
 }
 
+#[test]
+fn inline_attribute_writer_rejects_mismatched_enumeration_datatype_size_before_output() {
+    let mut writer = FileWriter::new();
+    let mut message = type_builders::build_attr_message("invalid", &AttrValue::U8(1)).unwrap();
+    let mut datatype = crate::EnumTypeBuilder::u8_based()
+        .u8_value("first", 1)
+        .build()
+        .unwrap();
+    let Datatype::Enumeration { size, .. } = &mut datatype else {
+        panic!("expected an enumeration datatype");
+    };
+    *size = 2;
+    message.datatype = datatype;
+    message.raw_data.push(0);
+    writer.set_root_attr_verbatim(message, None);
+
+    let mut destination = b"previous bytes".to_vec();
+    let error = writer
+        .finish_to_sink(&mut destination)
+        .unwrap_err()
+        .into_format();
+    assert_eq!(
+        error,
+        FormatError::EnumBaseSizeMismatch {
+            size: 2,
+            base_size: 1,
+        },
+    );
+    assert_eq!(destination, b"previous bytes");
+}
+
 #[rstest]
 #[case::unbounded(None)]
 #[case::v18(Some(LibVer::V18))]
