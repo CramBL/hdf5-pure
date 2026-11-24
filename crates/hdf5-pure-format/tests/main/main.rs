@@ -28,6 +28,7 @@ mod message_record;
 mod nested_datatype;
 mod object_header_allocation;
 mod object_header_continuation;
+mod object_header_framing;
 mod object_header_splice;
 mod object_reference_count;
 mod opaque_tags;

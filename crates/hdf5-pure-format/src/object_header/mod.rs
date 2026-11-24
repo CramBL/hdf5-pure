@@ -170,10 +170,12 @@ impl ObjectHeader {
     /// this parser cannot name and [`MessageFlags::must_be_understood`] returns
     /// `true` for `access_mode`.
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a version 2 header's continuation message
-    /// body is shorter than the combined offset and length widths. Returns
-    /// [`FormatError::UndefinedContinuationAddress`] if a complete continuation body stores an
-    /// undefined address, in either header version.
+    /// Returns [`FormatError::UnexpectedEof`] if a version 2 message record has a complete prefix
+    /// and its body extends into the chunk checksum or beyond it, or if a version 2 continuation
+    /// message body is shorter than the combined offset and length widths.
+    ///
+    /// Returns [`FormatError::UndefinedContinuationAddress`] if a complete continuation body
+    /// stores an undefined address, in either header version.
     ///
     /// Returns [`FormatError::NestingDepthExceeded`] if a version 1 header exceeds 256 followed
     /// continuation references or 32 continuation hops after the root, or if a version 2 header
@@ -411,9 +413,9 @@ impl ObjectHeader {
     /// Parses an object header and observes each chunk's borrowed message region.
     ///
     /// `source` positions and `address` use physical file coordinates. Stored continuation
-    /// addresses are resolved through `base_address`. Calls `observer` after reading each chunk's
-    /// local framing, before checking message compatibility and applying `filter`. Version 1
-    /// continuations are visited depth-first, and version 2 continuations breadth-first.
+    /// addresses are resolved through `base_address`. Calls `observer` after acquiring each
+    /// chunk and before parsing its message records. Version 1 continuations are visited
+    /// depth-first, and version 2 continuations breadth-first.
     ///
     /// The observer borrows bytes from the active source buffer. The returned header retains
     /// only the messages selected by `filter`.
