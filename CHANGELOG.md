@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::datatype` reserving memory for a compound's declared member count before
+  reading any members ([#1363](https://github.com/CramBL/hdf5-pure/pull/1363)).
 - Fixed `FileBuilder::finish_to` writing compounds with overlapping members and enumerations
   whose declared size differs from their base datatype's stored size. Fixed rejection of valid
   committed compounds whose variable-length members fit at the selected two- or four-byte offset

@@ -5,6 +5,7 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::num::{NonZeroU32, NonZeroUsize};
@@ -118,10 +119,10 @@ impl Compound {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. Propagates
     /// member name and version 1 shape errors.
-    pub(in crate::datatype) fn member(
+    pub(in crate::datatype) fn member<'a>(
         &self,
-        cursor: &mut ByteCursor<'_>,
-    ) -> Result<Member, FormatError> {
+        cursor: &mut ByteCursor<'a>,
+    ) -> Result<Member<'a>, FormatError> {
         let name = self.names.read(cursor, COMPOUND_CLASS)?;
         let (offset, shape) = match self.fields {
             CompoundFields::LegacyWithShape => {
@@ -148,8 +149,8 @@ enum CompoundFields {
 }
 
 /// A compound member's fields before its nested datatype.
-pub(in crate::datatype) struct Member {
-    pub(in crate::datatype) name: String,
+pub(in crate::datatype) struct Member<'a> {
+    pub(in crate::datatype) name: Cow<'a, str>,
     /// The byte offset within the containing element.
     pub(in crate::datatype) offset: u64,
     /// The version 1 scalar or array shape when present.
@@ -182,18 +183,13 @@ impl Enumeration {
         super::check_enum_base_size(declared_size, value_width.get())?;
         let count = usize::from(self.0.count);
         let mut members = Vec::new();
-        for index in 0..count {
+        for _ in 0..count {
             let name = self.0.read(cursor, ENUMERATION_CLASS)?;
-            if members.capacity() == index {
-                let additional = index.max(4).min(count - index);
-                members.try_reserve_exact(additional).map_err(|source| {
-                    FormatError::AllocationFailed {
-                        values: index + additional,
-                        source,
-                    }
-                })?;
-            }
-            members.push(__private::enum_member(name, Vec::new()));
+            push_member(
+                &mut members,
+                count,
+                __private::enum_member(name.into_owned(), Vec::new()),
+            )?;
         }
         let length = u64::from(self.0.count) * u64::from(value_width.get());
         let values = cursor.slice(length.to_usize()?)?;
@@ -206,6 +202,32 @@ impl Enumeration {
         }
         Ok(members)
     }
+}
+
+/// Appends a member, limiting each reservation to the remaining declared members.
+///
+/// Callers pass a declared `count` greater than the number of members already appended.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AllocationFailed`] if reserving space for more members fails.
+pub(in crate::datatype) fn push_member<T>(
+    members: &mut Vec<T>,
+    count: usize,
+    member: T,
+) -> Result<(), FormatError> {
+    let index = members.len();
+    if members.capacity() == index {
+        let additional = index.max(4).min(count - index);
+        members
+            .try_reserve_exact(additional)
+            .map_err(|source| FormatError::AllocationFailed {
+                values: index + additional,
+                source,
+            })?;
+    }
+    members.push(member);
+    Ok(())
 }
 
 struct MemberNames {
@@ -248,12 +270,19 @@ impl MemberNames {
 
     /// Reads one NUL-terminated name and any padding in its name slot.
     ///
+    /// Borrows each valid UTF-8 name. For semantic names, replaces invalid UTF-8 sequences in
+    /// an owned string.
+    ///
     /// # Errors
     ///
     /// Returns [`FormatError::UnexpectedEof`] if the terminator or required padding is
     /// missing, or [`FormatError::UnsupportedDatatypeMemberEncoding`] if a retained
     /// name is not UTF-8.
-    fn read(&self, cursor: &mut ByteCursor<'_>, class: u8) -> Result<String, FormatError> {
+    fn read<'a>(
+        &self,
+        cursor: &mut ByteCursor<'a>,
+        class: u8,
+    ) -> Result<Cow<'a, str>, FormatError> {
         let remaining = cursor.remaining();
         let offset = cursor.position();
         let length = remaining
@@ -277,10 +306,10 @@ impl MemberNames {
             NameEncoding::Padded => {
                 let padding = (NAME_ALIGNMENT - (length + 1) % NAME_ALIGNMENT) % NAME_ALIGNMENT;
                 cursor.take(padding)?;
-                Ok(String::from_utf8_lossy(name).into_owned())
+                Ok(String::from_utf8_lossy(name))
             }
-            NameEncoding::Unpadded => Ok(String::from_utf8_lossy(name).into_owned()),
-            NameEncoding::StrictUtf8 => str::from_utf8(name).map(String::from).map_err(|source| {
+            NameEncoding::Unpadded => Ok(String::from_utf8_lossy(name)),
+            NameEncoding::StrictUtf8 => str::from_utf8(name).map(Cow::Borrowed).map_err(|source| {
                 FormatError::UnsupportedDatatypeMemberEncoding {
                     class,
                     offset,

@@ -648,26 +648,45 @@ fn datatype_compound_codecs_preserve_float_member_versions(
 
 #[test]
 fn datatype_compound_codecs_bound_recursion() {
-    let bytes = (0..63).fold(Leaf::Integer.bytes(Version::One), |parent, _| {
-        containers::compound(
-            3,
+    let mut bytes = leaf::unsigned_byte(Version::One);
+    let mut expected = DatatypeMessage::new(
+        DatatypeVersion::One,
+        DatatypeProperties::FixedPoint(FixedPointType::u8()),
+    )
+    .unwrap();
+    for _ in 0..63 {
+        bytes = containers::compound(
+            Version::Three.get(),
             [1, 0, 0],
-            4,
+            1,
             MemberOffset::One,
             &[CompoundField {
                 name: b"x",
                 offset: 0,
-                datatype: &parent,
+                datatype: &bytes,
             }],
+        );
+        expected = DatatypeMessage::new(
+            DatatypeVersion::Three,
+            DatatypeProperties::Compound {
+                size: 1,
+                members: vec![DatatypeMessageMember::new("x".into(), 0, expected).unwrap()],
+            },
         )
-    });
+        .unwrap();
+    }
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (expected.to_datatype().unwrap(), bytes.len())
+    );
     let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
+    assert_eq!(message, expected);
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
     let too_deep = containers::compound(
-        3,
+        Version::Three.get(),
         [1, 0, 0],
-        4,
+        1,
         MemberOffset::One,
         &[CompoundField {
             name: b"x",
@@ -679,10 +698,14 @@ fn datatype_compound_codecs_bound_recursion() {
         DatatypeMessage::parse(&too_deep).unwrap_err(),
         FormatError::NestingDepthExceeded
     );
+    assert_eq!(
+        format::parse_datatype(&too_deep).unwrap_err(),
+        FormatError::NestingDepthExceeded
+    );
     let too_deep = DatatypeMessage::new(
         DatatypeVersion::Three,
         DatatypeProperties::Compound {
-            size: 4,
+            size: 1,
             members: vec![DatatypeMessageMember::new("x".into(), 0, message).unwrap()],
         },
     )
@@ -690,6 +713,51 @@ fn datatype_compound_codecs_bound_recursion() {
     assert_eq!(
         too_deep.serialize(OffsetWidth::Eight).unwrap_err(),
         FormatError::NestingDepthExceeded
+    );
+}
+
+#[test]
+fn semantic_parser_accepts_v1_compound_in_v3_and_retained_parser_rejects_it() {
+    let child = legacy_compound::array_member();
+    let bytes = containers::compound(
+        Version::Three.get(),
+        [1, 0, 0],
+        20,
+        MemberOffset::One,
+        &[CompoundField {
+            name: b"inner",
+            offset: 4,
+            datatype: &child,
+        }],
+    );
+    let expected = Datatype::Compound {
+        size: 20,
+        members: vec![__private::compound_member(
+            "inner".into(),
+            4,
+            Datatype::Compound {
+                size: 16,
+                members: vec![__private::compound_member(
+                    "arr".into(),
+                    0,
+                    Datatype::Array {
+                        base_type: Box::new(Datatype::FixedPoint(FixedPointType::i32())),
+                        dimensions: vec![4],
+                    },
+                )],
+            },
+        )],
+    };
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (expected, bytes.len())
+    );
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::InvalidDatatypeVersion {
+            class: datatype::Class::COMPOUND.0,
+            version: Version::One.get(),
+        },
     );
 }
 
