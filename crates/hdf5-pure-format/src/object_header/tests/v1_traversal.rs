@@ -214,7 +214,9 @@ fn the_version_1_budget_precedes_target_resolution_and_access(
 #[case::two(Widths::new(2, 2))]
 #[case::four(Widths::FOUR)]
 #[case::eight(Widths::EIGHT)]
-#[case::mixed(Widths::new(2, 4))]
+#[case::shorter_fields(Widths::new(2, 4))]
+#[case::longer_address(Widths::new(8, 4))]
+#[case::longer_length(Widths::new(4, 8))]
 fn version_1_continuations_preserve_base_widths_and_depth_first_order(
     #[case] widths: Widths,
     #[values(Driver::Buffered, Driver::Source)] driver: Driver,
@@ -236,30 +238,9 @@ fn version_1_continuations_preserve_base_widths_and_depth_first_order(
     image.place(base + 128, &chunk);
     image.place(base + 256, &leaf);
     image.place(base + 384, &leaf);
-    let sizes = FormatWidths::from_sizes(
-        u8::try_from(widths.offset).unwrap(),
-        u8::try_from(widths.length).unwrap(),
-    )
-    .unwrap();
-    let header = match driver {
-        Driver::Buffered => ObjectHeader::parse_filtered_with_widths(
-            image.as_bytes(),
-            AccessMode::ReadOnly,
-            base,
-            sizes,
-            BaseAddress::new(base.to_u64()),
-            MessageFilter::All,
-        ),
-        Driver::Source => ObjectHeader::parse_from_source_filtered_with_widths(
-            image.as_bytes(),
-            AccessMode::ReadOnly,
-            base.to_u64(),
-            sizes,
-            BaseAddress::new(base.to_u64()),
-            MessageFilter::All,
-        ),
-    }
-    .unwrap();
+    let header = driver
+        .parse_v1(image.as_bytes(), base, widths, MessageFilter::All)
+        .unwrap();
     assert_records(&header, &[first, a, nested, b.clone(), c, sibling, b]);
 }
 
@@ -372,18 +353,52 @@ fn version_1_continuation_truncation_preserves_the_backend_error(
 }
 
 #[rstest]
-#[case::empty(&[])]
-#[case::short(&[0; 8])]
-fn short_version_1_continuation_bodies_remain_unfollowed(
-    #[case] body: &[u8],
+#[case::two_two(Widths::new(2, 2))]
+#[case::two_four(Widths::new(2, 4))]
+#[case::two_eight(Widths::new(2, 8))]
+#[case::four_two(Widths::new(4, 2))]
+#[case::four_four(Widths::FOUR)]
+#[case::four_eight(Widths::new(4, 8))]
+#[case::eight_two(Widths::new(8, 2))]
+#[case::eight_four(Widths::new(8, 4))]
+#[case::eight_eight(Widths::EIGHT)]
+fn version_1_continuation_requires_complete_fields(
+    #[case] widths: Widths,
     #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+    #[values(ContinuationLocation::Root, ContinuationLocation::ContinuedChunk)]
+    location: ContinuationLocation,
 ) {
-    let message = Message::new(WireType::OBJECT_HEADER_CONTINUATION, body);
-    let data = v1::Header::new().message(message.clone()).build();
-    assert_records(
-        &driver.parse(&data, MessageFilter::All).unwrap(),
-        &[message],
-    );
+    let expected = widths.offset + widths.length;
+    for available in (0..expected).step_by(v1::MESSAGE_ALIGNMENT) {
+        let image = location.short_continuation(widths, available);
+        let mut discard = |_: MessageType, _: &[u8]| false;
+        assert_eq!(
+            driver
+                .parse_v1(&image, 0, widths, MessageFilter::Only(&mut discard))
+                .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available,
+            },
+        );
+    }
+}
+
+#[rstest]
+fn version_1_continuation_record_requires_an_aligned_body_size(
+    #[values(Driver::Buffered, Driver::Source)] driver: Driver,
+    #[values(ContinuationLocation::Root, ContinuationLocation::ContinuedChunk)]
+    location: ContinuationLocation,
+) {
+    let widths = Widths::EIGHT;
+    let field_size = widths.offset + widths.length;
+    for available in (0..field_size).filter(|len| !len.is_multiple_of(v1::MESSAGE_ALIGNMENT)) {
+        let image = location.short_continuation(widths, available);
+        assert_eq!(
+            driver.parse(&image, MessageFilter::All).unwrap_err(),
+            FormatError::InvalidObjectHeaderMessageSize(u16::try_from(available).unwrap()),
+        );
+    }
 }
 
 #[rstest]
@@ -508,6 +523,71 @@ fn assert_records(header: &ObjectHeader, expected: &[Message]) {
         assert_eq!(actual.size, expected.data.len());
         assert_eq!(actual.flags.get(), expected.flags.0);
         assert_eq!(actual.creation_order, None);
+    }
+}
+
+impl Driver {
+    fn parse_v1(
+        self,
+        data: &[u8],
+        base: usize,
+        widths: Widths,
+        filter: MessageFilter<'_>,
+    ) -> Result<ObjectHeader, FormatError> {
+        let widths = FormatWidths::from_sizes(
+            u8::try_from(widths.offset).unwrap(),
+            u8::try_from(widths.length).unwrap(),
+        )
+        .unwrap();
+        let base_address = BaseAddress::new(base.to_u64());
+        match self {
+            Self::Buffered => ObjectHeader::parse_filtered_with_widths(
+                data,
+                AccessMode::ReadOnly,
+                base,
+                widths,
+                base_address,
+                filter,
+            ),
+            Self::Source => ObjectHeader::parse_from_source_filtered_with_widths(
+                data,
+                AccessMode::ReadOnly,
+                base.to_u64(),
+                widths,
+                base_address,
+                filter,
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ContinuationLocation {
+    ContinuedChunk,
+    Root,
+}
+
+impl ContinuationLocation {
+    fn short_continuation(self, widths: Widths, len: usize) -> Vec<u8> {
+        let body = vec![u8::MAX; len];
+        let message = Message::new(WireType::OBJECT_HEADER_CONTINUATION, &body);
+        match self {
+            Self::ContinuedChunk => {
+                let chunk = v1::message_record(&message);
+                let address = 128;
+                let root = v1::Header::new()
+                    .message(aligned_continuation(
+                        address.to_u64(),
+                        chunk.len().to_u64(),
+                        widths,
+                    ))
+                    .build();
+                let mut image = Image::starting_with(&root);
+                image.place(address, &chunk);
+                image.build()
+            }
+            Self::Root => v1::Header::new().message(message).build(),
+        }
     }
 }
 

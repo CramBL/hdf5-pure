@@ -14,14 +14,19 @@ use std::fs;
 use std::path::Path;
 
 use hdf5_pure::{Error, FormatError};
+use hdf5_pure::{LengthWidth, OffsetWidth};
 #[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
 use libhdf5::file::LibraryVersion;
 use libhdf5::{File as NativeFile, MajorErrorCode, MinorErrorCode};
 use rstest::rstest;
 
 use test_util::bytes;
+#[cfg(feature = "__libhdf5-1.14")]
+use test_util::object_header::Message;
 use test_util::object_header::{MessageType, v1};
 use test_util::superblock::v0;
+#[cfg(feature = "__libhdf5-1.14")]
+use test_util::widths::Widths;
 use test_util_hdf5::file;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -37,14 +42,17 @@ enum Malformation {
     },
     /// A continuation ending with one byte of a message prefix.
     PartialPrefix,
+    /// A continuation message whose eight-byte body contains only its address.
+    #[cfg(feature = "__libhdf5-1.14")]
+    ShortContinuation,
     /// A final Nil message with a 47-byte body.
     UnalignedBody,
 }
 
 impl Malformation {
-    // H5O_chunk_deserialize in H5Ocache.c, HDF5 1.8.23, and H5O__chunk_deserialize in
-    // H5Ocache.c, HDF5 1.10.11, 1.12.3, 1.14.6 and 2.2.0, report these errors while
-    // decoding object header messages.
+    // The chunk decoders in `H5Ocache.c` report record framing errors:
+    // `H5O_chunk_deserialize` in HDF5 1.8.23 and `H5O__chunk_deserialize` in HDF5 1.10.11,
+    // 1.12.3, 1.14.6, and 2.2.0.
     /// Asserts a file-open failure with the expected innermost libhdf5 format error.
     ///
     /// # Panics
@@ -55,21 +63,40 @@ impl Malformation {
         let NativeReadFailure { stage, error } = failure;
         assert_eq!(stage, NativeReadStage::FileOpen, "{error:?}");
         let version = libhdf5::library_version();
-        let (minor, description) = match self {
-            Self::BodyOverrun { .. } if version >= (2, 2, 0) => {
-                (MinorErrorCode::BadValue, "message size exceeds buffer end")
-            }
-            Self::BodyOverrun { .. } => (MinorErrorCode::CantInit, "corrupt object header"),
-            Self::PartialPrefix => (
-                MinorErrorCode::BadMessage,
-                "gap found in early version of file format",
-            ),
-            Self::UnalignedBody => (MinorErrorCode::CantLoad, "message not aligned"),
-        };
-        let function = if version < (1, 10, 0) {
+        let chunk_decoder = if version < (1, 10, 0) {
             "H5O_chunk_deserialize"
         } else {
             "H5O__chunk_deserialize"
+        };
+        let (minor, function, description) = match self {
+            Self::BodyOverrun { .. } if version >= (2, 2, 0) => (
+                MinorErrorCode::BadValue,
+                chunk_decoder,
+                "message size exceeds buffer end",
+            ),
+            Self::BodyOverrun { .. } => (
+                MinorErrorCode::CantInit,
+                chunk_decoder,
+                "corrupt object header",
+            ),
+            Self::PartialPrefix => (
+                MinorErrorCode::BadMessage,
+                chunk_decoder,
+                "gap found in early version of file format",
+            ),
+            // `H5O__cont_decode` in `H5Ocont.c`, HDF5 1.14.6 and 2.2.0, checks whether
+            // the body has room for the length field after decoding the address.
+            #[cfg(feature = "__libhdf5-1.14")]
+            Self::ShortContinuation => (
+                MinorErrorCode::Overflow,
+                "H5O__cont_decode",
+                "ran off end of input buffer while decoding",
+            ),
+            Self::UnalignedBody => (
+                MinorErrorCode::CantLoad,
+                chunk_decoder,
+                "message not aligned",
+            ),
         };
         let Some(stack) = error.stack() else {
             panic!("expected a native HDF5 error stack, got {error:?}");
@@ -109,6 +136,11 @@ impl Malformation {
                 Self::PartialPrefix => FormatError::UnexpectedEof {
                     expected: v1::RECORD_PREFIX,
                     available: 1,
+                },
+                #[cfg(feature = "__libhdf5-1.14")]
+                Self::ShortContinuation => FormatError::UnexpectedEof {
+                    expected: 16,
+                    available: 8,
                 },
                 Self::UnalignedBody => FormatError::InvalidObjectHeaderMessageSize(47),
             }
@@ -208,7 +240,8 @@ fn write_earliest_file(path: &Path) {
 
 /// Creates an earliest-format file whose root object header uses a continuation.
 fn write_earliest_file_with_continuation(path: &Path) {
-    let file = file::libhdf5_create_earliest(path);
+    let file =
+        file::libhdf5_create_earliest_with_widths(path, OffsetWidth::Eight, LengthWidth::Eight, 0);
 
     let dataset = file
         .new_dataset::<i32>()
@@ -582,6 +615,42 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
     // and later for continuation boundaries.
     Malformation::PartialPrefix
         .assert_pure_rejection(read_with_pure(&malformed_path, backend).unwrap_err());
+}
+
+#[cfg(feature = "__libhdf5-1.14")]
+#[rstest]
+#[case::buffered(ReadBackend::Buffered)]
+#[case::streaming(ReadBackend::Streaming)]
+fn a_v1_continuation_with_only_its_address_is_rejected_by_buffered_streaming_and_native_reads(
+    #[case] backend: ReadBackend,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let valid_path = dir.path().join("valid.h5");
+    let malformed_path = dir.path().join("malformed.h5");
+    write_earliest_file_with_continuation(&valid_path);
+    assert_eq!(read_with_c(&valid_path).unwrap(), [42]);
+    assert_eq!(read_with_pure(&valid_path, backend).unwrap(), [42]);
+
+    let mut bytes = fs::read(&valid_path).unwrap();
+    let chunks = v1::root_group_chunks(&bytes);
+    let record = chunks[0]
+        .records
+        .iter()
+        .find(|record| record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION)
+        .expect("large root attribute did not create a version 1 continuation");
+    assert_eq!(
+        record.body.len(),
+        Widths::EIGHT.offset + Widths::EIGHT.length
+    );
+    let address_width = Widths::EIGHT.offset;
+    record.set_body_size(&mut bytes, u16::try_from(address_width).unwrap());
+    bytes[record.body.start + address_width..record.body.end]
+        .copy_from_slice(&v1::message_record(&Message::nil(0)));
+    fs::write(&malformed_path, bytes).unwrap();
+
+    let malformation = Malformation::ShortContinuation;
+    malformation.assert_native_rejection(read_with_c(&malformed_path).unwrap_err());
+    malformation.assert_pure_rejection(read_with_pure(&malformed_path, backend).unwrap_err());
 }
 
 #[cfg(any(feature = "__libhdf5-1.14", feature = "__libhdf5-2"))]
