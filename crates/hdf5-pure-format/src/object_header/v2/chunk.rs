@@ -115,43 +115,32 @@ impl<'a> HeaderChunk<'a> {
         ))
     }
 
-    /// Returns the message records of the chunk in the order the chunk stores them, each as
-    /// [`ChunkRecord::classify`] returns it under `context`.
+    /// Classifies the chunk's message records under `context`.
+    ///
+    /// Yields errors from [`message_records`](Self::message_records) and
+    /// [`ChunkRecord::classify`].
     pub(super) fn records(
         self,
         context: ParseContext,
     ) -> impl Iterator<Item = Result<ChunkRecord<'a>, FormatError>> {
         self.message_records()
-            .map(move |record| ChunkRecord::classify(context, record))
+            .map(move |record| ChunkRecord::classify(context, record?))
     }
 
-    /// Returns the number of message records in the chunk other than Nil and continuation
-    /// messages, the number of messages a parse under
-    /// [`MessageFilter::All`](crate::object_header::MessageFilter::All) keeps from it.
-    pub(super) fn message_count(self) -> usize {
-        self.message_records()
-            .filter(|record| {
-                !matches!(
-                    record.msg_type,
-                    MessageType::NIL | MessageType::OBJECT_HEADER_CONTINUATION
-                )
-            })
-            .count()
-    }
-
-    /// Returns the message records of the chunk in the order the chunk stores them.
+    /// Yields records in chunk order, ending at a gap shorter than a record prefix.
     ///
-    /// The records end where fewer bytes remain than a record prefix, or at a record whose body
-    /// runs past the chunk.
-    fn message_records(self) -> impl Iterator<Item = MessageRecord<'a>> {
-        let mut msg_start = self.records_start;
+    /// Yields [`FormatError::UnexpectedEof`] and ends if a complete prefix declares a body that
+    /// extends into the chunk checksum or beyond it.
+    fn message_records(self) -> impl Iterator<Item = Result<MessageRecord<'a>, FormatError>> {
+        let mut next_start = Some(self.records_start);
         core::iter::from_fn(move || {
             let record = self
                 .layout
-                .next_message(self.region, msg_start)
-                .ok()
-                .flatten()?;
-            msg_start = record.body_range.end;
+                .next_message(self.region, next_start.take()?)
+                .transpose()?;
+            if let Ok(record) = &record {
+                next_start = Some(record.body_range.end);
+            }
             Some(record)
         })
     }

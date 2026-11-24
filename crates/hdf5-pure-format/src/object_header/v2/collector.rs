@@ -58,12 +58,9 @@ impl<'f> HeaderCollector<'f> {
     ///
     /// # Errors
     ///
-    /// Returns the errors [`ChunkRecord::classify`] returns for a record of `chunk`, and the errors
+    /// Returns the errors [`HeaderChunk::records`] yields, and the errors
     /// [`ContinuationWorklist::discover`] returns.
     pub(super) fn ingest(&mut self, chunk: HeaderChunk<'_>) -> Result<(), FormatError> {
-        if self.filter.keeps_all() {
-            self.messages.reserve(chunk.message_count());
-        }
         for record in chunk.records(self.context) {
             match record? {
                 ChunkRecord::Continuation(continuation) => self.worklist.discover(continuation)?,

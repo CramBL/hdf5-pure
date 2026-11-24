@@ -2,8 +2,7 @@
 
 use std::path::Path;
 
-use hdf5_pure::File;
-use hdf5_pure::MessageType;
+use hdf5_pure::{Error, File, FormatError, MessageType};
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private;
 use hdf5_pure_format::__private::AccessMode;
@@ -14,13 +13,15 @@ use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use libhdf5::File as NativeFile;
-use libhdf5::IndexType;
-use libhdf5::IterationOrder;
+use libhdf5::{IndexType, IterationOrder, MajorErrorCode, MinorErrorCode};
 use rstest::rstest;
+use test_util::checksum;
 use test_util::object_header::v1;
+use test_util::object_header::v2;
 use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::file;
+use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::storage;
 
 #[test]
@@ -38,6 +39,141 @@ fn compact_links_spread_over_continuation_blocks_list_in_the_native_order_of_the
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
     assert_eq!(file.root().groups().unwrap(), c_names);
+}
+
+#[rstest]
+#[case::root(false)]
+#[case::continuation(true)]
+fn a_v2_header_record_body_overrun_is_rejected_by_buffered_streaming_and_native_reads(
+    #[case] continuation: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let valid_path = directory.path().join("valid.h5");
+    let malformed_path = directory.path().join("malformed.h5");
+    write_links(&valid_path);
+
+    let native = NativeFile::open(&valid_path).unwrap();
+    let mut native_names = native.member_names().unwrap();
+    native_names.sort();
+    assert_eq!(native_names.len(), LINKS);
+    native.close().unwrap();
+
+    let backends = [ReadBackend::Buffered, ReadBackend::Streaming];
+    for backend in backends {
+        let file = backend.open(&valid_path).unwrap();
+        let mut names = file.root().groups().unwrap();
+        names.sort();
+        assert_eq!(names, native_names);
+        file.close().unwrap();
+    }
+
+    let mut image = std::fs::read(&valid_path).unwrap();
+    let error = extend_last_record_past_chunk(&valid_path, &mut image, continuation);
+    std::fs::write(&malformed_path, image).unwrap();
+
+    let error_from_native = NativeFile::open(&malformed_path)
+        .and_then(|file| {
+            let names = file.member_names();
+            file.close()?;
+            names
+        })
+        .unwrap_err();
+    assert_native_record_overrun(&error_from_native);
+
+    for backend in backends {
+        let result = backend.open(&malformed_path).and_then(|file| {
+            let names = file.root().groups();
+            file.close()?;
+            names
+        });
+        let error_from_pure = result.unwrap_err();
+        let Error::Format(actual) = error_from_pure else {
+            panic!("expected a format error from {backend:?}, got {error_from_pure:?}");
+        };
+        assert_eq!(actual, error);
+    }
+}
+
+fn extend_last_record_past_chunk(path: &Path, image: &mut [u8], continuation: bool) -> FormatError {
+    let file = File::open(path).unwrap();
+    let superblock = file.superblock();
+    let root = superblock
+        .base_address
+        .resolve(superblock.root_group_address)
+        .unwrap();
+    let root_at = usize::try_from(root.get()).unwrap();
+    let prefix = ObjectHeaderPrefix::parse(&image[root_at..]).unwrap();
+    let layout = prefix.prefix.layout;
+    let (at, len, records_start) = if continuation {
+        let extents = storage::header_extents(&file, image, root);
+        let block = extents
+            .iter()
+            .find(|range| range.start() != root)
+            .expect("the root header refers to a continuation block");
+        let at = usize::try_from(block.start().get()).unwrap();
+        let len = usize::try_from(block.length()).unwrap();
+        let records = __private::continuation_block_messages(&image[at..at + len]).unwrap();
+        (at, len, records.start)
+    } else {
+        (
+            root_at,
+            prefix.len + usize::try_from(prefix.chunk0_size).unwrap() + checksum::CHECKSUM,
+            prefix.len,
+        )
+    };
+    file.close().unwrap();
+
+    let region = &image[at..at + len - checksum::CHECKSUM];
+    let mut record_start = records_start;
+    let mut last_start = None;
+    while let Some(record) = layout.next_message(region, record_start).unwrap() {
+        last_start = Some(record_start);
+        record_start = record.body_range.end;
+    }
+    assert_eq!(record_start, region.len());
+    let last_start = last_start.expect("the target chunk contains an object-header record");
+    let available = region.len();
+    let body_len = available - last_start - layout.prefix_len();
+    v2::set_record_body_size(image, at + last_start, u16::try_from(body_len + 1).unwrap());
+    checksum::restamp(image, at, len);
+
+    FormatError::UnexpectedEof {
+        expected: available + 1,
+        available,
+    }
+}
+
+// The chunk decoder in `H5Ocache.c` rejects the overrun before decoding the message body
+// in HDF5 1.8.23 (`H5O_chunk_deserialize`) and HDF5 1.10.11, 1.12.3, and 1.14.6
+// (`H5O__chunk_deserialize`). In HDF5 2.2.0, `H5O__chunk_deserialize` rejects the chunk
+// when it checks that the checksum bytes are available.
+fn assert_native_record_overrun(error: &libhdf5::Error) {
+    let version = libhdf5::library_version();
+    let function = if version < (1, 10, 0) {
+        "H5O_chunk_deserialize"
+    } else {
+        "H5O__chunk_deserialize"
+    };
+    let (minor, description) = if version >= (2, 2, 0) {
+        (
+            MinorErrorCode::Overflow,
+            "ran off end of input buffer while decoding",
+        )
+    } else {
+        (MinorErrorCode::CantInit, "corrupt object header")
+    };
+    let stack = error.stack().expect("expected a native HDF5 error stack");
+    let frame = stack.last().expect("native rejection has no error frames");
+    assert_eq!(
+        (
+            frame.major_code(),
+            frame.minor_code(),
+            frame.func(),
+            frame.desc()
+        ),
+        (MajorErrorCode::ObjectHeader, minor, function, description),
+        "libhdf5 {version:?}: {error:?}"
+    );
 }
 
 #[rstest]

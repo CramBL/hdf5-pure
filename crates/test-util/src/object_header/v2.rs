@@ -63,6 +63,18 @@ impl Header {
     }
 
     pub fn build(&self) -> Vec<u8> {
+        self.build_with_record_tail(&[])
+    }
+
+    /// Returns chunk zero with `tail` between the last record and the checksum.
+    ///
+    /// The chunk size includes `tail`. Pass raw bytes for a trailing gap or a malformed record.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a message type exceeds [`u8::MAX`], a message body size exceeds [`u16::MAX`], or
+    /// the combined size of the records and `tail` exceeds the range of the chunk size field.
+    pub fn build_with_record_tail(&self, tail: &[u8]) -> Vec<u8> {
         let records = message_records(&self.messages, self.flags);
 
         let mut header = Vec::new();
@@ -89,10 +101,11 @@ impl Header {
         }
         bytes::push_uint(
             &mut header,
-            records.len() as u64,
+            (records.len() + tail.len()) as u64,
             self.flags.chunk_size_width(),
         );
         header.extend_from_slice(&records);
+        header.extend_from_slice(tail);
         checksum::append(&mut header);
         header
     }
@@ -101,8 +114,24 @@ impl Header {
 /// The bytes of a continuation chunk holding `messages`: its signature, the
 /// records, and the checksum over both.
 pub fn continuation_chunk(messages: &[Message], flags: HeaderFlags) -> Vec<u8> {
+    continuation_chunk_with_record_tail(messages, flags, &[])
+}
+
+/// Returns a continuation chunk with `tail` between the records and the checksum.
+///
+/// Pass raw bytes for a trailing gap or a malformed record.
+///
+/// # Panics
+///
+/// Panics if a message type exceeds [`u8::MAX`] or a message body size exceeds [`u16::MAX`].
+pub fn continuation_chunk_with_record_tail(
+    messages: &[Message],
+    flags: HeaderFlags,
+    tail: &[u8],
+) -> Vec<u8> {
     let mut chunk = CONTINUATION_SIGNATURE.to_vec();
     chunk.extend_from_slice(&message_records(messages, flags));
+    chunk.extend_from_slice(tail);
     checksum::append(&mut chunk);
     chunk
 }
@@ -132,6 +161,17 @@ pub fn message_record(message: &Message, flags: HeaderFlags) -> Vec<u8> {
     }
     record.extend_from_slice(&message.data);
     record
+}
+
+/// Overwrites the size field of the record starting at `at` in `file`.
+///
+/// Recompute the chunk checksum separately for fixtures that require a valid checksum.
+///
+/// # Panics
+///
+/// Panics if the size field extends past the end of `file`.
+pub fn set_record_body_size(file: &mut [u8], at: usize, size: u16) {
+    bytes::set_u16_at(file, at + RECORD_SIZE_AT, size);
 }
 
 /// Replaces the body of the first `msg_type` message in chunk zero of the version 2 object header
