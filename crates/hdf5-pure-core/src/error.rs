@@ -897,7 +897,7 @@ pub enum FormatError {
     },
     /// A fractal heap's doubling table, block extent, or filter metadata is invalid.
     InvalidFractalHeapGeometry,
-    /// A filtered huge-object heap ID has reserved bits set in its first byte.
+    /// A managed or huge fractal heap ID has reserved bits set in its first byte.
     ///
     /// Contains the set bits in positions 0 through 3.
     InvalidFractalHeapIdFlags(u8),
@@ -1612,7 +1612,7 @@ pub enum FormatError {
         /// The stored floating-point bit fields.
         layout: FloatingPointLayout,
     },
-    /// A filtered huge-object heap ID has a version other than 0.
+    /// A fractal heap ID has a version other than 0.
     ///
     /// Contains the version read from bits 6 and 7 of its first byte.
     UnsupportedFractalHeapIdVersion(u8),

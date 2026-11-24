@@ -38,7 +38,8 @@ use crate::width::FormatWidths;
 /// Returns dense links after checking heap and index consistency.
 ///
 /// Reads heap and index metadata through [`StoredRead::read_metadata`]. Checks name hashes,
-/// name-index order, the managed-object count, and any creation-order index.
+/// name-index order, the managed-object count, and any creation-order index. Parses each link's
+/// heap ID before checking that it refers to a managed object.
 ///
 /// # Errors
 ///
@@ -102,9 +103,7 @@ pub(crate) fn read_dense(
     walk_index(source, index.nodes(), |record| {
         let (hash, id) = index.record(record)?;
         let view = ids.parse(id)?;
-        if id.first() != Some(&MANAGED_HEAP_ID_FLAGS)
-            || !matches!(view.kind(), FractalHeapIdKind::Managed { .. })
-        {
+        if !matches!(view.kind(), FractalHeapIdKind::Managed { .. }) {
             return Err(Error::EditUnsupported(
                 "a group's link uses a non-managed heap ID",
             ));
@@ -337,6 +336,3 @@ const CREATION_RECORD_SIZE: u16 = 8 + LINK_HEAP_ID_LENGTH;
 // "Version 2 B-trees" in the format specification, version 4.0, defines eight-byte creation
 // indexes in type 6 records.
 const LINK_CREATION_ORDER_LENGTH: usize = 8;
-// "Fractal Heap" in the format specification, version 4.0, defines zero for the version and
-// type bits of a version 0 managed heap ID.
-const MANAGED_HEAP_ID_FLAGS: u8 = 0;

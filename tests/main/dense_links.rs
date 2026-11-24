@@ -4,6 +4,11 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
 use hdf5_pure_format::__private::GROUP_HEAP_MAX_MANAGED_OBJECT;
 use rstest::rstest;
+use test_util::btree::v2 as btree_v2;
+use test_util::bytes;
+use test_util::checksum;
+use test_util::modern;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 #[case::maximum(GROUP_HEAP_MAX_MANAGED_OBJECT, false)]
@@ -41,6 +46,28 @@ fn dense_links_reject_duplicate_names() {
     assert_eq!(error, FormatError::DuplicateLinkName("data_0000_λ".into()));
 }
 
+#[rstest]
+fn group_datasets_rejects_an_unsupported_heap_id_version_in_a_dense_link(
+    #[values(ReadBackend::Bytes, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let mut image = modern::v2_many_links();
+    let leaf = bytes::sole_signature(&image, btree_v2::LEAF_SIGNATURE);
+    let heap_id_at = leaf + btree_v2::NODE_PREFIX + size_of::<u32>();
+    image[heap_id_at] |= HEAP_ID_VERSION_ONE;
+    let leaf_length = btree_v2::NODE_PREFIX
+        + 20 * usize::from(btree_v2::LINK_NAME_RECORD_SIZE)
+        + checksum::CHECKSUM;
+    checksum::restamp(&mut image, leaf, leaf_length);
+
+    let file = backend.open_image(image).unwrap();
+    let error = file.root().datasets().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, FormatError::UnsupportedFractalHeapIdVersion(1));
+    file.close().unwrap();
+}
+
 fn compact_builder() -> FileBuilder {
     let mut builder = FileBuilder::new();
     for index in 0..MAX_COMPACT_LINKS {
@@ -56,3 +83,5 @@ const MAX_COMPACT_LINKS: usize = 8;
 // Section `subsubsec_fmt4_dataobject_hdr_msg_link`, version 4.0, defines the version, flags,
 // two-byte name length, and eight-byte target address of these untracked ASCII hard links.
 const HARD_LINK_OVERHEAD: usize = 2 + 2 + 8;
+// "Fractal Heap" in the format specification, version 4.0, defines bits 6 and 7 as the ID version.
+const HEAP_ID_VERSION_ONE: u8 = 0x40;

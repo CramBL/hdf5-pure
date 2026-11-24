@@ -2319,7 +2319,7 @@ mod tests {
 
     #[test]
     fn dense_private_targets_reject_an_unknown_heap_id_type() {
-        let bytes = btree_v2::attribute_name_record(&[0xFF; 8], 0, 0, 0);
+        let bytes = btree_v2::attribute_name_record(&[0x30, 0, 0, 0, 0, 0, 0, 0], 0, 0, 0);
         let record = DenseAttributeRecord::parse(&bytes, BTREE_V2_ATTRIBUTE_NAME, 8).unwrap();
         assert_eq!(
             record.target(&attribute_id_layout()).unwrap_err(),

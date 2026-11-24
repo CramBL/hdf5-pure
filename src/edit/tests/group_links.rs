@@ -419,10 +419,10 @@ fn dense_inspection_rejects_unsupported_heap_configurations(
     bytes[at] ^= 1;
     update_checksum(bytes, at - 6, 11);
 }, Some("a group's name index has inconsistent keys"))]
-#[case::heap_id_flags(1, |bytes: &mut Vec<u8>, info: &LinkInfoMessage| {
-    let at = name_leaf(bytes, info) + 10;
-    bytes[at] |= 1;
-    update_checksum(bytes, at - 10, 11);
+#[case::tiny_heap_id(1, |bytes: &mut Vec<u8>, info: &LinkInfoMessage| {
+    let at = name_leaf(bytes, info);
+    bytes[at + btree_v2::NODE_PREFIX + size_of::<u32>()] = TINY_HEAP_ID_PREFIX;
+    update_checksum(bytes, at, usize::from(btree_v2::LINK_NAME_RECORD_SIZE));
 }, Some("a group's link uses a non-managed heap ID"))]
 #[case::creation_id(1, |bytes: &mut Vec<u8>, info: &LinkInfoMessage| {
     let address = info.creation_order_index().defined_address().unwrap();
@@ -478,6 +478,34 @@ fn dense_inspection_rejects_inconsistent_index_metadata(
         ),
     }
 }
+
+#[test]
+fn dense_group_inspector_reports_reserved_bits_in_managed_heap_ids() {
+    let (mut bytes, region) = fixture(one_link_storage(), true);
+    let (_, start, end) = find_message(&region, MessageType::LINK_INFO);
+    let info = LinkInfoMessage::parse(&region[start..end], 8).unwrap();
+    let at = name_leaf(&bytes, &info);
+    bytes[at + btree_v2::NODE_PREFIX + size_of::<u32>()] |= RESERVED_HEAP_ID_BIT;
+    update_checksum(&mut bytes, at, usize::from(btree_v2::LINK_NAME_RECORD_SIZE));
+    let error = group_links::inspect(
+        &OpenedSource::for_test(&BytesSource::new(bytes), addresses()),
+        widths(),
+        &region,
+    )
+    .unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::InvalidFractalHeapIdFlags(RESERVED_HEAP_ID_BIT)
+    );
+}
+
+// "Fractal Heap" in the format specification, version 4.0, defines the version 0 tiny ID
+// prefix and reserves bits 0 through 3 of a managed ID prefix.
+const TINY_HEAP_ID_PREFIX: u8 = 0x20;
+const RESERVED_HEAP_ID_BIT: u8 = 0x01;
 
 #[rstest]
 #[case::duplicate_info(|region: &mut OhRegion| region.push_fixture_message(MessageType::LINK_INFO, &crate::file_writer::compact_link_info(OffsetWidth::Eight).to_bytes()), "a group has repeated link-info messages")]
