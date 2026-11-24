@@ -219,6 +219,19 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
         let prepared = format::PreparedDatatype::new(&semantic, width).unwrap();
         assert_eq!(prepared.encoded_size(), bytes.len());
         assert_eq!(&prepared.to_bytes(), bytes);
+        let mut short = vec![0xff; bytes.len() - 1];
+        assert_eq!(
+            prepared.write_into(&mut short).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: bytes.len(),
+                available: short.len(),
+            }
+        );
+        assert_eq!(short, vec![0xff; bytes.len() - 1]);
+        let mut output = vec![0xff; bytes.len() + 2];
+        assert_eq!(prepared.write_into(&mut output).unwrap(), bytes.len());
+        assert_eq!(&output[..bytes.len()], bytes);
+        assert_eq!(&output[bytes.len()..], &[0xff; 2]);
     }
     assert_eq!(
         format::PreparedDatatype::new(&semantic, OffsetWidth::Eight).unwrap_err(),

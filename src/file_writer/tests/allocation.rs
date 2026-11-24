@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use rstest::rstest;
 use test_util::allocation;
 
-use super::super::{DatatypeLocation, FileWriter, WIDTHS};
+use super::super::{DatatypeLocation, FileWriter, PreparedDatatype, WIDTHS};
 use crate::File;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
@@ -34,7 +34,8 @@ fn dataset_header_bounds_allocations() {
 fn committed_datatype_header_allocates_only_its_output() {
     let datatype = type_builders::make_u8_type();
     let (header, measured) = allocation::measure("committed_datatype_header", || {
-        super::super::build_committed_datatype_oh(WIDTHS, &datatype, 4).unwrap()
+        let datatype = PreparedDatatype::new(&datatype, WIDTHS.offsets).unwrap();
+        super::super::build_committed_datatype_oh(datatype, 4).unwrap()
     });
     assert_eq!(header, super::expected_committed_datatype_header(4));
     assert_eq!(measured.live_bytes, u64::try_from(header.len()).unwrap());

@@ -9,7 +9,6 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::mem;
 use core::num::NonZeroU32;
 use core::slice;
 
@@ -439,7 +438,7 @@ impl DatatypeMessage {
 #[derive(Debug)]
 pub struct PreparedDatatype<'a> {
     description: Description<'a>,
-    descriptor_size: u32,
+    offset_width: OffsetWidth,
     computed_sizes: Vec<u32>,
     len: usize,
 }
@@ -494,10 +493,31 @@ impl<'a> PreparedDatatype<'a> {
         description.prepare(&mut preparation, depth)?;
         Ok(Self {
             description,
-            descriptor_size,
+            offset_width,
             computed_sizes: preparation.computed_sizes,
             len: preparation.len,
         })
+    }
+
+    /// Compares the canonical encoding of `datatype` with this body at the prepared offset width.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::new`] when preparing `datatype` at this width.
+    pub fn matches_datatype(&self, datatype: &Datatype) -> Result<bool, FormatError> {
+        if matches!(&self.description, Description::Canonical(source) if *source == datatype) {
+            return Ok(true);
+        }
+        let candidate = PreparedDatatype::new(datatype, self.offset_width)?;
+        if self.len != candidate.len {
+            return Ok(false);
+        }
+        let expected = self.to_bytes();
+        let mut equal = true;
+        candidate.emit(|position, bytes| {
+            equal = equal && expected[position..position + bytes.len()] == *bytes;
+        });
+        Ok(equal)
     }
 
     /// Returns the exact body size in bytes, including all nested descriptions.
@@ -551,18 +571,27 @@ impl<'a> PreparedDatatype<'a> {
     ///
     /// Panics if `bytes` is shorter than the encoded body.
     pub(crate) fn write_body(&self, bytes: &mut [u8]) {
+        self.emit(|position, field| {
+            bytes[position..position + field.len()].copy_from_slice(field);
+        });
+    }
+
+    /// Passes each field and its byte position to `write_field`, with headers after their properties.
+    fn emit(&self, write_field: impl FnMut(usize, &[u8])) {
         let Self {
             description,
-            descriptor_size,
+            offset_width,
             computed_sizes,
-            len: _,
+            len,
         } = self;
         let mut output = Output {
-            bytes,
-            descriptor_size: *descriptor_size,
+            write_field,
+            position: 0,
+            descriptor_size: variable_length_size(*offset_width),
             computed_sizes: computed_sizes.iter(),
         };
         description.write(&mut output);
+        debug_assert_eq!(output.position, *len);
         debug_assert!(output.computed_sizes.as_slice().is_empty());
     }
 }
@@ -616,8 +645,8 @@ impl Description<'_> {
         }
     }
 
-    fn write(&self, output: &mut Output<'_>) -> NodeHeader {
-        let destination = output.take(DATATYPE_HEADER_SIZE);
+    fn write(&self, output: &mut Output<'_, impl FnMut(usize, &[u8])>) -> NodeHeader {
+        let position = output.advance(DATATYPE_HEADER_SIZE);
         let version = self.version();
         let header = match self.body() {
             Body::Atomic(properties) => properties.write(output, version),
@@ -637,7 +666,7 @@ impl Description<'_> {
                 unreachable!("a prepared datatype has a supported description")
             }
         };
-        destination.copy_from_slice(&header.to_bytes());
+        (output.write_field)(position, &header.to_bytes());
         header
     }
 
@@ -906,7 +935,11 @@ impl ContainerProperties<'_> {
         }
     }
 
-    fn write(&self, output: &mut Output<'_>, preserved: Option<DatatypeVersion>) -> NodeHeader {
+    fn write(
+        &self,
+        output: &mut Output<'_, impl FnMut(usize, &[u8])>,
+        preserved: Option<DatatypeVersion>,
+    ) -> NodeHeader {
         let (class, minimum, child_version, flags, size) = match self {
             Self::Compound { size, members } => {
                 let width = datatype::offset_bytes_for_size(*size);
@@ -1170,27 +1203,25 @@ impl Preparation {
     }
 }
 
-/// The unwritten suffix of the body and the sizes selected during preparation.
-pub(super) struct Output<'a> {
-    bytes: &'a mut [u8],
+/// The field writer, current byte position, and sizes selected during preparation.
+pub(super) struct Output<'a, WriteField> {
+    write_field: WriteField,
+    position: usize,
     descriptor_size: u32,
     computed_sizes: slice::Iter<'a, u32>,
 }
 
-impl<'a> Output<'a> {
-    /// Takes the next `len` bytes and advances the destination.
-    ///
-    /// # Panics
-    ///
-    /// Panics if fewer than `len` bytes remain.
-    pub(super) fn take(&mut self, len: usize) -> &'a mut [u8] {
-        let (field, rest) = mem::take(&mut self.bytes).split_at_mut(len);
-        self.bytes = rest;
-        field
+impl<WriteField: FnMut(usize, &[u8])> Output<'_, WriteField> {
+    /// Passes `bytes` to the field writer at the current position and advances by their length.
+    pub(super) fn write(&mut self, bytes: &[u8]) {
+        let position = self.advance(bytes.len());
+        (self.write_field)(position, bytes);
     }
 
-    pub(super) fn write(&mut self, bytes: &[u8]) {
-        self.take(bytes.len()).copy_from_slice(bytes);
+    fn advance(&mut self, len: usize) -> usize {
+        let position = self.position;
+        self.position += len;
+        position
     }
 
     /// Returns the next prepared element size in child-before-parent order.

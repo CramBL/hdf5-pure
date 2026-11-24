@@ -1,19 +1,86 @@
 #![cfg(feature = "libhdf5")]
 
+use hdf5_pure::CharacterSet;
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FixedPointType;
+use hdf5_pure::LibVer;
+use hdf5_pure::OffsetWidth;
+use hdf5_pure::StringPadding;
+use hdf5_pure::VariableLengthType;
 use libhdf5::plist::file_access::LibraryVersion;
 use libhdf5::types::CompoundField;
 use libhdf5::types::CompoundType;
 use libhdf5::types::IntSize;
 use libhdf5::types::TypeDescriptor;
-
-use hdf5_pure::FixedPointType;
-use hdf5_pure::LibVer;
 use rstest::rstest;
+use test_util_hdf5::lock;
+
+#[rstest]
+#[case::two_bytes(OffsetWidth::Two, 10)]
+#[case::four_bytes(OffsetWidth::Four, 12)]
+fn libhdf5_reads_committed_compounds_with_narrow_file_offsets(
+    #[case] width: OffsetWidth,
+    #[case] tag_offset: u64,
+) {
+    let mut datatype = CompoundTypeBuilder::with_size(17)
+        .field(
+            "v",
+            0,
+            Datatype::VariableLength(VariableLengthType::string(
+                StringPadding::NullTerminate,
+                CharacterSet::Ascii,
+            )),
+        )
+        .u8_field("tag", 16)
+        .build()
+        .unwrap();
+    let Datatype::Compound { members, .. } = &mut datatype else {
+        panic!("expected a compound datatype, got {datatype:?}");
+    };
+    members[1].byte_offset = tag_offset;
+    let mut builder = FileBuilder::new();
+    builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
+    builder.with_offset_width(width);
+    builder.commit_datatype("record", datatype.clone());
+    builder
+        .create_dataset("value")
+        .with_unallocated_storage(datatype, &[3])
+        .with_committed_datatype("record");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("committed.h5");
+    builder.write(&path).unwrap();
+
+    let _guard = lock::libhdf5_guard();
+    let file = libhdf5::File::open(&path).unwrap();
+    {
+        let dataset = file.dataset("value").unwrap();
+        let datatype = dataset.dtype().unwrap();
+        assert!(datatype.is_committed());
+        assert_eq!(dataset.shape(), [3]);
+        assert_eq!(dataset.storage_size(), 0);
+        let string_size = size_of::<*const core::ffi::c_char>();
+        assert_eq!(
+            datatype.to_descriptor().unwrap(),
+            TypeDescriptor::Compound(CompoundType {
+                size: 17 - usize::try_from(tag_offset).unwrap() + string_size,
+                fields: vec![
+                    CompoundField::new("v", TypeDescriptor::VarLenAscii, 0, 0),
+                    CompoundField::new(
+                        "tag",
+                        TypeDescriptor::Unsigned(IntSize::U1),
+                        string_size,
+                        1
+                    ),
+                ],
+            })
+        );
+    }
+    file.close().unwrap();
+}
 
 #[rstest]
 #[case::below_two_byte_boundary(255)]

@@ -362,21 +362,18 @@ impl<'a> DatasetHeaderRecords<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::OpaqueTagTooLong`] if the datatype contains an opaque tag longer than
-/// 247 bytes, or [`FormatError::InvalidOpaqueTagByte`] if such a tag contains a NUL byte.
 /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if the datatype message exceeds the
-/// object-header message size limit.
+/// object-header message size limit, or [`FormatError::AllocationFailed`] if reserving output
+/// space fails.
 pub(crate) fn build_committed_datatype_oh(
-    widths: FormatWidths,
-    dt: &Datatype,
+    datatype: PreparedDatatype<'_>,
     references: u32,
 ) -> Result<Vec<u8>, FormatError> {
-    preparation::require_reference_width(widths, dt)?;
     let prefix = ObjectHeaderPrefix::PLAIN;
     let datatype = prefix.layout.prepare_record(
         MessageFlags::CONSTANT | MessageFlags::FORBID_SHARING,
         0,
-        PreparedDatatype::new(dt, widths.offsets)?,
+        datatype,
     )?;
     let count = (references > 1).then(|| ObjectReferenceCountMessage::new(references).encode());
     let count = count
@@ -1136,10 +1133,6 @@ impl FileWriter {
             /// Link name in the owning group.
             name: LinkNameBuf,
             dt: Datatype,
-            /// Hard links plus shared references, completed once every dataset
-            /// and attribute in the file has been counted (see
-            /// `register_committed_use`).
-            references: u32,
         }
 
         let mut all_ds: Vec<PreparedDataset> = Vec::new();
@@ -1187,9 +1180,6 @@ impl FileWriter {
                     committed.push(CtFlat {
                         name: link_name(ct.name)?,
                         dt: ct.datatype,
-                        // One hard link. Every shared reference to it adds one
-                        // more, counted once the whole file is flattened.
-                        references: 1,
                     });
                     Ok(committed.len() - 1)
                 })
@@ -1395,20 +1385,20 @@ impl FileWriter {
             out
         };
 
-        /// Register one use of a committed datatype: resolve the path it names,
-        /// check that the user and the committed object describe the same type,
-        /// and add the use to the object's reference count.
+        /// Counts a shared reference after checking the datatype at the destination offset width.
         ///
-        /// The agreement check is what keeps the two encodings from disagreeing.
-        /// A reader takes the committed one — it is the only one in the file — so
-        /// a dataset written with a mismatched inline declaration would have its
-        /// element bytes read under a type it was not encoded in, silently.
+        /// The object header stores a shared reference to the committed datatype body. The reader
+        /// uses that body to interpret the dataset or attribute values.
         ///
-        /// `user` names the object for that error and is built only on that
-        /// path: every dataset and every attribute in every file passes through
-        /// here, and almost none of them name a committed type at all.
+        /// # Errors
+        ///
+        /// Returns [`FormatError::UnknownCommittedDatatype`] if the target path is absent from
+        /// the committed datatype index, or [`FormatError::CommittedDatatypeMismatch`] if the
+        /// encoded bodies differ.
+        /// Calls `user` for the name in the mismatch error. Propagates path resolution and
+        /// datatype preparation errors.
         fn register_committed_use(
-            committed: &mut [CtFlat],
+            committed: &mut [(PreparedDatatype<'_>, u32)],
             by_path: &HashMap<ObjectPathBuf, usize>,
             target: &ObjectTarget,
             dt: &Datatype,
@@ -1418,22 +1408,29 @@ impl FileWriter {
             let Some(&ci) = by_path.get(path) else {
                 return Err(FormatError::UnknownCommittedDatatype(path.to_string()));
             };
-            if hdf5_pure_format::__private::serialize_datatype(&committed[ci].dt)?
-                != hdf5_pure_format::__private::serialize_datatype(dt)?
-            {
+            let (body, references) = &mut committed[ci];
+            if !body.matches_datatype(dt)? {
                 return Err(FormatError::CommittedDatatypeMismatch {
                     path: path.to_string(),
                     user: user(),
                 });
             }
-            committed[ci].references = committed[ci].references.saturating_add(1);
+            *references = references.saturating_add(1);
             Ok(())
         }
+
+        let mut committed_bodies = committed
+            .iter()
+            .map(|ct| {
+                preparation::require_reference_width(widths, &ct.dt)?;
+                Ok((PreparedDatatype::new(&ct.dt, widths.offsets)?, 1))
+            })
+            .collect::<Result<Vec<_>, FormatError>>()?;
 
         for (index, target) in &root_attr_committed_datatype_targets {
             let attr = &root_attrs[*index];
             register_committed_use(
-                &mut committed,
+                &mut committed_bodies,
                 &committed_by_path,
                 target,
                 &attr.datatype,
@@ -1444,7 +1441,7 @@ impl FileWriter {
             for (index, target) in &g.attr_committed_datatype_targets {
                 let attr = &g.attrs[*index];
                 register_committed_use(
-                    &mut committed,
+                    &mut committed_bodies,
                     &committed_by_path,
                     target,
                     &attr.datatype,
@@ -1454,14 +1451,18 @@ impl FileWriter {
         }
         for d in &all_ds {
             if let Some(target) = &d.committed_datatype_target {
-                register_committed_use(&mut committed, &committed_by_path, target, &d.dt, || {
-                    format!("dataset {:?}", d.name.as_str())
-                })?;
+                register_committed_use(
+                    &mut committed_bodies,
+                    &committed_by_path,
+                    target,
+                    &d.dt,
+                    || format!("dataset {:?}", d.name.as_str()),
+                )?;
             }
             for (index, target) in &d.attr_committed_datatype_targets {
                 let attr = &d.attrs[*index];
                 register_committed_use(
-                    &mut committed,
+                    &mut committed_bodies,
                     &committed_by_path,
                     target,
                     &attr.datatype,
@@ -1474,9 +1475,9 @@ impl FileWriter {
         // and a reference count, neither of which depends on where anything in
         // the file lands. So it is built once here and only placed below, unlike
         // every other header, which is sized against dummy addresses and rebuilt.
-        let committed_oh: Vec<Vec<u8>> = committed
-            .iter()
-            .map(|ct| build_committed_datatype_oh(widths, &ct.dt, ct.references))
+        let committed_oh: Vec<Vec<u8>> = committed_bodies
+            .into_iter()
+            .map(|(body, references)| build_committed_datatype_oh(body, references))
             .collect::<Result<_, _>>()?;
 
         /// Everything a link can name, paired with the address assigned to it.
