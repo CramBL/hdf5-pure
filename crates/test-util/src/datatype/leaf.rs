@@ -110,6 +110,13 @@ impl Leaf {
     }
 }
 
+/// Builds a one-byte unsigned fixed-point description with eight bits of precision.
+pub fn unsigned_byte(version: Version) -> Vec<u8> {
+    let mut body = super::header(Class::FIXED_POINT, version.get(), [0; 3], 1);
+    body.extend_from_slice(&[0, 0, 8, 0]);
+    body
+}
+
 /// The byte order of a non-VAX floating-point fixture.
 #[derive(Clone, Copy, Debug)]
 pub enum Order {

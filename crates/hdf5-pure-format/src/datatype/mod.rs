@@ -1,18 +1,18 @@
 //! Parsing and serialization of HDF5 Datatype messages.
 
 use alloc::boxed::Box;
-use alloc::string::String;
 #[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 use core::num::NonZeroUsize;
 
-use byteorder::ByteOrder;
-use byteorder::LittleEndian;
+#[cfg(test)]
+use byteorder::{ByteOrder, LittleEndian};
 
 use hdf5_pure_core::__private;
 pub(crate) use hdf5_pure_core::CharacterSet;
+#[cfg(test)]
 use hdf5_pure_core::ComplexType;
 pub(crate) use hdf5_pure_core::Datatype;
 pub(crate) use hdf5_pure_core::ReferenceType;
@@ -25,10 +25,10 @@ use hdf5_pure_core::{
     MantissaNormalization, TimeType,
 };
 
-use self::header::{Context, DatatypeClass, Header};
-use self::message::DatatypeVersion;
+use self::header::{Context, Header};
 use self::message::atomic::{self, AtomicReservedFlagPolicy};
-use crate::bytes::{self, ByteCursor};
+use self::message::decode::{self, Decoded, Layout, Member, Projection};
+use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
@@ -140,6 +140,16 @@ pub fn stored_element_size_usize(
 /// Accepts legacy object and dataset-region reference kinds at every supported message
 /// version and preserves their declared element sizes.
 ///
+/// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Decodes
+/// compound and enumeration names with lossy UTF-8 conversion. Acquires the full
+/// array dimension list and any version 2 permutation indices before reading the
+/// base datatype. Reads all enumeration names before acquiring the complete stored
+/// value list.
+///
+/// Checks the array size against the stored base size multiplied by the dimension extents.
+/// Variable-length descriptors occupy 10, 12, or 16 bytes for heap address widths of 2, 4, or
+/// 8 bytes, respectively.
+///
 /// Reads an opaque tag's complete recorded property and copies its logical bytes into
 /// [`Datatype::Opaque`]. Reads a zero-length property as an absent tag and strips the first NUL
 /// and its zero padding from a tagged property. Also accepts aligned properties filled entirely
@@ -153,7 +163,9 @@ pub fn stored_element_size_usize(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the body ends within a field. Returns
+/// Returns [`FormatError::UnexpectedEof`] if the body ends within a field. For an incomplete
+/// array dimension or enumeration value list, `expected` is the end offset of the required
+/// list from the start of the description containing it. Returns
 /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
 /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
 /// Returns [`FormatError::InvalidDatatypeVersion`] for a version unsupported by an array,
@@ -162,6 +174,8 @@ pub fn stored_element_size_usize(
 /// [`FormatError::InvalidStringPadding`] for an unknown string padding code, or
 /// [`FormatError::InvalidCharacterSet`] for an unknown character set code. Returns
 /// [`FormatError::ZeroSizedDatatype`] if the parsed type has no element bytes.
+/// Returns [`FormatError::LengthTooLarge`] if the computed array size exceeds the size field, or
+/// [`FormatError::InvalidDatatypeSize`] if the declared array size differs from the computed size.
 /// Returns [`FormatError::InvalidFixedPointRange`], [`FormatError::InvalidFloatingPointRange`], or
 /// [`FormatError::InvalidNumericBitRange`] if a numeric bit range is empty or exceeds its element
 /// size. Returns [`FormatError::InvalidFloatingPointField`] if a floating-point field is empty or
@@ -181,14 +195,15 @@ pub fn stored_element_size_usize(
 /// neither sequence nor string, [`FormatError::InvalidVariableLengthReservedBits`] if its
 /// class bit field has reserved bits set, or
 /// [`FormatError::InvalidVariableLengthSequenceMetadata`] if a sequence has nonzero string
-/// padding or character-set metadata.
+/// padding or character-set metadata. Returns [`FormatError::InvalidVariableLengthSize`] for an
+/// unsupported descriptor size.
 ///
 /// Returns [`FormatError::InvalidCompoundV1Rank`] if a version 1 compound member declares more
 /// than four dimensions, [`FormatError::InvalidCompoundV1Extent`] if an active dimension is
 /// zero, or [`FormatError::UnsupportedCompoundV1Permutation`] if its permutation field is nonzero.
-/// Returns [`FormatError::CompoundArraySizeOverflow`] if a version 1 member's array size exceeds
-/// [`u32::MAX`], or [`FormatError::CompoundFieldOutOfBounds`] if its byte range exceeds the
-/// compound's declared size.
+/// Returns [`FormatError::CompoundArraySizeOverflow`] if a version 1 member's implicit array
+/// size exceeds [`u32::MAX`], or [`FormatError::CompoundFieldOutOfBounds`] if its stored byte
+/// range extends past the compound's declared size.
 ///
 /// Returns [`FormatError::InvalidComplexFlags`] if a complex class bit field has reserved bits,
 /// [`FormatError::UnsupportedComplexForm`] if the complex form is not homogeneous rectangular,
@@ -197,192 +212,105 @@ pub fn stored_element_size_usize(
 /// order pattern, or VAX order in versions 1 or 2. Returns
 /// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
+/// Returns [`FormatError::AllocationFailed`] if an enumeration member reservation fails.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     let mut cursor = ByteCursor::new(data);
-    let header = Header::parse(&mut cursor, Context::Description)?;
-    let Header {
-        class,
-        version,
-        flags: [bf0, bf1, bf2],
-        size,
-    } = header;
-    let mut pos = cursor.position();
+    let Decoded {
+        datatype,
+        stored_size: _,
+    } = parse_datatype_at(&mut cursor)?;
+    Ok((datatype, cursor.position()))
+}
 
-    let parsed = match class {
-        DatatypeClass::Atomic(class) => {
-            let datatype = class
-                .decode(
-                    &mut cursor,
-                    header.fields(),
-                    Context::Description,
-                    AtomicReservedFlagPolicy::Ignore,
-                )?
-                .into_datatype();
-            return Ok((datatype, cursor.position()));
-        }
-        DatatypeClass::Compound => {
-            // Compound
-            let num_members = (bf0 as u16) | ((bf1 as u16) << 8);
-            let mut members = Vec::with_capacity(num_members as usize);
-
-            // Versions 3 to 5 share one layout: version 4 added the revised
-            // reference types and version 5 the complex class, and neither
-            // changed a compound. HDF5 2.0 writes version 5 for every
-            // datatype under its latest library bounds.
-            if version >= DatatypeVersion::Three {
-                let ob = offset_bytes_for_size(size);
-                for _ in 0..num_members {
-                    let (name, name_len) = read_null_terminated_string(data, pos)?;
-                    pos += name_len;
-                    let byte_offset = read_uint(data, pos, ob)?;
-                    pos += ob;
-                    let (member_dt, consumed) = parse_datatype(&data[pos..])?;
-                    pos += consumed;
-                    members.push(__private::compound_member(name, byte_offset, member_dt));
-                }
-            } else {
-                // v1 and v2: the member name is NUL-terminated and padded with
-                // additional NULs to a multiple of 8 bytes, followed by a
-                // 4-byte member byte offset.
-                //
-                // v1 then carries a fixed 28-byte dimension block before the member datatype message:
-                //  dimensionality(1) + reserved(3) + dimension permutation(4) + reserved(4) + dimension sizes(16)
-                // v2 drops that block.
-                for _ in 0..num_members {
-                    let (name, name_len) = read_null_terminated_string(data, pos)?;
-                    let padded = (name_len + 7) & !7;
-                    pos += padded;
-                    bytes::ensure_len(data, pos, 4)?;
-                    let byte_offset = LittleEndian::read_u32(&data[pos..pos + 4]) as u64;
-                    pos += 4;
-                    let shape = if version == DatatypeVersion::One {
-                        let (shape, consumed) = legacy_member::MemberShape::parse(data, pos)?;
-                        pos += consumed;
-                        Some(shape)
-                    } else {
-                        None
-                    };
-                    let (member_dt, consumed) = parse_datatype(&data[pos..])?;
-                    pos += consumed;
-                    let member_dt = match shape {
-                        Some(shape) => shape.into_datatype(member_dt, &name, byte_offset, size)?,
-                        None => member_dt,
-                    };
-                    members.push(__private::compound_member(name, byte_offset, member_dt));
-                }
+/// Parses the next datatype and retains its stored element size.
+///
+/// # Errors
+///
+/// Returns the errors of [`parse_datatype`].
+fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, FormatError> {
+    let header = Header::parse(cursor, Context::Description)?;
+    let size = header.size;
+    let datatype = match Layout::from_header(&header, Projection::Semantic)? {
+        Layout::Atomic(class) => class
+            .decode(
+                cursor,
+                header.fields(),
+                Context::Description,
+                AtomicReservedFlagPolicy::Ignore,
+            )?
+            .into_datatype(),
+        Layout::Compound(compound) => {
+            let mut members = Vec::with_capacity(compound.member_count());
+            for _ in 0..compound.member_count() {
+                let Member {
+                    name,
+                    offset,
+                    shape,
+                } = compound.member(cursor)?;
+                let decoded = parse_nested_datatype(cursor)?;
+                let datatype = match shape {
+                    Some(shape) => shape.into_datatype(decoded, &name, offset, size)?,
+                    None => decoded.datatype,
+                };
+                members.push(__private::compound_member(name, offset, datatype));
             }
-
-            Ok((Datatype::Compound { size, members }, pos))
+            Datatype::Compound { size, members }
         }
-        DatatypeClass::Reference => return Ok((atomic::decode_reference(&header)?, pos)),
-        DatatypeClass::Enumeration => {
-            // Enumeration
-            let num_members = (bf0 as u16) | ((bf1 as u16) << 8);
-            // Parse base type
-            let (base_type, base_consumed) = parse_datatype(&data[pos..])?;
-            pos += base_consumed;
-            let base_size = base_type.type_size();
-            let mut members = Vec::with_capacity(num_members as usize);
-            // Enum layout: `base_type`, then all names (null-terminated), then all values
-            // v1/v2: names are padded to 8-byte boundaries
-            // v3: names are just null-terminated
-            let mut member_names = Vec::with_capacity(num_members as usize);
-            for _ in 0..num_members {
-                let (name, name_len) = read_null_terminated_string(data, pos)?;
-                if version < DatatypeVersion::Three {
-                    let padded = (name_len + 7) & !7;
-                    pos += padded;
-                } else {
-                    pos += name_len;
-                }
-                member_names.push(name);
+        Layout::Reference => atomic::decode_reference(&header)?,
+        Layout::Enumeration(enumeration) => {
+            let base_type = parse_nested_datatype(cursor)?.datatype;
+            let members = enumeration.members(cursor, base_type.element_size()?)?;
+            Datatype::Enumeration {
+                size,
+                base_type: Box::new(base_type),
+                members,
             }
-            // Now values
-            for name in &member_names {
-                bytes::ensure_len(data, pos, base_size as usize)?;
-                let value = data[pos..pos + base_size as usize].to_vec();
-                pos += base_size as usize;
-                members.push(__private::enum_member(name.clone(), value));
-            }
-            Ok((
-                Datatype::Enumeration {
-                    size,
-                    base_type: Box::new(base_type),
-                    members,
-                },
-                pos,
-            ))
         }
-        DatatypeClass::VariableLength => {
-            let kind = parse_variable_length_metadata([bf0, bf1, bf2])?;
-            let (base_type, consumed) = parse_datatype(&data[pos..])?;
-            pos += consumed;
-            let kind = match kind {
+        Layout::VariableLength(metadata) => {
+            let base_type = parse_nested_datatype(cursor)?.datatype;
+            let kind = match metadata {
                 VariableLengthMetadata::Sequence => VariableLengthType::sequence(base_type),
                 VariableLengthMetadata::String { padding, charset } => VariableLengthType::String(
                     VariableLengthStringType::with_base_type(padding, charset, base_type)?,
                 ),
             };
-            Ok((Datatype::VariableLength(kind), pos))
+            Datatype::VariableLength(kind)
         }
-
-        DatatypeClass::Array => {
-            // Array
-            if version == DatatypeVersion::Two {
-                bytes::ensure_len(data, pos, 4)?;
-                let ndims = data[pos] as usize;
-                pos += 4; // ndims(1) + reserved(3)
-                bytes::ensure_len(data, pos, ndims * 4 + ndims * 4)?;
-                let mut dimensions = Vec::with_capacity(ndims);
-                for _ in 0..ndims {
-                    dimensions.push(LittleEndian::read_u32(&data[pos..pos + 4]));
-                    pos += 4;
-                }
-                // skip permutation indices
-                pos += ndims * 4;
-                let (base_type, consumed) = parse_datatype(&data[pos..])?;
-                pos += consumed;
-                Ok((
-                    Datatype::Array {
-                        base_type: Box::new(base_type),
-                        dimensions,
-                    },
-                    pos,
-                ))
-            } else if version >= DatatypeVersion::Three {
-                bytes::ensure_len(data, pos, 1)?;
-                let ndims = data[pos] as usize;
-                pos += 1;
-                bytes::ensure_len(data, pos, ndims * 4)?;
-                let mut dimensions = Vec::with_capacity(ndims);
-                for _ in 0..ndims {
-                    dimensions.push(LittleEndian::read_u32(&data[pos..pos + 4]));
-                    pos += 4;
-                }
-                let (base_type, consumed) = parse_datatype(&data[pos..])?;
-                pos += consumed;
-                Ok((
-                    Datatype::Array {
-                        base_type: Box::new(base_type),
-                        dimensions,
-                    },
-                    pos,
-                ))
-            } else {
-                Err(FormatError::InvalidDatatypeVersion {
-                    class: class.code(),
-                    version: version.get(),
-                })
-            }
+        Layout::Array(array) => {
+            let dimensions = array.dimensions(cursor)?;
+            let base = parse_nested_datatype(cursor)?;
+            let stored_size = decode::array_size(size, base.stored_size, &dimensions)?;
+            return Ok(Decoded {
+                datatype: Datatype::Array {
+                    base_type: Box::new(base.datatype),
+                    dimensions,
+                },
+                stored_size,
+            });
         }
-        DatatypeClass::Complex => parse_complex(&mut cursor, version, [bf0, bf1, bf2], size),
+        Layout::Complex(complex) => {
+            let (datatype, _) = complex.component(cursor)?;
+            Datatype::Complex(datatype)
+        }
     };
+    Ok(Decoded {
+        datatype,
+        stored_size: message::positive_size(header.class.code(), size)?,
+    })
+}
 
-    // Array types compute their size from their base type and dimensions. A zero dimension
-    // produces an element with zero bytes even when the header size is positive.
-    let (datatype, consumed) = parsed?;
-    datatype.element_size()?;
-    Ok((datatype, consumed))
+/// Parses the next description from the bytes remaining at the cursor.
+///
+/// Advances the outer cursor by the consumed length on success.
+///
+/// # Errors
+///
+/// Returns the errors of [`parse_datatype`].
+fn parse_nested_datatype(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, FormatError> {
+    let mut nested = ByteCursor::new(cursor.remaining());
+    let decoded = parse_datatype_at(&mut nested)?;
+    cursor.take(nested.position())?;
+    Ok(decoded)
 }
 
 /// Serializes a datatype into an HDF5 Datatype message body.
@@ -568,61 +496,6 @@ const OPAQUE_TAG_ALIGNMENT: u8 = 8;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const OPAQUE_TAG_MAX_LEN: usize = 247;
-
-/// Parses a complex datatype from a cursor positioned at its floating-point parent.
-///
-/// # Errors
-///
-/// Returns the complex datatype errors of [`parse_datatype`]. The coordinates for incomplete
-/// floating-point properties are relative to the start of the parent description.
-fn parse_complex(
-    cursor: &mut ByteCursor<'_>,
-    version: DatatypeVersion,
-    flags: [u8; 3],
-    size: u32,
-) -> Result<(Datatype, usize), FormatError> {
-    if version != DatatypeVersion::Five {
-        return Err(FormatError::InvalidDatatypeVersion {
-            class: COMPLEX_CLASS,
-            version: version.get(),
-        });
-    }
-    let homogeneous = flags[0] & COMPLEX_HOMOGENEOUS_BIT != 0;
-    let form = (flags[0] & COMPLEX_FORM_MASK) >> COMPLEX_FORM_SHIFT;
-    let flags = u32::from(flags[0]) | (u32::from(flags[1]) << 8) | (u32::from(flags[2]) << 16);
-    if flags & COMPLEX_RESERVED_MASK != 0 {
-        return Err(FormatError::InvalidComplexFlags(flags));
-    }
-    if !homogeneous || form != COMPLEX_RECTANGULAR_FORM {
-        return Err(FormatError::UnsupportedComplexForm { homogeneous, form });
-    }
-    let context = Context::ComplexParent;
-    let parent_start = cursor.position();
-    let parent = Header::parse(cursor, context)?;
-    let component = atomic::decode_floating_point(cursor, parent.fields(), context).map_err(
-        |error| match error {
-            FormatError::UnexpectedEof {
-                expected,
-                available,
-            } => {
-                // The complete parent header lies before the attempted property extent.
-                FormatError::UnexpectedEof {
-                    expected: expected - parent_start,
-                    available: available - parent_start,
-                }
-            }
-            error => error,
-        },
-    )?;
-    let complex = ComplexType::new(component)?;
-    if size != complex.size().get() {
-        return Err(FormatError::InvalidComplexSize {
-            size,
-            component_size: component.size().get(),
-        });
-    }
-    Ok((Datatype::Complex(complex), cursor.position()))
-}
 
 /// The byte length of the common datatype message header.
 ///
@@ -849,27 +722,6 @@ fn parse_charset(val: u8) -> Result<CharacterSet, FormatError> {
     }
 }
 
-/// Read a null-terminated string from `data` starting at `offset`.
-/// Returns (`string`, `bytes_consumed` including the null terminator).
-fn read_null_terminated_string(data: &[u8], offset: usize) -> Result<(String, usize), FormatError> {
-    if offset >= data.len() {
-        return Err(FormatError::UnexpectedEof {
-            expected: offset + 1,
-            available: data.len(),
-        });
-    }
-    let remaining = &data[offset..];
-    let null_pos = remaining
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or(FormatError::UnexpectedEof {
-            expected: offset + 1,
-            available: data.len(),
-        })?;
-    let name = String::from_utf8_lossy(&remaining[..null_pos]).into_owned();
-    Ok((name, null_pos + 1))
-}
-
 /// Returns the member offset width for a version 3 compound datatype of `compound_size` bytes.
 fn offset_bytes_for_size(compound_size: u32) -> usize {
     // "The Datatype Message" in the format specification, version 4.0, defines the
@@ -879,30 +731,6 @@ fn offset_bytes_for_size(compound_size: u32) -> usize {
         .iter()
         .rposition(|&byte| byte != 0)
         .map_or(1, |index| index + 1)
-}
-
-/// Reads a little-endian unsigned integer of 1, 2, 3, 4, or 8 bytes.
-///
-/// # Errors
-///
-/// Returns [`FormatError::UnexpectedEof`] if the integer extends beyond `data` or `nbytes`
-/// is not a supported width.
-fn read_uint(data: &[u8], offset: usize, nbytes: usize) -> Result<u64, FormatError> {
-    bytes::ensure_len(data, offset, nbytes)?;
-    let slice = &data[offset..offset + nbytes];
-    Ok(match nbytes {
-        1 => slice[0] as u64,
-        2 => LittleEndian::read_u16(slice) as u64,
-        3 => LittleEndian::read_uint(slice, 3),
-        4 => LittleEndian::read_u32(slice) as u64,
-        8 => LittleEndian::read_u64(slice),
-        _ => {
-            return Err(FormatError::UnexpectedEof {
-                expected: offset + nbytes,
-                available: data.len(),
-            });
-        }
-    })
 }
 
 /// Returns `true` if a datatype of this encoded class can hold an object

@@ -1,6 +1,6 @@
 use hdf5_pure_core::{CharacterSet, FormatError, StringPadding};
 use hdf5_pure_format::__private::{
-    DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    self as format, DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
 use rstest::rstest;
 use test_util::datatype;
@@ -194,12 +194,16 @@ fn datatype_variable_length_parser_rejects_invalid_flags(
 #[case::between_widths(11)]
 #[case::oversized(17)]
 #[case::maximum(u32::MAX)]
-fn datatype_variable_length_parser_rejects_invalid_descriptor_size(#[case] size: u32) {
-    let bytes = datatype::variable_length(5, [0; 3], size, &Leaf::Integer.bytes(Version::One));
-    assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
-        FormatError::InvalidVariableLengthSize { size }
+fn datatype_parsers_reject_invalid_descriptor_sizes(#[case] size: u32) {
+    let bytes = datatype::variable_length(
+        Version::Five.get(),
+        [0; 3],
+        size,
+        &Leaf::Integer.bytes(Version::One),
     );
+    let expected = FormatError::InvalidVariableLengthSize { size };
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]

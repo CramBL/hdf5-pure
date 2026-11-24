@@ -1,7 +1,7 @@
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType,
-    FormatError, StringPadding, TimeType, VariableLengthType,
+    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, FixedPointType,
+    FloatingPointType, FormatError, StringPadding, TimeType, VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -9,9 +9,10 @@ use hdf5_pure_format::__private::{
     FloatingPointByteOrder, OffsetWidth,
 };
 use rstest::rstest;
+use test_util::datatype::containers::{self, CompoundField, EnumValue, MemberOffset};
 use test_util::datatype::float_context::Context;
 use test_util::datatype::leaf::{Leaf, Version};
-use test_util::datatype::{self, Class};
+use test_util::datatype::{self, Class, VariableLengthSequence};
 
 #[rstest]
 #[case::one(1, DatatypeVersion::One)]
@@ -676,3 +677,253 @@ impl Container {
         }
     }
 }
+
+#[test]
+fn nested_containers_preserve_datatype_values_and_wire_versions() {
+    let integer = Leaf::Integer.bytes(Version::One);
+    let enumeration =
+        containers::enumeration(Version::Three.get(), [2, 0, 0], 4, &integer, &enum_values());
+    let array = datatype::array(Version::Four.get(), [0; 3], 24, 2, &[2, 3], &enumeration);
+    let sequence = VariableLengthSequence::new(Version::Two, 8, &integer).build();
+    let complex = datatype::complex(
+        Version::Five.get(),
+        HOMOGENEOUS_COMPLEX,
+        16,
+        &datatype::f64_le(),
+    );
+    let expected = Datatype::Compound {
+        size: 56,
+        members: vec![
+            __private::compound_member(
+                "array".into(),
+                0,
+                Datatype::Array {
+                    base_type: Box::new(enumeration_datatype()),
+                    dimensions: vec![2, 3],
+                },
+            ),
+            __private::compound_member(
+                "sequence".into(),
+                24,
+                Datatype::VariableLength(VariableLengthType::sequence(integer_datatype())),
+            ),
+            __private::compound_member(
+                "complex".into(),
+                40,
+                Datatype::Complex(
+                    ComplexType::new(FloatingPointType::ieee754_binary64(
+                        DatatypeByteOrder::LittleEndian,
+                    ))
+                    .unwrap(),
+                ),
+            ),
+        ],
+    };
+    let bytes = containers::compound(
+        Version::Five.get(),
+        [3, 0, 0],
+        56,
+        MemberOffset::One,
+        &[
+            CompoundField {
+                name: b"array",
+                offset: 0,
+                datatype: &array,
+            },
+            CompoundField {
+                name: b"sequence",
+                offset: 24,
+                datatype: &sequence,
+            },
+            CompoundField {
+                name: b"complex",
+                offset: 40,
+                datatype: &complex,
+            },
+        ],
+    );
+    let mut input = bytes.clone();
+    input.extend_from_slice(&[0xff; 8]);
+    assert_eq!(
+        format::parse_datatype(&input).unwrap(),
+        (expected.clone(), bytes.len()),
+    );
+    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(message.to_datatype().unwrap(), expected);
+    assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+}
+
+#[rstest]
+#[case::compound_v1(test_util::legacy_compound::array_member(), Class::COMPOUND, Version::One,
+    Datatype::Compound {
+        size: 16,
+        members: vec![__private::compound_member(
+            "arr".into(),
+            0,
+            Datatype::Array {
+                base_type: Box::new(Datatype::FixedPoint(FixedPointType::i32())),
+                dimensions: vec![4],
+            },
+        )],
+    })]
+#[case::compound_v2(containers::legacy_compound_v2(), Class::COMPOUND, Version::Two,
+    Datatype::Compound {
+        size: 8,
+        members: vec![__private::compound_member("offset".into(), 4, integer_datatype())],
+    })]
+#[case::enumeration_v1(
+    containers::legacy_enumeration(),
+    Class::ENUMERATED,
+    Version::One,
+    enumeration_datatype()
+)]
+#[case::array_v2(containers::legacy_array(), Class::ARRAY, Version::Two,
+    Datatype::Array {
+        base_type: Box::new(integer_datatype()),
+        dimensions: vec![2, 3],
+    })]
+fn semantic_parser_accepts_and_retained_parser_rejects_legacy_containers(
+    #[case] bytes: Vec<u8>,
+    #[case] class: Class,
+    #[case] version: Version,
+    #[case] expected: Datatype,
+) {
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (expected, bytes.len())
+    );
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::InvalidDatatypeVersion {
+            class: class.0,
+            version: version.get()
+        },
+    );
+}
+
+#[test]
+fn incomplete_enumeration_values_report_the_full_value_list_extent() {
+    let parent = Leaf::Integer.bytes(Version::One);
+    let mut bytes =
+        containers::enumeration(Version::Three.get(), [2, 0, 0], 4, &parent, &enum_values());
+    let expected = bytes.len();
+    bytes.truncate(expected - 6);
+    assert_decode_error(
+        &bytes,
+        FormatError::UnexpectedEof {
+            expected,
+            available: bytes.len(),
+        },
+    );
+}
+
+#[test]
+fn incomplete_array_dimensions_report_the_full_dimension_list_extent() {
+    let parent = Leaf::Integer.bytes(Version::One);
+    let mut bytes = datatype::array(Version::Three.get(), [0; 3], 120, 3, &[2, 3, 5], &parent);
+    let expected = bytes.len() - parent.len();
+    bytes.truncate(expected - 5);
+    assert_decode_error(
+        &bytes,
+        FormatError::UnexpectedEof {
+            expected,
+            available: bytes.len(),
+        },
+    );
+}
+
+#[test]
+fn retained_array_flag_error_precedes_dimension_list_eof() {
+    let version = Version::Three;
+    let parent = Leaf::Integer.bytes(Version::One);
+    let mut bytes = datatype::array(version.get(), [0; 3], 24, 2, &[2, 3], &parent);
+    let expected = bytes.len() - parent.len();
+    bytes.truncate(expected - 1);
+    bytes[1] = 0x80;
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::InvalidDatatypeFlags {
+            class: Class::ARRAY.0,
+            version: version.get(),
+            flags: 0x80
+        },
+    );
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected,
+            available: bytes.len()
+        },
+    );
+}
+
+#[test]
+fn incomplete_compound_member_reports_eof_from_each_parser_origin() {
+    let child = Leaf::Integer.bytes(Version::One);
+    let mut bytes = containers::compound(
+        Version::Three.get(),
+        [1, 0, 0],
+        4,
+        MemberOffset::One,
+        &[CompoundField {
+            name: b"value",
+            offset: 0,
+            datatype: &child,
+        }],
+    );
+    let expected = bytes.len();
+    bytes.truncate(expected - 1);
+    assert_eq!(
+        DatatypeMessage::parse(&bytes).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected,
+            available: bytes.len()
+        },
+    );
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: child.len(),
+            available: child.len() - 1
+        },
+    );
+}
+
+fn enum_values() -> [EnumValue<'static>; 2] {
+    [
+        EnumValue {
+            name: b"first",
+            value: &[0xf0, 0, 0, 0x0f],
+        },
+        EnumValue {
+            name: b"second",
+            value: &[0xf0, 0, 0, 0x17],
+        },
+    ]
+}
+
+fn enumeration_datatype() -> Datatype {
+    Datatype::Enumeration {
+        size: 4,
+        base_type: Box::new(integer_datatype()),
+        members: enum_values()
+            .into_iter()
+            .map(|EnumValue { name, value }| {
+                __private::enum_member(core::str::from_utf8(name).unwrap().into(), value.to_vec())
+            })
+            .collect(),
+    }
+}
+
+fn integer_datatype() -> Datatype {
+    Datatype::FixedPoint(
+        FixedPointType::new(4, DatatypeByteOrder::BigEndian, true, 3, 25)
+            .unwrap()
+            .with_padding(true, true),
+    )
+}
+
+// "The Datatype Message" in format specification version 4.0 uses bit 0 of the version 5
+// complex class bit field for the homogeneous flag.
+const HOMOGENEOUS_COMPLEX: [u8; 3] = [1, 0, 0];

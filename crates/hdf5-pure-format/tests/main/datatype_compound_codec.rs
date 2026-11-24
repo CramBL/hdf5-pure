@@ -1,13 +1,16 @@
 use core::error::Error;
 
-use hdf5_pure_core::FormatError;
+use hdf5_pure_core::__private;
+use hdf5_pure_core::{Datatype, FixedPointType, FormatError, VariableLengthType};
 use hdf5_pure_format::__private::{
-    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    self as format, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
+    OffsetWidth,
 };
 use rstest::rstest;
 use test_util::datatype;
 use test_util::datatype::containers::{self, CompoundField, MemberOffset};
 use test_util::datatype::leaf::{self, Leaf, OpaqueTag, Order, VaxVersion, Version};
+use test_util::legacy_compound::{self, SequenceMemberShape};
 
 #[rstest]
 #[case::integer(Leaf::Integer)]
@@ -125,6 +128,72 @@ fn datatype_compound_parser_uses_source_member_extent() {
         }
     );
 }
+
+#[rstest]
+#[case::scalar(SequenceMemberShape::Scalar, 1)]
+#[case::implicit_array(SequenceMemberShape::ImplicitArray, 2)]
+#[case::explicit_array(SequenceMemberShape::ExplicitArray, 2)]
+fn compound_v1_sequence_member_fits_at_its_stored_size(
+    #[case] shape: SequenceMemberShape,
+    #[case] count: u32,
+    #[values((2, 10), (4, 12), (8, 16))] width_and_descriptor_size: (usize, u32),
+) {
+    let (width, descriptor_size) = width_and_descriptor_size;
+    let bytes = legacy_compound::sequence_member(width, SEQUENCE_MEMBER_OFFSET, shape);
+    let sequence = Datatype::VariableLength(VariableLengthType::sequence(Datatype::FixedPoint(
+        FixedPointType::u8(),
+    )));
+    let member = match shape {
+        SequenceMemberShape::Scalar => sequence,
+        SequenceMemberShape::ExplicitArray | SequenceMemberShape::ImplicitArray => {
+            Datatype::Array {
+                base_type: Box::new(sequence),
+                dimensions: vec![2],
+            }
+        }
+    };
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (
+            Datatype::Compound {
+                size: SEQUENCE_MEMBER_OFFSET + count * descriptor_size,
+                members: vec![__private::compound_member(
+                    "arr".into(),
+                    u64::from(SEQUENCE_MEMBER_OFFSET),
+                    member,
+                )],
+            },
+            bytes.len(),
+        ),
+    );
+}
+
+#[rstest]
+#[case::scalar(SequenceMemberShape::Scalar, 1)]
+#[case::implicit_array(SequenceMemberShape::ImplicitArray, 2)]
+#[case::explicit_array(SequenceMemberShape::ExplicitArray, 2)]
+fn compound_v1_sequence_member_rejects_a_one_byte_overrun(
+    #[case] shape: SequenceMemberShape,
+    #[case] count: u32,
+    #[values((2, 10), (4, 12), (8, 16))] width_and_descriptor_size: (usize, u32),
+) {
+    let (width, descriptor_size) = width_and_descriptor_size;
+    let field_size = count * descriptor_size;
+    let compound_size = SEQUENCE_MEMBER_OFFSET + field_size - 1;
+    let mut bytes = legacy_compound::sequence_member(width, SEQUENCE_MEMBER_OFFSET, shape);
+    bytes[4..8].copy_from_slice(&compound_size.to_le_bytes());
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap_err(),
+        FormatError::CompoundFieldOutOfBounds {
+            name: "arr".into(),
+            offset: u64::from(SEQUENCE_MEMBER_OFFSET),
+            field_size,
+            compound_size,
+        }
+    );
+}
+
+const SEQUENCE_MEMBER_OFFSET: u32 = 4;
 
 #[test]
 fn datatype_compound_encoder_uses_selected_member_extent() {

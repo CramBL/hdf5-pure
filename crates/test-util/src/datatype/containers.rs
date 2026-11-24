@@ -6,6 +6,7 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
 use super::Class;
+use super::leaf::{Leaf, Version};
 
 /// Builds a compound message using the property layout of versions 3 through 5.
 ///
@@ -131,4 +132,40 @@ pub struct EnumValue<'a> {
     pub name: &'a [u8],
     /// The bytes appended unchanged after all names.
     pub value: &'a [u8],
+}
+
+/// Builds a version 2 compound with one member at byte offset four.
+pub fn legacy_compound_v2() -> Vec<u8> {
+    let child = Leaf::Integer.bytes(Version::One);
+    let mut bytes = super::header(Class::COMPOUND, Version::Two.get(), [1, 0, 0], 8);
+    bytes.extend_from_slice(b"offset\0\0");
+    bytes.extend_from_slice(&4u32.to_le_bytes());
+    bytes.extend_from_slice(&child);
+    bytes
+}
+
+/// Builds a version 1 enumeration with two padded names and big-endian integer values.
+pub fn legacy_enumeration() -> Vec<u8> {
+    let child = Leaf::Integer.bytes(Version::One);
+    let mut bytes = super::header(Class::ENUMERATED, Version::One.get(), [2, 0, 0], 4);
+    bytes.extend_from_slice(&child);
+    bytes.extend_from_slice(b"first\0\0\0second\0\0");
+    bytes.extend_from_slice(&0xf000_000fu32.to_be_bytes());
+    bytes.extend_from_slice(&0xf000_0017u32.to_be_bytes());
+    bytes
+}
+
+/// Builds a version 2 array with dimensions two and three and identity permutation indices.
+pub fn legacy_array() -> Vec<u8> {
+    let child = Leaf::Integer.bytes(Version::One);
+    let mut bytes = super::header(Class::ARRAY, Version::Two.get(), [0; 3], 24);
+    bytes.extend_from_slice(&[2, 0, 0, 0]);
+    for dimension in [2u32, 3] {
+        bytes.extend_from_slice(&dimension.to_le_bytes());
+    }
+    for index in 0u32..2 {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    bytes.extend_from_slice(&child);
+    bytes
 }

@@ -8,7 +8,8 @@ use byteorder::LittleEndian;
 use hdf5_pure_core::Datatype;
 use hdf5_pure_core::FormatError;
 
-use crate::bytes;
+use crate::bytes::ByteCursor;
+use crate::datatype::message::decode::Decoded;
 
 /// A version 1 compound member's scalar shape or one to four nonzero array dimensions.
 ///
@@ -20,7 +21,7 @@ use crate::bytes;
 pub(super) struct MemberShape(Shape);
 
 impl MemberShape {
-    /// Parses the dimension block at `pos` and returns the shape and number of bytes read.
+    /// Reads the complete 28-byte version 1 dimension block before checking its fields.
     ///
     /// # Errors
     ///
@@ -28,9 +29,8 @@ impl MemberShape {
     /// [`FormatError::InvalidCompoundV1Rank`] if the rank exceeds four,
     /// [`FormatError::UnsupportedCompoundV1Permutation`] if the permutation is nonzero, or
     /// [`FormatError::InvalidCompoundV1Extent`] if an active dimension is zero.
-    pub(super) fn parse(data: &[u8], pos: usize) -> Result<(Self, usize), FormatError> {
-        bytes::ensure_len(data, pos, DIMENSION_BLOCK_SIZE)?;
-        let block = &data[pos..pos + DIMENSION_BLOCK_SIZE];
+    pub(super) fn parse(cursor: &mut ByteCursor<'_>) -> Result<Self, FormatError> {
+        let block = cursor.take_array::<DIMENSION_BLOCK_SIZE>()?;
         let rank = block[0];
         if rank > MAX_RANK {
             return Err(FormatError::InvalidCompoundV1Rank(rank));
@@ -44,32 +44,36 @@ impl MemberShape {
             NonZeroU32::new(LittleEndian::read_u32(&block[start..start + 4]))
                 .ok_or(FormatError::InvalidCompoundV1Extent { dimension })
         };
-        Ok((
-            Self(match rank {
-                0 => Shape::Scalar,
-                1 => Shape::One([extent(0)?]),
-                2 => Shape::Two([extent(0)?, extent(1)?]),
-                3 => Shape::Three([extent(0)?, extent(1)?, extent(2)?]),
-                4 => Shape::Four([extent(0)?, extent(1)?, extent(2)?, extent(3)?]),
-                _ => return Err(FormatError::InvalidCompoundV1Rank(rank)),
-            }),
-            DIMENSION_BLOCK_SIZE,
-        ))
+        Ok(Self(match rank {
+            0 => Shape::Scalar,
+            1 => Shape::One([extent(0)?]),
+            2 => Shape::Two([extent(0)?, extent(1)?]),
+            3 => Shape::Three([extent(0)?, extent(1)?, extent(2)?]),
+            4 => Shape::Four([extent(0)?, extent(1)?, extent(2)?, extent(3)?]),
+            _ => return Err(FormatError::InvalidCompoundV1Rank(rank)),
+        }))
     }
 
-    /// Applies the shape to `base_type` within the declared compound byte range.
+    /// Checks the member's stored byte range and applies any implicit array shape.
+    ///
+    /// Computes an implicit array's size from the decoded base size and the member's extents.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::CompoundArraySizeOverflow`] if an array size exceeds [`u32::MAX`],
-    /// or [`FormatError::CompoundFieldOutOfBounds`] if the member extends past `compound_size`.
+    /// Returns [`FormatError::CompoundArraySizeOverflow`] if an implicit array size exceeds
+    /// [`u32::MAX`], or [`FormatError::CompoundFieldOutOfBounds`] if the stored member range
+    /// extends past `compound_size`.
     pub(super) fn into_datatype(
         self,
-        base_type: Datatype,
+        base: Decoded<Datatype>,
         name: &str,
         offset: u64,
         compound_size: u32,
     ) -> Result<Datatype, FormatError> {
+        let Decoded {
+            datatype: base_type,
+            stored_size,
+        } = base;
         let dimensions = match &self.0 {
             Shape::Scalar => None,
             Shape::One(extents) => Some(extents.as_slice()),
@@ -77,12 +81,15 @@ impl MemberShape {
             Shape::Three(extents) => Some(extents.as_slice()),
             Shape::Four(extents) => Some(extents.as_slice()),
         };
-        let size = dimensions
-            .unwrap_or_default()
-            .iter()
-            .try_fold(checked_size(&base_type)?, |size, extent| {
-                multiply_size(size, extent.get())
-            })?;
+        let size =
+            dimensions
+                .unwrap_or_default()
+                .iter()
+                .try_fold(stored_size.get(), |size, extent| {
+                    let extent = extent.get();
+                    size.checked_mul(extent)
+                        .ok_or(FormatError::CompoundArraySizeOverflow { size, extent })
+                })?;
         if offset
             .checked_add(u64::from(size))
             .is_none_or(|end| end > u64::from(compound_size))
@@ -110,25 +117,6 @@ enum Shape {
     Scalar,
     Three([NonZeroU32; 3]),
     Two([NonZeroU32; 2]),
-}
-
-fn checked_size(datatype: &Datatype) -> Result<u32, FormatError> {
-    match datatype {
-        Datatype::Array {
-            base_type,
-            dimensions,
-        } => dimensions
-            .iter()
-            .try_fold(checked_size(base_type)?, |size, &extent| {
-                multiply_size(size, extent)
-            }),
-        _ => Ok(datatype.type_size()),
-    }
-}
-
-fn multiply_size(size: u32, extent: u32) -> Result<u32, FormatError> {
-    size.checked_mul(extent)
-        .ok_or(FormatError::CompoundArraySizeOverflow { size, extent })
 }
 
 /// The dimension block's byte length in "The Datatype Message" of the [format specification,
