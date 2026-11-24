@@ -15,7 +15,6 @@ use hdf5_pure_core::{
     VariableLengthStringType, VariableLengthType,
 };
 
-use self::compound_layout::CompoundLayout;
 use super::{
     ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_VERSION_FIVE,
     DATATYPE_VERSION_FOUR, DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO,
@@ -28,6 +27,7 @@ use crate::width::OffsetWidth;
 
 pub(super) use self::codec::MessageDepth;
 pub use self::codec::PreparedDatatype;
+pub(super) use self::compound_layout::CompoundLayout;
 
 pub(super) mod atomic;
 mod codec;
@@ -301,21 +301,16 @@ impl DatatypeMessage {
                 compound_member_count(members.len())?;
                 let mut names = BTreeSet::new();
                 let mut layout = CompoundLayout::new(*size);
-                for (
-                    index,
-                    DatatypeMessageMember {
-                        name,
-                        byte_offset: _,
-                        datatype,
-                    },
-                ) in members.iter().enumerate()
-                {
-                    if !names.insert(name.as_str()) {
-                        return Err(FormatError::DuplicateCompoundField(name.clone()));
-                    }
-                    compatible_child(version, class, datatype)?;
-                    let field_size = datatype.stored_size(OffsetWidth::Two)?;
-                    layout.insert(members, index, field_size)?;
+                for (index, member) in members.iter().enumerate() {
+                    member.check_compound_name_and_version(version, &mut names)?;
+                    let datatype = &member.datatype;
+                    let field_size = positive_size(
+                        datatype.properties.class(),
+                        datatype.stored_size(OffsetWidth::Two)?,
+                    )?;
+                    layout.insert(member.byte_offset, field_size, index, |index| {
+                        members.get(index).map(|member| member.name.as_str())
+                    })?;
                 }
             }
             DatatypeProperties::Enumeration { base_type, members } => {
@@ -651,6 +646,23 @@ impl DatatypeMessageMember {
     /// Returns the member description, including its message version.
     pub const fn datatype(&self) -> &DatatypeMessage {
         &self.datatype
+    }
+
+    /// Records the member name among the names in this compound and checks the member version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DuplicateCompoundField`] if `names` already contains the name,
+    /// or [`FormatError::DatatypeChildVersion`] if the member's version exceeds `version`.
+    fn check_compound_name_and_version<'a>(
+        &'a self,
+        version: DatatypeVersion,
+        names: &mut BTreeSet<&'a str>,
+    ) -> Result<(), FormatError> {
+        if !names.insert(self.name.as_str()) {
+            return Err(FormatError::DuplicateCompoundField(self.name.clone()));
+        }
+        compatible_child(version, COMPOUND_CLASS, &self.datatype)
     }
 }
 

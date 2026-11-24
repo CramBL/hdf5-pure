@@ -3,14 +3,12 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_core::FormatError;
 
-use super::DatatypeMessageMember;
-
 /// Disjoint member byte ranges within one compound element.
 ///
 /// Member indices refer to declaration order. Ranges are indexed by their starting byte
 /// offsets. `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 2.2.0, rejects overlapping
 /// compound members.
-pub(super) struct CompoundLayout {
+pub(in crate::datatype) struct CompoundLayout {
     /// The compound element size in bytes.
     size: u32,
     /// The accepted ranges, keyed by their starting byte offsets.
@@ -19,7 +17,7 @@ pub(super) struct CompoundLayout {
 
 impl CompoundLayout {
     /// Starts an empty layout bounded by `size` bytes.
-    pub(super) fn new(size: u32) -> Self {
+    pub(in crate::datatype) fn new(size: u32) -> Self {
         Self {
             size,
             extents: BTreeMap::new(),
@@ -28,82 +26,61 @@ impl CompoundLayout {
 
     /// Checks and records one member's byte range.
     ///
-    /// Each index must refer to the same member throughout insertion. `field_size` is the
-    /// stored size at the source or output address width, or the minimum width during
-    /// construction. Adjacent ranges are allowed.
+    /// Pass the stored member size when reading, the encoded member size when writing,
+    /// or the size at the minimum address width when constructing a description.
+    /// Use declaration indices throughout, including in `member_name`, which the checker calls
+    /// only when reporting an error. Adjacent ranges are allowed.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::CompoundFieldOutOfBounds`] if the range exceeds the element,
     /// and [`FormatError::CompoundFieldOverlap`] if it intersects an accepted range.
     /// Reports conflicting names in byte-offset order, with encounter order for equal offsets.
-    /// Returns [`FormatError::Internal`] if a member index is missing or `field_size` is zero.
-    pub(super) fn insert(
+    /// Returns [`FormatError::Internal`] if `member_name` returns `None` for an index needed
+    /// in an error.
+    pub(in crate::datatype) fn insert<'a>(
         &mut self,
-        members: &[DatatypeMessageMember],
+        offset: u64,
+        field_size: NonZeroU32,
         index: usize,
-        field_size: u32,
+        member_name: impl Fn(usize) -> Option<&'a str>,
     ) -> Result<(), FormatError> {
         let Self { size, extents } = self;
-        let DatatypeMessageMember {
-            name,
-            byte_offset,
-            datatype: _,
-        } = members.get(index).ok_or_else(|| {
-            FormatError::Internal("a compound layout refers to a missing member".into())
-        })?;
-        let field_size = NonZeroU32::new(field_size)
-            .ok_or_else(|| {
-                FormatError::Internal("a checked compound member has zero stored size".into())
-            })?
-            .get();
-        let end = byte_offset
-            .checked_add(u64::from(field_size))
+        let name = |index| {
+            member_name(index).ok_or_else(|| {
+                FormatError::Internal("a compound layout refers to a missing member".into())
+            })
+        };
+        // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks the member bounds.
+        let Some(end) = offset
+            .checked_add(u64::from(field_size.get()))
             .filter(|&end| end <= u64::from(*size))
-            .ok_or_else(|| FormatError::CompoundFieldOutOfBounds {
-                name: name.clone(),
-                offset: *byte_offset,
-                field_size,
+        else {
+            return Err(FormatError::CompoundFieldOutOfBounds {
+                name: name(index)?.into(),
+                offset,
+                field_size: field_size.get(),
                 compound_size: *size,
-            })?;
-        let previous = extents.range(..=*byte_offset).next_back();
-        let next = extents.range(*byte_offset..).next();
-        let conflict = match (previous, next) {
-            (
-                Some((
-                    _,
-                    MemberExtent {
-                        end: previous_end,
-                        index: previous_index,
-                    },
-                )),
-                _,
-            ) if *previous_end > *byte_offset => Some((*previous_index, index)),
-            (
-                _,
-                Some((
-                    next_start,
-                    MemberExtent {
-                        end: _,
-                        index: next_index,
-                    },
-                )),
-            ) if *next_start < end => Some((index, *next_index)),
-            _ => None,
+            });
+        };
+        let conflict = if let Some((_, previous)) = extents.range(..=offset).next_back()
+            && previous.end > offset
+        {
+            Some((previous.index, index))
+        } else if let Some((&next_start, next)) = extents.range(offset..).next()
+            && next_start < end
+        {
+            Some((index, next.index))
+        } else {
+            None
         };
         if let Some((first, second)) = conflict {
-            let first = members.get(first).ok_or_else(|| {
-                FormatError::Internal("a compound overlap refers to a missing member".into())
-            })?;
-            let second = members.get(second).ok_or_else(|| {
-                FormatError::Internal("a compound overlap refers to a missing member".into())
-            })?;
             return Err(FormatError::CompoundFieldOverlap {
-                first: first.name.clone(),
-                second: second.name.clone(),
+                first: name(first)?.into(),
+                second: name(second)?.into(),
             });
         }
-        extents.insert(*byte_offset, MemberExtent { end, index });
+        extents.insert(offset, MemberExtent { end, index });
         Ok(())
     }
 }

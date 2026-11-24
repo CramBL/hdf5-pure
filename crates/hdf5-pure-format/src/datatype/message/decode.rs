@@ -61,7 +61,7 @@ impl Layout {
     /// Returns [`FormatError::InvalidDatatypeVersion`] if this parser requires a later version
     /// for the class, or [`FormatError::InvalidDatatypeFlags`] for set
     /// reserved compound, enumeration, or array flags in a retained description. Propagates
-    /// variable-length metadata, descriptor size, compound size, and complex form errors.
+    /// variable-length metadata, descriptor size, and complex form errors.
     pub(in crate::datatype) fn from_header(
         header: &Header,
         projection: Projection,
@@ -83,9 +83,6 @@ impl Layout {
                         CompoundFields::Packed(datatype::offset_bytes_for_size(size))
                     }
                 };
-                if projection == Projection::Retained {
-                    super::positive_size(COMPOUND_CLASS, size)?;
-                }
                 Self::Compound(Compound { names, fields })
             }
             DatatypeClass::Reference => Self::Reference,
@@ -163,22 +160,32 @@ pub(in crate::datatype) struct Member {
 pub(in crate::datatype) struct Enumeration(MemberNames);
 
 impl Enumeration {
-    /// Reads all member names, then acquires the complete list of stored values.
+    /// Reads member names and values after checking the enumeration size against the base size.
     ///
-    /// The cursor starts immediately after the base datatype. Each value occupies
-    /// `value_width` bytes and is paired with its name in stored order.
+    /// The cursor starts immediately after the base datatype. The reader reads all names before
+    /// acquiring the complete value list and pairs each `value_width`-byte value with its name in
+    /// stored order.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a name or the value list is incomplete,
+    /// Returns [`FormatError::EnumBaseSizeMismatch`] if `declared_size` differs from `value_width`,
+    /// [`FormatError::UnexpectedEof`] if a name or the value list is incomplete,
     /// [`FormatError::UnsupportedDatatypeMemberEncoding`] if a retained name is not UTF-8,
     /// or [`FormatError::AllocationFailed`] if a member list reservation fails. Propagates
     /// platform-conversion errors for the value width or list length.
     pub(in crate::datatype) fn members(
         self,
         cursor: &mut ByteCursor<'_>,
+        declared_size: u32,
         value_width: NonZeroU32,
     ) -> Result<Vec<EnumMember>, FormatError> {
+        // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks that the sizes agree.
+        if declared_size != value_width.get() {
+            return Err(FormatError::EnumBaseSizeMismatch {
+                size: declared_size,
+                base_size: value_width.get(),
+            });
+        }
         let count = usize::from(self.0.count);
         let mut members = Vec::new();
         for index in 0..count {

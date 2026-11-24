@@ -6,6 +6,7 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
@@ -38,8 +39,9 @@ impl DatatypeMessage {
     /// Reads each complete eight-byte header before checking its version or class. Checks version
     /// before class, except in a complex datatype's parent, where it checks class first.
     /// Reads fixed-size atomic property blocks in full before checking class flags.
-    /// Acquires all array dimensions before reading the base datatype. Reads all enumeration
-    /// names before acquiring the complete stored value list.
+    /// Acquires all array dimensions before reading the base datatype. Checks the enumeration
+    /// size against its base size before reading the member names, then acquires the complete
+    /// value list.
     ///
     /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
     /// descriptions at versions 1 through 5, compounds, enumerations, and arrays at versions
@@ -53,12 +55,11 @@ impl DatatypeMessage {
     /// address widths of 2, 4, or 8 bytes. The parser checks each array size against the stored
     /// base size multiplied by the dimension extents, and each complex size against twice the
     /// component size.
-    /// Compound member bounds and overlaps are checked using their declared source sizes.
-    /// A compound must have at least one member, with unique UTF-8 names.
+    /// Checks compound member bounds and overlaps using the sizes stored in the member
+    /// descriptions. A compound must have at least one member, with unique UTF-8 names.
     /// Enumerations have a fixed-point parent and at least one member, with nonempty, unique
-    /// UTF-8 names and distinct raw values of the parent's width. The enumeration and parent
-    /// sizes must match. The nesting limit is 64 descriptions on one parent chain, including
-    /// the outer description.
+    /// UTF-8 names and distinct raw values of the parent's width. The nesting limit is 64
+    /// descriptions on one parent chain, including the outer description.
     ///
     /// The parser accepts an opaque property filled with tag bytes without a NUL terminator.
     /// The writer uses terminated tags, as described in [`serialize`](Self::serialize).
@@ -155,9 +156,12 @@ impl DatatypeMessage {
                 });
             }
             Layout::Compound(compound) => {
+                let stored_size = super::positive_size(COMPOUND_CLASS, header.size)?;
+                let count = compound.member_count();
+                super::compound_member_count(count)?;
                 let mut members = Vec::new();
                 let mut layout = CompoundLayout::new(header.size);
-                for _ in 0..compound.member_count() {
+                for _ in 0..count {
                     let Member {
                         name,
                         offset,
@@ -169,12 +173,25 @@ impl DatatypeMessage {
                     } = Self::parse_at(cursor, depth.child()?)?;
                     let index = members.len();
                     members.push(DatatypeMessageMember::new(name, offset, datatype)?);
-                    layout.insert(&members, index, field_size.get())?;
+                    layout.insert(offset, field_size, index, |index| {
+                        members.get(index).map(|member| member.name.as_str())
+                    })?;
                 }
-                DatatypeProperties::Compound {
-                    size: header.size,
-                    members,
+                drop(layout);
+                let mut names = BTreeSet::new();
+                for member in &members {
+                    member.check_compound_name_and_version(header.version, &mut names)?;
                 }
+                return Ok(Decoded {
+                    datatype: Self {
+                        version: header.version,
+                        properties: DatatypeProperties::Compound {
+                            size: header.size,
+                            members,
+                        },
+                    },
+                    stored_size,
+                });
             }
             Layout::Reference => return Err(FormatError::InvalidDatatypeClass(REFERENCE_CLASS)),
             Layout::Enumeration(enumeration) => {
@@ -182,17 +199,11 @@ impl DatatypeMessage {
                     datatype: base_type,
                     stored_size: base_size,
                 } = Self::parse_at(cursor, depth.child()?)?;
-                let DatatypeProperties::FixedPoint(integer) = base_type.properties else {
+                if !matches!(base_type.properties, DatatypeProperties::FixedPoint(_)) {
                     return Err(FormatError::EnumBaseNotInteger);
-                };
-                if header.size != base_size.get() {
-                    return Err(FormatError::EnumBaseSizeMismatch {
-                        size: header.size,
-                        base_size: base_size.get(),
-                    });
                 }
                 DatatypeProperties::Enumeration {
-                    members: enumeration.members(cursor, integer.size())?,
+                    members: enumeration.members(cursor, header.size, base_size)?,
                     base_type: Box::new(base_type),
                 }
             }
@@ -1015,13 +1026,16 @@ impl CompoundMembers<'_> {
                 for (index, member) in members.iter().enumerate() {
                     let DatatypeMessageMember {
                         name,
-                        byte_offset: _,
+                        byte_offset,
                         datatype,
                     } = member;
                     preparation.add_member_prefix(name, width)?;
                     let child_size =
                         Description::Preserved(datatype).prepare(preparation, child_depth)?;
-                    layout.insert(members, index, child_size)?;
+                    let child_size = super::positive_size(datatype.properties.class(), child_size)?;
+                    layout.insert(*byte_offset, child_size, index, |index| {
+                        members.get(index).map(|member| member.name.as_str())
+                    })?;
                 }
             }
         }
