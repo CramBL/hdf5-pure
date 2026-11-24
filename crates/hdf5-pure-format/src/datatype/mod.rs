@@ -26,6 +26,7 @@ use hdf5_pure_core::{
 };
 
 use self::header::{Context, Header};
+use self::message::MessageDepth;
 use self::message::atomic::{self, AtomicReservedFlagPolicy};
 use self::message::decode::{self, Decoded, Layout, Member, Projection};
 use crate::bytes::ByteCursor;
@@ -150,6 +151,9 @@ pub fn stored_element_size_usize(
 /// Variable-length descriptors occupy 10, 12, or 16 bytes for heap address widths of 2, 4, or
 /// 8 bytes, respectively.
 ///
+/// The nesting limit is 64 descriptions along one path, including the outer description and
+/// any complex datatype's floating-point parent.
+///
 /// Reads an opaque tag's complete recorded property and copies its logical bytes into
 /// [`Datatype::Opaque`]. Reads a zero-length property as an absent tag and strips the first NUL
 /// and its zero padding from a tagged property. Also accepts aligned properties filled entirely
@@ -168,6 +172,7 @@ pub fn stored_element_size_usize(
 /// list from the start of the description containing it. Returns
 /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
 /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
+/// Returns [`FormatError::NestingDepthExceeded`] if a nested description exceeds the limit.
 /// Returns [`FormatError::InvalidDatatypeVersion`] for a version unsupported by an array,
 /// complex datatype, or its parent. Returns
 /// [`FormatError::InvalidReferenceType`] for an unknown reference kind,
@@ -218,7 +223,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     let Decoded {
         datatype,
         stored_size: _,
-    } = parse_datatype_at(&mut cursor)?;
+    } = parse_datatype_at(&mut cursor, MessageDepth::ROOT)?;
     Ok((datatype, cursor.position()))
 }
 
@@ -227,7 +232,10 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 /// # Errors
 ///
 /// Returns the errors of [`parse_datatype`].
-fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, FormatError> {
+fn parse_datatype_at(
+    cursor: &mut ByteCursor<'_>,
+    depth: MessageDepth,
+) -> Result<Decoded<Datatype>, FormatError> {
     let header = Header::parse(cursor, Context::Description)?;
     let size = header.size;
     let datatype = match Layout::from_header(&header, Projection::Semantic)? {
@@ -247,7 +255,7 @@ fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, F
                     offset,
                     shape,
                 } = compound.member(cursor)?;
-                let decoded = parse_nested_datatype(cursor)?;
+                let decoded = parse_nested_datatype(cursor, depth)?;
                 let datatype = match shape {
                     Some(shape) => shape.into_datatype(decoded, &name, offset, size)?,
                     None => decoded.datatype,
@@ -258,7 +266,7 @@ fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, F
         }
         Layout::Reference => atomic::decode_reference(&header)?,
         Layout::Enumeration(enumeration) => {
-            let base_type = parse_nested_datatype(cursor)?.datatype;
+            let base_type = parse_nested_datatype(cursor, depth)?.datatype;
             let members = enumeration.members(cursor, base_type.element_size()?)?;
             Datatype::Enumeration {
                 size,
@@ -267,7 +275,7 @@ fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, F
             }
         }
         Layout::VariableLength(metadata) => {
-            let base_type = parse_nested_datatype(cursor)?.datatype;
+            let base_type = parse_nested_datatype(cursor, depth)?.datatype;
             let kind = match metadata {
                 VariableLengthMetadata::Sequence => VariableLengthType::sequence(base_type),
                 VariableLengthMetadata::String { padding, charset } => VariableLengthType::String(
@@ -278,7 +286,7 @@ fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, F
         }
         Layout::Array(array) => {
             let dimensions = array.dimensions(cursor)?;
-            let base = parse_nested_datatype(cursor)?;
+            let base = parse_nested_datatype(cursor, depth)?;
             let stored_size = decode::array_size(size, base.stored_size, &dimensions)?;
             return Ok(Decoded {
                 datatype: Datatype::Array {
@@ -289,7 +297,7 @@ fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, F
             });
         }
         Layout::Complex(complex) => {
-            let (datatype, _) = complex.component(cursor)?;
+            let (datatype, _) = complex.component(cursor, depth)?;
             Datatype::Complex(datatype)
         }
     };
@@ -301,14 +309,19 @@ fn parse_datatype_at(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, F
 
 /// Parses the next description from the bytes remaining at the cursor.
 ///
-/// Advances the outer cursor by the consumed length on success.
+/// Checks the nesting limit before reading the child. Advances the outer cursor by the consumed
+/// length on success.
 ///
 /// # Errors
 ///
 /// Returns the errors of [`parse_datatype`].
-fn parse_nested_datatype(cursor: &mut ByteCursor<'_>) -> Result<Decoded<Datatype>, FormatError> {
+fn parse_nested_datatype(
+    cursor: &mut ByteCursor<'_>,
+    parent_depth: MessageDepth,
+) -> Result<Decoded<Datatype>, FormatError> {
+    let depth = parent_depth.child()?;
     let mut nested = ByteCursor::new(cursor.remaining());
-    let decoded = parse_datatype_at(&mut nested)?;
+    let decoded = parse_datatype_at(&mut nested, depth)?;
     cursor.take(nested.position())?;
     Ok(decoded)
 }

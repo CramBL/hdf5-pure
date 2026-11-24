@@ -3,6 +3,8 @@ use hdf5_pure_format::__private::{
     self as format, DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
 use rstest::rstest;
+use test_util::datatype::containers::{self, CompoundField, EnumValue, MemberOffset};
+use test_util::datatype::float_context::Context;
 use test_util::datatype::leaf::{self, Leaf, OpaqueTag, Order, VaxVersion, Version};
 use test_util::datatype::{self, Class, VariableLengthSequence};
 
@@ -394,15 +396,23 @@ fn datatype_array_complex_parser_reports_incomplete_complex_fields(
 
 #[test]
 fn datatype_array_complex_codecs_bound_array_recursion() {
-    let bytes = (0..63).fold(Leaf::Integer.bytes(Version::One), |parent, _| {
-        datatype::array(3, [0; 3], 4, 1, &[1], &parent)
+    let bytes = (1..NESTING_LIMIT).fold(Leaf::Integer.bytes(Version::One), |parent, _| {
+        array_of_one(Version::Three, 4, &parent)
     });
     let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
-    let too_deep = datatype::array(3, [0; 3], 4, 1, &[1], &bytes);
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (message.to_datatype().unwrap(), consumed)
+    );
+    let too_deep = array_of_one(Version::Three, 4, &bytes);
     assert_eq!(
         DatatypeMessage::parse(&too_deep).unwrap_err(),
+        FormatError::NestingDepthExceeded
+    );
+    assert_eq!(
+        format::parse_datatype(&too_deep).unwrap_err(),
         FormatError::NestingDepthExceeded
     );
     let too_deep = DatatypeMessage::new(
@@ -415,6 +425,58 @@ fn datatype_array_complex_codecs_bound_array_recursion() {
     .unwrap();
     assert_eq!(
         too_deep.serialize(OffsetWidth::Eight).unwrap_err(),
+        FormatError::NestingDepthExceeded
+    );
+}
+
+#[rstest]
+#[case::complex(Context::Complex.bytes(&datatype::f64_le()), 16)]
+#[case::enumeration(
+    containers::enumeration(
+        Version::Three.get(), [1, 0, 0], 1, &leaf::unsigned_byte(Version::One),
+        &[EnumValue { name: b"zero", value: &[0] }]
+    ),
+    1
+)]
+fn datatype_parsers_bound_mixed_container_recursion(#[case] base: Vec<u8>, #[case] size: u32) {
+    let version = Version::Five;
+    let (bytes, size) =
+        (0..NESTING_LIMIT - 2).fold((base, size), |(parent, size), layer| match layer % 3 {
+            0 => (array_of_one(version, size, &parent), size),
+            1 => {
+                let sequence = VariableLengthSequence::new(version, 8, &parent);
+                let size = sequence.descriptor_size();
+                (sequence.build(), size)
+            }
+            _ => (
+                containers::compound(
+                    version.get(),
+                    [1, 0, 0],
+                    size,
+                    MemberOffset::One,
+                    &[CompoundField {
+                        name: b"value",
+                        offset: 0,
+                        datatype: &parent,
+                    }],
+                ),
+                size,
+            ),
+        });
+    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (message.to_datatype().unwrap(), consumed)
+    );
+    let too_deep = array_of_one(version, size, &bytes);
+    assert_eq!(
+        DatatypeMessage::parse(&too_deep).unwrap_err(),
+        FormatError::NestingDepthExceeded
+    );
+    assert_eq!(
+        format::parse_datatype(&too_deep).unwrap_err(),
         FormatError::NestingDepthExceeded
     );
 }
@@ -501,3 +563,9 @@ fn assert_encoding(bytes: &[u8], expected: DatatypeMessage, width: OffsetWidth) 
     assert_eq!(message, expected);
     assert_eq!(message.serialize(width).unwrap(), bytes);
 }
+
+fn array_of_one(version: Version, size: u32, base: &[u8]) -> Vec<u8> {
+    datatype::array(version.get(), [0; 3], size, 1, &[1], base)
+}
+
+const NESTING_LIMIT: usize = 64;

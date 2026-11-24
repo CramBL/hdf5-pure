@@ -38,9 +38,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `Dataset::datatype` accepting inconsistent array sizes and unsupported variable-length
-  descriptor sizes. Truncation errors report the required byte extent for complex components and
-  enumeration value lists ([#1359](https://github.com/CramBL/hdf5-pure/pull/1359)).
+- Fixed `Dataset::datatype` accepting inconsistent array sizes, unsupported variable-length
+  descriptor sizes, and more than 64 descriptions on one nesting path. Truncation errors report
+  the required byte extent for complex components and enumeration value lists ([#1359](https://github.com/CramBL/hdf5-pure/pull/1359)).
 - Fixed `Dataset::datatype` accepting datatype messages with unsupported version numbers ([#1358](https://github.com/CramBL/hdf5-pure/pull/1358)).
 - Fixed `Dataset::datatype` rejecting valid version 1 compounds with variable-length members
   that use two- or four-byte heap addresses ([#1359](https://github.com/CramBL/hdf5-pure/pull/1359)).
