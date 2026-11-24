@@ -14,6 +14,7 @@ use hdf5_pure_core::__private;
 pub(crate) use hdf5_pure_core::CharacterSet;
 #[cfg(test)]
 use hdf5_pure_core::ComplexType;
+use hdf5_pure_core::CompoundMember;
 pub(crate) use hdf5_pure_core::Datatype;
 pub(crate) use hdf5_pure_core::ReferenceType;
 pub(crate) use hdf5_pure_core::StringPadding;
@@ -26,9 +27,9 @@ use hdf5_pure_core::{
 };
 
 use self::header::{Context, Header};
-use self::message::MessageDepth;
 use self::message::atomic::{self, AtomicReservedFlagPolicy};
 use self::message::decode::{self, Decoded, Layout, Member, Projection};
+use self::message::{CompoundLayout, MessageDepth};
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -144,10 +145,13 @@ pub fn stored_element_size_usize(
 /// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Decodes
 /// compound and enumeration names with lossy UTF-8 conversion. Acquires the full
 /// array dimension list and any version 2 permutation indices before reading the
-/// base datatype. Reads all enumeration names before acquiring the complete stored
-/// value list.
+/// base datatype. Checks the enumeration size against its base size before reading the
+/// member names, then acquires the complete value list.
 ///
-/// Checks the array size against the stored base size multiplied by the dimension extents.
+/// Checks compound member bounds and overlaps using the sizes stored in the member
+/// descriptions. For a version 1 implicit array member, multiplies the base size by its extents.
+/// Checks each array message's declared size against the stored base size multiplied by
+/// the dimension extents.
 /// Variable-length descriptors occupy 10, 12, or 16 bytes for heap address widths of 2, 4, or
 /// 8 bytes, respectively.
 ///
@@ -207,8 +211,13 @@ pub fn stored_element_size_usize(
 /// than four dimensions, [`FormatError::InvalidCompoundV1Extent`] if an active dimension is
 /// zero, or [`FormatError::UnsupportedCompoundV1Permutation`] if its permutation field is nonzero.
 /// Returns [`FormatError::CompoundArraySizeOverflow`] if a version 1 member's implicit array
-/// size exceeds [`u32::MAX`], or [`FormatError::CompoundFieldOutOfBounds`] if its stored byte
-/// range extends past the compound's declared size.
+/// size exceeds [`u32::MAX`]. Returns [`FormatError::CompoundFieldOutOfBounds`] if a member
+/// extends past the compound's declared size or [`FormatError::CompoundFieldOverlap`] if member
+/// byte ranges overlap.
+///
+/// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration and its base datatype
+/// declare different sizes, or [`FormatError::AllocationFailed`] if an enumeration member
+/// reservation fails.
 ///
 /// Returns [`FormatError::InvalidComplexFlags`] if a complex class bit field has reserved bits,
 /// [`FormatError::UnsupportedComplexForm`] if the complex form is not homogeneous rectangular,
@@ -217,7 +226,6 @@ pub fn stored_element_size_usize(
 /// order pattern, or VAX order in versions 1 or 2. Returns
 /// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
-/// Returns [`FormatError::AllocationFailed`] if an enumeration member reservation fails.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     let mut cursor = ByteCursor::new(data);
     let Decoded {
@@ -248,17 +256,33 @@ fn parse_datatype_at(
             )?
             .into_datatype(),
         Layout::Compound(compound) => {
-            let mut members = Vec::with_capacity(compound.member_count());
+            let mut members: Vec<CompoundMember> = Vec::with_capacity(compound.member_count());
+            let mut layout = CompoundLayout::new(size);
             for _ in 0..compound.member_count() {
                 let Member {
                     name,
                     offset,
                     shape,
                 } = compound.member(cursor)?;
-                let decoded = parse_nested_datatype(cursor, depth)?;
+                let Decoded {
+                    datatype,
+                    stored_size,
+                } = parse_nested_datatype(cursor, depth)?;
+                let stored_size = match &shape {
+                    Some(shape) => shape.stored_size(stored_size)?,
+                    None => stored_size,
+                };
+                let index = members.len();
+                layout.insert(offset, stored_size, index, |member_index| {
+                    if member_index == index {
+                        Some(name.as_str())
+                    } else {
+                        members.get(member_index).map(|member| member.name.as_str())
+                    }
+                })?;
                 let datatype = match shape {
-                    Some(shape) => shape.into_datatype(decoded, &name, offset, size)?,
-                    None => decoded.datatype,
+                    Some(shape) => shape.into_datatype(datatype),
+                    None => datatype,
                 };
                 members.push(__private::compound_member(name, offset, datatype));
             }
@@ -266,8 +290,11 @@ fn parse_datatype_at(
         }
         Layout::Reference => atomic::decode_reference(&header)?,
         Layout::Enumeration(enumeration) => {
-            let base_type = parse_nested_datatype(cursor, depth)?.datatype;
-            let members = enumeration.members(cursor, base_type.element_size()?)?;
+            let Decoded {
+                datatype: base_type,
+                stored_size: base_size,
+            } = parse_nested_datatype(cursor, depth)?;
+            let members = enumeration.members(cursor, size, base_size)?;
             Datatype::Enumeration {
                 size,
                 base_type: Box::new(base_type),

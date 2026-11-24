@@ -1,4 +1,5 @@
 use hdf5_pure_core::{CharacterSet, FormatError, StringPadding};
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
@@ -57,6 +58,7 @@ fn compound_layout_rejects_overlapping_members(
         ],
     );
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -98,6 +100,10 @@ fn compound_layout_preserves_disjoint_members_and_record_order(#[case] spans: &[
     let [low, high] = u16::try_from(spans.len()).unwrap().to_le_bytes();
     let bytes = containers::compound(3, [low, high, 0], 32, MemberOffset::One, &fields);
     assert_eq!(expected.serialize(OffsetWidth::Eight).unwrap(), bytes);
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (expected.to_datatype().unwrap(), bytes.len())
+    );
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap(),
         (expected, bytes.len())
@@ -182,6 +188,14 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
     );
     let (message, consumed) = DatatypeMessage::parse(&low).unwrap();
     assert_eq!(consumed, low.len());
+    assert_eq!(
+        format::parse_datatype(&low).unwrap(),
+        (message.to_datatype().unwrap(), low.len())
+    );
+    assert_eq!(
+        format::parse_datatype(&middle).unwrap(),
+        (message.to_datatype().unwrap(), middle.len())
+    );
     assert_eq!(message.serialize(OffsetWidth::Two).unwrap(), low);
     assert_eq!(message.serialize(OffsetWidth::Four).unwrap(), middle);
     let expected = FormatError::CompoundFieldOverlap {
@@ -189,6 +203,7 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
         second: "fixed".into(),
     };
     assert_eq!(DatatypeMessage::parse(&high).unwrap_err(), expected);
+    assert_eq!(format::parse_datatype(&high).unwrap_err(), expected);
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap_err(), expected);
     let outer = DatatypeMessage::new(
         DatatypeVersion::Three,
@@ -211,6 +226,7 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
         }],
     );
     assert_eq!(DatatypeMessage::parse(&outer).unwrap_err(), expected);
+    assert_eq!(format::parse_datatype(&outer).unwrap_err(), expected);
 }
 
 fn string(size: u32) -> DatatypeMessage {

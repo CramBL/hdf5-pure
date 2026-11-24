@@ -118,15 +118,14 @@ fn datatype_compound_parser_uses_source_member_extent() {
             datatype: &sequence,
         }],
     );
-    assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
-        FormatError::CompoundFieldOutOfBounds {
-            name: "x".into(),
-            offset: 0,
-            field_size: 16,
-            compound_size: 10
-        }
-    );
+    let expected = FormatError::CompoundFieldOutOfBounds {
+        name: "x".into(),
+        offset: 0,
+        field_size: 16,
+        compound_size: 10,
+    };
+    assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -189,6 +188,40 @@ fn compound_v1_sequence_member_rejects_a_one_byte_overrun(
             offset: u64::from(SEQUENCE_MEMBER_OFFSET),
             field_size,
             compound_size,
+        }
+    );
+}
+
+#[rstest]
+fn compound_v1_implicit_array_rejects_an_overlapping_member(
+    #[values((2, 10), (4, 12), (8, 16))] width_and_descriptor_size: (usize, u32),
+) {
+    const DATATYPE_HEADER_SIZE: usize = 8;
+
+    let (width, descriptor_size) = width_and_descriptor_size;
+    let mut bytes = legacy_compound::sequence_member(
+        width,
+        SEQUENCE_MEMBER_OFFSET,
+        SequenceMemberShape::ImplicitArray,
+    );
+    let mut scalar = legacy_compound::raw_member(
+        SEQUENCE_MEMBER_OFFSET + 2 * descriptor_size,
+        SEQUENCE_MEMBER_OFFSET + descriptor_size + 1,
+        0,
+        0,
+        [0; 4],
+        &leaf::unsigned_byte(Version::One),
+    );
+    let scalar = &mut scalar[DATATYPE_HEADER_SIZE..];
+    scalar[..3].copy_from_slice(b"tag");
+    bytes[1..3].copy_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(scalar);
+
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap_err(),
+        FormatError::CompoundFieldOverlap {
+            first: "arr".into(),
+            second: "tag".into(),
         }
     );
 }

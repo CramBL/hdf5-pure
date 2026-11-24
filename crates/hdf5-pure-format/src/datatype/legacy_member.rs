@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use alloc::string::ToString;
 use core::num::NonZeroU32;
 
 use byteorder::ByteOrder;
@@ -9,7 +8,6 @@ use hdf5_pure_core::Datatype;
 use hdf5_pure_core::FormatError;
 
 use crate::bytes::ByteCursor;
-use crate::datatype::message::decode::Decoded;
 
 /// A version 1 compound member's scalar shape or one to four nonzero array dimensions.
 ///
@@ -54,60 +52,46 @@ impl MemberShape {
         }))
     }
 
-    /// Checks the member's stored byte range and applies any implicit array shape.
+    /// Multiplies the stored base size by each implicit array extent.
     ///
-    /// Computes an implicit array's size from the decoded base size and the member's extents.
+    /// Returns `base_size` for a scalar member.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::CompoundArraySizeOverflow`] if an implicit array size exceeds
-    /// [`u32::MAX`], or [`FormatError::CompoundFieldOutOfBounds`] if the stored member range
-    /// extends past `compound_size`.
-    pub(super) fn into_datatype(
-        self,
-        base: Decoded<Datatype>,
-        name: &str,
-        offset: u64,
-        compound_size: u32,
-    ) -> Result<Datatype, FormatError> {
-        let Decoded {
-            datatype: base_type,
-            stored_size,
-        } = base;
-        let dimensions = match &self.0 {
-            Shape::Scalar => None,
-            Shape::One(extents) => Some(extents.as_slice()),
-            Shape::Two(extents) => Some(extents.as_slice()),
-            Shape::Three(extents) => Some(extents.as_slice()),
-            Shape::Four(extents) => Some(extents.as_slice()),
-        };
-        let size =
-            dimensions
-                .unwrap_or_default()
-                .iter()
-                .try_fold(stored_size.get(), |size, extent| {
-                    let extent = extent.get();
-                    size.checked_mul(extent)
-                        .ok_or(FormatError::CompoundArraySizeOverflow { size, extent })
-                })?;
-        if offset
-            .checked_add(u64::from(size))
-            .is_none_or(|end| end > u64::from(compound_size))
-        {
-            return Err(FormatError::CompoundFieldOutOfBounds {
-                name: name.to_string(),
-                offset,
-                field_size: size,
-                compound_size,
-            });
-        }
-        Ok(match dimensions {
-            Some(extents) => Datatype::Array {
+    /// Returns [`FormatError::CompoundArraySizeOverflow`] if the product exceeds [`u32::MAX`].
+    pub(super) fn stored_size(&self, base_size: NonZeroU32) -> Result<NonZeroU32, FormatError> {
+        self.dimensions()
+            .iter()
+            .try_fold(base_size, |size, &extent| {
+                size.checked_mul(extent)
+                    .ok_or(FormatError::CompoundArraySizeOverflow {
+                        size: size.get(),
+                        extent: extent.get(),
+                    })
+            })
+    }
+
+    /// Returns [`Datatype::Array`] for an array member or `base_type` for a scalar member.
+    pub(super) fn into_datatype(self, base_type: Datatype) -> Datatype {
+        let dimensions = self.dimensions();
+        if dimensions.is_empty() {
+            base_type
+        } else {
+            Datatype::Array {
                 base_type: Box::new(base_type),
-                dimensions: extents.iter().map(|extent| extent.get()).collect(),
-            },
-            None => base_type,
-        })
+                dimensions: dimensions.iter().map(|extent| extent.get()).collect(),
+            }
+        }
+    }
+
+    fn dimensions(&self) -> &[NonZeroU32] {
+        match &self.0 {
+            Shape::Scalar => &[],
+            Shape::One(extents) => extents,
+            Shape::Two(extents) => extents,
+            Shape::Three(extents) => extents,
+            Shape::Four(extents) => extents,
+        }
     }
 }
 

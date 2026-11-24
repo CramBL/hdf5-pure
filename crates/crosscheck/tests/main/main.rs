@@ -34,6 +34,8 @@ mod dataspace;
 mod datatype_array_complex_codec;
 mod datatype_compound_codec;
 mod datatype_enum_codec;
+#[cfg(feature = "__libhdf5-1.14")]
+mod datatype_geometry;
 mod datatype_leaf_codec;
 mod datatype_variable_length_codec;
 mod decoded_chunk_size;

@@ -1,5 +1,6 @@
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{EnumMember, FormatError};
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
@@ -235,16 +236,23 @@ fn datatype_enum_parser_rejects_newer_bases() {
     );
 }
 
-#[test]
-fn datatype_enum_parser_rejects_size_mismatch() {
+#[rstest]
+#[case::smaller(2)]
+#[case::larger(8)]
+#[case::zero(0)]
+fn datatype_enum_parsers_reject_size_mismatch(#[case] size: u32) {
     let child = Leaf::Integer.bytes(Version::One);
-    assert_eq!(
-        DatatypeMessage::parse(&containers::enumeration(3, [0; 3], 8, &child, &[])).unwrap_err(),
-        FormatError::EnumBaseSizeMismatch {
-            size: 8,
-            base_size: 4
-        }
-    );
+    let values = [EnumValue {
+        name: b"one",
+        value: &1_u32.to_be_bytes(),
+    }];
+    let bytes = containers::enumeration(Version::Three.get(), [1, 0, 0], size, &child, &values);
+    let expected = FormatError::EnumBaseSizeMismatch { size, base_size: 4 };
+    assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    let array = datatype::array(Version::Three.get(), [0; 3], 8, 1, &[2], &bytes);
+    assert_eq!(DatatypeMessage::parse(&array).unwrap_err(), expected);
+    assert_eq!(format::parse_datatype(&array).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -392,6 +400,10 @@ fn assert_encoding(bytes: &[u8], expected: DatatypeMessage) {
     let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message, expected);
+    assert_eq!(
+        format::parse_datatype(&input).unwrap(),
+        (expected.to_datatype().unwrap(), bytes.len())
+    );
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
 }
 
