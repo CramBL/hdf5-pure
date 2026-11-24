@@ -282,10 +282,11 @@ mod tests {
                 },
             },
             InvalidIndex::BTreeTruncated => {
+                let expected = address + u64::try_from(encoded.len()).unwrap();
                 encoded.truncate(encoded.len() - 5);
-                FormatError::UnexpectedEof {
-                    expected: encoded.len() + 1,
-                    available: encoded.len(),
+                FormatError::UnexpectedSourceEof {
+                    expected,
+                    available: address + u64::try_from(encoded.len()).unwrap(),
                 }
             }
             InvalidIndex::ListTruncated => {

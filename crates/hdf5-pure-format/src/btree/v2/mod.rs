@@ -18,14 +18,10 @@ use core::ops::Range;
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(feature = "checksum")]
-use byteorder::ByteOrder;
-#[cfg(feature = "checksum")]
-use byteorder::LittleEndian;
-
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
+use crate::checksum;
 use crate::chunk_record;
 use crate::convert::Narrow;
 use crate::data_layout::LayoutVersion;
@@ -724,36 +720,19 @@ fn read_var_uint(data: &[u8], pos: usize, width: usize) -> Result<u64, FormatErr
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub const fn btree_v2_header_size(offset_width: OffsetWidth, length_width: LengthWidth) -> usize {
-    // signature(4) + version(1) + type(1) + node size(4) + record size(2) +
-    // depth(2) + split %(1) + merge %(1) + root address + records in root(2) +
-    // total records + checksum(4)
-    4 + 1
-        + 1
-        + 4
-        + 2
-        + 2
-        + 1
-        + 1
-        + offset_width.get() as usize
-        + 2
-        + length_width.get() as usize
-        + 4
+    HEADER_FIXED_LEN + offset_width.get() as usize + length_width.get() as usize
 }
 
 impl BTreeV2Header {
-    /// Parses the version 2 B-tree header at `offset` in `file_data`.
+    /// Parses a version 2 B-tree header using the width bytes from the superblock.
     ///
-    /// `offset_size` and `length_size` are the superblock's "Size of Offsets" and "Size of
-    /// Lengths" bytes. With the `checksum` feature, `parse` also verifies the header's checksum.
+    /// Pass the "Size of Offsets" byte as `offset_size` and the "Size of Lengths" byte as
+    /// `length_size`.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidBTreeV2Signature`] if the header does not begin with `BTHD`,
-    /// [`FormatError::InvalidBTreeV2Version`] if its version is not 0,
-    /// [`FormatError::UnexpectedEof`] if it runs past the end of `file_data`,
-    /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not
-    /// 2, 4, or 8, and, with the `checksum` feature, [`FormatError::ChecksumMismatch`] if the
-    /// stored checksum differs from the computed one.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] for an
+    /// unsupported width, or an error from [`parse_with_widths`](Self::parse_with_widths).
     pub fn parse(
         file_data: &[u8],
         offset: usize,
@@ -767,92 +746,44 @@ impl BTreeV2Header {
         )
     }
 
-    /// Returns the version 2 B-tree header at `offset` using validated file widths.
+    /// Checks that the version 2 B-tree header fits in the slice before parsing its fields.
+    ///
+    /// Requires the four-byte checksum field. With the `checksum` feature, verifies the checksum
+    /// after checking the signature and version.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidBTreeV2Signature`] if the header does not begin with `BTHD`,
-    /// [`FormatError::InvalidBTreeV2Version`] if its version is not 0,
-    /// [`FormatError::UnexpectedEof`] if it runs past the end of `file_data`, and, with the
-    /// `checksum` feature, [`FormatError::ChecksumMismatch`] if the stored checksum differs from
-    /// the computed one.
+    /// Returns [`FormatError::UnexpectedEof`] if the header extends past `file_data`. Reports
+    /// the exclusive end of the header, capped at [`usize::MAX`], and the length of `file_data`.
+    ///
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] for a signature other than `BTHD`,
+    /// or [`FormatError::InvalidBTreeV2Version`] for a header version other than 0. With the
+    /// `checksum` feature, returns [`FormatError::ChecksumMismatch`] if verification fails.
     pub fn parse_with_widths(
         file_data: &[u8],
         offset: usize,
         widths: FormatWidths,
     ) -> Result<BTreeV2Header, FormatError> {
-        bytes::ensure_len(file_data, offset, 4)?;
-        if &file_data[offset..offset + 4] != b"BTHD" {
-            return Err(FormatError::InvalidBTreeV2Signature);
-        }
-
-        bytes::ensure_len(file_data, offset, 4 + 1 + 1 + 4 + 2 + 2 + 1 + 1)?;
-        let version = file_data[offset + 4];
-        if version != 0 {
-            return Err(FormatError::InvalidBTreeV2Version(version));
-        }
-
-        let tree_type = file_data[offset + 5];
-        let node_size = u32::from_le_bytes([
-            file_data[offset + 6],
-            file_data[offset + 7],
-            file_data[offset + 8],
-            file_data[offset + 9],
-        ]);
-        let record_size = u16::from_le_bytes([file_data[offset + 10], file_data[offset + 11]]);
-        let depth = u16::from_le_bytes([file_data[offset + 12], file_data[offset + 13]]);
-        let _split_percent = file_data[offset + 14];
-        let _merge_percent = file_data[offset + 15];
-
-        let mut pos = offset + 16;
-        let root_node_address =
-            StoredAddress::new(bytes::read_offset_width(file_data, pos, widths.offsets)?);
-        pos += usize::from(widths.offsets.get());
-
-        bytes::ensure_len(file_data, pos, 2)?;
-        let num_records_in_root = u16::from_le_bytes([file_data[pos], file_data[pos + 1]]);
-        pos += 2;
-
-        let total_records = bytes::read_length_width(file_data, pos, widths.lengths)?;
-        #[allow(unused_assignments)]
-        {
-            pos += usize::from(widths.lengths.get());
-        }
-
-        // Validate header checksum
-        #[cfg(feature = "checksum")]
-        {
-            bytes::ensure_len(file_data, pos, 4)?;
-            let stored = LittleEndian::read_u32(&file_data[pos..pos + 4]);
-            let computed = crate::checksum::jenkins_lookup3(&file_data[offset..pos]);
-            if computed != stored {
-                return Err(FormatError::ChecksumMismatch {
-                    expected: stored,
-                    computed,
-                });
-            }
-        }
-
-        Ok(BTreeV2Header {
-            tree_type,
-            node_size,
-            record_size,
-            depth,
-            root_node_address,
-            num_records_in_root,
-            total_records,
-        })
+        let size = btree_v2_header_size(widths.offsets, widths.lengths);
+        let header = offset
+            .checked_add(size)
+            .and_then(|end| file_data.get(offset..end))
+            .ok_or_else(|| FormatError::UnexpectedEof {
+                expected: offset.saturating_add(size),
+                available: file_data.len(),
+            })?;
+        Self::parse_header(header, widths)
     }
 
-    /// Parses the version 2 B-tree header at `address` in `source`.
+    /// Reads a version 2 B-tree header using the width bytes from the superblock.
     ///
-    /// Reads at most 64 bytes, which hold the header at every width the format allows, and fewer
-    /// where the file ends first, then parses them as [`parse`](Self::parse) does.
+    /// Takes the same width bytes as [`parse`](Self::parse).
     ///
     /// # Errors
     ///
-    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
-    /// fails.
+    /// Returns [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] for an
+    /// unsupported width, or an error from
+    /// [`parse_from_source_with_widths`](Self::parse_from_source_with_widths).
     pub fn parse_from_source(
         source: &(impl MetadataSource + ?Sized),
         address: u64,
@@ -866,25 +797,101 @@ impl BTreeV2Header {
         )
     }
 
-    /// Returns the version 2 B-tree header at `address` using validated file widths.
+    /// Reads exactly the bytes of a version 2 B-tree header in one metadata request.
+    ///
+    /// Parses the header as [`parse_with_widths`](Self::parse_with_widths) does.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use hdf5_pure_format::__private::{BTreeV2Header, FormatWidths};
+    /// # use hdf5_pure_format::FormatError;
+    /// let file = b"\0\0BTHD";
+    /// let widths = FormatWidths::from_sizes(4, 8)?;
+    /// assert_eq!(
+    ///     BTreeV2Header::parse_from_source_with_widths(file.as_slice(), 2, widths),
+    ///     Err(FormatError::UnexpectedSourceEof {
+    ///         expected: 36,
+    ///         available: 6,
+    ///     }),
+    /// );
+    /// # Ok::<(), FormatError>(())
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
-    /// `source` returns if a read fails.
+    /// Returns [`FormatError::OffsetOverflow`] if the end of the header exceeds [`u64::MAX`], or
+    /// [`FormatError::UnexpectedSourceEof`] if the source is too short or returns fewer bytes than
+    /// requested. The truncation error reports the exclusive end of the header and the available
+    /// extent in the source's coordinates.
+    ///
+    /// Returns errors from the source if a read fails, or the signature, version, and checksum
+    /// errors of [`parse_with_widths`](Self::parse_with_widths) if parsing fails.
     pub fn parse_from_source_with_widths(
         source: &(impl MetadataSource + ?Sized),
         address: u64,
         widths: FormatWidths,
     ) -> Result<BTreeV2Header, FormatError> {
-        // 16 fixed prefix bytes + root address + 2 (records in the root) + total-records
-        // field + 4 checksum: <= 64 with 8-byte offsets/lengths.
-        const MAX_HEADER: u64 = 64;
-        let window = MAX_HEADER
-            .min(source.len().saturating_sub(address))
-            .to_usize()?;
-        let buf = source.read_metadata(address, window)?;
-        Self::parse_with_widths(&buf, 0, widths)
+        let size = btree_v2_header_size(widths.offsets, widths.lengths);
+        let end = address
+            .checked_add(size.to_u64())
+            .ok_or(FormatError::OffsetOverflow {
+                offset: address,
+                length: size.to_u64(),
+            })?;
+        let available = source.len();
+        if end > available {
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available,
+            });
+        }
+        let acquired = source.read_metadata(address, size)?;
+        let header = acquired
+            .get(..size)
+            .ok_or_else(|| FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: address + acquired.len().to_u64(),
+            })?;
+        Self::parse_header(header, widths)
+    }
+
+    /// Parses a header from an exact-length slice that includes the checksum field.
+    ///
+    /// # Errors
+    ///
+    /// Returns the signature, version, and checksum errors of
+    /// [`parse_with_widths`](Self::parse_with_widths).
+    fn parse_header(header: &[u8], widths: FormatWidths) -> Result<Self, FormatError> {
+        let mut cursor = bytes::ByteCursor::new(header);
+        if cursor.take_array()? != HEADER_SIGNATURE {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
+        let version = cursor.u8()?;
+        if version != HEADER_VERSION {
+            return Err(FormatError::InvalidBTreeV2Version(version));
+        }
+
+        let tree_type = cursor.u8()?;
+        let node_size = cursor.u32()?;
+        let record_size = cursor.u16()?;
+        let depth = cursor.u16()?;
+        let _split_percent = cursor.u8()?;
+        let _merge_percent = cursor.u8()?;
+        let root_node_address = cursor.address(widths.offsets)?;
+        let num_records_in_root = cursor.u16()?;
+        let total_records = cursor.length(widths.lengths)?;
+        checksum::verify_trailing(header)?;
+
+        Ok(Self {
+            tree_type,
+            node_size,
+            record_size,
+            depth,
+            root_node_address,
+            num_records_in_root,
+            total_records,
+        })
     }
 }
 
@@ -2184,6 +2191,12 @@ const LINK_CREATION_ORDER_LEN: usize = 8;
 
 /// The width of the message flags in a type 8 or type 9 record.
 const MESSAGE_FLAGS_LEN: u16 = 1;
+
+// The fixed-width fields of the version 0 header, including its checksum, are defined in
+// "Version 2 B-trees" of the format specification, version 4.0.
+const HEADER_FIXED_LEN: usize = 22;
+const HEADER_SIGNATURE: &[u8; 4] = b"BTHD";
+const HEADER_VERSION: u8 = 0;
 
 // "Version 2 B-trees" in the format specification, version 4.0, defines the version 0 node
 // signatures, six-byte prefix, and four-byte trailing checksum.
