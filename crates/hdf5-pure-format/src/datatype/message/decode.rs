@@ -13,8 +13,8 @@ use core::str;
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{ComplexType, EnumMember, FormatError};
 
-use super::DatatypeVersion;
 use super::atomic;
+use super::{DatatypeVersion, MessageDepth};
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::datatype::header::{AtomicClass, Context, DatatypeClass, Header};
@@ -431,7 +431,8 @@ impl Complex {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the parent is incomplete. For an incomplete
+    /// Returns [`FormatError::NestingDepthExceeded`] before reading a parent beyond the nesting
+    /// limit. Returns [`FormatError::UnexpectedEof`] if the parent is incomplete. For an incomplete
     /// property block in the semantic representation, the byte counts are relative to the
     /// parent header. Returns [`FormatError::InvalidComplexSize`] if the declared size differs
     /// from twice the component size, and propagates errors reading the parent and checking
@@ -439,7 +440,9 @@ impl Complex {
     pub(in crate::datatype) fn component(
         self,
         cursor: &mut ByteCursor<'_>,
+        depth: MessageDepth,
     ) -> Result<(ComplexType, DatatypeVersion), FormatError> {
+        depth.child()?;
         let Self { size, projection } = self;
         let context = Context::ComplexParent;
         let start = cursor.position();

@@ -232,8 +232,7 @@ impl DatatypeMessage {
                 });
             }
             Layout::Complex(complex) => {
-                depth.child()?;
-                let (datatype, version) = complex.component(cursor)?;
+                let (datatype, version) = complex.component(cursor, depth)?;
                 DatatypeProperties::Complex {
                     component: Box::new(Self {
                         version,
@@ -1184,9 +1183,9 @@ impl<'a> Output<'a> {
     }
 }
 
-/// The number of enclosing descriptions on a retained-version path, less than 64.
+/// The number of enclosing datatype descriptions, from zero through 63.
 #[derive(Clone, Copy)]
-struct MessageDepth(u8);
+pub(in crate::datatype) struct MessageDepth(u8);
 
 impl MessageDepth {
     /// Returns the depth of a child description within the checked nesting limit.
@@ -1195,7 +1194,7 @@ impl MessageDepth {
     ///
     /// Returns [`FormatError::NestingDepthExceeded`] if the child would exceed 64 descriptions
     /// on one parent chain, including the outer description.
-    fn child(self) -> Result<Self, FormatError> {
+    pub(in crate::datatype) fn child(self) -> Result<Self, FormatError> {
         self.0
             .checked_add(1)
             .filter(|&depth| depth < MAX_MESSAGE_DEPTH)
@@ -1204,7 +1203,7 @@ impl MessageDepth {
     }
 
     /// The depth of the outer description.
-    const ROOT: Self = Self(0);
+    pub(in crate::datatype) const ROOT: Self = Self(0);
 }
 
 /// Encodes a checked member count in the low two class flag bytes.

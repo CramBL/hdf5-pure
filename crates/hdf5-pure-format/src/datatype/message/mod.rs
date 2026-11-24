@@ -26,6 +26,7 @@ use super::{
 use crate::convert::Narrow;
 use crate::width::OffsetWidth;
 
+pub(super) use self::codec::MessageDepth;
 pub use self::codec::PreparedDatatype;
 
 pub(super) mod atomic;
