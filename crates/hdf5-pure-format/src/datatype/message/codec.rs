@@ -57,7 +57,8 @@ impl DatatypeMessage {
     /// base size multiplied by the dimension extents, and each complex size against twice the
     /// component size.
     /// Checks compound member bounds and overlaps using the sizes stored in the member
-    /// descriptions. A compound must have at least one member, with unique UTF-8 names.
+    /// descriptions. Reserves member capacity after reading a member's nested datatype and
+    /// checking its byte range. A compound must have at least one member, with unique UTF-8 names.
     /// Enumerations have a fixed-point parent and at least one member, with nonempty, unique
     /// UTF-8 names and distinct raw values of the parent's width. The nesting limit is 64
     /// descriptions on one parent chain, including the outer description.
@@ -100,7 +101,8 @@ impl DatatypeMessage {
     /// [`FormatError::EmptyEnumMemberName`] for an empty name,
     /// [`FormatError::DuplicateEnumMemberName`] for duplicate names, and
     /// [`FormatError::DuplicateEnumMemberValue`] for duplicate raw values.
-    /// Returns [`FormatError::AllocationFailed`] if an enumeration member reservation fails.
+    /// Returns [`FormatError::AllocationFailed`] if a compound or enumeration member list
+    /// reservation fails.
     /// Propagates checked range and platform-conversion errors when reading values.
     ///
     /// Returns [`FormatError::InvalidComplexFlags`] for reserved complex class bits,
@@ -160,7 +162,7 @@ impl DatatypeMessage {
                 let stored_size = super::positive_size(COMPOUND_CLASS, header.size)?;
                 let count = compound.member_count();
                 super::compound_member_count(count)?;
-                let mut members = Vec::new();
+                let mut members: Vec<DatatypeMessageMember> = Vec::new();
                 let mut layout = CompoundLayout::new(header.size);
                 for _ in 0..count {
                     let Member {
@@ -173,10 +175,18 @@ impl DatatypeMessage {
                         stored_size: field_size,
                     } = Self::parse_at(cursor, depth.child()?)?;
                     let index = members.len();
-                    members.push(DatatypeMessageMember::new(name, offset, datatype)?);
-                    layout.insert(offset, field_size, index, |index| {
-                        members.get(index).map(|member| member.name.as_str())
+                    layout.insert(offset, field_size, index, |member_index| {
+                        if member_index == index {
+                            Some(name.as_ref())
+                        } else {
+                            members.get(member_index).map(|member| member.name.as_str())
+                        }
                     })?;
+                    decode::push_member(
+                        &mut members,
+                        count,
+                        DatatypeMessageMember::new(name.into_owned(), offset, datatype)?,
+                    )?;
                 }
                 drop(layout);
                 let mut names = BTreeSet::new();

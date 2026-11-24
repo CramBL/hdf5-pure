@@ -1,12 +1,16 @@
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
+use hdf5_pure::FixedPointType;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::{
+    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
+};
 use rstest::rstest;
 use test_util::allocation;
 use test_util::datatype::Class;
-use test_util::datatype::containers::{self, EnumValue};
+use test_util::datatype::containers::{self, CompoundField, EnumValue, MemberOffset};
 use test_util::datatype::leaf::{Leaf, Version};
 
 #[rstest]
@@ -171,6 +175,142 @@ fn unterminated_first_enum_name_does_not_allocate_members() {
     );
     assert_eq!(measured.blocks, 0, "{measured}");
     assert_eq!(measured.peak_bytes, 0, "{measured}");
+}
+
+#[rstest]
+#[case::header_only(compound_header_without_members(), 8, FormatError::UnexpectedEof {
+    expected: 9,
+    available: 8,
+})]
+#[case::nested_at_the_depth_limit(nested_compound_prefix(), 704, FormatError::NestingDepthExceeded)]
+fn parsers_reject_compound_headers_and_nested_prefixes_without_allocating(
+    #[case] bytes: Vec<u8>,
+    #[case] length: usize,
+    #[case] expected: FormatError,
+) {
+    assert_eq!(bytes.len(), length);
+    let child = Leaf::Integer.bytes(Version::One);
+    let valid = containers::compound(
+        Version::Three.get(),
+        [1, 0, 0],
+        4,
+        MemberOffset::One,
+        &[CompoundField {
+            name: b"x",
+            offset: 0,
+            datatype: &child,
+        }],
+    );
+    let semantic: fn(&[u8]) -> Result<usize, FormatError> =
+        |bytes| format::parse_datatype(bytes).map(|(_, consumed)| consumed);
+    let retained = |bytes: &[u8]| DatatypeMessage::parse(bytes).map(|(_, consumed)| consumed);
+    for (projection, parse) in [("semantic", semantic), ("retained", retained)] {
+        let region = format!("compound_member_{projection}_{length}_bytes");
+        let (result, control) = allocation::measure(&format!("{region}_valid"), || parse(&valid));
+        assert_eq!(result.unwrap(), valid.len());
+        assert!(control.blocks > 0, "{control}");
+        assert!(control.peak_bytes >= 1, "{control}");
+
+        let (result, measured) = allocation::measure(&region, || parse(&bytes));
+        assert_eq!(result.unwrap_err(), expected);
+        assert_eq!(measured.blocks, 0, "{measured}");
+        assert_eq!(measured.peak_bytes, 0, "{measured}");
+    }
+}
+
+fn compound_header_without_members() -> Vec<u8> {
+    let [low, high] = u16::MAX.to_le_bytes();
+    containers::compound(
+        Version::Three.get(),
+        [low, high, 0],
+        1,
+        MemberOffset::One,
+        &[],
+    )
+}
+
+fn nested_compound_prefix() -> Vec<u8> {
+    let [low, high] = u16::MAX.to_le_bytes();
+    containers::compound(
+        Version::Three.get(),
+        [low, high, 0],
+        1,
+        MemberOffset::One,
+        &[CompoundField {
+            name: b"x",
+            offset: 0,
+            datatype: &[],
+        }],
+    )
+    .repeat(64)
+}
+
+#[rstest]
+#[case::members_256(256)]
+#[case::members_1024(1024)]
+fn wide_compound_decoding_has_bounded_allocations(#[case] count: usize) {
+    let shape = Shape::Compound(count);
+    let expected = shape.datatype();
+    let Datatype::Compound { size, members } = &expected else {
+        panic!("expected a compound datatype");
+    };
+    let names = members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect::<Vec<_>>();
+    let (bytes, _) = encode_with_child_buffers(shape, &names);
+    let child = DatatypeMessage::new(
+        DatatypeVersion::One,
+        DatatypeProperties::FixedPoint(FixedPointType::i32()),
+    )
+    .unwrap();
+    let expected_retained = DatatypeMessage::new(
+        DatatypeVersion::Three,
+        DatatypeProperties::Compound {
+            size: *size,
+            members: members
+                .iter()
+                .map(|member| {
+                    DatatypeMessageMember::new(
+                        member.name.clone(),
+                        member.byte_offset,
+                        child.clone(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        },
+    )
+    .unwrap();
+
+    let (semantic, semantic_metrics) =
+        allocation::measure(&format!("wide_compound_semantic_{count}"), || {
+            format::parse_datatype(&bytes).unwrap()
+        });
+    assert_eq!(semantic, (expected, bytes.len()));
+    let (retained, retained_metrics) =
+        allocation::measure(&format!("wide_compound_retained_{count}"), || {
+            DatatypeMessage::parse(&bytes).unwrap()
+        });
+    assert_eq!(retained, (expected_retained, bytes.len()));
+    assert_eq!(
+        retained.0.serialize(format::OffsetWidth::Eight).unwrap(),
+        bytes
+    );
+    let count = u64::try_from(count).unwrap();
+    for (metrics, member_size) in [
+        (semantic_metrics, size_of::<hdf5_pure::CompoundMember>()),
+        (retained_metrics, size_of::<DatatypeMessageMember>()),
+    ] {
+        let member_size = u64::try_from(member_size).unwrap();
+        assert_eq!(metrics.live_bytes, count * (member_size + 9), "{metrics}");
+        assert!(metrics.blocks <= 2 * count, "{metrics}");
+        assert!(metrics.bytes <= count * (2 * member_size + 96), "{metrics}");
+        assert!(
+            metrics.peak_bytes <= count * (member_size + 96),
+            "{metrics}"
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

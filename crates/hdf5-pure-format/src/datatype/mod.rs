@@ -150,6 +150,7 @@ pub fn stored_element_size_usize(
 ///
 /// Checks compound member bounds and overlaps using the sizes stored in the member
 /// descriptions. For a version 1 implicit array member, multiplies the base size by its extents.
+/// Reserves member capacity after reading a member's nested datatype and checking its byte range.
 /// Checks each array message's declared size against the stored base size multiplied by
 /// the dimension extents.
 /// Variable-length descriptors occupy 10, 12, or 16 bytes for heap address widths of 2, 4, or
@@ -216,8 +217,8 @@ pub fn stored_element_size_usize(
 /// byte ranges overlap.
 ///
 /// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration and its base datatype
-/// declare different sizes, or [`FormatError::AllocationFailed`] if an enumeration member
-/// reservation fails.
+/// declare different sizes, or [`FormatError::AllocationFailed`] if a compound or enumeration
+/// member list reservation fails.
 ///
 /// Returns [`FormatError::InvalidComplexFlags`] if a complex class bit field has reserved bits,
 /// [`FormatError::UnsupportedComplexForm`] if the complex form is not homogeneous rectangular,
@@ -256,9 +257,10 @@ fn parse_datatype_at(
             )?
             .into_datatype(),
         Layout::Compound(compound) => {
-            let mut members: Vec<CompoundMember> = Vec::with_capacity(compound.member_count());
+            let count = compound.member_count();
+            let mut members: Vec<CompoundMember> = Vec::new();
             let mut layout = CompoundLayout::new(size);
-            for _ in 0..compound.member_count() {
+            for _ in 0..count {
                 let Member {
                     name,
                     offset,
@@ -275,7 +277,7 @@ fn parse_datatype_at(
                 let index = members.len();
                 layout.insert(offset, stored_size, index, |member_index| {
                     if member_index == index {
-                        Some(name.as_str())
+                        Some(name.as_ref())
                     } else {
                         members.get(member_index).map(|member| member.name.as_str())
                     }
@@ -284,7 +286,11 @@ fn parse_datatype_at(
                     Some(shape) => shape.into_datatype(datatype),
                     None => datatype,
                 };
-                members.push(__private::compound_member(name, offset, datatype));
+                decode::push_member(
+                    &mut members,
+                    count,
+                    __private::compound_member(name.into_owned(), offset, datatype),
+                )?;
             }
             Datatype::Compound { size, members }
         }
