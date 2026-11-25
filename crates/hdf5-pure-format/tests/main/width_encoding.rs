@@ -4,9 +4,9 @@ use hdf5_pure_core::{
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
-    BlockOffsetWidth, ChunkIndexInfo, ChunkedLayoutFlags, DataLayout, Dataspace, DataspaceType,
-    DatatypeLocation, EA_CLIENT_ID_UNFILTERED, FilteredSingleChunk, FormatWidths,
-    FractalHeapHeader, LayoutVersion, LinkMessage, LinkTarget,
+    ChunkIndexInfo, ChunkedLayoutFlags, DataLayout, Dataspace, DataspaceType, DatatypeLocation,
+    EA_CLIENT_ID_UNFILTERED, ExtensibleArrayBlockWriter, ExtensibleArrayCreationParameters,
+    FilteredSingleChunk, FormatWidths, FractalHeapHeader, LayoutVersion, LinkMessage, LinkTarget,
 };
 use rstest::rstest;
 use test_util::bytes::push_uint;
@@ -675,27 +675,22 @@ fn fractal_heap_addresses_outside_the_selected_width_are_rejected(
     );
 }
 
-#[rstest]
-#[case::owner_address(StoredAddress::new(0x1_0000), 0, vec![], FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 })]
-#[case::child_address(StoredAddress::new(0), 0, vec![StoredAddress::new(0x1_0000)], FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 })]
-#[case::block_offset(StoredAddress::new(0), 256, vec![], FormatError::ValueTooLargeForRepresentation { value: 256, target: "Extensible Array block offset" })]
-fn extensible_array_super_blocks_reject_unrepresentable_fields(
-    #[case] owner: StoredAddress,
-    #[case] block_offset: u64,
-    #[case] children: Vec<StoredAddress>,
-    #[case] expected: FormatError,
-) {
+#[test]
+fn extensible_array_block_writer_rejects_an_unrepresentable_owner_address() {
+    let Err(error) = ExtensibleArrayBlockWriter::new(
+        ExtensibleArrayCreationParameters::canonical(),
+        OffsetWidth::Two,
+        EA_CLIENT_ID_UNFILTERED,
+        2,
+        StoredAddress::new(0x1_0000),
+    ) else {
+        panic!("expected an address width error");
+    };
     assert_eq!(
-        format::encode_super_block(
-            owner,
-            block_offset,
-            &[],
-            &children,
-            OffsetWidth::Two,
-            EA_CLIENT_ID_UNFILTERED,
-            BlockOffsetWidth::One
-        )
-        .unwrap_err(),
-        expected
+        error,
+        FormatError::AddressTooLarge {
+            address: 0x1_0000,
+            offset_size: 2,
+        }
     );
 }

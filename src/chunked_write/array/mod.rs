@@ -8,6 +8,7 @@ use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::SlotOccupancy;
 
 use crate::address::StoredAddress;
+use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_emission::EmissionError;
@@ -118,8 +119,9 @@ impl ArrayMeasure {
     /// # Errors
     ///
     /// Returns [`EmissionError::Sink`] if `emit` fails. Returns [`EmissionError::Format`] with
-    /// [`FormatError::Internal`] if a fixed array has other than two addresses. Propagates
-    /// array planning, placement, slot, and encoding errors as [`EmissionError::Format`].
+    /// [`FormatError::Internal`] if a fixed array has other than two addresses or
+    /// [`FormatError::AllocationFailed`] if reserving an extensible array block buffer fails.
+    /// Propagates array planning, placement, slot, and encoding errors as [`EmissionError::Format`].
     pub(crate) fn write_at<E>(
         &self,
         slots: &IndexSlots<'_>,
@@ -131,10 +133,11 @@ impl ArrayMeasure {
             Self::Extensible(plan) => {
                 let placement = plan.place(addresses)?;
                 let encoding = placement.encoding(slots)?;
-                let mut bytes = Vec::new();
+                let mut buffer = Vec::new();
                 for block in encoding.blocks() {
-                    block.encode_into(&mut bytes)?;
-                    emit(block.address(), &bytes).map_err(EmissionError::Sink)?;
+                    bytes::resize_buffer(&mut buffer, block.encoded_size())?;
+                    let written = block.write_into(&mut buffer)?;
+                    emit(block.address(), &buffer[..written]).map_err(EmissionError::Sink)?;
                 }
                 Ok(())
             }

@@ -347,13 +347,10 @@ fn replace_index(
     superblock.eof_address = end;
     file.close().unwrap();
     image.resize(usize::try_from(end).unwrap(), 0);
-    let mut output = Vec::new();
     for (emission, range) in encoding.blocks().zip(&ranges) {
-        emission.encode_into(&mut output).unwrap();
-        assert_eq!(u64::try_from(output.len()).unwrap(), range.length());
-        image[usize::try_from(range.start().get()).unwrap()
-            ..usize::try_from(range.end().get()).unwrap()]
-            .copy_from_slice(&output);
+        let destination = &mut image[usize::try_from(range.start().get()).unwrap()
+            ..usize::try_from(range.end().get()).unwrap()];
+        assert_eq!(emission.write_into(destination).unwrap(), destination.len());
     }
     layout.set_index(&mut image, &placement);
     let encoded = format::serialize_superblock(&superblock).unwrap();

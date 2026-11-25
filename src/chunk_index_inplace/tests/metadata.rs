@@ -374,7 +374,7 @@ impl Fixture {
                 }
             }
             Damage::Offset => {
-                let width = located.ea_bits.block_offset_width().bytes();
+                let width = located.creation.bit_geometry().block_offset_width().bytes();
                 data[at + 14..at + 14 + width].fill(0xff);
                 let mut actual = [0u8; 8];
                 actual[..width].fill(0xff);

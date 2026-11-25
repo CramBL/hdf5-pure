@@ -253,11 +253,11 @@ impl ExtensibleArrayPlan {
         }
         Ok(ExtensibleArrayPlacement { plan: self, ranges })
     }
+
     /// Serializes adjacent complete blocks at the stored `address`.
     ///
-    /// A checked whole range covers the blocks in [`blocks`](Self::blocks) order. Each block is
-    /// appended directly to one reserved output buffer. The caller establishes allocation
-    /// ownership.
+    /// Checks the complete stored range and writes each block in [`blocks`](Self::blocks) order
+    /// into its slice of a single output buffer. The caller establishes allocation ownership.
     ///
     /// # Errors
     ///
@@ -295,10 +295,13 @@ impl ExtensibleArrayPlan {
                 values: length,
                 source,
             })?;
+        output.resize(length, 0);
+        let mut remainder = output.as_mut_slice();
         for block in encoding.blocks() {
-            block.append_into(&mut output)?;
+            let written = block.write_into(remainder)?;
+            remainder = &mut remainder[written..];
         }
-        if cursor != whole.end() || output.len() != length {
+        if cursor != whole.end() || !remainder.is_empty() {
             return Err(FormatError::Internal(alloc::format!(
                 "contiguous EA encoding does not fill its planned {length} bytes"
             )));

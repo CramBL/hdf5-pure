@@ -22,6 +22,7 @@ use hdf5_pure_format::__private::DataBlockGeometry;
 use hdf5_pure_format::__private::EA_CLIENT_ID_UNFILTERED;
 use hdf5_pure_format::__private::ExtensibleArray;
 use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
+use hdf5_pure_format::__private::ExtensibleArrayBlockWriter;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
@@ -44,6 +45,7 @@ use crate::DeflateLevel;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, BaseAddress};
+use crate::bytes;
 use crate::checksum;
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
@@ -651,9 +653,9 @@ pub(crate) struct Located {
     pub idx_blk_elmts: u64,
     /// Size of one stored EA element in bytes (offset size for unfiltered; wider
     /// for filtered).
-    pub ea_elem_size: usize,
-    /// The parsed maximum element bit count and data block page exponent.
-    pub ea_bits: ExtensibleArrayBitGeometry,
+    pub ea_elem_size: u8,
+    /// Creation parameters read from the Extensible Array header.
+    creation: ExtensibleArrayCreationParameters,
     /// Address of the EA index block (`EAIB`).
     pub index_block_addr: StoredAddress,
     /// Number of chunk positions within the current dataset extent, including unallocated ones.
@@ -992,8 +994,8 @@ impl Located {
             offset_width: widths.offsets,
             geom,
             idx_blk_elmts: u64::from(ea_header.creation_parameters().inline_elements()),
-            ea_elem_size: elem_w,
-            ea_bits: ea_header.bit_geometry(),
+            ea_elem_size: ea_header.element_size(),
+            creation: ea_header.creation_parameters(),
             index_block_addr,
             num_chunks,
             allocation_stats: None,
@@ -1081,12 +1083,12 @@ impl Located {
             return Ok(ElemRecord::addr_only(file.read_addr_at(off)?));
         }
         // One bounded read of the whole fixed-width element record.
-        let elem = file.read_exact_at(off, self.ea_elem_size)?;
+        let elem = file.read_exact_at(off, usize::from(self.ea_elem_size))?;
         let addr_w = os;
         let mut a = [0u8; 8];
         a[..addr_w].copy_from_slice(&elem[..addr_w]);
         let addr = StoredAddress::new(u64::from_le_bytes(a));
-        let csz = self.ea_elem_size - os - 4;
+        let csz = usize::from(self.ea_elem_size) - os - 4;
         let mut stored_size = 0u64;
         for i in 0..csz {
             stored_size |= (elem[os + i] as u64) << (8 * i);
@@ -1105,10 +1107,10 @@ impl Located {
     /// disk yet.
     fn elem_slot_off<F: Store>(&self, file: &F, e: u64) -> Result<Option<u64>, Error> {
         let os = file.widths().offsets.get() as usize;
-        let elem_size = self.ea_elem_size as u64;
+        let elem_size = u64::from(self.ea_elem_size);
         let idx = self.idx_blk_elmts;
-        let blk_off = self.ea_bits.block_offset_width();
-        let page_nelmts = self.ea_bits.page_nelmts();
+        let blk_off = self.creation.bit_geometry().block_offset_width();
+        let page_nelmts = self.creation.bit_geometry().page_nelmts();
 
         if e < idx {
             let ib_prefix = (4 + 1 + 1 + os) as u64;
@@ -1168,7 +1170,7 @@ impl Located {
                 let ib_prefix = (4 + 1 + 1 + os) as u64;
                 Ok(self.index_block_addr.get()
                     + ib_prefix
-                    + self.idx_blk_elmts * self.ea_elem_size as u64
+                    + self.idx_blk_elmts * u64::from(self.ea_elem_size)
                     + (ordinal * os) as u64)
             }
             Parent::Super { dblk_local, .. } => {
@@ -1177,7 +1179,7 @@ impl Located {
                     os,
                     sblk_addr,
                     dblk_local,
-                    region.super_block(self.ea_bits.page_nelmts()),
+                    region.super_block(self.creation.bit_geometry().page_nelmts()),
                     blk_off,
                 ))
             }
@@ -1206,9 +1208,9 @@ impl Located {
     /// Writes `rec` into element slot `e`, allocating missing data or secondary blocks.
     ///
     /// Reuses existing blocks for element updates and recomputes the checksum of the block
-    /// or page that contains the element. Invalidates cached allocation statistics before
-    /// modifying the index. Planning a subsequent append reads block pointers again until
-    /// the header publication barrier completes successfully.
+    /// or page that contains the element. Uses `block_bytes` for new blocks. Invalidates cached
+    /// allocation statistics before modifying the index. Planning a subsequent append reads
+    /// block pointers again until the header publication barrier completes successfully.
     ///
     /// Before setting a page's initialization bit, drains its buffered contents through
     /// [`Store::sync`]. Under [`SyncPolicy::Always`](crate::SyncPolicy::Always), also requests
@@ -1227,13 +1229,14 @@ impl Located {
         file: &mut F,
         e: u64,
         rec: ConfirmedChunk,
+        block_bytes: &mut Vec<u8>,
     ) -> Result<(), Error> {
         let rec = rec.record(file)?;
         self.allocation_stats = None;
         let os = file.widths().offsets.get() as usize;
-        let elem_size = self.ea_elem_size as u64;
+        let elem_size = u64::from(self.ea_elem_size);
         let idx = self.idx_blk_elmts;
-        let blk_off = self.ea_bits.block_offset_width();
+        let blk_off = self.creation.bit_geometry().block_offset_width();
 
         // Inline element slots live directly in the index block.
         if e < idx {
@@ -1246,7 +1249,7 @@ impl Located {
 
         let region = locate_data_block(&self.geom, idx, e)?;
         let dblk_nelmts = region.dblk_nelmts;
-        let sb_geom = region.super_block(self.ea_bits.page_nelmts());
+        let sb_geom = region.super_block(self.creation.bit_geometry().page_nelmts());
         let is_paged = sb_geom.blocks.is_paged();
         let slot = e - region.db_start;
         let block_offset_rel = region.db_start - idx;
@@ -1254,7 +1257,7 @@ impl Located {
         // Ensure the owning super block exists (idempotent) for a Super parent.
         let sblk_addr = match region.parent {
             Parent::Super { sblk_j, .. } => {
-                Some(self.ensure_super_block(file, sblk_j, region.sb_block_offset, sb_geom)?)
+                Some(self.ensure_super_block(file, sblk_j, block_bytes)?)
             }
             Parent::IndexDirect { .. } => None,
         };
@@ -1266,7 +1269,7 @@ impl Located {
         let dblk_ptr_off = self.dblk_ptr_off(sblk_addr, &region, os, blk_off)?;
         let existing = file.read_addr_at(dblk_ptr_off)?;
         let dblk_addr = if existing.is_undefined(file.widths().offsets) {
-            let new_addr = self.alloc_undef_data_block(file, dblk_nelmts, block_offset_rel)?;
+            let new_addr = self.alloc_undef_data_block(file, block_offset_rel, block_bytes)?;
             // As in `ensure_super_block`: an appended block sits above its parent
             // pointer, so they need a barrier between them or an address-ordered
             // flush names a block that is not there yet.
@@ -1305,7 +1308,7 @@ impl Located {
             let cks_off = block_start + db_prefix + dblk_nelmts * elem_size;
             file.publish_checksummed(block_start, cks_off, elem_off, &buf[..n])?;
         } else {
-            let page_nelmts = self.ea_bits.page_nelmts().get();
+            let page_nelmts = self.creation.bit_geometry().page_nelmts().get();
             let header_size = (4 + 1 + 1 + os + blk_off.bytes() + 4) as u64;
             let page = slot / page_nelmts;
             let slot_in_page = slot % page_nelmts;
@@ -1339,20 +1342,26 @@ impl Located {
         let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
         let slot_off = self.index_block_addr.get()
             + ib_prefix
-            + self.idx_blk_elmts * self.ea_elem_size as u64
+            + self.idx_blk_elmts * u64::from(self.ea_elem_size)
             + ((ndblk_addrs + sblk_j) * os) as u64;
         file.read_addr_at(slot_off)
     }
 
-    /// Return the address of super block `sblk_j`, allocating an empty one (all
-    /// data-block pointers undefined, plus a zeroed page-init bitmap when its data
-    /// blocks are paged) if it does not exist yet.
+    /// Returns the address of secondary block `sblk_j`, allocating an empty block if needed.
+    ///
+    /// The caller passes an index in the secondary block address table. Uses `block_bytes` to
+    /// encode undefined child addresses and, for paged data blocks, a zeroed page bitmap.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from reading the index, converting the block number, preparing the
+    /// block, reserving buffer space, and encoding the block. Propagates errors from
+    /// [`Store::allocate`] and from publishing the allocation and index entry.
     fn ensure_super_block<F: Store>(
         &self,
         file: &mut F,
         sblk_j: usize,
-        sb_block_offset: u64,
-        sb: SuperBlockGeometry,
+        block_bytes: &mut Vec<u8>,
     ) -> Result<StoredAddress, Error> {
         let existing = self.super_block_addr(file, sblk_j)?;
         if !existing.is_undefined(file.widths().offsets) {
@@ -1362,18 +1371,12 @@ impl Located {
         let ib_prefix = (4 + 1 + 1 + os) as u64;
         let ndblk_addrs = self.geom.direct_dblk_nelmts().len();
 
-        let bitmap = vec![0u8; sb.bitmap_size().to_usize()?];
-        let undef = vec![StoredAddress::undefined(file.widths().offsets); sb.ndblks.to_usize()?];
-        let super_block = hdf5_pure_format::__private::encode_super_block(
-            self.ea_addr,
-            sb_block_offset,
-            &bitmap,
-            &undef,
-            self.offset_width,
-            self.client_id,
-            self.ea_bits.block_offset_width(),
-        )?;
-        let allocation = file.allocate(&super_block, AllocationClass::Metadata)?;
+        let block = self
+            .block_writer()?
+            .prepare_secondary_block(sblk_j.narrow()?, None, None)?;
+        bytes::resize_buffer(block_bytes, block.encoded_size())?;
+        let written = block.write_into(block_bytes)?;
+        let allocation = file.allocate(&block_bytes[..written], AllocationClass::Metadata)?;
         // The block exists before anything names it. When its bytes were appended
         // they sit above the slot below, which is in the index block near the
         // front, so without this the two are one barrier-free window and a
@@ -1388,7 +1391,7 @@ impl Located {
 
         let slot_off = self.index_block_addr.get()
             + ib_prefix
-            + self.idx_blk_elmts * self.ea_elem_size as u64
+            + self.idx_blk_elmts * u64::from(self.ea_elem_size)
             + ((ndblk_addrs + sblk_j) * os) as u64;
         self.publish_index_block(file, slot_off, &self.address_bytes(new_addr)?[..os])?;
         Ok(new_addr)
@@ -1396,32 +1399,40 @@ impl Located {
 
     /// Allocates a provisional data block (`EADB`) with undefined element addresses.
     ///
-    /// A block of more than one page of elements is paged.
+    /// Uses `block_bytes` for the complete encoding, including all pages of a paged block.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the element or page element count
-    /// exceeds [`usize::MAX`]. Propagates errors from [`Store::allocate`].
+    /// Propagates block preparation errors from [`ExtensibleArrayBlockWriter::prepare_data_block`],
+    /// buffer and encoding errors, and errors from [`Store::allocate`].
     fn alloc_undef_data_block<F: Store>(
         &self,
         file: &mut F,
-        dblk_nelmts: u64,
         block_offset_rel: u64,
+        block_bytes: &mut Vec<u8>,
     ) -> Result<ProvisionalAllocation, Error> {
-        let os = self.offset_width;
-        let block = hdf5_pure_format::__private::encode_data_block(
-            &IndexSlots::dense(&[]),
-            0,
-            dblk_nelmts.to_usize()?,
-            block_offset_rel,
-            self.ea_addr,
-            os,
-            self.client_id != EA_CLIENT_ID_UNFILTERED,
-            self.element_size_width(usize::from(os.get())),
+        let slots = IndexSlots::dense(&[]);
+        let block = self
+            .block_writer()?
+            .prepare_data_block(block_offset_rel, &slots)?;
+        bytes::resize_buffer(block_bytes, block.encoded_size())?;
+        let written = block.write_into(block_bytes)?;
+        file.allocate(&block_bytes[..written], AllocationClass::Metadata)
+    }
+
+    /// Prepares a block writer from the owning header's creation parameters and element layout.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`ExtensibleArrayBlockWriter::new`].
+    fn block_writer(&self) -> Result<ExtensibleArrayBlockWriter, FormatError> {
+        ExtensibleArrayBlockWriter::new(
+            self.creation,
+            self.offset_width,
             self.client_id,
-            self.ea_bits,
-        )?;
-        file.allocate(&block, AllocationClass::Metadata)
+            self.ea_elem_size,
+            self.ea_addr,
+        )
     }
 
     /// Width of a filtered element's stored-size field. Zero for an unfiltered
@@ -1434,11 +1445,11 @@ impl Located {
         // a width the three fields do not fit in. `locate` is where that byte is
         // refused; by here it is in `os + 5 ..= os + 12`.
         debug_assert!(
-            (os + 5..=os + 12).contains(&self.ea_elem_size),
+            (os + 5..=os + 12).contains(&usize::from(self.ea_elem_size)),
             "locate admitted an element width of {} for a {os}-byte address",
             self.ea_elem_size
         );
-        self.ea_elem_size - os - 4
+        usize::from(self.ea_elem_size) - os - 4
     }
 
     /// Refuse a stored chunk size the element's size field cannot hold.
@@ -1517,7 +1528,7 @@ impl Located {
         let nsblk_addrs = self.geom.nsblk_addrs();
         let cks_off = self.index_block_addr.get()
             + ib_prefix
-            + self.idx_blk_elmts * self.ea_elem_size as u64
+            + self.idx_blk_elmts * u64::from(self.ea_elem_size)
             + ((ndblk_addrs + nsblk_addrs) * os) as u64;
         file.publish_checksummed(self.index_block_addr.get(), cks_off, at, value)
     }
@@ -1613,7 +1624,7 @@ impl Located {
                     if addr.is_undefined(self.offset_width) && last_new_secondary != Some(sblk_j) {
                         self.add_super_block(
                             &mut stats,
-                            region.super_block(self.ea_bits.page_nelmts()),
+                            region.super_block(self.creation.bit_geometry().page_nelmts()),
                         )?;
                         last_new_secondary = Some(sblk_j);
                     }
@@ -1627,7 +1638,7 @@ impl Located {
                     secondary,
                     &region,
                     usize::from(self.offset_width.get()),
-                    self.ea_bits.block_offset_width(),
+                    self.creation.bit_geometry().block_offset_width(),
                 )?)?
                 .is_undefined(self.offset_width)
             };
@@ -1688,7 +1699,7 @@ impl Located {
             self.index_block_addr.get(),
             EA_BLOCK_PREFIX_SIZE,
             os,
-            ea_product(self.idx_blk_elmts, self.ea_elem_size.to_u64())?,
+            ea_product(self.idx_blk_elmts, u64::from(self.ea_elem_size))?,
         ])?;
         for (ordinal, &elements) in self.geom.direct_dblk_nelmts().iter().enumerate() {
             let count = self.allocated_pointers(
@@ -1715,7 +1726,7 @@ impl Located {
                 ndblks,
                 blocks: DataBlockGeometry {
                     dblk_nelmts: elements,
-                    page_nelmts: self.ea_bits.page_nelmts(),
+                    page_nelmts: self.creation.bit_geometry().page_nelmts(),
                 },
             };
             self.add_super_block(&mut stats, block)?;
@@ -1857,8 +1868,8 @@ impl Located {
         IndexPlanningGeometry {
             geom: &self.geom,
             idx_blk_elmts: self.idx_blk_elmts,
-            ea_elem_size: self.ea_elem_size,
-            ea_bits: self.ea_bits,
+            ea_elem_size: usize::from(self.ea_elem_size),
+            ea_bits: self.creation.bit_geometry(),
             offset_width: self.offset_width,
         }
     }
@@ -2459,16 +2470,20 @@ pub(crate) fn apply_ea_append<F: Store>(
                 })
         },
     ));
+    let mut block_bytes = Vec::new();
     if let Some(reference) = predecessor {
         let (index, record) = records
             .next()
             .ok_or_else(|| FormatError::Internal("a tail replacement has no record".into()))?;
         debug_assert_eq!(reference.slot, index);
-        UnpublishedChunkReference::bind(file, loc, reference)?
-            .publish(record?, records.map(|(_, record)| record))?;
+        UnpublishedChunkReference::bind(file, loc, reference)?.publish(
+            record?,
+            records.map(|(_, record)| record),
+            &mut block_bytes,
+        )?;
     } else {
         for (index, record) in records {
-            loc.ea_insert(file, index, record?)?;
+            loc.ea_insert(file, index, record?, &mut block_bytes)?;
         }
         file.sync()?;
     }
@@ -2488,7 +2503,11 @@ pub(crate) fn apply_ea_append<F: Store>(
     loc.current_dim = new_dim;
     loc.num_chunks = new_num_chunks;
     if let Some(record) = completed_record {
-        UnpublishedChunkReference::read(file, loc, n_full)?.publish(record, [])?;
+        UnpublishedChunkReference::read(file, loc, n_full)?.publish(
+            record,
+            [],
+            &mut block_bytes,
+        )?;
         loc.allocation_stats = Some(stats);
     }
     Ok(())
@@ -2612,6 +2631,8 @@ impl<'a, F: Store> UnpublishedChunkReference<'a, F> {
     /// Writes replacement and following records, then confirms retirement after the ordering
     /// barrier.
     ///
+    /// Reuses `block_bytes` when inserting records requires new blocks.
+    ///
     /// On a write or barrier error, the predecessor and replacement allocations remain unavailable
     /// for reuse.
     ///
@@ -2623,6 +2644,7 @@ impl<'a, F: Store> UnpublishedChunkReference<'a, F> {
         self,
         record: ConfirmedChunk,
         following: impl IntoIterator<Item = Result<ConfirmedChunk, Error>>,
+        block_bytes: &mut Vec<u8>,
     ) -> Result<(), Error> {
         let Self {
             file,
@@ -2638,13 +2660,15 @@ impl<'a, F: Store> UnpublishedChunkReference<'a, F> {
         };
         pending
             .located
-            .ea_insert(pending.file, pending.slot, record)?;
+            .ea_insert(pending.file, pending.slot, record, block_bytes)?;
         let mut next = pending.slot;
         for record in following {
             next = next
                 .checked_add(1)
                 .ok_or_else(|| FormatError::Internal("append record index exceeds u64".into()))?;
-            pending.located.ea_insert(pending.file, next, record?)?;
+            pending
+                .located
+                .ea_insert(pending.file, next, record?, block_bytes)?;
         }
         pending.confirm()
     }
@@ -2739,7 +2763,6 @@ struct DataBlockLoc {
     db_start: u64,
     dblk_nelmts: u64,
     ndblks: u64,
-    sb_block_offset: u64,
     parent: Parent,
 }
 
@@ -2791,7 +2814,6 @@ fn locate_data_block(
                 db_start: elem,
                 dblk_nelmts: dn,
                 ndblks: 1,
-                sb_block_offset: 0,
                 parent: Parent::IndexDirect { ordinal },
             });
         }
@@ -2807,7 +2829,6 @@ fn locate_data_block(
         let span = ea_product(ndblks, dn)?;
         let end = ea_sum([elem, span])?;
         if e < end {
-            let sb_block_offset = elem - idx_blk_elmts;
             let within = e - elem;
             let dblk_local = (within / dn).to_usize()?;
             let db_start = ea_sum([elem, ea_product(dblk_local.to_u64(), dn)?])?;
@@ -2815,7 +2836,6 @@ fn locate_data_block(
                 db_start,
                 dblk_nelmts: dn,
                 ndblks,
-                sb_block_offset,
                 parent: Parent::Super {
                     sblk_j: j,
                     dblk_local,
@@ -3566,7 +3586,7 @@ mod tests {
                 0,
                 0,
                 1,
-                16 * state.index.allocated().unwrap().ea_elem_size.to_u64() + 22,
+                16 * u64::from(state.index.allocated().unwrap().ea_elem_size) + 22,
                 5,
                 20
             ]
@@ -3729,20 +3749,19 @@ mod tests {
     }
 
     #[rstest]
-    #[case::first_direct(4, 4, 16, 1, 0, None, 0)]
-    #[case::last_in_first_direct(19, 4, 16, 1, 0, None, 0)]
-    #[case::next_direct(20, 20, 32, 1, 0, None, 1)]
-    #[case::first_secondary(244, 244, 64, 4, 240, Some(0), 0)]
-    #[case::last_in_secondary(499, 436, 64, 4, 240, Some(0), 3)]
-    #[case::next_secondary(500, 500, 128, 4, 496, Some(1), 0)]
-    #[case::first_paged(131_060, 131_060, 2_048, 64, 131_056, Some(9), 0)]
-    #[case::next_paged_block(133_108, 133_108, 2_048, 64, 131_056, Some(9), 1)]
+    #[case::first_direct(4, 4, 16, 1, None, 0)]
+    #[case::last_in_first_direct(19, 4, 16, 1, None, 0)]
+    #[case::next_direct(20, 20, 32, 1, None, 1)]
+    #[case::first_secondary(244, 244, 64, 4, Some(0), 0)]
+    #[case::last_in_secondary(499, 436, 64, 4, Some(0), 3)]
+    #[case::next_secondary(500, 500, 128, 4, Some(1), 0)]
+    #[case::first_paged(131_060, 131_060, 2_048, 64, Some(9), 0)]
+    #[case::next_paged_block(133_108, 133_108, 2_048, 64, Some(9), 1)]
     fn data_block_locations_match_expected_ranges(
         #[case] element: u64,
         #[case] start: u64,
         #[case] elements: u64,
         #[case] blocks: u64,
-        #[case] offset: u64,
         #[case] secondary: Option<usize>,
         #[case] local: usize,
     ) {
@@ -3750,13 +3769,8 @@ mod tests {
         let geom = ExtensibleArrayGeometry::from_header(&header).unwrap();
         let region = locate_data_block(&geom, 4, element).unwrap();
         assert_eq!(
-            (
-                region.db_start,
-                region.dblk_nelmts,
-                region.ndblks,
-                region.sb_block_offset
-            ),
-            (start, elements, blocks, offset)
+            (region.db_start, region.dblk_nelmts, region.ndblks),
+            (start, elements, blocks)
         );
         match (region.parent, secondary) {
             (Parent::IndexDirect { ordinal }, None) => assert_eq!(ordinal, local),
@@ -3802,7 +3816,6 @@ mod tests {
         assert_eq!(u128::from(region.db_start) + u128::from(elements), end);
         assert_eq!(region.dblk_nelmts, elements);
         assert_eq!(region.ndblks, 1 << 29);
-        assert_eq!(region.sb_block_offset, (1 << 63) - 16);
         let Parent::Super { sblk_j, dblk_local } = region.parent else {
             panic!("expected a secondary block");
         };
@@ -3819,7 +3832,7 @@ mod tests {
         #[case] secondary_bytes: u64,
         #[case] data_count: u64,
         #[case] elements: u64,
-        #[values(8, 14)] stride: usize,
+        #[values(8, 14)] stride: u8,
     ) {
         let store = WindowProbeStore::open(build_unlimited(4, 1));
         let (mut loc, _) = locate(&store);
@@ -3830,7 +3843,7 @@ mod tests {
                 nsuper_blks: secondary_count,
                 super_blk_size: secondary_bytes,
                 ndata_blks: data_count,
-                data_blk_size: (elements - 4) * stride.to_u64() + data_count * 22,
+                data_blk_size: (elements - 4) * u64::from(stride) + data_count * 22,
                 max_idx_set: chunks,
                 nelmts: elements,
             }
@@ -3849,7 +3862,7 @@ mod tests {
         let (mut loc, datatype) = locate(&store);
         let header = range_header(bits, 4, 16);
         loc.geom = ExtensibleArrayGeometry::from_header(&header).unwrap();
-        loc.ea_bits = header.bit_geometry();
+        loc.creation = header.creation_parameters();
         loc.current_dim = dimension;
         store.reset_counters();
         let error = match plan_ea_append(
@@ -4321,25 +4334,23 @@ mod tests {
         apply_ea_append(store, loc, plan).unwrap();
     }
 
-    /// Returns the bytes of the file from a fresh data block of `dblk_nelmts`
-    /// elements on, and the prefix that block opens with.
-    fn fresh_data_block(dblk_nelmts: u64) -> (Vec<u8>, Vec<u8>) {
+    fn fresh_data_block(offset: u64) -> (Vec<u8>, Vec<u8>) {
         let mut store = WindowProbeStore::open(build_unlimited(4, 1));
         let (loc, _) = locate(&store);
-        let at = loc
-            .alloc_undef_data_block(&mut store, dblk_nelmts, 32)
+        let range = loc
+            .alloc_undef_data_block(&mut store, offset, &mut Vec::new())
             .unwrap()
-            .range()
-            .start()
-            .get()
-            .to_usize()
-            .unwrap();
+            .range();
         let mut prefix = b"EADB".to_vec();
         prefix.push(0);
         prefix.push(loc.client_id);
         prefix.extend_from_slice(&loc.ea_addr.get().to_le_bytes());
-        prefix.extend_from_slice(&32u64.to_le_bytes()[..loc.ea_bits.block_offset_width().bytes()]);
-        (store.data[at..].to_vec(), prefix)
+        prefix.extend_from_slice(
+            &offset.to_le_bytes()[..loc.creation.bit_geometry().block_offset_width().bytes()],
+        );
+        let at = range.start().get().to_usize().unwrap();
+        let end = range.end().get().to_usize().unwrap();
+        (store.data[at..end].to_vec(), prefix)
     }
 
     #[test]
@@ -4758,21 +4769,47 @@ mod tests {
 
     #[test]
     fn a_fresh_unpaged_data_block_holds_only_undefined_elements() {
-        let (block, mut expected) = fresh_data_block(16);
+        let (block, mut expected) = fresh_data_block(0);
         expected.extend_from_slice(&[0xFF; 16 * 8]);
         test_util::checksum::append(&mut expected);
-        assert_eq!(block[..expected.len()], expected);
+        assert_eq!(block, expected);
     }
 
     #[test]
     fn a_fresh_paged_data_block_checksums_its_prefix_and_each_page() {
-        let (block, mut expected) = fresh_data_block(2048);
+        let (block, mut expected) = fresh_data_block(131_056);
         test_util::checksum::append(&mut expected);
         let mut page = vec![0xFF; 1024 * 8];
         test_util::checksum::append(&mut page);
         expected.extend_from_slice(&page);
         expected.extend_from_slice(&page);
-        assert_eq!(block[..expected.len()], expected);
+        assert_eq!(block, expected);
+    }
+
+    #[test]
+    fn secondary_block_initializer_writes_an_empty_paged_block_with_a_reused_buffer() {
+        let mut store = WindowProbeStore::open(build_unlimited(4, 1));
+        let (located, _) = locate(&store);
+        let mut expected = EA_SECONDARY_SIGNATURE.to_vec();
+        expected.extend_from_slice(&[EA_BLOCK_VERSION, EA_CLIENT_ID_UNFILTERED]);
+        expected.extend_from_slice(&located.ea_addr.get().to_le_bytes());
+        expected.extend_from_slice(&131_056u32.to_le_bytes());
+        expected.extend_from_slice(&[0; 64]);
+        expected.extend_from_slice(&[0xFF; 64 * 8]);
+        test_util::checksum::append(&mut expected);
+
+        let mut bytes = Vec::with_capacity(expected.len());
+        let buffer = bytes.as_ptr();
+        let address = located
+            .ensure_super_block(&mut store, 9, &mut bytes)
+            .unwrap();
+        assert_eq!(bytes.as_ptr(), buffer);
+        assert_eq!(bytes, expected);
+        assert_eq!(
+            store.read_exact_at(address.get(), expected.len()).unwrap(),
+            expected
+        );
+        assert_eq!(located.super_block_addr(&store, 9).unwrap(), address);
     }
 
     /// A fresh Extensible-Array block is separated from the pointer that names
@@ -5262,7 +5299,7 @@ mod tests {
                     let located = state.index.allocated_mut().unwrap();
                     UnpublishedChunkReference::read(&mut store, located, 0)
                         .unwrap()
-                        .publish(record, [])
+                        .publish(record, [], &mut Vec::new())
                         .unwrap();
                     assert_eq!(store.retired.len(), 1);
                 } else {
@@ -5662,7 +5699,7 @@ mod tests {
             allocation: publication.confirm(allocation).unwrap(),
             filter_mask: 0,
         };
-        loc.ea_insert(store, 1, rec).unwrap();
+        loc.ea_insert(store, 1, rec, &mut Vec::new()).unwrap();
     }
 
     fn stored_chunks(data: &[u8]) -> Vec<(Vec<u64>, u32, Vec<u8>)> {
@@ -5697,6 +5734,10 @@ mod tests {
     // "The Extensible Array Index" in format specification, version 4.0, defines the version 0
     // header signature and version.
     const EA_HEADER_SIGNATURE: &[u8; 4] = b"EAHD";
+    // "The Extensible Array Index" in the format specification, version 4.0, defines the
+    // version 0 secondary block signature and version field.
+    const EA_BLOCK_VERSION: u8 = 0;
+    const EA_SECONDARY_SIGNATURE: &[u8; 4] = b"EASB";
     const EA_HEADER_VERSION: u8 = 0;
 
     // "The Extensible Array Index" in format specification, version 4.0, places six statistics
