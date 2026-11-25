@@ -68,10 +68,7 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
     let expected = match damage {
         Damage::Zero => {
             fixture.bytes[LIST + 14] = 0;
-            FormatError::InvalidFreeSpaceManager(
-                "the set at byte 13 of the section list holds sections of 0 bytes".into(),
-            )
-            .into()
+            FormatError::InvalidFreeSpaceSectionGroupSize { offset: 13 }.into()
         }
         Damage::Overflow => {
             fixture.manager(ManagerSlot::Metadata, &[(u64::MAX - 15, 32)]);
@@ -174,9 +171,11 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
         }
         Damage::InvalidClass => {
             fixture.bytes[LIST + 30] = 3;
-            FormatError::InvalidFreeSpaceManager(
-                "the class of the section at byte 22 of the section list is 3, not one of the 3 classes of the file client".into(),
-            ).into()
+            FormatError::InvalidFreeSpaceSectionClass {
+                offset: 22,
+                class_id: 3,
+            }
+            .into()
         }
     };
     test_util::checksum::restamp(

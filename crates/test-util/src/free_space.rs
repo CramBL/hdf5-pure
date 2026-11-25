@@ -90,6 +90,57 @@ pub fn oversized_section_list() -> Vec<u8> {
     )
 }
 
+/// Returns a checksummed manager header and section list with 2-byte addresses and lengths.
+///
+/// Copies `records` after the section-list prefix. The caller supplies the declared section
+/// count and total free space in bytes independently of the record bytes.
+///
+/// # Panics
+///
+/// Panics if the section list's length including its checksum exceeds [`u16::MAX`] bytes.
+pub fn raw_manager_two(
+    header_address: u16,
+    list_address: u16,
+    sections: u16,
+    space: u16,
+    records: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    // The format specification, version 4.0, defines these fields in "Free-space Index".
+    const HEADER_VERSION: u8 = 0;
+    const LIST_VERSION: u8 = 0;
+    const FILE_CLIENT_ID: u8 = 1;
+    // `H5MFpkg.h` in HDF5 1.14.6 defines classes for simple, small, and large sections.
+    const FILE_CLASS_COUNT: u16 = 3;
+
+    let mut list = SECTIONS_SIGNATURE.to_vec();
+    list.push(LIST_VERSION);
+    list.extend_from_slice(&header_address.to_le_bytes());
+    list.extend_from_slice(records);
+    crate::checksum::append(&mut list);
+    let used = u16::try_from(list.len()).unwrap();
+
+    let mut header = SIGNATURE.to_vec();
+    header.extend([HEADER_VERSION, FILE_CLIENT_ID]);
+    for field in [
+        space,
+        sections,
+        sections,
+        0,
+        FILE_CLASS_COUNT,
+        80,
+        120,
+        15,
+        0xFFFD,
+        list_address,
+        used,
+        used,
+    ] {
+        header.extend_from_slice(&field.to_le_bytes());
+    }
+    crate::checksum::append(&mut header);
+    (header, list)
+}
+
 /// Returns a checksummed manager header and section list with 8-byte addresses and lengths.
 ///
 /// Sections are `(stored_address, length)` pairs, grouped by length in the section list. The
