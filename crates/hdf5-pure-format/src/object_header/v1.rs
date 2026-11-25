@@ -31,6 +31,10 @@ use crate::metadata_source::MetadataSource;
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one
 const MESSAGE_PREFIX_LEN: usize = 8;
 
+// "Version 1 Data Object Header Prefix" in the format specification, version 4.0, includes
+// padding to a multiple of eight bytes in the message body size.
+const MESSAGE_ALIGNMENT: u16 = 8;
+
 /// The parser resource limit on continuation hops after the root chunk.
 const MAX_V1_CONTINUATION_DEPTH: u16 = 32;
 
@@ -185,6 +189,7 @@ impl ObjectHeader {
 /// Collects retained messages depth-first with one traversal allowance per header.
 ///
 /// The parse context and filter apply to every chunk. Filtering affects retention only.
+/// A root chunk may end with a gap shorter than a record prefix.
 struct HeaderCollector<'a, 'f> {
     context: ParseContext,
     traversal: Traversal,
@@ -211,7 +216,7 @@ impl HeaderCollector<'_, '_> {
     ) -> Result<(), FormatError> {
         let mut count = 0usize;
         while !records.is_empty() && max_messages.is_none_or(|max| count < usize::from(max)) {
-            let Some((record, record_len)) =
+            let Some((record, remaining)) =
                 parse_message_record(records, self.context.access_mode)?
             else {
                 if max_messages.is_none() {
@@ -222,7 +227,7 @@ impl HeaderCollector<'_, '_> {
                 }
                 break;
             };
-            records = &records[record_len..];
+            records = remaining;
             count += 1;
             if let Some(permit) = self.ingest(record, depth)? {
                 self.follow_buffered(data, permit)?;
@@ -261,7 +266,7 @@ impl HeaderCollector<'_, '_> {
     ) -> Result<(), FormatError> {
         let mut count = 0usize;
         while !records.is_empty() && max_messages.is_none_or(|max| count < usize::from(max)) {
-            let Some((record, record_len)) =
+            let Some((record, remaining)) =
                 parse_message_record(records, self.context.access_mode)?
             else {
                 if max_messages.is_none() {
@@ -272,7 +277,7 @@ impl HeaderCollector<'_, '_> {
                 }
                 break;
             };
-            records = &records[record_len..];
+            records = remaining;
             count += 1;
             if let Some(permit) = self.ingest(record, depth)? {
                 self.follow_from_source(source, permit, observer)?;
@@ -403,7 +408,7 @@ struct ContinuationVisit {
 /// The parser resource limit on followed continuation references per header.
 const MAX_V1_CONTINUATION_VISITS: u16 = 256;
 
-/// Represents one decoded message record from a version 1 object header.
+/// A version 1 object header message with a complete, aligned body.
 ///
 /// The body borrows from the current header chunk. The type, size, flags,
 /// reserved bytes, and data layout are defined in "Version 1 Data Object
@@ -417,20 +422,18 @@ struct MessageRecord<'a> {
     body: &'a [u8],
 }
 
-/// Decodes one version 1 message record from a bounded chunk slice.
+/// Parses the first record and returns it with the unconsumed bytes.
 ///
 /// Returns `Ok(None)` when fewer than [`MESSAGE_PREFIX_LEN`] bytes remain.
+/// Checks the declared size for alignment before acquiring the body.
 ///
 /// # Errors
 ///
-/// Returns:
-///
-/// - [`FormatError::UnexpectedEof`] when a complete prefix declares a body that
-///   extends past the bounded slice.
-/// - [`FormatError::InvalidObjectHeaderMessageSize`] when the declared body size
-///   is not a multiple of eight.
-/// - [`FormatError::UnsupportedMessage`] when an unknown message type must be
-///   understood under `access_mode`.
+/// Returns [`FormatError::InvalidObjectHeaderMessageSize`] if the declared body size is not a
+/// multiple of eight, or [`FormatError::UnexpectedEof`] if an aligned body extends past `data`.
+/// EOF extents are relative to the start of `data`. After acquiring the body, returns
+/// [`FormatError::UnsupportedMessage`] if an unknown message type must be understood under
+/// `access_mode`.
 ///
 /// The record layout is defined in "Version 1 Data Object Header Prefix" of the
 /// [format specification, version 4.0][spec].
@@ -439,24 +442,20 @@ struct MessageRecord<'a> {
 fn parse_message_record(
     data: &[u8],
     access_mode: AccessMode,
-) -> Result<Option<(MessageRecord<'_>, usize)>, FormatError> {
-    if data.len() < MESSAGE_PREFIX_LEN {
+) -> Result<Option<(MessageRecord<'_>, &[u8])>, FormatError> {
+    let mut cursor = bytes::ByteCursor::new(data);
+    let Ok(prefix) = cursor.take_array::<MESSAGE_PREFIX_LEN>() else {
         return Ok(None);
+    };
+
+    let body_len = LittleEndian::read_u16(&prefix[2..4]);
+    if !body_len.is_multiple_of(MESSAGE_ALIGNMENT) {
+        return Err(FormatError::InvalidObjectHeaderMessageSize(body_len));
     }
+    let body = cursor.take(usize::from(body_len))?;
 
-    let msg_type = MessageType::from_u16(LittleEndian::read_u16(&data[..2]));
-    let body_len_raw = LittleEndian::read_u16(&data[2..4]);
-    let body_len = usize::from(body_len_raw);
-    let flags = MessageFlags::new(data[4]);
-
-    bytes::ensure_len(data, MESSAGE_PREFIX_LEN, body_len)?;
-
-    if !body_len.is_multiple_of(8) {
-        return Err(FormatError::InvalidObjectHeaderMessageSize(body_len_raw));
-    }
-
-    let record_len = MESSAGE_PREFIX_LEN + body_len;
-
+    let msg_type = MessageType::from_u16(LittleEndian::read_u16(&prefix[..2]));
+    let flags = MessageFlags::new(prefix[4]);
     if let Some(id) = msg_type.unknown_id()
         && flags.must_be_understood(access_mode)
     {
@@ -467,9 +466,9 @@ fn parse_message_record(
         MessageRecord {
             msg_type,
             flags,
-            body: &data[MESSAGE_PREFIX_LEN..record_len],
+            body,
         },
-        record_len,
+        cursor.remaining(),
     )))
 }
 
