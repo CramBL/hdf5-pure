@@ -7,6 +7,7 @@ use core::fmt;
 
 use hdf5_pure_core::FillTime;
 
+use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
@@ -67,6 +68,9 @@ impl<'a> FillValueView<'a> {
     }
 
     /// Parses a fill value message from its message type and payload bytes.
+    ///
+    /// For version 1, reads the eight-byte prefix before interpreting the allocation time,
+    /// fill time, or defined indicator.
     ///
     /// # Errors
     ///
@@ -137,33 +141,18 @@ impl<'a> FillValueView<'a> {
     }
 
     fn parse_v1(data: &'a [u8]) -> Result<Self, FormatError> {
-        if data.len() < 4 {
-            return Err(eof(4, data.len()));
-        }
-        let space_alloc_time = data[1];
+        let mut cursor = ByteCursor::new(data);
+        let &[_, space_alloc_time, fill_time, defined, length @ ..] =
+            cursor.take_array::<V1_V2_VALUE_OFFSET>()?;
         if space_alloc_time > SPACE_ALLOC_TIME_MAX {
             return Err(FormatError::InvalidSpaceAllocationTime(space_alloc_time));
         }
-        let fill_time = FillTime::try_from(data[2])?;
-        let defined = data[3];
+        let fill_time = FillTime::try_from(fill_time)?;
         if defined > FILL_DEFINED_MAX {
             return Err(FormatError::InvalidFillValueDefined(defined));
         }
-        if data.len() < V1_V2_VALUE_OFFSET {
-            return Err(eof(V1_V2_VALUE_OFFSET, data.len()));
-        }
-        let size = read_u32(data, 4)?.to_usize()?;
-        let end = V1_V2_VALUE_OFFSET
-            .checked_add(size)
-            .ok_or(eof(usize::MAX, data.len()))?;
-        if data.len() < end {
-            return Err(eof(end, data.len()));
-        }
-        let value = if defined == 0 || size == 0 {
-            None
-        } else {
-            Some(&data[V1_V2_VALUE_OFFSET..end])
-        };
+        let bytes = cursor.take(u32::from_le_bytes(length).to_usize()?)?;
+        let value = (defined != 0 && !bytes.is_empty()).then_some(bytes);
         Ok(Self { fill_time, value })
     }
 
@@ -632,9 +621,15 @@ mod tests {
 
     #[rstest]
     #[case::missing_version(MessageType::FILL_VALUE, &[], FormatError::UnexpectedEof { expected: 1, available: 0 })]
-    #[case::v1_prefix(MessageType::FILL_VALUE, &[1u8, 2], FormatError::UnexpectedEof { expected: 4, available: 2 })]
-    #[case::v1_length(MessageType::FILL_VALUE, &[1u8, 2, 2, 1, 4, 0], FormatError::UnexpectedEof { expected: 8, available: 6 })]
+    #[case::v1_version_only(MessageType::FILL_VALUE, &[1u8], FormatError::UnexpectedEof { expected: 8, available: 1 })]
+    #[case::v1_prefix(MessageType::FILL_VALUE, &[1u8, 2], FormatError::UnexpectedEof { expected: 8, available: 2 })]
+    #[case::v1_missing_defined_indicator(MessageType::FILL_VALUE, &[1u8, 2, 2], FormatError::UnexpectedEof { expected: 8, available: 3 })]
+    #[case::v1_invalid_allocation_time(MessageType::FILL_VALUE, &[1u8, 4, 2, 1], FormatError::UnexpectedEof { expected: 8, available: 4 })]
+    #[case::v1_invalid_fill_time(MessageType::FILL_VALUE, &[1u8, 2, 3, 1, 4], FormatError::UnexpectedEof { expected: 8, available: 5 })]
+    #[case::v1_invalid_defined_indicator(MessageType::FILL_VALUE, &[1u8, 2, 2, 2, 4, 0], FormatError::UnexpectedEof { expected: 8, available: 6 })]
+    #[case::v1_undefined_partial_length(MessageType::FILL_VALUE, &[1u8, 2, 2, 0, 0, 0, 0], FormatError::UnexpectedEof { expected: 8, available: 7 })]
     #[case::v1_payload(MessageType::FILL_VALUE, &[1u8, 2, 2, 1, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 12, available: 10 })]
+    #[case::v1_undefined_payload(MessageType::FILL_VALUE, &[1u8, 2, 2, 0, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 12, available: 10 })]
     #[case::v2_prefix(MessageType::FILL_VALUE, &[2u8, 2], FormatError::UnexpectedEof { expected: 4, available: 2 })]
     #[case::v2_length(MessageType::FILL_VALUE, &[2u8, 2, 2, 1, 4, 0], FormatError::UnexpectedEof { expected: 8, available: 6 })]
     #[case::v2_payload(MessageType::FILL_VALUE, &[2u8, 2, 2, 1, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 12, available: 10 })]
@@ -651,6 +646,14 @@ mod tests {
     ) {
         let err = FillValueView::parse(msg_type, bytes).unwrap_err();
         assert_eq!(err, expected);
+        assert_eq!(
+            fill_value_is_written(msg_type, bytes).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            parse_defined_fill_value(msg_type, bytes).unwrap_err(),
+            expected
+        );
     }
 
     #[cfg(target_pointer_width = "64")]
