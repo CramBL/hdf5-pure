@@ -1,7 +1,5 @@
 //! Pure placement and encoding of extension chunks and managers for a persistent PAGE edit.
 
-use std::collections::BTreeSet;
-
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private as format;
@@ -41,9 +39,9 @@ impl PagedPersistencePlan {
     ///
     /// Places each complete extension chunk, manager header, and section list within one page
     /// when smaller than a page, or at a page boundary otherwise. Tries a contiguous layout
-    /// before a layout with admitted alignment gaps. Retains the projected sections and their
-    /// distinct metadata sizes for count-based measurement. Surplus owned capacity belongs to
-    /// extension chunks. Returns `None` when `reuse_only` is set and no candidate layout fits.
+    /// before a layout with admitted alignment gaps. Measures the section lists from the
+    /// projected section groups and any additional gap sizes. Surplus owned capacity belongs
+    /// to extension chunks. Returns `None` when `reuse_only` is set and no candidate layout fits.
     ///
     /// # Errors
     ///
@@ -150,18 +148,15 @@ impl PagedPersistencePlan {
         drop(tail);
         drop(managers);
         let append = space.plan_paged_append(eoa, freed, old_blocks)?;
-        let (base, sizes) = ManagerProjection::indexed(append.admitted_snapshot(), widths)?;
+        let base = ManagerProjection::new(append.admitted_snapshot(), widths)?;
         let mut chosen = None;
         for controls in [false, true] {
-            if let Some(layout) =
-                PageLayout::new(geometry, page, eoa, None, &base, &sizes, controls)?
-            {
+            if let Some(layout) = PageLayout::new(geometry, page, eoa, None, &base, controls)? {
                 chosen = Some(layout);
                 break;
             }
         }
         drop(base);
-        drop(sizes);
         let layout = chosen.ok_or_else(|| {
             FormatError::Internal("an appended PAGE reservation has no layout".into())
         })?;
@@ -202,14 +197,14 @@ impl PagedPersistencePlan {
         page: FileSpacePageSize,
         widths: FormatWidths,
     ) -> Result<Option<Self>, FormatError> {
-        let (managers, sizes) = ManagerProjection::indexed(tail.post.admitted_snapshot(), widths)?;
+        let managers = ManagerProjection::new(tail.post.admitted_snapshot(), widths)?;
         if managers.is_empty() {
             return Ok(None);
         }
         if let Some(extension) = contiguous_extension(&tail, &managers, geometry, page)? {
             return Self::contiguous(tail, managers, extension).map(Some);
         }
-        Self::reused(tail, managers, sizes, geometry, page, widths)
+        Self::reused(tail, managers, geometry, page, widths)
     }
 
     fn contiguous(
@@ -240,7 +235,6 @@ impl PagedPersistencePlan {
     fn reused(
         mut tail: PagedTail,
         mut base: ManagerProjection,
-        mut sizes: BTreeSet<u64>,
         geometry: &ObjectHeaderAllocationGeometry<'_>,
         page: FileSpacePageSize,
         widths: FormatWidths,
@@ -275,9 +269,8 @@ impl PagedPersistencePlan {
         }
         if !boundary.is_empty() {
             drop(base);
-            drop(sizes);
             tail = tail.with_metadata_padding(&boundary)?;
-            (base, sizes) = ManagerProjection::indexed(tail.post.admitted_snapshot(), widths)?;
+            base = ManagerProjection::new(tail.post.admitted_snapshot(), widths)?;
         }
         let mut chosen = None;
         for controls in [false, true] {
@@ -287,7 +280,6 @@ impl PagedPersistencePlan {
                 tail.allocation.start(),
                 Some(end),
                 &base,
-                &sizes,
                 controls,
             )? {
                 chosen = Some(layout);
@@ -295,7 +287,7 @@ impl PagedPersistencePlan {
             }
         }
         chosen
-            .map(|layout| Self::placed(tail, layout, &boundary, widths, Some((base, sizes))))
+            .map(|layout| Self::placed(tail, layout, &boundary, widths, Some(base)))
             .transpose()
     }
 
@@ -304,7 +296,7 @@ impl PagedPersistencePlan {
         layout: PageLayout,
         boundary: &[Extent],
         widths: FormatWidths,
-        cached: Option<(ManagerProjection, BTreeSet<u64>)>,
+        cached: Option<ManagerProjection>,
     ) -> Result<Self, FormatError> {
         let PageLayout {
             extension,
@@ -318,26 +310,27 @@ impl PagedPersistencePlan {
             .copied()
             .filter(|gap| !boundary.contains(gap))
             .collect::<Vec<_>>();
-        let (managers, sizes) = if internal.is_empty() {
+        let managers = if internal.is_empty() {
             match cached {
                 Some(cached) => cached,
-                None => ManagerProjection::indexed(tail.post.admitted_snapshot(), widths)?,
+                None => ManagerProjection::new(tail.post.admitted_snapshot(), widths)?,
             }
         } else {
             drop(cached);
             tail = tail.with_metadata_padding(&internal)?;
-            ManagerProjection::indexed(tail.post.admitted_snapshot(), widths)?
+            ManagerProjection::new(tail.post.admitted_snapshot(), widths)?
         };
         if (
-            managers.sections(ManagerKind::PagedSmallMetadata).len() as u64,
-            sizes.len() as u64,
+            managers.section_count(ManagerKind::PagedSmallMetadata),
+            managers
+                .section_sizes(ManagerKind::PagedSmallMetadata)
+                .count(),
         ) != metadata_counts
         {
             return Err(FormatError::Internal(
                 "PAGE gap counts differ from the final manager projection".into(),
             ));
         }
-        drop(sizes);
         let plan = managers.place_with_kind(|kind, lengths| {
             let allocations = placements
                 .iter()

@@ -1,11 +1,10 @@
 //! Stored-address allocation for new files.
 
-use alloc::vec::Vec;
-
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
 use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::PreparedFreeSpaceManager;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use hdf5_pure_space::__private::AggregationError;
 use hdf5_pure_space::__private::AllocationClass;
@@ -13,7 +12,9 @@ use hdf5_pure_space::__private::ClassicAggregators;
 use hdf5_pure_space::__private::SessionSpace;
 
 use crate::address::{BaseAddress, BaseAddressExt, StoredAddress};
+use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::free_space_manager::EncodedManager;
 use crate::width::FormatWidths;
 
 /// Reserves stored-address ranges by direct append or through metadata and raw aggregates.
@@ -176,49 +177,27 @@ impl FileAllocation {
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if cleanup or manager placement exceeds
-    /// [`u64::MAX`], [`FormatError::AddressTooLarge`] or [`FormatError::LengthTooLarge`] if a
-    /// manager field exceeds its width, [`FormatError::InvalidFreeSpaceManager`] if a section
-    /// exceeds the manager's size limit, or [`FormatError::Internal`] if an active aggregate
-    /// extends beyond the writer's EOA or the free-space total exceeds [`u64::MAX`]. Returns
-    /// the errors of [`Self::require_end`] if the manager's final EOA does not fit the address
-    /// width.
+    /// [`u64::MAX`] or [`FormatError::Internal`] if an active aggregate extends beyond the
+    /// writer's EOA. Propagates section preparation errors from [`PreparedFreeSpaceManager::new`],
+    /// address errors from [`Self::require_end`], and encoding errors from [`EncodedManager::new`].
     pub(crate) fn finish_persisted(
         mut self,
-    ) -> Result<(StoredAddress, Option<FileManager>), FormatError> {
-        let widths = self.widths;
+    ) -> Result<(StoredAddress, Option<EncodedManager>), FormatError> {
         self.settle(true)?;
-        let sections: Vec<_> = self
-            .space
-            .reusable_sections()
-            .map(|extent| FreeSection {
-                addr: extent.start(),
-                size: extent.len().get(),
-            })
-            .collect();
-        if sections.is_empty() {
+        let sections = self.space.reusable_sections().map(|extent| FreeSection {
+            addr: extent.start(),
+            size: extent.len().get(),
+        });
+        let prepared = PreparedFreeSpaceManager::new(self.widths, sections, SECTION_CLASS_SIMPLE)?;
+        if prepared.section_count() == 0 {
             return Ok((self.end, None));
         }
         let header_address = self.end;
-        let length = hdf5_pure_format::__private::free_space_manager_header_len(widths);
-        let section_list_address = self.end.checked_add(length)?;
-        let (header, section_list) = hdf5_pure_format::__private::serialize_free_space_manager(
-            widths,
-            &sections,
-            header_address,
-            section_list_address,
-            SECTION_CLASS_SIMPLE,
-        )?;
-        self.end = section_list_address.checked_add(section_list.len() as u64)?;
+        let section_list_address = self.end.checked_add(prepared.header_len().to_u64())?;
+        self.end = section_list_address.checked_add(prepared.section_list_len().to_u64())?;
         self.require_end(self.end)?;
-        Ok((
-            self.end,
-            Some(FileManager {
-                header_address,
-                section_list_address,
-                header,
-                section_list,
-            }),
-        ))
+        let manager = EncodedManager::new(&prepared, header_address, section_list_address, None)?;
+        Ok((self.end, Some(manager)))
     }
 
     pub(crate) fn end(&self) -> StoredAddress {
@@ -247,15 +226,6 @@ impl FileAllocation {
         }
         Ok(())
     }
-}
-
-/// Holds a serialized file free-space manager and its stored placement addresses.
-#[derive(Debug)]
-pub(crate) struct FileManager {
-    pub(crate) header_address: StoredAddress,
-    pub(crate) section_list_address: StoredAddress,
-    pub(crate) header: Vec<u8>,
-    pub(crate) section_list: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -303,16 +273,16 @@ mod tests {
         let (end, manager) = allocation.finish_persisted().unwrap();
         assert_eq!(manager.is_some(), has_manager);
         if let Some(manager) = manager {
-            let header = FreeSpaceManagerHeader::parse(widths, &manager.header).unwrap();
+            let header = FreeSpaceManagerHeader::parse(widths, manager.header()).unwrap();
             assert_eq!(manager.header_address.get(), 2_128);
             assert_eq!(header.section_list_addr(), manager.section_list_address);
             assert_eq!(
                 header.section_list_used(),
-                manager.section_list.len() as u64
+                manager.section_list().len() as u64
             );
             assert_eq!(
                 header.section_list_allocated(),
-                manager.section_list.len() as u64
+                manager.section_list().len() as u64
             );
             assert_eq!(
                 end,
@@ -323,7 +293,7 @@ mod tests {
             );
             let sections = hdf5_pure_format::__private::parse_section_info(
                 widths,
-                &manager.section_list,
+                manager.section_list(),
                 manager.header_address,
                 &header,
             )
@@ -363,10 +333,10 @@ mod tests {
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
         let (_, manager) = allocation.finish_persisted().unwrap();
         let manager = manager.unwrap();
-        let header = FreeSpaceManagerHeader::parse(widths, &manager.header).unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths, manager.header()).unwrap();
         let sections = hdf5_pure_format::__private::parse_section_info(
             widths,
-            &manager.section_list,
+            manager.section_list(),
             manager.header_address,
             &header,
         )
@@ -385,6 +355,39 @@ mod tests {
             ]
         );
         assert_eq!(manager.header_address.get(), 6_144);
+    }
+
+    #[test]
+    fn persisted_allocation_matches_eight_byte_manager_fixture() {
+        let mut allocation =
+            FileAllocation::new(StoredAddress::new(48), true, Some(ByteLength::new(1)));
+        allocation
+            .reserve(ByteLength::new(64), AllocationClass::Metadata)
+            .unwrap();
+        allocation
+            .reserve(ByteLength::new(32), AllocationClass::Raw)
+            .unwrap();
+
+        let (end, manager) = allocation.finish_persisted().unwrap();
+        let manager = manager.unwrap();
+        let header_address = 2_128;
+        let section_list_address = 2_210;
+        let (header, section_list) = test_util::free_space::raw_manager_eight(
+            header_address,
+            section_list_address,
+            &[(112, 1_984)],
+        );
+        assert_eq!(
+            manager.blocks(),
+            [
+                (StoredAddress::new(header_address), header.as_slice()),
+                (
+                    StoredAddress::new(section_list_address),
+                    section_list.as_slice()
+                ),
+            ]
+        );
+        assert_eq!(end.get(), section_list_address + section_list.len() as u64);
     }
 
     #[test]

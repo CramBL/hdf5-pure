@@ -83,6 +83,7 @@ use crate::file_space_info::FileSpaceInfo;
 #[cfg(test)]
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
+use crate::free_space_manager::EncodedManager;
 use crate::libver::{LibVer, WritableTarget};
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
@@ -2483,15 +2484,7 @@ impl FileWriter {
                     .emit_array_at(sink, base, &array.addresses)?;
             }
             let mut tail = core::iter::once((ext_addr, real_ext_oh.as_slice()))
-                .chain(managers.iter().flatten().flat_map(|manager| {
-                    [
-                        (manager.header_address, manager.header.as_slice()),
-                        (
-                            manager.section_list_address,
-                            manager.section_list.as_slice(),
-                        ),
-                    ]
-                }))
+                .chain(managers.iter().flatten().flat_map(EncodedManager::blocks))
                 .map(|(address, bytes)| {
                     Reservation::new(base, address, ByteLength::new(bytes.len().to_u64()), bytes)
                 });
@@ -2942,25 +2935,18 @@ impl FileWriter {
         // Under direct placement, supply each source in ascending physical order. With aggregation
         // enabled, a small reservation can precede a large one already placed outside its window,
         // so sort the reservations before emission.
-        let mut manager_blocks = manager
-            .iter()
-            .flat_map(|manager| {
-                [
-                    (manager.header_address, manager.header.as_slice()),
-                    (
-                        manager.section_list_address,
-                        manager.section_list.as_slice(),
-                    ),
-                ]
-            })
-            .map(|(address, bytes)| {
-                Reservation::new(
-                    base,
-                    address,
-                    ByteLength::new(bytes.len() as u64),
-                    FileData::Bytes(bytes),
-                )
-            });
+        let mut manager_blocks =
+            manager
+                .iter()
+                .flat_map(EncodedManager::blocks)
+                .map(|(address, bytes)| {
+                    Reservation::new(
+                        base,
+                        address,
+                        ByteLength::new(bytes.len() as u64),
+                        FileData::Bytes(bytes),
+                    )
+                });
         let sources: [&mut dyn Iterator<Item = Result<Reservation<FileData<'_>>, FormatError>>;
             11] = [
             &mut early_collections,

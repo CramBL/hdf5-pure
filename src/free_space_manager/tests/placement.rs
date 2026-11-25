@@ -99,12 +99,12 @@ fn measured_allocations_preserve_native_manager_sections(
     assert_eq!(encoded.section_list_address.get(), list_address);
     assert_eq!(
         [
-            encoded.header.len() as u64,
-            encoded.section_list.len() as u64
+            encoded.header().len() as u64,
+            encoded.section_list().len() as u64
         ],
         measured
     );
-    let header = format::FreeSpaceManagerHeader::parse(widths, &encoded.header).unwrap();
+    let header = format::FreeSpaceManagerHeader::parse(widths, encoded.header()).unwrap();
     assert_eq!(header.total_space(), native_header.total_space());
     assert_eq!(header.total_sections(), native_header.total_sections());
     assert_eq!(header.section_list_addr().get(), list_address);
@@ -113,7 +113,7 @@ fn measured_allocations_preserve_native_manager_sections(
     assert_eq!(
         format::parse_section_info(
             widths,
-            &encoded.section_list,
+            encoded.section_list(),
             encoded.header_address,
             &header
         )
@@ -131,8 +131,64 @@ fn independent_placement_matches_known_bytes() {
     let (header, list) = free_space::raw_manager_eight(619, 1701, &[(2848, 1600)]);
     assert_eq!(block.header_address.get(), 619);
     assert_eq!(block.section_list_address.get(), 1701);
-    assert_eq!(block.header, header);
-    assert_eq!(block.section_list, list);
+    assert_eq!(block.header(), header);
+    assert_eq!(block.section_list(), list);
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[test]
+fn encoding_a_placed_manager_allocates_one_section_list_buffer() {
+    const SECTION_COUNT: u64 = 4096;
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let sections = (0..SECTION_COUNT)
+        .map(|index| extent(100_000 + 128 * index, 64))
+        .collect::<Vec<_>>();
+    let free = FreeList::from_sorted(sections.iter().copied()).unwrap();
+    let projection = ManagerProjection::new(AdmittedFreeSnapshot::flat(&free), widths).unwrap();
+    let header_address = 619;
+    let list_address = 1024;
+    let plan = projection
+        .place(|[header, list]| Ok([extent(header_address, header), extent(list_address, list)]))
+        .unwrap();
+    let ranges = sections
+        .iter()
+        .map(|section| (section.start().get(), section.len().get()))
+        .collect::<Vec<_>>();
+    let (header, list) = free_space::raw_manager_eight(header_address, list_address, &ranges);
+
+    let (encoded, stats) = test_util::allocation::measure("placed_file_manager_buffers", || {
+        plan.encode_allocations().next().unwrap().unwrap()
+    });
+    assert_eq!(stats.blocks, 1, "{stats}");
+    assert_eq!(stats.bytes, list.len() as u64, "{stats}");
+    assert_eq!(stats.peak_bytes, list.len() as u64, "{stats}");
+    assert_eq!(stats.live_bytes, list.len() as u64, "{stats}");
+    assert_eq!(
+        encoded.blocks(),
+        [
+            (StoredAddress::new(header_address), header.as_slice()),
+            (StoredAddress::new(list_address), list.as_slice()),
+        ]
+    );
+}
+
+#[rstest]
+#[case::address(65_536, 1, FormatError::AddressTooLarge { address: 65_536, offset_size: 2 })]
+#[case::size(1, 32_768, FormatError::InvalidFreeSpaceSectionSize { size: 32_768, maximum: 32_767 })]
+fn projection_measures_sections_that_fail_preparation_and_rejects_placement(
+    #[case] address: u64,
+    #[case] size: u64,
+    #[case] expected: FormatError,
+) {
+    let widths = FormatWidths::from_sizes(2, 2).unwrap();
+    let free = FreeList::from_sorted([extent(address, size)]).unwrap();
+    let projection = ManagerProjection::new(AdmittedFreeSnapshot::flat(&free), widths).unwrap();
+    assert_eq!(projection.block_lengths().collect::<Vec<_>>(), [[34, 17]]);
+    let error = projection
+        .place(|_| panic!("an unencodable manager cannot be placed"))
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(error, expected);
 }
 
 #[rstest]
@@ -145,7 +201,7 @@ fn planning_complete_capacity_retains_u64_lengths(#[case] length: u64) {
     assert_eq!(plan.end().get(), (1 << 35) + length);
     assert_eq!(plan.blocks[0].header, extent(512, 82));
     assert_eq!(plan.blocks[0].section_list, extent(1 << 35, length));
-    assert_eq!(plan.blocks[0].section_list_len, 35);
+    assert_eq!(plan.blocks[0].prepared.section_list_len(), 35);
 }
 
 #[rstest]
@@ -203,15 +259,15 @@ fn independent_allocations_retain_complete_capacity_and_manager_identity(
         .unwrap();
     let mut bytes = vec![0; (base + 4096) as usize];
     for (block, (address, size)) in encoded.iter().zip([(100, 200), (5000, 200), (8192, 4096)]) {
-        assert_eq!(block.header.len(), 82);
-        assert_eq!(block.section_list.len() as u64, 35 + padding);
-        let header = format::FreeSpaceManagerHeader::parse(widths, &block.header).unwrap();
+        assert_eq!(block.header().len(), 82);
+        assert_eq!(block.section_list().len() as u64, 35 + padding);
+        let header = format::FreeSpaceManagerHeader::parse(widths, block.header()).unwrap();
         assert_eq!(header.section_list_used(), 35 + padding);
         assert_eq!(header.section_list_allocated(), 35 + padding);
         assert_eq!(header.total_sections(), 1);
         assert_eq!(header.total_space(), size);
         assert_eq!(
-            format::parse_section_info(widths, &block.section_list, block.header_address, &header)
+            format::parse_section_info(widths, block.section_list(), block.header_address, &header)
                 .unwrap(),
             [format::FreeSection {
                 addr: StoredAddress::new(address),
@@ -220,9 +276,9 @@ fn independent_allocations_retain_complete_capacity_and_manager_identity(
         );
         let header_start = (base + block.header_address.get()) as usize;
         let list_start = (base + block.section_list_address.get()) as usize;
-        bytes[header_start..header_start + block.header.len()].copy_from_slice(&block.header);
-        bytes[list_start..list_start + block.section_list.len()]
-            .copy_from_slice(&block.section_list);
+        bytes[header_start..header_start + block.header().len()].copy_from_slice(block.header());
+        bytes[list_start..list_start + block.section_list().len()]
+            .copy_from_slice(block.section_list());
     }
     let managers =
         [512, 1024, 1536].map(|address| DecodedStoredAddress::Defined(StoredAddress::new(address)));
@@ -384,7 +440,7 @@ fn complete_allocations_can_end_at_the_widths_undefined_address() {
     assert_eq!(plan.end_of_managers.get(), 65_535);
     let encoded = plan.encode_allocations().next().unwrap().unwrap();
     assert_eq!(
-        encoded.section_list_address.get() + encoded.section_list.len() as u64,
+        encoded.section_list_address.get() + encoded.section_list().len() as u64,
         65_535
     );
 }

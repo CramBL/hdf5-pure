@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::PreparedFreeSpaceManager;
 use hdf5_pure_format::__private::SectionInfoCounts;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ManagerKind;
@@ -19,12 +20,12 @@ use crate::chunked_write::EmptyChunkIndex;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::file_allocation::FileAllocation;
-use crate::file_allocation::FileManager;
+
 #[cfg(feature = "std")]
 use crate::file_emission::Reservation;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
-use crate::free_space_manager;
+use crate::free_space_manager::{self, EncodedManager};
 use crate::width::FormatWidths;
 
 /// A stored file address and the byte length reserved there.
@@ -247,7 +248,7 @@ pub(super) enum DataKind {
 pub(super) struct ClassicLayout {
     pub(super) extension: Option<Allocation>,
     pub(super) end: StoredAddress,
-    pub(super) manager: Option<FileManager>,
+    pub(super) manager: Option<EncodedManager>,
 }
 
 impl ClassicLayout {
@@ -373,7 +374,7 @@ pub(super) struct PagedLayout<T> {
     /// Manager header addresses in File Space Info slot order, undefined for inactive slots.
     pub(super) slots: [DecodedStoredAddress; NUM_FILE_FSM_MANAGERS],
     /// Metadata, small-raw, and generic-large managers in emission order.
-    pub(super) managers: [Option<FileManager>; 3],
+    pub(super) managers: [Option<EncodedManager>; 3],
     /// The stored address after the extension and manager blocks, before page padding.
     pub(super) metadata_end: StoredAddress,
     /// The first stored address of the raw-data region.
@@ -565,7 +566,7 @@ impl<T> PagedLayout<T> {
                 .zip([meta_sections, raw_sections, large_sections])
         {
             if let Some(location) = location {
-                managers[target] = Some(location.serialize(widths, &sections)?);
+                managers[target] = Some(location.serialize(widths, sections)?);
             }
         }
         Ok(Self {
@@ -1020,17 +1021,16 @@ struct ManagerLocation {
 }
 
 impl ManagerLocation {
-    /// Serializes the manager at its reserved addresses and checks its lengths.
+    /// Serializes the manager at its reserved addresses, padding its section list to the reservation.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if serialized lengths differ from their reservations.
-    /// Propagates manager serialization errors.
+    /// Returns the errors of [`PreparedFreeSpaceManager::new`] and [`EncodedManager::new`].
     fn serialize(
         self,
         widths: FormatWidths,
-        sections: &[FreeSection],
-    ) -> Result<FileManager, FormatError> {
+        sections: Vec<FreeSection>,
+    ) -> Result<EncodedManager, FormatError> {
         let Self {
             header,
             section_list,
@@ -1038,29 +1038,8 @@ impl ManagerLocation {
             kind,
         } = self;
         let (_, class) = free_space_manager::manager_wire(kind);
-        let (header_bytes, section_bytes) =
-            hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
-                widths,
-                sections,
-                header,
-                section_list,
-                class,
-                Some(length.get()),
-            )?;
-        if header_bytes.len() as u64
-            != hdf5_pure_format::__private::free_space_manager_header_len(widths)
-            || ByteLength::new(section_bytes.len().to_u64()) != length
-        {
-            return Err(FormatError::Internal(
-                "free-space manager bytes differ from their allocation".into(),
-            ));
-        }
-        Ok(FileManager {
-            header_address: header,
-            section_list_address: section_list,
-            header: header_bytes,
-            section_list: section_bytes,
-        })
+        let prepared = PreparedFreeSpaceManager::new(widths, sections, class)?;
+        EncodedManager::new(&prepared, header, section_list, Some(length.get()))
     }
 }
 
@@ -1380,10 +1359,10 @@ mod tests {
             slots[slot],
             DecodedStoredAddress::Defined(manager.header_address)
         );
-        let header = FreeSpaceManagerHeader::parse(WIDTHS, &manager.header).unwrap();
+        let header = FreeSpaceManagerHeader::parse(WIDTHS, manager.header()).unwrap();
         let sections = format::parse_section_info(
             WIDTHS,
-            &manager.section_list,
+            manager.section_list(),
             manager.header_address,
             &header,
         )
@@ -1566,17 +1545,17 @@ mod tests {
             let Some(manager) = manager else {
                 continue;
             };
-            let header = FreeSpaceManagerHeader::parse(WIDTHS, &manager.header).unwrap();
+            let header = FreeSpaceManagerHeader::parse(WIDTHS, manager.header()).unwrap();
             assert_eq!(
                 header.section_list_used(),
-                u64::try_from(manager.section_list.len()).unwrap()
+                u64::try_from(manager.section_list().len()).unwrap()
             );
             assert_eq!(header.section_list_allocated(), header.section_list_used());
             assert_eq!(header.section_list_addr(), manager.section_list_address);
             occupied.extend([
                 span(
                     manager.header_address.get(),
-                    u64::try_from(manager.header.len()).unwrap(),
+                    u64::try_from(manager.header().len()).unwrap(),
                 ),
                 span(
                     manager.section_list_address.get(),
@@ -1585,7 +1564,7 @@ mod tests {
             ]);
             actual[target] = format::parse_section_info(
                 WIDTHS,
-                &manager.section_list,
+                manager.section_list(),
                 manager.header_address,
                 &header,
             )
@@ -1640,7 +1619,7 @@ mod tests {
             assert!(plan.managers[2].is_some());
         }
         if raw_count == 54 {
-            assert_eq!(plan.managers[1].as_ref().unwrap().section_list.len(), 512);
+            assert_eq!(plan.managers[1].as_ref().unwrap().section_list().len(), 512);
             assert!(plan.managers[2].is_none());
         }
     }
@@ -1698,16 +1677,16 @@ mod tests {
         assert_eq!(
             plan.managers[2]
                 .as_ref()
-                .map(|manager| manager.section_list.len()),
+                .map(|manager| manager.section_list().len()),
             large_list_length
         );
         assert_eq!(plan.raw_start.get(), raw_start);
         assert_eq!(plan.end.get(), end);
         if let Some(manager) = &plan.managers[0] {
-            let header = FreeSpaceManagerHeader::parse(WIDTHS, &manager.header).unwrap();
+            let header = FreeSpaceManagerHeader::parse(WIDTHS, manager.header()).unwrap();
             let mut sections = format::parse_section_info(
                 WIDTHS,
-                &manager.section_list,
+                manager.section_list(),
                 manager.header_address,
                 &header,
             )
@@ -1870,7 +1849,7 @@ mod tests {
             + managers
                 .iter()
                 .flatten()
-                .map(|manager| manager.header.capacity() + manager.section_list.capacity())
+                .map(|manager| manager.section_list_capacity())
                 .sum::<usize>();
         assert_eq!(arrays.len(), 1);
         assert_eq!(arrays[0].1.addresses.len(), blocks);
@@ -1972,7 +1951,7 @@ mod tests {
             + managers
                 .iter()
                 .flatten()
-                .map(|manager| manager.header.capacity() + manager.section_list.capacity())
+                .map(|manager| manager.section_list_capacity())
                 .sum::<usize>();
         assert_eq!(calls, count);
         assert_eq!(data.len(), count);

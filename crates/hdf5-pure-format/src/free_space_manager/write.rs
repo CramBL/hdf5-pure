@@ -129,6 +129,16 @@ impl PreparedFreeSpaceManager {
         })
     }
 
+    /// Returns the number of size groups in the section list.
+    pub fn distinct_size_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// Returns whether any section has a length of `size` bytes.
+    pub fn contains_section_size(&self, size: u64) -> bool {
+        NonZeroU64::new(size).is_some_and(|size| self.groups.contains_key(&size))
+    }
+
     /// Returns the number of sections, all of which are serialized.
     pub fn section_count(&self) -> u64 {
         self.section_count
@@ -334,6 +344,12 @@ impl FreeSpaceManagerHeaderEncoding {
         output.write_uint_le(section_list_len, length_width);
         debug_assert!(output.remaining.is_empty());
     }
+
+    /// The header length in bytes at eight-byte offset and length widths, including the checksum.
+    pub const MAX_ENCODED_SIZE: usize = super::header_len(FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    });
 }
 
 impl Encode for FreeSpaceManagerHeaderEncoding {
