@@ -50,6 +50,7 @@ pub use datatype::ComplexType;
 pub use datatype::CompoundMember;
 pub use datatype::Datatype;
 pub use datatype::EnumMember;
+pub use datatype::EnumerationType;
 pub use datatype::ReferenceType;
 pub use datatype::StringPadding;
 pub use datatype::VariableLengthStringType;
