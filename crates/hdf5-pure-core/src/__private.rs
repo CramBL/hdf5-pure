@@ -123,7 +123,7 @@ pub fn compound_member_parts(member: &CompoundMember) -> (&str, u64, &Datatype) 
 
 /// Constructs an enumeration member from fields read from a datatype message.
 pub fn enum_member(name: String, value: Vec<u8>) -> EnumMember {
-    EnumMember { name, value }
+    EnumMember::new(name, value)
 }
 
 /// Borrows an enumeration member's name and stored value bytes without copying.

@@ -73,8 +73,84 @@ pub struct CompoundMember {
 pub struct EnumMember {
     /// Member name.
     pub name: String,
-    /// Raw value bytes (length = base type size).
+    /// The encoded value bytes. [`EnumerationType::new`] checks their length against the base
+    /// datatype's width.
     pub value: Vec<u8>,
+}
+
+impl EnumMember {
+    /// Constructs a named member and stores its value bytes as supplied.
+    pub fn new(name: String, value: Vec<u8>) -> Self {
+        Self { name, value }
+    }
+}
+
+/// An enumeration with a fixed-point base datatype and named values of that width.
+///
+/// Class 8 of the datatype message is defined in "The Datatype Message" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumerationType {
+    base_type: FixedPointType,
+    members: Vec<EnumMember>,
+}
+
+impl EnumerationType {
+    /// Constructs an enumeration whose values occupy the base type's byte width.
+    ///
+    /// Pass each value in the base type's byte order. Preserves the supplied bytes and
+    /// member order, and accepts an empty member list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::EnumMemberValueSize`] if a value has a different byte length than
+    /// the base type. The error reports the first such member.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{EnumMember, EnumerationType, FixedPointType};
+    ///
+    /// let base = FixedPointType::u16();
+    /// let member = EnumMember::new("active".into(), 1_u16.to_le_bytes().to_vec());
+    /// let enumeration = EnumerationType::new(base, vec![member])?;
+    /// assert_eq!(enumeration.base_type(), base);
+    /// assert_eq!(enumeration.size().get(), 2);
+    /// assert_eq!(enumeration.members()[0].name, "active");
+    /// assert_eq!(enumeration.members()[0].value, [1, 0]);
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    pub fn new(
+        base_type: FixedPointType,
+        mut members: Vec<EnumMember>,
+    ) -> Result<Self, FormatError> {
+        let size = base_type.size().get();
+        if let Some(index) = members
+            .iter()
+            .position(|member| u32::try_from(member.value.len()) != Ok(size))
+        {
+            let EnumMember { name, value } = members.swap_remove(index);
+            return Err(FormatError::EnumMemberValueSize(name, size, value.len()));
+        }
+        Ok(Self { base_type, members })
+    }
+
+    /// Returns the fixed-point datatype that describes each member's encoded value.
+    pub const fn base_type(&self) -> FixedPointType {
+        self.base_type
+    }
+
+    /// Returns the size of one encoded value in bytes, equal to the base type's size.
+    pub const fn size(&self) -> NonZeroU32 {
+        self.base_type.size()
+    }
+
+    /// Borrows the members in the order supplied at construction.
+    pub fn members(&self) -> &[EnumMember] {
+        &self.members
+    }
 }
 
 /// Represents the class-specific fields of an HDF5 Datatype message.
