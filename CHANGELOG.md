@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `FileBuilder::finish` reporting an oversized fill value as a generic serialization error.
 - Fixed `Dataset::filter_pipeline` and related operations losing structured error details for
   invalid filter names and out-of-range filter counts.
 - Fixed `File::dataset` and related metadata reads reporting truncation for version 1 object
