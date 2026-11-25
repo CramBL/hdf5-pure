@@ -1,3 +1,5 @@
+use core::ops::Range;
+
 use rstest::rstest;
 
 use super::super::*;
@@ -5,6 +7,17 @@ use crate::{
     DatatypeByteOrder,
     datatype::{CompoundMember, StringPadding},
 };
+
+fn vlen_slots_in_element(datatype: &Datatype) -> Option<Vec<(Range<usize>, usize)>> {
+    slots_in_element(embedded_vlen_slots(datatype))
+}
+
+fn slots_in_element(slots: Option<EmbeddedVlenSlots>) -> Option<Vec<(Range<usize>, usize)>> {
+    slots.map(|slots| {
+        let raw = vec![0; slots.element_size()];
+        slots.slots_in(&raw).collect()
+    })
+}
 
 fn vlen_string() -> Datatype {
     Datatype::VariableLength(VariableLengthType::string(
@@ -29,17 +42,14 @@ fn member(name: &str, byte_offset: u64, datatype: Datatype) -> CompoundMember {
 
 #[test]
 fn a_plain_datatype_reaches_no_reference() {
-    assert_eq!(embedded_vlen_slots(&i32_type()), Some(Vec::new()));
+    assert_eq!(vlen_slots_in_element(&i32_type()), Some(Vec::new()));
 }
 
 #[test]
 fn a_top_level_vlen_is_its_own_slot() {
     assert_eq!(
-        embedded_vlen_slots(&vlen_string()),
-        Some(vec![EmbeddedVlSlot {
-            byte_offset: 0,
-            element_size: 1
-        }])
+        vlen_slots_in_element(&vlen_string()),
+        Some(vec![(0..16, 1)])
     );
 }
 
@@ -54,17 +64,8 @@ fn compound_members_keep_their_own_element_size() {
         ],
     };
     assert_eq!(
-        embedded_vlen_slots(&dt),
-        Some(vec![
-            EmbeddedVlSlot {
-                byte_offset: 0,
-                element_size: 1
-            },
-            EmbeddedVlSlot {
-                byte_offset: 24,
-                element_size: 4
-            },
-        ])
+        vlen_slots_in_element(&dt),
+        Some(vec![(0..16, 1), (24..40, 4),])
     );
 }
 
@@ -83,34 +84,15 @@ fn nested_compounds_and_arrays_are_walked() {
             member("inner", 4, inner.clone()),
         ],
     };
-    assert_eq!(
-        embedded_vlen_slots(&nested),
-        Some(vec![EmbeddedVlSlot {
-            byte_offset: 8,
-            element_size: 1
-        }])
-    );
+    assert_eq!(vlen_slots_in_element(&nested), Some(vec![(8..24, 1)]));
 
     let array = Datatype::Array {
         base_type: Box::new(inner),
         dimensions: vec![3],
     };
     assert_eq!(
-        embedded_vlen_slots(&array),
-        Some(vec![
-            EmbeddedVlSlot {
-                byte_offset: 4,
-                element_size: 1
-            },
-            EmbeddedVlSlot {
-                byte_offset: 24,
-                element_size: 1
-            },
-            EmbeddedVlSlot {
-                byte_offset: 44,
-                element_size: 1
-            },
-        ])
+        vlen_slots_in_element(&array),
+        Some(vec![(4..20, 1), (24..40, 1), (44..60, 1),])
     );
 }
 
@@ -120,7 +102,7 @@ fn a_datatype_too_small_for_its_own_references_is_rejected() {
         size: 8, // one VL reference needs 16
         members: vec![member("s", 0, vlen_string())],
     };
-    assert_eq!(embedded_vlen_slots(&dt), None);
+    assert_eq!(vlen_slots_in_element(&dt), None);
 }
 
 #[test]
@@ -129,12 +111,11 @@ fn an_array_declaring_absurd_dimensions_is_rejected_not_walked() {
         base_type: Box::new(vlen_string()),
         dimensions: vec![u32::MAX, u32::MAX],
     };
-    assert_eq!(embedded_vlen_slots(&dt), None);
+    assert_eq!(vlen_slots_in_element(&dt), None);
 }
 
-// Seventeen nested binary arrays exercise base-slot reuse for 131,072 references.
 #[test]
-fn deeply_nested_arrays_cost_time_proportional_to_their_slots() {
+fn nested_array_slots_require_a_complete_element() {
     let mut dt = vlen_string();
     for _ in 0..17 {
         dt = Datatype::Array {
@@ -142,17 +123,11 @@ fn deeply_nested_arrays_cost_time_proportional_to_their_slots() {
             dimensions: vec![2],
         };
     }
-    let started = std::time::Instant::now();
-    let slots = embedded_vlen_slots(&dt).expect("a well-formed nesting must be walkable");
-    let elapsed = started.elapsed();
+    let slots = embedded_vlen_slots(&dt).unwrap();
 
-    assert_eq!(slots.len(), 1 << 17, "one slot per leaf entry");
-    // Ten seconds permits slow CI execution while bounding repeated subtree work.
-    assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "walking {} slots took {elapsed:?}; the walk is no longer linear in its output",
-        slots.len()
-    );
+    assert_eq!(slots.len(), 1 << 17);
+    assert_eq!(slots.element_size(), 16 * (1 << 17));
+    assert_eq!(slots.slots_in(&[0; 16]).next(), None);
 }
 
 // The member offset exceeds `usize` on 32-bit targets and the element size on 64-bit targets.
@@ -162,7 +137,7 @@ fn a_member_offset_beyond_the_address_space_is_rejected() {
         size: 40,
         members: vec![member("s", u64::MAX - 8, vlen_string())],
     };
-    assert_eq!(embedded_vlen_slots(&dt), None);
+    assert_eq!(vlen_slots_in_element(&dt), None);
 }
 
 #[rstest]
@@ -179,13 +154,10 @@ fn stored_array_slots_use_the_file_reference_width(
     };
     let stride = 4 + usize::from(offsets.get()) + 4;
     assert_eq!(
-        embedded_vlen_slots_with_offset_width(&datatype, offsets).unwrap(),
+        slots_in_element(embedded_vlen_slots_with_offset_width(&datatype, offsets).unwrap()),
         Some(
             (0..3)
-                .map(|index| EmbeddedVlSlot {
-                    byte_offset: index * stride,
-                    element_size
-                })
+                .map(|index| (index * stride..(index + 1) * stride, element_size))
                 .collect()
         )
     );

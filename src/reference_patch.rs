@@ -457,19 +457,22 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
         return Ok(false);
     };
     let holds = datatype::datatype_holds_object_address(&dt);
-    let (
-        Some(slots),
-        Some(DataLayout::Contiguous {
-            address: Some(a),
-            size,
-        }),
-    ) = (element_slots(&dt), layout)
+    let Some(DataLayout::Contiguous {
+        address: Some(a),
+        size,
+    }) = layout
     else {
+        return Ok(holds);
+    };
+    let Some(slots) = element_slots(&dt) else {
         return Ok(holds);
     };
     let (Ok(at), Ok(want)) = (base.resolve(a), usize::try_from(size)) else {
         return Ok(holds);
     };
+    if want < slots.element_size() {
+        return Ok(holds);
+    }
     let Ok(raw) = src.read_exact_at(at.get(), want) else {
         return Ok(holds);
     };
@@ -741,6 +744,9 @@ fn scan_object<S: OriginalSource + ?Sized>(
             let Ok(want) = usize::try_from(size) else {
                 return Ok(out);
             };
+            if want < slots.element_size() {
+                return Ok(out);
+            }
             let Ok(raw) = src.read_exact_at(at.get(), want) else {
                 return Ok(out);
             };
@@ -1294,6 +1300,27 @@ mod tests {
         let (plan, scanned) = scan(&src, &[(300, 900)]);
         assert!(scanned.holds_a_reference);
         assert_header_reference_write(&plan, bytes, region.len() - 8);
+    }
+
+    #[test]
+    fn compact_reference_arrays_patch_each_complete_element() {
+        let reference = datatype_bytes::object_reference(8);
+        let array = datatype_bytes::array(3, [0; 3], 16, 1, &[2], &reference);
+        let mut region = message_record(MessageType::DATATYPE, &array);
+        let raw = [300u64, 200, 300, u64::MAX].map(u64::to_le_bytes).concat();
+        let layout = layout_bytes::compact(&raw);
+        region.extend_from_slice(&message_record(MessageType::DATA_LAYOUT, &layout));
+
+        let (src, original) = image_with_header(&region);
+        let (plan, scanned) = scan(&src, &[(300, 900), (200, 800)]);
+        assert!(scanned.holds_a_reference);
+        let new_raw = [900u64, 800, 900, u64::MAX].map(u64::to_le_bytes).concat();
+        let value_start = region.len() - raw.len();
+        region[value_start..].copy_from_slice(&new_raw);
+        let (_, expected) = image_with_header(&region);
+        let mut target = Recording::new(original);
+        plan.apply(&mut target).unwrap();
+        assert_eq!(target.bytes, expected);
     }
 
     #[test]

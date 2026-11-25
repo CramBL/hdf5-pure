@@ -1,6 +1,9 @@
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
+use hdf5_pure::File;
 use hdf5_pure::FixedPointType;
+use hdf5_pure::Layout;
+use hdf5_pure::RepackOptions;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_format::__private as format;
@@ -9,9 +12,16 @@ use hdf5_pure_format::__private::{
 };
 use rstest::rstest;
 use test_util::allocation;
-use test_util::datatype::Class;
+use test_util::data_layout;
+use test_util::dataspace::VersionTwo;
 use test_util::datatype::containers::{self, CompoundField, EnumValue, MemberOffset};
 use test_util::datatype::leaf::{Leaf, Version};
+use test_util::datatype::{self, Class, VariableLengthSequence};
+use test_util::image::Image;
+use test_util::link_message::HardLink;
+use test_util::object_header::{Message, MessageType, v2};
+use test_util::superblock::v2::Superblock;
+use test_util::widths::Widths;
 
 #[rstest]
 #[case::atomic(Shape::Sequence(0))]
@@ -408,4 +418,119 @@ fn control_header(class: Class, version: u8, flags: [u8; 3], size: u32) -> Vec<u
     header.extend_from_slice(&flags);
     header.extend_from_slice(&size.to_le_bytes());
     header
+}
+
+#[rstest]
+#[case::moderate(1 << 17)]
+#[case::largest(u32::MAX / 8)]
+fn object_reference_planning_has_bounded_allocations(#[case] count: u32) {
+    let body = datatype::array(
+        3,
+        [0; 3],
+        count * 8,
+        1,
+        &[count],
+        &datatype::object_reference(8),
+    );
+    let (datatype, length) = format::parse_datatype(&body).unwrap();
+    assert_eq!(length, 21);
+    assert_eq!(length, body.len());
+    let (slots, measured) = allocation::measure("object_reference_slot_geometry", || {
+        format::embedded_reference_slots(&datatype).unwrap()
+    });
+    eprintln!("object reference slot geometry ({count} slots): {measured}");
+    assert!(measured.bytes <= 1024, "{measured}");
+    assert_eq!(slots.len(), usize::try_from(count).unwrap());
+    assert_eq!(slots.element_size(), usize::try_from(count * 8).unwrap());
+    assert_eq!(slots.stored_references(&[0; 8]).count(), 0);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Storage {
+    Unallocated,
+    EmptyCompact,
+}
+
+#[rstest]
+#[case::object_131072(131_072, 8, datatype::object_reference(8))]
+#[case::object_maximum(u32::MAX / 8, 8, datatype::object_reference(8))]
+#[case::vlen_maximum(
+    u32::MAX / 16,
+    16,
+    VariableLengthSequence::new(
+        Version::One,
+        8,
+        &Leaf::LittleInteger.bytes(Version::One),
+    ).build()
+)]
+fn repack_reference_planning_is_bounded_without_payload(
+    #[case] count: u32,
+    #[case] stride: u32,
+    #[case] parent: Vec<u8>,
+    #[values(Storage::Unallocated, Storage::EmptyCompact)] storage: Storage,
+) {
+    let body = datatype::array(3, [0; 3], count * stride, 1, &[count], &parent);
+    let (datatype, length) = format::parse_datatype(&body).unwrap();
+    assert_eq!(length, body.len());
+    let (layout, shape, layout_body) = match storage {
+        Storage::Unallocated => (
+            Layout::Contiguous {
+                address: None,
+                size: u64::from(count * stride),
+            },
+            [1],
+            data_layout::contiguous(u64::MAX, u64::from(count * stride)),
+        ),
+        Storage::EmptyCompact => (Layout::Compact { size: 0 }, [0], data_layout::compact(&[])),
+    };
+    let mut image = Image::starting_with(&[0; 48]);
+    let address = image.append(
+        &v2::Header::new()
+            .messages([
+                Message::new(MessageType::DATATYPE, &body),
+                Message::new(
+                    MessageType::DATASPACE,
+                    &VersionTwo::simple(Widths::EIGHT, &shape, None).build(),
+                ),
+                Message::new(MessageType::DATA_LAYOUT, &layout_body),
+            ])
+            .build(),
+    ) as u64;
+    let root = image.append(
+        &v2::Header::new()
+            .message(Message::new(
+                MessageType::LINK,
+                &HardLink::new("references", address).build(Widths::EIGHT),
+            ))
+            .build(),
+    ) as u64;
+    image.place(
+        0,
+        &Superblock::new(Widths::EIGHT)
+            .version(3)
+            .root_header_address(root)
+            .eof_address(image.as_bytes().len() as u64)
+            .build(),
+    );
+
+    let source = File::from_bytes(image.build()).unwrap();
+    let dataset = source.dataset("references").unwrap();
+    assert_eq!(dataset.layout().unwrap(), layout);
+    assert_eq!(dataset.shape().unwrap(), shape);
+    assert_eq!(dataset.datatype().unwrap(), datatype);
+    let mut output = Vec::new();
+    let ((), measured) = allocation::measure("repack_reference_geometry", || {
+        hdf5_pure::repack_into(&source, &mut output, &RepackOptions::new()).unwrap();
+    });
+    eprintln!("repack reference geometry ({count} slots, {storage:?}): {measured}");
+    assert!(measured.bytes <= 64 * 1024, "{measured}");
+
+    let destination = File::from_bytes(output).unwrap();
+    let dataset = destination.dataset("references").unwrap();
+    assert_eq!(dataset.shape().unwrap(), shape);
+    assert_eq!(dataset.datatype().unwrap(), datatype);
+    match storage {
+        Storage::Unallocated => assert_eq!(dataset.layout().unwrap(), layout),
+        Storage::EmptyCompact => assert_eq!(dataset.read_raw().unwrap(), Vec::<u8>::new()),
+    }
 }

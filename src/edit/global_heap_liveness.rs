@@ -30,7 +30,7 @@ use crate::read_spec::RawReadSpec;
 use crate::read_spec::RawReadStorage;
 use crate::source::PhysicalSource;
 use crate::vl_data;
-use crate::vl_data::EmbeddedVlSlot;
+use crate::vl_data::EmbeddedVlenSlots;
 use crate::vl_data::VlElement;
 use crate::width::OffsetWidth;
 
@@ -529,15 +529,8 @@ impl WriteEngine {
             available: raw.len(),
         })?;
         for element in elements.chunks_exact(stride) {
-            for slot in vlen_slots {
-                let reference =
-                    element
-                        .get(slot.byte_offset..)
-                        .ok_or(FormatError::UnexpectedEof {
-                            expected: slot.byte_offset,
-                            available: element.len(),
-                        })?;
-                if let Some(id) = VlElement::parse(reference, self.widths().offsets)?
+            for (descriptor, _) in vlen_slots.slots_in(element) {
+                if let Some(id) = VlElement::parse(&element[descriptor], self.widths().offsets)?
                     .heap_id(self.widths().offsets, self.context.addresses())?
                 {
                     referenced.record(id);
@@ -601,7 +594,7 @@ pub(super) enum DatasetReferenceScope {
 struct ReferenceSlots {
     /// The size in bytes of an element.
     element_size: NonZeroU32,
-    vlen_slots: Vec<EmbeddedVlSlot>,
+    vlen_slots: EmbeddedVlenSlots,
 }
 
 /// Returns whether `datatype` holds a file address the analysis does not locate: a reference, or

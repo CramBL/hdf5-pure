@@ -107,6 +107,7 @@ pub use crate::datatype::message::{
 pub use crate::datatype::parse_datatype;
 pub use crate::datatype::serialize_datatype;
 pub use crate::datatype::serialize_datatype_with_offset_width;
+pub use crate::datatype::slots::{EmbeddedVlenSlots, embedded_vlen_slots};
 pub use crate::datatype::stored_element_size;
 pub use crate::datatype::stored_element_size_usize;
 pub use crate::datatype::stored_type_size;

@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `repack` allocating memory for each embedded reference position in a dataset element
+  before reading any values, even for unallocated datasets ([#1370](https://github.com/CramBL/hdf5-pure/pull/1370)).
 - Fixed `Dataset::datatype` omitting bytes before a nested description or opaque tag from EOF
   byte counts in a truncated datatype message ([#1369](https://github.com/CramBL/hdf5-pure/pull/1369)).
 - Fixed `File::file_space_info` excluding the message prefix from EOF byte counts for incomplete

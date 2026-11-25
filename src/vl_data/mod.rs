@@ -11,7 +11,10 @@ use core::num::NonZeroU16;
 
 use hdf5_pure_core::__private::ElementCount;
 use hdf5_pure_core::__private::ElementSize;
-use hdf5_pure_format::__private::VariableLengthDescriptor;
+pub(crate) use hdf5_pure_format::__private::EmbeddedVlenSlots;
+#[cfg(any(feature = "std", test))]
+pub(crate) use hdf5_pure_format::__private::embedded_vlen_slots as embedded_vlen_slots_with_offset_width;
+use hdf5_pure_format::__private::{self as format, VariableLengthDescriptor};
 
 #[cfg(test)]
 use crate::FixedPointType;
@@ -226,22 +229,9 @@ pub(crate) fn is_vlen_string_datatype(datatype: &Datatype) -> bool {
     }
 }
 
-/// A variable-length reference within a compound member or array entry.
-///
-/// Readers use its position and element size to inspect heap references. The repack writer uses
-/// them to copy heap payloads and rewrite references in place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EmbeddedVlSlot {
-    /// Byte offset of the reference within one stored element.
-    pub byte_offset: usize,
-    /// The byte multiplier for the reference's stored `length`. This is 1 for strings
-    /// and the base-type element size for sequences.
-    pub element_size: usize,
-}
-
 /// Dataset bytes and heap payloads for rewriting embedded variable-length references.
 pub(crate) struct EmbeddedVlData {
-    /// The dataset's element bytes, references still carrying source addresses.
+    /// The dataset's element bytes with their original stored addresses.
     pub raw: Vec<u8>,
     /// Byte offset within `raw` of each embedded reference.
     pub offsets: Vec<usize>,
@@ -249,156 +239,19 @@ pub(crate) struct EmbeddedVlData {
     pub objects: Vec<VlByteObject>,
 }
 
-/// Returns reference slots at eight-byte address width in compound and array declaration order.
+/// Prepares variable-length descriptor positions for a file with eight-byte addresses.
 ///
-/// Returns `None` if a stored size exceeds its field or platform capacity, or if slot traversal
-/// exceeds address or storage bounds. A top-level variable-length datatype has one slot at
-/// offset 0.
-pub(crate) fn embedded_vlen_slots(datatype: &Datatype) -> Option<Vec<EmbeddedVlSlot>> {
-    embedded_vlen_slots_with_offset_width(datatype, OffsetWidth::Eight)
+/// Returns `None` if the descriptor positions, count, or stored element size exceed the bounds of
+/// the datatype or the platform.
+pub(crate) fn embedded_vlen_slots(datatype: &Datatype) -> Option<EmbeddedVlenSlots> {
+    format::embedded_vlen_slots(datatype, OffsetWidth::Eight)
         .ok()
         .flatten()
-}
-
-/// Returns bounded reference slots using stored sizes at `offset_width`.
-///
-/// Walks compound members and array entries in declaration order. A top-level variable-length
-/// value has one slot at offset 0. Returns `Ok(None)` if address arithmetic, slot capacity, or
-/// bounds for complete references cannot be established.
-///
-/// # Errors
-///
-/// Returns the field-size errors of [`crate::datatype::stored_type_size`], or
-/// [`FormatError::ValueTooLargeForPlatform`] if stored geometry exceeds [`usize::MAX`].
-pub(crate) fn embedded_vlen_slots_with_offset_width(
-    datatype: &Datatype,
-    offset_width: OffsetWidth,
-) -> Result<Option<Vec<EmbeddedVlSlot>>, FormatError> {
-    let element_size = crate::datatype::stored_type_size(datatype, offset_width)?.to_usize()?;
-    let reference_size = VlElement::serialized_size(offset_width);
-    let capacity = element_size / reference_size;
-    let mut slots = Vec::new();
-    if !collect_vlen_slots(datatype, offset_width, 0, capacity, &mut slots)? {
-        return Ok(None);
-    }
-    if slots.len() > capacity
-        || slots.iter().any(|s| {
-            s.byte_offset
-                .checked_add(reference_size)
-                .is_none_or(|end| end > element_size)
-        })
-    {
-        return Ok(None);
-    }
-    Ok(Some(slots))
 }
 
 /// Reference stride for test fixtures with eight-byte heap addresses.
 #[cfg(test)]
 const VL_REF_BYTES: usize = 16;
-
-/// Appends reference slots while checking address arithmetic and output capacity.
-///
-/// Returns `Ok(false)` if address arithmetic fails or an array with reference slots has more
-/// entries than `capacity`. Appends at most one excess slot for the caller's capacity check.
-/// Previously appended slots remain in `out` on error.
-///
-/// # Errors
-///
-/// Returns the field-size errors of [`crate::datatype::stored_type_size`], or
-/// [`FormatError::ValueTooLargeForPlatform`] if a stored size exceeds [`usize::MAX`].
-fn collect_vlen_slots(
-    datatype: &Datatype,
-    offset_width: OffsetWidth,
-    base: usize,
-    capacity: usize,
-    out: &mut Vec<EmbeddedVlSlot>,
-) -> Result<bool, FormatError> {
-    // Stop after one excess slot so the caller detects capacity overflow.
-    if out.len() > capacity {
-        return Ok(true);
-    }
-    Ok(match datatype {
-        Datatype::VariableLength(kind) => {
-            let base_type = kind.base_type();
-            // A VL string's reference counts bytes. A sequence's reference counts
-            // base-type elements.
-            let element_size = if is_vlen_string_datatype(datatype) {
-                1
-            } else {
-                crate::datatype::stored_type_size(base_type, offset_width)?
-                    .to_usize()?
-                    .max(1)
-            };
-            out.push(EmbeddedVlSlot {
-                byte_offset: base,
-                element_size,
-            });
-            true
-        }
-        Datatype::Compound { members, .. } => {
-            for m in members {
-                let Some(at) = usize::try_from(m.byte_offset)
-                    .ok()
-                    .and_then(|off| base.checked_add(off))
-                else {
-                    return Ok(false);
-                };
-                if !collect_vlen_slots(&m.datatype, offset_width, at, capacity, out)? {
-                    return Ok(false);
-                }
-            }
-            true
-        }
-        Datatype::Array {
-            base_type,
-            dimensions,
-        } => {
-            // Walk the base type once and translate its slots to each array entry.
-            // Each repeated entry contributes a slot, so the output bound also limits the work.
-            let mut probe = Vec::new();
-            if !collect_vlen_slots(base_type, offset_width, 0, capacity, &mut probe)? {
-                return Ok(false);
-            }
-            // No reference in one entry means none in any repetition of it.
-            if probe.is_empty() {
-                return Ok(true);
-            }
-            let count = dimensions
-                .iter()
-                .copied()
-                .fold(1u64, |a, b| a.saturating_mul(u64::from(b)));
-            // Reject an entry count larger than the slot capacity before allocation.
-            if count > capacity as u64 {
-                return Ok(false);
-            }
-            let entries = usize::try_from(count).unwrap_or(usize::MAX);
-            let stride = crate::datatype::stored_type_size(base_type, offset_width)?.to_usize()?;
-            for i in 0..entries {
-                let Some(at) = i.checked_mul(stride).and_then(|off| base.checked_add(off)) else {
-                    return Ok(false);
-                };
-                for slot in &probe {
-                    let Some(byte_offset) = at.checked_add(slot.byte_offset) else {
-                        return Ok(false);
-                    };
-                    out.push(EmbeddedVlSlot {
-                        byte_offset,
-                        element_size: slot.element_size,
-                    });
-                    // Stop after one excess slot so the caller detects capacity overflow.
-                    if out.len() > capacity {
-                        return Ok(true);
-                    }
-                }
-            }
-            true
-        }
-        // An enumeration's base is an integer, and no other class can reach a
-        // variable-length reference.
-        _ => true,
-    })
-}
 
 fn check_element_limit(
     num_elements: ElementCount,
