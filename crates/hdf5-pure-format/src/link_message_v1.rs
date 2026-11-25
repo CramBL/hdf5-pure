@@ -2,6 +2,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 
 use crate::address::StoredAddress;
 use crate::datatype::CharacterSet;
@@ -474,7 +476,8 @@ impl UserLinkValue {
 
 /// An error converting a checked wire message to a supported link model.
 ///
-/// The converter reports user-defined kinds separately from text-conversion errors.
+/// [`Error::source`] returns the wrapped [`FormatError`] for [`Self::Format`].
+/// [`Self::UnsupportedKind`] reports the stored kind code and has no source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkProjectionError {
     /// Text conversion failed for a supported target.
@@ -492,13 +495,56 @@ impl LinkProjectionError {
     }
 }
 
+impl fmt::Display for LinkProjectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Format(error) => fmt::Display::fmt(error, f),
+            Self::UnsupportedKind(kind) => write!(f, "unsupported link kind: {}", kind.get()),
+        }
+    }
+}
+
+impl Error for LinkProjectionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Format(error) => Some(error),
+            Self::UnsupportedKind(_) => None,
+        }
+    }
+}
+
 /// An error constructing, decoding, or encoding a version 1 Link message.
+///
+/// [`Error::source`] returns the wrapped [`LinkStorageError`] for [`Self::Storage`].
+/// [`Self::NameWidth`] reports the name length and field width in bytes and has no source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkWireError {
     /// The name length does not fit the selected field width.
     NameWidth { length: usize, width: UintWidth },
     /// An error in a field, the message framing, or the encoded length.
     Storage(LinkStorageError),
+}
+
+impl fmt::Display for LinkWireError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NameWidth { length, width } => write!(
+                f,
+                "link name length {length} exceeds its {}-byte field",
+                width.get()
+            ),
+            Self::Storage(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for LinkWireError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::NameWidth { .. } => None,
+            Self::Storage(error) => Some(error),
+        }
+    }
 }
 
 impl From<LinkStorageError> for LinkWireError {
