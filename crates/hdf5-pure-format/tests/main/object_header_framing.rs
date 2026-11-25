@@ -9,9 +9,72 @@ use test_util::checksum;
 use test_util::group_info::GroupInfo;
 use test_util::image::Image;
 use test_util::object_header::{
-    Message, MessageFlags as FixtureFlags, MessageType as FixtureType, v2,
+    Message, MessageFlags as FixtureFlags, MessageType as FixtureType, v1, v2,
 };
 use test_util::widths::Widths;
+
+#[rstest]
+#[case::unaligned_without_body(1, 0, FormatError::InvalidObjectHeaderMessageSize(1))]
+#[case::unaligned_with_body(1, 1, FormatError::InvalidObjectHeaderMessageSize(1))]
+#[case::aligned_without_body(8, 0, FormatError::UnexpectedEof {
+    expected: 16,
+    available: 8,
+})]
+fn version_1_readers_check_record_alignment_before_acquiring_the_body(
+    #[case] declared: u16,
+    #[case] present: usize,
+    #[case] expected: FormatError,
+    #[values(Chunk::Root, Chunk::Continuation)] chunk: Chunk,
+    #[values(Backend::Buffered, Backend::Source, Backend::ObservedSource)] backend: Backend,
+) {
+    let image = chunk.v1_image(&v1_record(declared, present));
+
+    let mut discard = |_: MessageType, _: &[u8]| false;
+    for filter in [MessageFilter::All, MessageFilter::Only(&mut discard)] {
+        assert_eq!(backend.parse(&image, filter).unwrap_err(), expected);
+    }
+}
+
+#[rstest]
+fn a_version_1_root_reader_ignores_an_incomplete_record_prefix(
+    #[values(1, 4, 7)] available: usize,
+    #[values(Backend::Buffered, Backend::Source, Backend::ObservedSource)] backend: Backend,
+) {
+    let record = v1_record(1, 0);
+    let image = Chunk::Root.v1_image(&record[..available]);
+
+    let header = backend.parse(&image, MessageFilter::All).unwrap();
+    assert_eq!(header.version, 1);
+    assert_eq!(header.reference_count, Some(1));
+    assert_eq!(header.messages.len(), 0);
+}
+
+#[rstest]
+fn a_version_1_continuation_reader_reports_an_incomplete_record_prefix(
+    #[values(1, 4, 7)] available: usize,
+    #[values(Backend::Buffered, Backend::Source, Backend::ObservedSource)] backend: Backend,
+) {
+    let record = v1_record(1, 0);
+    let image = Chunk::Continuation.v1_image(&record[..available]);
+
+    assert_eq!(
+        backend.parse(&image, MessageFilter::All).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: v1::RECORD_PREFIX,
+            available,
+        }
+    );
+}
+
+fn v1_record(declared: u16, present: usize) -> Vec<u8> {
+    let mut record = v1::message_record(&Message::new(
+        FixtureType::DATATYPE,
+        &[0x43; v1::MESSAGE_ALIGNMENT],
+    ));
+    record[size_of::<u16>()..2 * size_of::<u16>()].copy_from_slice(&declared.to_le_bytes());
+    record.truncate(v1::RECORD_PREFIX + present);
+    record
+}
 
 #[rstest]
 #[case::plain(v2::HeaderFlags::default(), &[0x03, 2, 0, 0, 0x43])]
@@ -138,6 +201,29 @@ enum Chunk {
 }
 
 impl Chunk {
+    fn v1_image(self, record: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Root => {
+                let mut root = v1::Header::new()
+                    .message(Message::nil(0))
+                    .declared_data_size(u32::try_from(record.len()).unwrap())
+                    .build();
+                root.truncate(v1::PREFIX);
+                root.extend_from_slice(record);
+                root
+            }
+            Self::Continuation => {
+                let start = 64;
+                let root = v1::Header::new()
+                    .continuation(start, record, Widths::EIGHT)
+                    .build();
+                let mut image = Image::starting_with(&root);
+                image.place(start, record);
+                image.build()
+            }
+        }
+    }
+
     fn image(self, flags: v2::HeaderFlags, tail: &[u8]) -> (Vec<u8>, Range<usize>) {
         let group_info = GroupInfo {
             phase_change: None,
