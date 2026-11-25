@@ -1,6 +1,8 @@
 use alloc::collections::BTreeMap;
+use alloc::collections::btree_map::Entry;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
+use core::slice;
 
 use crate::address::StoredAddress;
 use crate::bytes;
@@ -26,7 +28,7 @@ use super::{
 pub struct PreparedFreeSpaceManager {
     widths: FormatWidths,
     class_id: u8,
-    groups: BTreeMap<NonZeroU64, Vec<StoredAddress>>,
+    groups: BTreeMap<NonZeroU64, SectionAddresses>,
     section_count: u64,
     fields: SectionFields,
     total_space: u64,
@@ -71,7 +73,7 @@ impl PreparedFreeSpaceManager {
         }
         let max_section_size = super::written_max_section_size(widths.lengths);
         let maximum = (1 << max_section_size.ilog2()) - 1;
-        let mut groups = BTreeMap::<NonZeroU64, Vec<StoredAddress>>::new();
+        let mut groups = BTreeMap::<NonZeroU64, SectionAddresses>::new();
         let mut total_space = 0u64;
         let mut section_count = 0u64;
         for FreeSection { addr, size } in sections {
@@ -87,12 +89,19 @@ impl PreparedFreeSpaceManager {
             )?;
             // Every section adds at least one byte to the checked sum.
             section_count += 1;
-            groups.entry(size).or_default().push(addr);
+            match groups.entry(size) {
+                Entry::Occupied(mut entry) => entry.get_mut().push(addr),
+                Entry::Vacant(entry) => {
+                    entry.insert(SectionAddresses::Single(addr));
+                }
+            }
         }
         require_length(total_space, widths.lengths)?;
 
         for addresses in groups.values_mut() {
-            addresses.sort_unstable();
+            if let SectionAddresses::Multiple(addresses) = addresses {
+                addresses.sort_unstable();
+            }
         }
         let section_list_len =
             SectionInfoCounts::new(section_count, groups.len().to_u64())?.encoded_len(widths)?;
@@ -113,7 +122,7 @@ impl PreparedFreeSpaceManager {
     /// Returns the sections in ascending order of size, then of address within each size.
     pub fn sections(&self) -> impl Iterator<Item = FreeSection> + '_ {
         self.groups.iter().flat_map(|(&size, addresses)| {
-            addresses.iter().map(move |&addr| FreeSection {
+            addresses.as_slice().iter().map(move |&addr| FreeSection {
                 addr,
                 size: size.get(),
             })
@@ -383,6 +392,7 @@ impl FreeSpaceManagerSectionListEncoding<'_> {
         output.write_bytes(&[FSSE_VERSION]);
         output.write_uint_le(header_address.get(), usize::from(plan.widths.offsets.get()));
         for (&section_size, addresses) in &plan.groups {
+            let addresses = addresses.as_slice();
             output.write_uint_le(addresses.len().to_u64(), count);
             output.write_uint_le(section_size.get(), size);
             for address in addresses {
@@ -405,6 +415,29 @@ impl Encode for FreeSpaceManagerSectionListEncoding<'_> {
 
     fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
         write_checksummed(output, self.encoded_len(), |body| self.write_body(body))
+    }
+}
+
+/// The addresses of sections of one size, with inline storage for a single address.
+#[derive(Debug)]
+enum SectionAddresses {
+    Multiple(Vec<StoredAddress>),
+    Single(StoredAddress),
+}
+
+impl SectionAddresses {
+    fn push(&mut self, address: StoredAddress) {
+        match self {
+            Self::Multiple(addresses) => addresses.push(address),
+            Self::Single(first) => *self = Self::Multiple(Vec::from([*first, address])),
+        }
+    }
+
+    fn as_slice(&self) -> &[StoredAddress] {
+        match self {
+            Self::Multiple(addresses) => addresses,
+            Self::Single(address) => slice::from_ref(address),
+        }
     }
 }
 

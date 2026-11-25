@@ -157,3 +157,26 @@ fn allocating_manager_writer_bounds_peak_for_equal_sizes_at_two_byte_widths() {
         sections,
     );
 }
+
+#[test]
+fn preparing_distinct_section_sizes_keeps_allocations_below_the_group_count() {
+    const SECTION_COUNT: u64 = 4096;
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let sections = (1..=SECTION_COUNT)
+        .map(|size| FreeSection {
+            addr: StoredAddress::new(8192 * size),
+            size,
+        })
+        .collect::<Vec<_>>();
+    let (manager, measured) = allocation::measure("distinct_file_manager_groups", || {
+        PreparedFreeSpaceManager::new(
+            widths,
+            sections.iter().copied(),
+            format::SECTION_CLASS_SIMPLE,
+        )
+        .unwrap()
+    });
+    assert_eq!(manager.sections().collect::<Vec<_>>(), sections);
+    assert!(measured.blocks > 0, "{measured}");
+    assert!(measured.blocks < SECTION_COUNT / 2, "{measured}");
+}
