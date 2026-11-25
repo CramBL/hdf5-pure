@@ -11,7 +11,7 @@ use hdf5_pure_format::__private::{
 use rstest::rstest;
 use test_util::datatype::containers::{self, CompoundField, EnumValue, MemberOffset};
 use test_util::datatype::float_context::Context;
-use test_util::datatype::leaf::{Leaf, Version};
+use test_util::datatype::leaf::{Leaf, OpaqueTag, Version};
 use test_util::datatype::{self, Class, VariableLengthSequence};
 
 #[rstest]
@@ -784,14 +784,16 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
         dimensions: vec![2, 3],
     })]
 fn semantic_parser_accepts_and_retained_parser_rejects_legacy_containers(
-    #[case] bytes: Vec<u8>,
+    #[case] mut bytes: Vec<u8>,
     #[case] class: Class,
     #[case] version: Version,
     #[case] expected: Datatype,
 ) {
+    let consumed = bytes.len();
+    bytes.extend_from_slice(&[0xff; 4]);
     assert_eq!(
         format::parse_datatype(&bytes).unwrap(),
-        (expected, bytes.len())
+        (expected, consumed)
     );
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap_err(),
@@ -859,7 +861,7 @@ fn retained_array_flag_error_precedes_dimension_list_eof() {
 }
 
 #[test]
-fn incomplete_compound_member_reports_eof_from_each_parser_origin() {
+fn datatype_parsers_report_member_eof_from_the_compound_start() {
     let child = Leaf::Integer.bytes(Version::One);
     let mut bytes = containers::compound(
         Version::Three.get(),
@@ -874,18 +876,70 @@ fn incomplete_compound_member_reports_eof_from_each_parser_origin() {
     );
     let expected = bytes.len();
     bytes.truncate(expected - 1);
-    assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
+    assert_decode_error(
+        &bytes,
         FormatError::UnexpectedEof {
             expected,
-            available: bytes.len()
+            available: bytes.len(),
+        },
+    );
+}
+
+#[rstest]
+#[case::complex(Context::Complex.bytes(&datatype::f64_le()), 28)]
+#[case::opaque(Leaf::Opaque(OpaqueTag::NonAscii).bytes(Version::One), 16)]
+#[case::array_dimensions(datatype::array(Version::Three.get(), [0; 3], 24, 2, &[2, 3], &[]), 17)]
+#[case::enumeration_values(containers::enumeration(
+    Version::Three.get(), [2, 0, 0], 4, &Leaf::Integer.bytes(Version::One), &enum_values()
+), 41)]
+fn datatype_parsers_report_nested_eof_from_the_supplied_subslice(
+    #[case] child: Vec<u8>,
+    #[case] child_extent: usize,
+) {
+    assert_eq!(child.len(), child_extent);
+    let inner = VariableLengthSequence::new(Version::Five, 8, &child[..child_extent - 1]).build();
+    let body = VariableLengthSequence::new(Version::Five, 8, &inner).build();
+    let mut enclosing = vec![0xa5; 7];
+    let start = enclosing.len();
+    enclosing.extend_from_slice(&body);
+    enclosing.extend_from_slice(&[0x5a; 3]);
+    assert_decode_error(
+        &enclosing[start..start + body.len()],
+        FormatError::UnexpectedEof {
+            expected: body.len() + 1,
+            available: body.len(),
+        },
+    );
+}
+
+#[rstest]
+#[case::compound_v1(
+    test_util::legacy_compound::array_member(),
+    Class::COMPOUND,
+    Version::One
+)]
+#[case::compound_v2(containers::legacy_compound_v2(), Class::COMPOUND, Version::Two)]
+#[case::array_v2(containers::legacy_array(), Class::ARRAY, Version::Two)]
+#[case::enumeration_v1(containers::legacy_enumeration(), Class::ENUMERATED, Version::One)]
+fn semantic_parser_reports_nested_legacy_eof_from_the_outer_description(
+    #[case] mut child: Vec<u8>,
+    #[case] class: Class,
+    #[case] version: Version,
+) {
+    child.truncate(child.len() - 1);
+    let body = VariableLengthSequence::new(Version::Five, 8, &child).build();
+    assert_eq!(
+        format::parse_datatype(&body).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: body.len() + 1,
+            available: body.len(),
         },
     );
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
-        FormatError::UnexpectedEof {
-            expected: child.len(),
-            available: child.len() - 1
+        DatatypeMessage::parse(&body).unwrap_err(),
+        FormatError::InvalidDatatypeVersion {
+            class: class.0,
+            version: version.get(),
         },
     );
 }

@@ -7,6 +7,7 @@ use hdf5_pure_format::__private as format;
 use rstest::rstest;
 use test_util::datatype;
 use test_util::datatype::Class;
+use test_util::datatype::leaf::Version;
 use test_util::opaque::{ArrayVersion, CompoundLayout};
 
 #[rstest]
@@ -110,16 +111,22 @@ fn opaque_tags_reject_malformed_properties(
 #[case::missing_terminator(4)]
 #[case::missing_padding(5)]
 #[case::last_padding_byte(7)]
-fn opaque_tags_require_the_entire_declared_property(#[case] available: usize) {
-    let mut bytes = datatype::header(Class::OPAQUE, 1, [8, 0, 0], 4);
-    bytes.extend_from_slice(&b"BLOB\0\0\0\0"[..available]);
-    assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
-        FormatError::UnexpectedEof {
-            expected: 8,
-            available
-        },
+fn datatype_parsers_report_opaque_tag_eof_from_the_message_start(#[case] available: usize) {
+    let property = b"BLOB\0\0\0\0";
+    let mut bytes = datatype::header(
+        Class::OPAQUE,
+        Version::One.get(),
+        [u8::try_from(property.len()).unwrap(), 0, 0],
+        4,
     );
+    let expected = bytes.len() + property.len();
+    bytes.extend_from_slice(&property[..available]);
+    let error = FormatError::UnexpectedEof {
+        expected,
+        available: bytes.len(),
+    };
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), error);
+    assert_eq!(format::DatatypeMessage::parse(&bytes).unwrap_err(), error);
 }
 
 #[rstest]

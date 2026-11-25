@@ -96,8 +96,8 @@ fn native_complex_rejects_other_message_versions(#[case] version: u8) {
 #[rstest]
 #[case::no_parent(0, 16, 8)]
 #[case::partial_parent_header(7, 16, 15)]
-#[case::no_parent_properties(8, 20, 8)]
-#[case::partial_parent_properties(19, 20, 19)]
+#[case::no_parent_properties(8, 28, 16)]
+#[case::partial_parent_properties(19, 28, 27)]
 fn native_complex_rejects_truncated_parent(
     #[case] parent_len: usize,
     #[case] expected: usize,

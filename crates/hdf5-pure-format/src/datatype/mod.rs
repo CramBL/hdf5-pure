@@ -172,9 +172,8 @@ pub fn stored_element_size_usize(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the body ends within a field. For an incomplete
-/// array dimension or enumeration value list, `expected` is the end offset of the required
-/// list from the start of the description containing it. Returns
+/// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. EOF byte counts
+/// are relative to the start of `data`, including for nested descriptions. Returns
 /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
 /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
 /// Returns [`FormatError::NestingDepthExceeded`] if a nested description exceeds the limit.
@@ -342,8 +341,8 @@ fn parse_datatype_at(
 
 /// Parses the next description from the bytes remaining at the cursor.
 ///
-/// Checks the nesting limit before reading the child. Advances the outer cursor by the consumed
-/// length on success.
+/// Checks the nesting limit before reading the child. Uses byte offsets relative to the original
+/// input when reading the child. Advances the outer cursor by the consumed length on success.
 ///
 /// # Errors
 ///
@@ -353,9 +352,9 @@ fn parse_nested_datatype(
     parent_depth: MessageDepth,
 ) -> Result<Decoded<Datatype>, FormatError> {
     let depth = parent_depth.child()?;
-    let mut nested = ByteCursor::new(cursor.remaining());
+    let mut nested = *cursor;
     let decoded = parse_datatype_at(&mut nested, depth)?;
-    cursor.take(nested.position())?;
+    *cursor = nested;
     Ok(decoded)
 }
 
@@ -452,24 +451,17 @@ impl<'a> OpaqueTagWire<'a> {
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidOpaqueTagLength`] if the declared length is not a multiple
-    /// of eight, then [`FormatError::UnexpectedEof`] if that many bytes are unavailable. For
-    /// truncation, `expected` is the recorded property length and `available` is the number of
-    /// bytes remaining at the start of the property. Returns
-    /// [`FormatError::InvalidOpaqueTagPadding`] for a nonzero byte after the first NUL, with its
-    /// offset relative to the start of the property.
+    /// of eight. Returns [`FormatError::UnexpectedEof`] if the property is incomplete, with
+    /// byte counts relative to the cursor's original input. Returns
+    /// [`FormatError::InvalidOpaqueTagPadding`] for a nonzero byte after the first NUL, with
+    /// the byte's offset relative to the start of the property.
     fn parse(encoded_len: u8, cursor: &mut ByteCursor<'a>) -> Result<Self, FormatError> {
         if !encoded_len.is_multiple_of(OPAQUE_TAG_ALIGNMENT) {
             return Err(FormatError::InvalidOpaqueTagLength {
                 length: encoded_len,
             });
         }
-        let length = usize::from(encoded_len);
-        let property = cursor
-            .take(length)
-            .map_err(|_error| FormatError::UnexpectedEof {
-                expected: length,
-                available: cursor.remaining().len(),
-            })?;
+        let property = cursor.take(usize::from(encoded_len))?;
         // `H5O__dtype_encode_helper` fills aligned tags without a terminator
         // (H5Odtype.c, HDF5 2.2.0).
         let terminator = property.iter().position(|&byte| byte == 0);
