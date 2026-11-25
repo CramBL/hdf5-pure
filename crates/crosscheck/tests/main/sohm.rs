@@ -31,13 +31,15 @@ use hdf5_pure::FormatError;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
 use libhdf5::file::LibraryVersion;
-use libhdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
+use libhdf5::plist::file_create::{SharedMessageIndex, SharedMessageType, Sizeof, SizeofInfo};
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util::btree::v2 as btree_v2;
 use test_util::bytes;
 #[cfg(target_endian = "little")]
 use test_util::sohm as shared_fixture;
+#[cfg(target_endian = "little")]
+use test_util_hdf5::lock;
 #[cfg(target_endian = "little")]
 use test_util_hdf5::reader::ReadBackend;
 
@@ -94,14 +96,27 @@ struct Fixture {
 /// shared; the C library's own default (250) shares almost nothing in a small
 /// fixture.
 fn create_shared_file(path: &Path, max_list: u32, min_btree: u32) -> libhdf5::File {
+    create_shared_file_with_offsets(path, max_list, min_btree, Sizeof::Bytes8)
+}
+
+fn create_shared_file_with_offsets(
+    path: &Path,
+    max_list: u32,
+    min_btree: u32,
+    offsets: Sizeof,
+) -> libhdf5::File {
     libhdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
         .with_fcpl(|p| {
-            p.shared_mesg_phase_change(max_list, min_btree)
-                .shared_mesg_indexes(&[SharedMessageIndex {
-                    message_types: SharedMessageType::ALL,
-                    min_message_size: 1,
-                }])
+            p.sizes(SizeofInfo {
+                sizeof_addr: offsets,
+                sizeof_size: Sizeof::Bytes8,
+            })
+            .shared_mesg_phase_change(max_list, min_btree)
+            .shared_mesg_indexes(&[SharedMessageIndex {
+                message_types: SharedMessageType::ALL,
+                min_message_size: 1,
+            }])
         })
         .create(path)
         .expect("create a file with a shared-message index")
@@ -165,10 +180,14 @@ const BTREE_FIXTURE_OBJECTS: usize = 3;
 /// shared messages than that (one dataspace per distinct shape, plus the
 /// datatype and the attribute), which is what makes the C library convert.
 fn btree_fixture() -> Fixture {
+    btree_fixture_with_offsets(Sizeof::Bytes8)
+}
+
+fn btree_fixture_with_offsets(offsets: Sizeof) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sohm_btree.h5");
     {
-        let file = create_shared_file(&path, 2, 1);
+        let file = create_shared_file_with_offsets(&path, 2, 1, offsets);
         write_shared_objects(&file, BTREE_FIXTURE_OBJECTS);
         // Distinct shapes, so each contributes its own dataspace message to the
         // index rather than sharing one already there. They live in a subgroup so
@@ -289,6 +308,36 @@ fn a_btree_indexed_shared_message_file_reads_back_whole() {
         );
         assert_eq!(dataset.datatype().unwrap(), i32_type());
     }
+}
+
+#[cfg(target_endian = "little")]
+#[rstest]
+#[case::two(Sizeof::Bytes2)]
+#[case::four(Sizeof::Bytes4)]
+fn libhdf5_declares_a_seventeen_byte_shared_message_btree_stride_at_narrow_offsets(
+    #[case] offsets: Sizeof,
+) {
+    let _guard = lock::libhdf5_guard();
+    let fixture = btree_fixture_with_offsets(offsets);
+    let file = libhdf5::File::open(&fixture.path).unwrap();
+    assert_eq!(
+        file.fcpl().unwrap().get_sizes().unwrap(),
+        SizeofInfo {
+            sizeof_addr: offsets,
+            sizeof_size: Sizeof::Bytes8,
+        }
+    );
+    file.close().unwrap();
+
+    let image = fs::read(&fixture.path).unwrap();
+    let header = bytes::sole_signature(&image, btree_v2::SIGNATURE);
+    let tree_type = header + btree_v2::SIGNATURE.len() + core::mem::size_of::<u8>();
+    let record_size = tree_type + core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
+    assert_eq!(bytes::u8_at(&image, tree_type), SHARED_MESSAGE_INDEX_TYPE);
+    assert_eq!(
+        bytes::u16_at(&image, record_size),
+        shared_fixture::RECORD_SIZE
+    );
 }
 
 /// A message shared by many objects is one message: every user must read the
