@@ -1,14 +1,12 @@
-use alloc::vec::Vec;
-
+use super::block;
 use super::{ExtensibleArrayPlacement, INDEX_BLOCK};
 use crate::address::StoredAddress;
 use crate::bytes::UnexpectedEof;
-use crate::checksum;
 use crate::chunk_record::{ArrayClient, ElementEncoding, InvalidElementEncoding};
 use crate::codec::Encode;
 use crate::error::FormatError;
 use crate::extensible_array::{
-    CHECKSUM_LEN, ExtensibleArrayCreationParameters, ExtensibleArrayHeader, ExtensibleArrayStats,
+    ExtensibleArrayCreationParameters, ExtensibleArrayHeader, ExtensibleArrayStats,
     HEADER_BYTE_FIELDS, HEADER_PREFIX_LEN, HEADER_SIGNATURE, VERSION,
 };
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
@@ -143,16 +141,16 @@ pub(super) struct HeaderEncoding<'a> {
 }
 
 impl HeaderEncoding<'_> {
-    /// Appends the complete header to a buffer with capacity for it.
-    pub(super) fn append_into(&self, output: &mut Vec<u8>) {
-        let start = output.len();
-        output.resize(start + self.encoded_len(), 0);
-        self.write_header(&mut output[start..]);
+    /// Writes the header and checksum into a destination of exactly the encoded length.
+    ///
+    /// # Panics
+    ///
+    /// Can panic if `output` has the wrong length.
+    pub(super) fn write_header(&self, output: &mut [u8]) {
+        block::write_checksummed(output, |content| self.write_fields(content));
     }
 
-    /// Writes the header and checksum into a destination of exactly the encoded length.
-    fn write_header(&self, output: &mut [u8]) {
-        let (content, checksum_field) = output.split_at_mut(output.len() - CHECKSUM_LEN);
+    fn write_fields(&self, content: &mut [u8]) {
         let (prefix, fields) = content.split_at_mut(HEADER_PREFIX_LEN);
         let (signature, properties) = prefix.split_at_mut(HEADER_SIGNATURE.len());
         signature.copy_from_slice(&HEADER_SIGNATURE);
@@ -186,7 +184,6 @@ impl HeaderEncoding<'_> {
             }
         };
         index_address.copy_from_slice(&address.get().to_le_bytes()[..usize::from(offsets.get())]);
-        checksum_field.copy_from_slice(&checksum::jenkins_lookup3(content).to_le_bytes());
     }
 }
 
@@ -199,11 +196,7 @@ impl Encode for HeaderEncoding<'_> {
 
     fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
         let required = self.encoded_len();
-        let available = output.len();
-        let header = output
-            .get_mut(..required)
-            .ok_or_else(|| UnexpectedEof::new(required, available))?;
-        self.write_header(header);
+        self.write_header(block::destination(output, required)?);
         Ok(required)
     }
 }

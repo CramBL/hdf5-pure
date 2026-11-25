@@ -3,21 +3,17 @@
 use alloc::vec::Vec;
 
 use super::BlockLocation;
-use super::ChildBlock;
 use super::ExtensibleArrayBlock;
 use super::ExtensibleArrayPlacement;
 use super::ExtensibleArrayPlan;
 use super::HEADER_BLOCK;
-use crate::address::DecodedStoredAddress;
+use super::block::{self, Addresses, Bitmap, ExtensibleArrayBlockWriter};
 use crate::address::StoredAddress;
-use crate::bytes;
-use crate::checksum;
-use crate::chunk_record;
+use crate::bytes::UnexpectedEof;
 use crate::chunk_record::IndexSlots;
+use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::extensible_array;
-use crate::width;
 
 impl ExtensibleArrayPlacement<'_> {
     /// Checks chunk records against this placement's logical capacity.
@@ -33,7 +29,8 @@ impl ExtensibleArrayPlacement<'_> {
     /// [`FormatError::DefinedAddressIsUndefined`] if a chunk address is undefined,
     /// [`FormatError::AddressTooLarge`] if a chunk address exceeds the address width, or
     /// [`FormatError::LengthTooLarge`] if a filtered chunk's stored size exceeds its field width.
-    /// Returns [`FormatError::AllocationFailed`] if the reference index reservation fails.
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if a block's encoded length does not fit
+    /// [`usize`], or [`FormatError::AllocationFailed`] if the reference index reservation fails.
     pub fn encoding<'a>(
         &'a self,
         slots: &'a IndexSlots<'a>,
@@ -75,8 +72,8 @@ impl ExtensibleArrayPlacement<'_> {
 /// let mut emitted = 0;
 /// for (block, expected_address) in encoding.blocks().zip(addresses) {
 ///     assert_eq!(block.address(), expected_address);
-///     block.encode_into(&mut output)?;
-///     emitted += output.len();
+///     output.resize(block.encoded_size(), 0);
+///     emitted += block.write_into(&mut output)?;
 /// }
 /// assert_eq!(emitted, 370);
 /// # Ok::<(), hdf5_pure_core::FormatError>(())
@@ -94,8 +91,8 @@ impl<'a> ExtensibleArrayEncoding<'a> {
     ) -> Result<Self, FormatError> {
         let ExtensibleArrayPlan {
             creation: _,
-            widths,
-            encoding,
+            widths: _,
+            encoding: _,
             layout,
             blocks,
             stats,
@@ -123,31 +120,11 @@ impl<'a> ExtensibleArrayEncoding<'a> {
         if let Some(slot) = next {
             return Err(FormatError::ExtensibleArrayUnplannedSlot { slot });
         }
-        let maximum = StoredAddress::undefined(widths.offsets).get();
         for chunk in slots.records() {
-            if chunk.address.get() == maximum {
-                return Err(FormatError::DefinedAddressIsUndefined {
-                    address: maximum,
-                    offset_size: widths.offsets.get(),
-                });
-            }
-            if chunk.address.get() > maximum {
-                return Err(FormatError::AddressTooLarge {
-                    address: chunk.address.get(),
-                    offset_size: widths.offsets.get(),
-                });
-            }
-            if encoding.client_id != extensible_array::EA_CLIENT_ID_UNFILTERED
-                && usize::from(width::encoded_unsigned_width(chunk.stored_size))
-                    > encoding.chunk_size_bytes
-            {
-                return Err(FormatError::LengthTooLarge {
-                    length: chunk.stored_size,
-                    length_size: encoding
-                        .chunk_size_bytes
-                        .narrow_or_else(|| FormatError::InvalidExtensibleArrayGeometry)?,
-                });
-            }
+            layout.encoding.require_record_fits(chunk)?;
+        }
+        for block in blocks {
+            block.length.to_usize()?;
         }
         let mut pointers = Vec::new();
         pointers
@@ -157,17 +134,18 @@ impl<'a> ExtensibleArrayEncoding<'a> {
                 source,
             })?;
         let direct_blocks = layout.direct_data_blocks();
-        for (child, block) in blocks.iter().enumerate() {
-            let (block, slot_base) = match &block.location {
+        for (descriptor, block) in blocks.iter().enumerate() {
+            let (parent, slot) = match &block.location {
                 BlockLocation::Header | BlockLocation::Index { .. } => continue,
-                BlockLocation::Secondary(block) => (block, direct_blocks),
-                BlockLocation::Data(block) => (block, 0),
+                BlockLocation::Secondary(block) => {
+                    (super::INDEX_BLOCK, direct_blocks + block.pointer)
+                }
+                BlockLocation::Data(block) => block.parent,
             };
-            let (parent, slot) = block.parent;
             pointers.push(Pointer {
                 parent,
-                slot: slot + slot_base,
-                child,
+                slot,
+                descriptor,
             });
         }
         pointers.sort_unstable_by_key(|pointer| (pointer.parent, pointer.slot));
@@ -225,219 +203,143 @@ impl ExtensibleArrayEmission<'_> {
     /// Replaces `output` with this complete block, reusing its capacity.
     ///
     /// A paged data block includes its prefix and every page. The writer computes all checksums
-    /// regardless of the `checksum` feature. On error, the contents of `output` are unspecified.
+    /// regardless of the `checksum` feature.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the complete length does not fit
-    /// [`usize`], [`FormatError::AllocationFailed`] if the output reservation fails, or
-    /// [`FormatError::Internal`] if the encoded length differs from the planned length.
+    /// Returns [`FormatError::AllocationFailed`] if the output reservation fails, leaving
+    /// `output` unchanged.
+    #[expect(
+        clippy::same_name_method,
+        reason = "the existing Vec method reserves storage before using the bounded encoder"
+    )]
     pub fn encode_into(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
-        output.clear();
-        self.append_into(output)
+        let length = self.encoded_len();
+        reserve(output, length.saturating_sub(output.len()), length)?;
+        output.resize(length, 0);
+        self.write_block(output);
+        Ok(())
     }
 
     /// Appends this complete block after the existing `output` bytes.
     ///
-    /// Existing bytes are preserved, and checksums cover only this block's appended bytes. On
-    /// error, the appended bytes may be incomplete.
+    /// Preserves existing bytes. The writer computes the block's checksums over appended bytes.
     ///
     /// # Errors
     ///
-    /// Returns the length, reservation, and encoding errors of [`Self::encode_into`].
+    /// Returns [`FormatError::AllocationFailed`] if the output reservation fails, leaving
+    /// `output` unchanged.
     pub(crate) fn append_into(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
-        let length = self.block().length.to_usize()?;
+        let length = self.encoded_len();
         let start = output.len();
-        output
-            .try_reserve_exact(length)
-            .map_err(|source| FormatError::AllocationFailed {
-                values: start.saturating_add(length),
-                source,
-            })?;
-        match &self.block().location {
-            BlockLocation::Header => self
-                .encoding
-                .placement
-                .header_encoding()
-                .append_into(output),
-            BlockLocation::Index { .. } => self.index(output)?,
-            BlockLocation::Secondary(block) => self.secondary(output, block)?,
-            BlockLocation::Data(block) => self.data(output, block)?,
-        }
-        if output.len().checked_sub(start) != Some(length) {
-            return Err(FormatError::Internal(alloc::format!(
-                "EA encoding produced {} bytes for a complete block of {length} bytes",
-                output.len().saturating_sub(start)
-            )));
-        }
+        let end = start.saturating_add(length);
+        reserve(output, length, end)?;
+        output.resize(end, 0);
+        self.write_block(&mut output[start..]);
         Ok(())
     }
 
-    fn index(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
-        let block_start = output.len();
-        self.prefix(output, &extensible_array::INDEX_BLOCK_SIGNATURE)?;
-        self.elements(
-            output,
-            0,
-            u64::from(self.encoding.placement.plan.layout.inline_elements),
-        )?;
-        let layout = self.encoding.placement.plan.layout;
-        self.pointers(
-            output,
-            layout.direct_data_blocks() + u64::from(layout.super_blocks - layout.first_super_block),
-        )?;
-        append_checksum(output, block_start);
-        Ok(())
+    /// Returns the exact length in bytes of the complete allocation, including checksums.
+    pub fn encoded_size(&self) -> usize {
+        Encode::encoded_len(self)
     }
 
-    fn secondary(&self, output: &mut Vec<u8>, descriptor: &ChildBlock) -> Result<(), FormatError> {
-        let block_start = output.len();
-        let plan = self.encoding.placement.plan;
-        let (_, pointer) = descriptor.parent;
-        let block = plan.layout.super_block(
-            plan.layout.first_super_block
-                + u32::try_from(pointer)
-                    .map_err(|_error| FormatError::InvalidExtensibleArrayGeometry)?,
-        )?;
-        self.prefix(output, &extensible_array::SUPER_BLOCK_SIGNATURE)?;
-        self.block_offset(output, descriptor.offset);
-        let bitmap_start = output.len();
-        output.resize(bitmap_start + plan.layout.bitmap_len(block)?.to_usize()?, 0);
-        if let Some(pages) = plan.layout.pages(block.block_elements) {
-            let page_nelmts = plan.layout.page_nelmts.get();
-            for child in self.encoding.children(self.index) {
-                let start = extensible_array::sum([
-                    descriptor.slots.start,
-                    extensible_array::product(child.slot, block.block_elements)?,
-                ])?;
-                let end = extensible_array::sum([start, block.block_elements])?;
-                let mut next = self.encoding.slots.next_occupied(start);
-                while let Some(slot) = next.filter(|&slot| slot < end) {
-                    let page = (slot - start) / page_nelmts;
-                    let bit = extensible_array::sum([
-                        extensible_array::product(child.slot, pages)?,
-                        page,
-                    ])?;
-                    let byte = bitmap_start + (bit / 8).to_usize()?;
-                    output[byte] |= 0x80 >> (bit % 8);
-                    next = self.encoding.slots.next_occupied(extensible_array::sum([
-                        start,
-                        extensible_array::product(page + 1, page_nelmts)?,
-                    ])?);
-                }
+    /// Writes the complete allocation at the start of `output` and returns its length in bytes.
+    ///
+    /// A paged data block includes its prefix and every page. The writer computes all checksums
+    /// regardless of the `checksum` feature and preserves any output suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `output` is too short, leaving it unchanged.
+    pub fn write_into(&self, output: &mut [u8]) -> Result<usize, FormatError> {
+        Ok(Encode::encode_into(self, output)?)
+    }
+
+    /// Writes the allocation into a slice of exactly its encoded size.
+    ///
+    /// # Panics
+    ///
+    /// Can panic if `output` has the wrong length.
+    fn write_block(&self, output: &mut [u8]) {
+        let ExtensibleArrayEncoding {
+            placement,
+            slots,
+            pointers: _,
+        } = self.encoding;
+        let layout = placement.plan.layout;
+        let writer =
+            ExtensibleArrayBlockWriter::placed(layout, placement.ranges[HEADER_BLOCK].start());
+        let children = self.encoding.children(self.index);
+        let addresses = Addresses::Placed {
+            children,
+            ranges: &placement.ranges,
+        };
+        let length = output.len();
+        let block = match &self.block().location {
+            BlockLocation::Header => {
+                placement.header_encoding().write_header(output);
+                return;
             }
-        }
-        self.pointers(output, block.blocks)?;
-        append_checksum(output, block_start);
-        Ok(())
-    }
-
-    fn data(&self, output: &mut Vec<u8>, descriptor: &ChildBlock) -> Result<(), FormatError> {
-        let block_start = output.len();
-        let layout = self.encoding.placement.plan.layout;
-        let slots = &descriptor.slots;
-        self.prefix(output, &extensible_array::DATA_BLOCK_SIGNATURE)?;
-        self.block_offset(output, descriptor.offset);
-        match layout.pages(slots.end - slots.start) {
-            None => {
-                self.elements(output, slots.start, slots.end - slots.start)?;
-                append_checksum(output, block_start);
+            BlockLocation::Index { .. } => writer.index(length, slots, addresses),
+            BlockLocation::Secondary(block) => {
+                let offsets = usize::from(layout.encoding.offsets().get());
+                #[cfg_attr(
+                    target_pointer_width = "32",
+                    expect(
+                        clippy::cast_possible_truncation,
+                        reason = "the checked block length fits usize and includes at least one byte per pointer"
+                    )
+                )]
+                let pointer_count = block.geometry.blocks as usize;
+                let bitmap_len = length - layout.pages_offset_usize() - pointer_count * offsets;
+                let bitmap = Bitmap::Occupied {
+                    slots,
+                    children,
+                    first_slot: block.first_slot,
+                };
+                writer.secondary(length, block.geometry, bitmap_len, bitmap, addresses)
             }
-            Some(pages) => {
-                let page_nelmts = layout.page_nelmts.get();
-                append_checksum(output, block_start);
-                for page in 0..pages {
-                    let page_start = output.len();
-                    self.elements(
-                        output,
-                        extensible_array::sum([
-                            slots.start,
-                            extensible_array::product(page, page_nelmts)?,
-                        ])?,
-                        page_nelmts,
-                    )?;
-                    append_checksum(output, page_start);
-                }
+            BlockLocation::Data(block) => {
+                writer.data(slots, block.slots.clone(), block.offset, length)
             }
-        }
-        Ok(())
+        };
+        block.write_block(output);
     }
+}
 
-    fn prefix(&self, output: &mut Vec<u8>, signature: &[u8; 4]) -> Result<(), FormatError> {
-        output.extend_from_slice(signature);
-        output.extend_from_slice(&[
-            extensible_array::VERSION,
-            self.encoding.placement.plan.encoding.client_id,
-        ]);
-        self.address_field(output, Some(HEADER_BLOCK))
-    }
+impl Encode for ExtensibleArrayEmission<'_> {
+    type Error = UnexpectedEof;
 
-    fn block_offset(&self, output: &mut Vec<u8>, offset: u64) {
-        output.extend_from_slice(
-            &offset.to_le_bytes()
-                [..usize::from(self.encoding.placement.plan.layout.block_offset_len)],
-        );
-    }
-
-    fn elements(&self, output: &mut Vec<u8>, start: u64, count: u64) -> Result<(), FormatError> {
-        let plan = self.encoding.placement.plan;
-        for slot in start..extensible_array::sum([start, count])? {
-            match usize::try_from(slot)
-                .ok()
-                .and_then(|slot| self.encoding.slots.at(slot))
-            {
-                Some(chunk) => chunk_record::write_chunk_element(
-                    output,
-                    chunk,
-                    plan.widths.offsets,
-                    plan.encoding.client_id != extensible_array::EA_CLIENT_ID_UNFILTERED,
-                    plan.encoding.chunk_size_bytes,
-                )?,
-                None => chunk_record::write_undefined_element(
-                    output,
-                    plan.widths.offsets,
-                    plan.encoding.client_id != extensible_array::EA_CLIENT_ID_UNFILTERED,
-                    plan.encoding.chunk_size_bytes,
-                ),
-            }
-        }
-        Ok(())
-    }
-
-    fn pointers(&self, output: &mut Vec<u8>, count: u64) -> Result<(), FormatError> {
-        let mut children = self.encoding.children(self.index).iter().peekable();
-        for slot in 0..count {
-            self.address_field(
-                output,
-                children
-                    .next_if(|pointer| pointer.slot == slot)
-                    .map(|pointer| pointer.child),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn address_field(&self, output: &mut Vec<u8>, block: Option<usize>) -> Result<(), FormatError> {
-        bytes::try_write_decoded_address(
-            output,
-            block.map_or(DecodedStoredAddress::Undefined, |block| {
-                DecodedStoredAddress::Defined(self.encoding.placement.ranges[block].start())
-            }),
-            self.encoding.placement.plan.widths.offsets,
+    #[cfg_attr(
+        target_pointer_width = "32",
+        expect(
+            clippy::cast_possible_truncation,
+            reason = "encoding preparation checks that every complete block length fits usize"
         )
+    )]
+    fn encoded_len(&self) -> usize {
+        self.block().length as usize
+    }
+
+    fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let length = self.encoded_len();
+        self.write_block(block::destination(output, length)?);
+        Ok(length)
     }
 }
 
 /// The parent and child descriptor indices and the encoded pointer slot between them.
-struct Pointer {
-    parent: usize,
-    slot: u64,
-    child: usize,
+pub(super) struct Pointer {
+    pub(super) parent: usize,
+    pub(super) slot: u64,
+    pub(super) descriptor: usize,
 }
 
-fn append_checksum(output: &mut Vec<u8>, start: usize) {
-    let checksum = checksum::jenkins_lookup3(&output[start..]);
-    output.extend_from_slice(&checksum.to_le_bytes());
+fn reserve(output: &mut Vec<u8>, additional: usize, values: usize) -> Result<(), FormatError> {
+    output
+        .try_reserve_exact(additional)
+        .map_err(|source| FormatError::AllocationFailed { values, source })
 }
 
 #[cfg(test)]
@@ -455,6 +357,7 @@ mod tests {
 
     use super::*;
     use crate::chunk_record::ChunkRecord;
+    use crate::extensible_array;
     use crate::extensible_array::ExtensibleArrayCreationParameters;
     use crate::extensible_array::ExtensibleArrayHeaderLocator;
     use crate::extensible_array::SlotOccupancy;

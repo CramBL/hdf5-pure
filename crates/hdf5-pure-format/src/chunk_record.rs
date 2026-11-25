@@ -333,45 +333,67 @@ impl ElementEncoding {
     /// [`FormatError::DefinedAddressIsUndefined`] if a defined address equals the undefined
     /// marker, or [`FormatError::LengthTooLarge`] if a filtered size exceeds its entry field.
     pub(crate) fn encode(self, record: Option<ChunkRecord>) -> Result<EncodedElement, FormatError> {
+        if let Some(record) = &record {
+            self.require_record_fits(record)?;
+        }
+        let mut element = EncodedElement {
+            bytes: [0; MAX_ELEMENT_LEN],
+            length: self.stride,
+        };
+        self.write_element(
+            &mut element.bytes[..usize::from(self.stride.get())],
+            record.as_ref(),
+        );
+        Ok(element)
+    }
+
+    /// Checks the stored address and, for a filtered record, its stored size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if the address exceeds the offset width,
+    /// [`FormatError::DefinedAddressIsUndefined`] if the address equals the undefined marker,
+    /// or [`FormatError::LengthTooLarge`] if a filtered size exceeds its entry field.
+    pub(crate) fn require_record_fits(self, record: &ChunkRecord) -> Result<(), FormatError> {
+        DecodedStoredAddress::Defined(record.address).to_stored(self.offsets)?;
+        if let ArrayClient::FilteredChunks { chunk_size_len } = self.client {
+            low_bytes(
+                &record.stored_size.to_le_bytes(),
+                usize::from(chunk_size_len),
+            )
+            .ok_or(FormatError::LengthTooLarge {
+                length: record.stored_size,
+                length_size: chunk_size_len,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Writes one checked record, or an undefined address and zero fields for an unoccupied slot.
+    ///
+    /// The caller passes a slice of exactly one element's stride and checks any occupied record
+    /// with [`Self::require_record_fits`].
+    ///
+    /// # Panics
+    ///
+    /// Can panic if `output` has the wrong length.
+    pub(crate) fn write_element(self, output: &mut [u8], record: Option<&ChunkRecord>) {
         let Self {
             offsets,
             client,
-            stride,
+            stride: _,
         } = self;
-        let mut element = EncodedElement {
-            bytes: [0; MAX_ELEMENT_LEN],
-            length: stride,
-        };
-        match record {
-            Some(record) => bytes::write_defined_stored_address_at(
-                &mut element.bytes,
-                0,
-                record.address,
-                offsets,
-            )?,
-            None => bytes::write_stored_address_at(
-                &mut element.bytes,
-                0,
-                StoredAddress::undefined(offsets),
-                offsets,
-            )?,
-        }
+        let (address, fields) = output.split_at_mut(usize::from(offsets.get()));
+        let stored =
+            record.map_or_else(|| StoredAddress::undefined(offsets), |chunk| chunk.address);
+        address.copy_from_slice(&stored.get().to_le_bytes()[..address.len()]);
         if let ArrayClient::FilteredChunks { chunk_size_len } = client {
-            let value = record.map_or(0, |record| record.stored_size);
-            let encoded = value.to_le_bytes();
-            let field = low_bytes(&encoded, usize::from(chunk_size_len)).ok_or(
-                FormatError::LengthTooLarge {
-                    length: value,
-                    length_size: chunk_size_len,
-                },
-            )?;
-            let position = usize::from(offsets.get());
-            element.bytes[position..position + field.len()].copy_from_slice(field);
-            let position = position + field.len();
-            element.bytes[position..position + usize::from(FILTER_MASK_LEN)]
-                .copy_from_slice(&record.map_or(0, |record| record.filter_mask).to_le_bytes());
+            let (size, mask) = fields.split_at_mut(usize::from(chunk_size_len));
+            size.copy_from_slice(
+                &record.map_or(0, |chunk| chunk.stored_size).to_le_bytes()[..size.len()],
+            );
+            mask.copy_from_slice(&record.map_or(0, |chunk| chunk.filter_mask).to_le_bytes());
         }
-        Ok(element)
     }
 
     pub(crate) const fn offsets(self) -> OffsetWidth {
@@ -482,14 +504,20 @@ pub(crate) enum InvalidElementEncoding {
     EntrySize,
 }
 
-// Page 0 is the most significant bit of the first byte, as `H5VM_bit_get` reads it
-// (`H5VMprivate.h`, HDF5 2.2.0).
 pub(crate) fn page_initialized(bitmap: &[u8], page: u64) -> bool {
     usize::try_from(page / 8)
         .ok()
         .and_then(|byte| bitmap.get(byte))
-        .is_some_and(|&byte| byte & (0x80 >> (page % 8)) != 0)
+        .is_some_and(|&byte| byte & page_bit_mask(page) != 0)
 }
+
+// Page 0 is the most significant bit of the first byte, as `H5VM_bit_get` reads it
+// (`H5VMprivate.h`, HDF5 2.2.0).
+pub(crate) const fn page_bit_mask(page: u64) -> u8 {
+    FIRST_PAGE_BIT >> (page % 8)
+}
+
+const FIRST_PAGE_BIT: u8 = 0x80;
 
 const fn address_stride(offsets: OffsetWidth) -> NonZeroU8 {
     match offsets {

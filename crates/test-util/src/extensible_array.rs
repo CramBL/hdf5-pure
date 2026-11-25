@@ -113,6 +113,8 @@ pub enum Creation {
     NoInline,
     /// Sets the maximum element bit count to 16 and reserves eight inline entries.
     Small,
+    /// Reserves two inline entries and limits each page to two elements.
+    SmallPages,
 }
 
 impl Creation {
@@ -124,6 +126,7 @@ impl Creation {
             Self::LargeInline => [24, 32, 8, 32, 12],
             Self::NoInline => [16, 0, 2, 8, 8],
             Self::Small => [16, 8, 2, 8, 8],
+            Self::SmallPages => [8, 2, 2, 1, 1],
         }
     }
 }
