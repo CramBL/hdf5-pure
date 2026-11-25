@@ -60,6 +60,26 @@ fn opening_extension_reports_truncated_record_after_file_space_info() {
     );
 }
 
+#[test]
+fn opening_extension_reports_manager_eof_from_the_file_space_info_body() {
+    let mut body =
+        file_space_info::non_persistent_version_1(Widths::EIGHT, file_space_info::PAGE, 7, 4096);
+    body[file_space_info::VERSION_1_PERSIST_FLAG_OFFSET] = 1;
+    let header = v2::Header::new()
+        .message(Message::new(MessageType::FILE_SPACE_INFO, &body))
+        .build();
+    let Err(error) = read_extension(header) else {
+        panic!("expected an incomplete manager list");
+    };
+    assert_eq!(
+        error,
+        FormatError::UnexpectedEof {
+            expected: 125,
+            available: 29,
+        }
+    );
+}
+
 fn persistent_file_space_info() -> Vec<u8> {
     file_space_info::version_0(
         Widths::EIGHT,

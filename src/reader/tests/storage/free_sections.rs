@@ -357,7 +357,18 @@ fn assert_current_file_space_metadata(file: &File) -> u64 {
 }
 
 #[rstest]
-fn malformed_file_space_info_is_reported(#[values(false, true)] streaming: bool) {
+#[case::version(0, 9, FormatError::UnsupportedFileSpaceInfoVersion(9))]
+#[case::managers(
+    file_space_info::VERSION_1_PERSIST_FLAG_OFFSET,
+    1,
+    FormatError::UnexpectedEof { expected: 125, available: 29 }
+)]
+fn malformed_file_space_info_is_reported(
+    #[case] byte: usize,
+    #[case] value: u8,
+    #[case] expected: FormatError,
+    #[values(false, true)] streaming: bool,
+) {
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(
         FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
@@ -375,38 +386,26 @@ fn malformed_file_space_info_is_reported(#[values(false, true)] streaming: bool)
     drop(file);
     let mut body =
         file_space_info::non_persistent_version_1(Widths::EIGHT, file_space_info::PAGE, 1, 4096);
-    body[0] = 9;
+    body[byte] = value;
     file_space_info::replace_message(&path, extension, &body);
     let file = if streaming {
         File::open_streaming(&path).unwrap()
     } else {
         File::open(&path).unwrap()
     };
-    let error = file.file_space_info().unwrap_err();
-    assert!(
-        matches!(
-            error,
-            Error::Format(FormatError::UnsupportedFileSpaceInfoVersion(9))
-        ),
-        "{error:?}"
-    );
-    let error = file.file_space_settings().unwrap_err();
-    assert!(
-        matches!(
-            error,
-            Error::Format(FormatError::UnsupportedFileSpaceInfoVersion(9))
-        ),
-        "{error:?}"
-    );
+    let Error::Format(error) = file.file_space_info().unwrap_err() else {
+        panic!("expected a File Space Info format error");
+    };
+    assert_eq!(error, expected);
+    let Error::Format(error) = file.file_space_settings().unwrap_err() else {
+        panic!("expected a file-space settings format error");
+    };
+    assert_eq!(error, expected);
     assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
-    let error = file.persisted_free_sections().unwrap_err();
-    assert!(
-        matches!(
-            error,
-            Error::Format(FormatError::UnsupportedFileSpaceInfoVersion(9))
-        ),
-        "{error:?}"
-    );
+    let Error::Format(error) = file.persisted_free_sections().unwrap_err() else {
+        panic!("expected a persisted free sections format error");
+    };
+    assert_eq!(error, expected);
 }
 
 #[rstest]

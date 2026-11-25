@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::file_space_info` excluding the message prefix from EOF byte counts for incomplete
+  version 1 free-space manager lists.
 - Fixed `Dataset::filter_pipeline` and related operations losing structured error details for
   invalid filter names and out-of-range filter counts ([#1368](https://github.com/CramBL/hdf5-pure/pull/1368)).
 - Fixed `File::dataset` and related metadata reads reporting truncation for version 1 object

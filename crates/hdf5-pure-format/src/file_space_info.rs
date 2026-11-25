@@ -98,8 +98,7 @@ pub fn normalize_file_space_info_to_v1(info: &FileSpaceInfo, eoa: StoredAddress)
 /// [`FormatError::UnsupportedFileSpaceInfoVersion`] if the version is not 0 or 1,
 /// [`FormatError::InvalidFileSpaceStrategy`] if the version does not define the strategy code, and
 /// [`FormatError::InvalidFileSpacePageSize`] if a version 1 page size is outside 512 bytes to 1 GiB.
-/// EOF coordinates refer to the original body, except for a version 1 manager list, whose
-/// coordinates refer to the start of that list.
+/// EOF extents are relative to the start of `data`.
 #[inline]
 pub fn parse_file_space_info(
     widths: FormatWidths,
@@ -121,8 +120,8 @@ impl<'input> Decode<'input> for FileSpaceInfo {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete,
     /// [`FormatError::UnsupportedFileSpaceInfoVersion`] if the version is not 0 or 1, and the
-    /// semantic errors of [`parse_version_0`] and [`parse_version_1`]. Prefix errors are relative
-    /// to `input`. EOF coordinates for version 1 manager addresses are relative to their list.
+    /// semantic errors of [`parse_version_0`] and [`parse_version_1`]. EOF extents are relative to
+    /// the start of `input`.
     #[inline]
     fn decode(input: &'input [u8], widths: FormatWidths) -> Result<Self, Self::Error> {
         decode_file_space_info(widths, input)
@@ -196,7 +195,7 @@ fn parse_version_0(
 /// Returns [`FormatError::UnexpectedEof`] if the prefix or manager list is incomplete,
 /// [`FormatError::InvalidFileSpaceStrategy`] if the strategy code is undefined, or
 /// [`FormatError::InvalidFileSpacePageSize`] if the page size is outside its range.
-/// Reports prefix errors relative to the original body and manager EOF relative to the list.
+/// EOF extents are relative to the start of `data`.
 fn parse_version_1(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, FormatError> {
     let FormatWidths { offsets, lengths } = widths;
     let mut cursor = bytes::ByteCursor::new(data);
@@ -209,11 +208,7 @@ fn parse_version_1(widths: FormatWidths, data: &[u8]) -> Result<FileSpaceInfo, F
     let page_end_meta_threshold = prefix.u16()?;
     let eoa_pre_fsm = prefix.decoded_address(offsets)?;
     let manager_addrs = if persist {
-        read_managers(
-            &mut bytes::ByteCursor::new(cursor.remaining()),
-            offsets,
-            NUM_FILE_FSM_MANAGERS,
-        )?
+        read_managers(&mut cursor, offsets, NUM_FILE_FSM_MANAGERS)?
     } else {
         Vec::new()
     };
@@ -526,6 +521,7 @@ mod tests {
     use proptest::test_runner::FileFailurePersistence;
     use rstest::rstest;
     use test_util::bytes as fixture_bytes;
+    use test_util::file_space_info::VERSION_1_PERSIST_FLAG_OFFSET;
 
     use super::*;
     use crate::address::StoredAddress;
@@ -794,8 +790,8 @@ mod tests {
         assert_eq!(
             FileSpaceInfo::decode(&bytes, widths(8, 8)),
             Err(FormatError::UnexpectedEof {
-                expected: 12 * 8,
-                available: 11 * 8,
+                expected: 125,
+                available: 117,
             })
         );
     }
@@ -912,7 +908,7 @@ mod tests {
             test_util::widths::Widths::new(usize::from(offset_size), usize::from(length_size));
         let mut body =
             test_util::file_space_info::non_persistent_version_1(fixture_widths, 3, 0x1234, 513);
-        body[2] = if persist { 0x80 } else { 0 };
+        body[VERSION_1_PERSIST_FLAG_OFFSET] = if persist { 0x80 } else { 0 };
         let fixed = body.len();
         let eoa = fixed - usize::from(offset_size);
         body[eoa..].fill(0);
@@ -950,7 +946,7 @@ mod tests {
             FileSpaceInfo::decode(&unaligned.0[1..body.len() + 3], widths),
             Ok(expected.clone())
         );
-        body[2] = u8::from(persist);
+        body[VERSION_1_PERSIST_FLAG_OFFSET] = u8::from(persist);
         if offset_size == 4 && length_size == 2 && persist {
             assert_eq!(
                 &body[..25],
@@ -988,7 +984,7 @@ mod tests {
     #[rstest]
     #[case::version_0(VERSION_0, 6)]
     #[case::version_1(VERSION_1, 12)]
-    fn incomplete_manager_lists_preserve_version_specific_eof_coordinates(
+    fn file_space_info_parsers_report_manager_list_eof_from_the_body_start(
         #[case] version: u8,
         #[case] count: usize,
         #[values(2, 4, 8)] offset_size: u8,
@@ -1010,7 +1006,7 @@ mod tests {
                 0x1234,
                 513,
             );
-            body[2] = 0x80;
+            body[VERSION_1_PERSIST_FLAG_OFFSET] = 0x80;
             body
         };
         let prefix_len = body.len();
@@ -1029,26 +1025,25 @@ mod tests {
         expected.manager_addrs = (0..count)
             .map(|index| DecodedStoredAddress::Defined(StoredAddress::new(index as u64)))
             .collect();
-        assert_eq!(
-            FileSpaceInfo::decode(&body, widths(offset_size, length_size)),
-            Ok(expected)
-        );
-        for available in prefix_len..body.len() {
-            let origin = if version == VERSION_0 { 0 } else { prefix_len };
-            assert_eq!(
-                FileSpaceInfo::decode(&body[..available], widths(offset_size, length_size)),
-                Err(FormatError::UnexpectedEof {
-                    expected: body.len() - origin,
-                    available: available - origin,
-                })
-            );
+        let widths = widths(offset_size, length_size);
+        let complete_len = body.len();
+        body.extend_from_slice(&[0xf6, 0x17]);
+        assert_eq!(FileSpaceInfo::decode(&body, widths), Ok(expected.clone()));
+        assert_eq!(parse_file_space_info(widths, &body), Ok(expected));
+        for available in prefix_len..complete_len {
+            let input = &body[..available];
+            let error = FormatError::UnexpectedEof {
+                expected: complete_len,
+                available,
+            };
+            assert_eq!(FileSpaceInfo::decode(input, widths), Err(error.clone()));
+            assert_eq!(parse_file_space_info(widths, input), Err(error));
         }
     }
 
     #[rstest]
     #[case::strategy(0xff, 511, FormatError::InvalidFileSpaceStrategy(0xff))]
     #[case::page_size(0, 511, FormatError::InvalidFileSpacePageSize(511))]
-    #[case::tail(0, 512, FormatError::UnexpectedEof { expected: 96, available: 0 })]
     fn version_1_prefix_errors_precede_missing_manager_bytes(
         #[case] strategy: u8,
         #[case] page_size: u64,
@@ -1060,8 +1055,40 @@ mod tests {
             1,
             page_size,
         );
-        body[2] = 0xff;
+        body[VERSION_1_PERSIST_FLAG_OFFSET] = 0xff;
         assert_eq!(FileSpaceInfo::decode(&body, widths(8, 8)), Err(expected));
+    }
+
+    #[rstest]
+    #[case::eight_eight(8, 8, 125, 29)]
+    #[case::four_two(4, 2, 61, 13)]
+    fn file_space_info_parsers_report_manager_list_eof_from_the_supplied_subslice(
+        #[case] offset_size: u8,
+        #[case] length_size: u8,
+        #[case] expected: usize,
+        #[case] available: usize,
+    ) {
+        let fixture_widths =
+            test_util::widths::Widths::new(usize::from(offset_size), usize::from(length_size));
+        let mut body = test_util::file_space_info::non_persistent_version_1(
+            fixture_widths,
+            test_util::file_space_info::PAGE,
+            1,
+            512,
+        );
+        body[VERSION_1_PERSIST_FLAG_OFFSET] = 0xff;
+        let mut enclosing = vec![0xa5; 7];
+        enclosing.extend_from_slice(&body);
+        enclosing.extend_from_slice(&[0x5a; 3]);
+        let input = &enclosing[7..7 + body.len()];
+        assert_eq!(input.len(), available);
+        let widths = widths(offset_size, length_size);
+        let error = FormatError::UnexpectedEof {
+            expected,
+            available,
+        };
+        assert_eq!(FileSpaceInfo::decode(input, widths), Err(error.clone()));
+        assert_eq!(parse_file_space_info(widths, input), Err(error));
     }
 
     #[rstest]

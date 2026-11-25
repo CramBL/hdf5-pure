@@ -80,6 +80,14 @@ pub const VFD: u8 = 4;
 /// The number of free-space manager addresses a persisting version 0 message stores.
 pub const VERSION_0_MANAGERS: usize = 6;
 
+/// The byte offset of the persistence flag in a version 1 message body.
+///
+/// "The File Space Info Message" of the [format specification, version 4.0][spec] places the
+/// flag after the version and strategy bytes.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fsinfo
+pub const VERSION_1_PERSIST_FLAG_OFFSET: usize = 2;
+
 const VERSION_0: u8 = 0;
 
 const VERSION_1: u8 = 1;
