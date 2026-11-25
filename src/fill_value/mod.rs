@@ -5,13 +5,10 @@
 //! errors for file operations.
 
 #[cfg(not(feature = "std"))]
-use alloc::format;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::FillTime;
-use hdf5_pure_format::__private::FillValueError;
 pub(crate) use hdf5_pure_format::__private::FillValueMessage;
 pub(crate) use hdf5_pure_format::__private::FillValueView;
 
@@ -218,17 +215,17 @@ impl PaddingFill {
     }
 }
 
+/// Writes the fill time policy and any fill bytes as a version 3 message.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if the fill value length exceeds [`u32::MAX`].
 pub(crate) fn serialize_fill_value_message_v3(
     fill_time: FillTime,
     fill: Option<&[u8]>,
 ) -> Result<Vec<u8>, FormatError> {
-    hdf5_pure_format::__private::serialize_fill_value_message_v3(fill_time, fill).map_err(|error| {
-        match error {
-            FillValueError::TooLarge { length } => FormatError::SerializationError(format!(
-                "fill value length {length} exceeds the u32 message field"
-            )),
-        }
-    })
+    hdf5_pure_format::__private::serialize_fill_value_message_v3(fill_time, fill)
+        .map_err(FormatError::from)
 }
 
 #[cfg(test)]

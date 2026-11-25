@@ -2,6 +2,8 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 
 use hdf5_pure_core::FillTime;
 
@@ -9,14 +11,41 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 
-/// An error indicating that serializing a fill value message failed.
+/// An error writing a version 3 fill value message.
+///
+/// [`Error::source`] returns `None`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FillValueError {
-    /// A fill value length exceeds the 4-byte format limit.
+    /// The fill value length exceeds the maximum of its four-byte length field.
     TooLarge {
         /// The byte length that exceeds the format limit.
         length: usize,
     },
+}
+
+impl fmt::Display for FillValueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge { length } => write!(
+                f,
+                "fill value length {length} does not fit a {FILL_VALUE_LENGTH_SIZE}-byte length field"
+            ),
+        }
+    }
+}
+
+impl Error for FillValueError {}
+
+impl From<FillValueError> for FormatError {
+    /// Converts the error to [`FormatError::LengthTooLarge`], preserving the length in bytes.
+    fn from(error: FillValueError) -> Self {
+        match error {
+            FillValueError::TooLarge { length } => Self::LengthTooLarge {
+                length: length.to_u64(),
+                length_size: FILL_VALUE_LENGTH_SIZE,
+            },
+        }
+    }
 }
 
 /// A borrowed view of a parsed fill value message.
@@ -358,6 +387,10 @@ const VERSION_THREE: u8 = 3;
 const V1_V2_VALUE_OFFSET: usize = 8;
 const V3_VALUE_OFFSET: usize = 6;
 
+// "The Data Storage - Fill Value Message" in the format specification, version 4.0,
+// defines a four-byte size field in message version 3.
+const FILL_VALUE_LENGTH_SIZE: u8 = 4;
+
 const V3_FLAG_UNDEFINED: u8 = 0x10;
 const V3_FLAG_DEFINED: u8 = 0x20;
 const V3_FLAGS_RESERVED: u8 = 0xc0;
@@ -630,5 +663,27 @@ mod tests {
             fill_value_len(length).unwrap_err(),
             FillValueError::TooLarge { length }
         );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn converting_a_fill_value_length_error_reports_length_and_field_width() {
+        let length = 0x1_0000_0000;
+        let error = FillValueError::TooLarge { length };
+
+        assert_eq!(
+            error.to_string(),
+            "fill value length 4294967296 does not fit a 4-byte length field"
+        );
+        assert!(Error::source(&error).is_none());
+        let converted = FormatError::from(error);
+        assert_eq!(
+            converted,
+            FormatError::LengthTooLarge {
+                length: 0x1_0000_0000,
+                length_size: FILL_VALUE_LENGTH_SIZE,
+            }
+        );
+        assert!(Error::source(&converted).is_none());
     }
 }
