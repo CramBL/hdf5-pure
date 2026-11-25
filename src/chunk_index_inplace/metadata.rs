@@ -172,7 +172,7 @@ impl Located {
                             Some(address),
                             &position,
                             usize::from(self.offset_width.get()),
-                            self.ea_bits.block_offset_width(),
+                            self.creation.bit_geometry().block_offset_width(),
                         )?;
                         let address = file.read_addr_at(offset)?;
                         if !address.is_undefined(self.offset_width) {
@@ -188,7 +188,7 @@ impl Located {
             };
             if let Some(framing) = framing {
                 check_block(file, framing)?;
-                let page_elements = self.ea_bits.page_nelmts().get();
+                let page_elements = self.creation.bit_geometry().page_nelmts().get();
                 if position.dblk_nelmts > page_elements {
                     let Parent::Super { sblk_j, dblk_local } = position.parent else {
                         return Err(FormatError::Internal(
@@ -204,7 +204,7 @@ impl Located {
                         - position.db_start)
                         .div_ceil(page_elements);
                     let page_length = super::ea_sum([
-                        super::ea_product(page_elements, self.ea_elem_size.to_u64())?,
+                        super::ea_product(page_elements, u64::from(self.ea_elem_size))?,
                         EA_CHECKSUM_SIZE,
                     ])?;
                     for page in first_page..last_page {

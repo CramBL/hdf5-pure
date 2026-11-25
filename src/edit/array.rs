@@ -10,6 +10,7 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::ReservationRequest;
 
 use crate::address::StoredAddress;
+use crate::bytes;
 use crate::chunked_write::ChunkArrayKind;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -128,8 +129,8 @@ impl ArrayIndexPlanRef<'_> {
     ///
     /// The pending prefix must match [`Self::requests`] exactly. Previously emitted payload
     /// reservations may precede it, and later reservations remain pending. The reservation plan's
-    /// address context is used for stored references. Chunk records remain borrowed. Parser child
-    /// pages remain within their parent allocation.
+    /// address context is used for stored references. Chunk records remain borrowed. Each paged
+    /// data block and its pages share one reservation.
     ///
     /// On error, the caller retains all reservations through `reservations`, including any partly
     /// emitted blocks.
@@ -143,8 +144,9 @@ impl ArrayIndexPlanRef<'_> {
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if pending reservations differ from the complete metadata
-    /// requests. Returns errors from checked address conversion, format placement and encoding,
-    /// or [`ReservationPlan::write_next`].
+    /// requests, or [`FormatError::AllocationFailed`] if reserving an extensible array block buffer
+    /// fails. Propagates address conversion, format placement and encoding errors, and errors
+    /// from [`ReservationPlan::write_next`].
     pub(super) fn write(
         &self,
         slots: &IndexSlots<'_>,
@@ -174,10 +176,11 @@ impl ArrayIndexPlanRef<'_> {
             Self::Extensible(plan) => {
                 let placement = plan.place(&starts)?;
                 let encoding = placement.encoding(slots)?;
-                let mut bytes = Vec::new();
+                let mut buffer = Vec::new();
                 for block in encoding.blocks() {
-                    block.encode_into(&mut bytes)?;
-                    reservations.write_next(&bytes)?;
+                    bytes::resize_buffer(&mut buffer, block.encoded_size())?;
+                    let written = block.write_into(&mut buffer)?;
+                    reservations.write_next(&buffer[..written])?;
                 }
             }
             Self::Fixed(plan) => {

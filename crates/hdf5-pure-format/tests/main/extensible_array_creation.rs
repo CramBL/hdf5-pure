@@ -247,13 +247,9 @@ fn placed_header_preserves_a_defined_index_address_of_zero() {
         .unwrap();
     let slots = IndexSlots::dense(&[]);
     let encoding = placement.encoding(&slots).unwrap();
-    let mut bytes = Vec::new();
-    encoding
-        .blocks()
-        .next()
-        .unwrap()
-        .encode_into(&mut bytes)
-        .unwrap();
+    let header = encoding.blocks().next().unwrap();
+    let mut bytes = vec![0; header.encoded_size()];
+    assert_eq!(header.write_into(&mut bytes).unwrap(), bytes.len());
     assert_eq!(
         bytes,
         fixture

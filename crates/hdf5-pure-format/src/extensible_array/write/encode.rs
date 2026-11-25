@@ -200,45 +200,6 @@ impl ExtensibleArrayEmission<'_> {
         &self.encoding.placement.plan.blocks[self.index]
     }
 
-    /// Replaces `output` with this complete block, reusing its capacity.
-    ///
-    /// A paged data block includes its prefix and every page. The writer computes all checksums
-    /// regardless of the `checksum` feature.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AllocationFailed`] if the output reservation fails, leaving
-    /// `output` unchanged.
-    #[expect(
-        clippy::same_name_method,
-        reason = "the existing Vec method reserves storage before using the bounded encoder"
-    )]
-    pub fn encode_into(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
-        let length = self.encoded_len();
-        reserve(output, length.saturating_sub(output.len()), length)?;
-        output.resize(length, 0);
-        self.write_block(output);
-        Ok(())
-    }
-
-    /// Appends this complete block after the existing `output` bytes.
-    ///
-    /// Preserves existing bytes. The writer computes the block's checksums over appended bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AllocationFailed`] if the output reservation fails, leaving
-    /// `output` unchanged.
-    pub(crate) fn append_into(&self, output: &mut Vec<u8>) -> Result<(), FormatError> {
-        let length = self.encoded_len();
-        let start = output.len();
-        let end = start.saturating_add(length);
-        reserve(output, length, end)?;
-        output.resize(end, 0);
-        self.write_block(&mut output[start..]);
-        Ok(())
-    }
-
     /// Returns the exact length in bytes of the complete allocation, including checksums.
     pub fn encoded_size(&self) -> usize {
         Encode::encoded_len(self)
@@ -336,12 +297,6 @@ pub(super) struct Pointer {
     pub(super) descriptor: usize,
 }
 
-fn reserve(output: &mut Vec<u8>, additional: usize, values: usize) -> Result<(), FormatError> {
-    output
-        .try_reserve_exact(additional)
-        .map_err(|source| FormatError::AllocationFailed { values, source })
-}
-
 #[cfg(test)]
 mod tests {
     use alloc::vec;
@@ -419,7 +374,8 @@ mod tests {
         let mut actual = Vec::new();
         let mut block = Vec::new();
         for emission in encoding.blocks() {
-            emission.encode_into(&mut block).unwrap();
+            block.resize(emission.encoded_size(), 0);
+            emission.write_into(&mut block).unwrap();
             actual.extend_from_slice(&block);
         }
         let expected = extensible_array::build_extensible_array_at(
@@ -433,29 +389,6 @@ mod tests {
         .unwrap();
         assert_eq!(actual, expected);
         assert_eq!(actual.len().to_u64(), plan.total_len());
-    }
-
-    #[test]
-    fn appending_blocks_preserves_the_prefix_and_each_block_checksum() {
-        let records = chunks(4, true);
-        let slots = IndexSlots::new(&records, &[0, 8, 32, 200], 201).unwrap();
-        let plan = plan([24, 8, 2, 8, 8], &slots, 8, true);
-        let addresses: Vec<_> = (0..plan.blocks().len())
-            .map(|index| StoredAddress::new(1_024 + index.to_u64() * 4_096))
-            .collect();
-        let placement = plan.place(&addresses).unwrap();
-        let encoding = placement.encoding(&slots).unwrap();
-        let mut output = vec![0xa5; 17];
-        let mut expected = Vec::new();
-        for emission in encoding.blocks() {
-            let start = output.len();
-            emission.append_into(&mut output).unwrap();
-            emission.encode_into(&mut expected).unwrap();
-            assert_eq!(&output[start..], expected);
-            assert_checksum(&output[start..]);
-        }
-        assert_eq!(&output[..17], &[0xa5; 17]);
-        assert_eq!(output.len().to_u64(), plan.total_len() + 17);
     }
 
     #[rstest]
@@ -488,7 +421,8 @@ mod tests {
         ];
         let mut output = Vec::new();
         for emission in encoding.blocks() {
-            emission.encode_into(&mut output).unwrap();
+            output.resize(emission.encoded_size(), 0);
+            emission.write_into(&mut output).unwrap();
             let start = emission.address().get().to_usize().unwrap();
             image[start..start + output.len()].copy_from_slice(&output);
             let descriptor = emission.block();
@@ -577,7 +511,8 @@ mod tests {
             .blocks()
             .find(|emission| emission.block().kind() == ExtensibleArrayBlockKind::Secondary)
             .unwrap();
-        secondary.encode_into(&mut output).unwrap();
+        output.resize(secondary.encoded_size(), 0);
+        secondary.write_into(&mut output).unwrap();
         assert_eq!(&output[..4], b"EASB");
         assert_eq!(&output[14..16], &504_u16.to_le_bytes());
         assert_eq!(&output[16..24], &[0xc4, 0, 0, 0, 0, 0, 0, 0]);
@@ -600,7 +535,8 @@ mod tests {
         let encoding = placement.encoding(&actual).unwrap();
         let mut output = Vec::new();
         for emission in encoding.blocks() {
-            emission.encode_into(&mut output).unwrap();
+            output.resize(emission.encoded_size(), 0);
+            emission.write_into(&mut output).unwrap();
             if emission.block().kind() == ExtensibleArrayBlockKind::Secondary {
                 assert_eq!(output[16], 0x40);
             } else if emission.block().kind() == ExtensibleArrayBlockKind::Data {
@@ -619,7 +555,8 @@ mod tests {
         let encoding = placement.encoding(&slots).unwrap();
         let mut output = Vec::new();
         for emission in encoding.blocks() {
-            emission.encode_into(&mut output).unwrap();
+            output.resize(emission.encoded_size(), 0);
+            emission.write_into(&mut output).unwrap();
             assert_checksum(&output);
             assert_eq!(output.len().to_u64(), emission.block().length());
             if emission.block().kind() == ExtensibleArrayBlockKind::Header {
@@ -652,7 +589,8 @@ mod tests {
         let references = encoding.pointers.as_ptr();
         let mut emitted = 0;
         for emission in encoding.blocks().chain(encoding.blocks()) {
-            emission.encode_into(&mut output).unwrap();
+            output.resize(emission.encoded_size(), 0);
+            emission.write_into(&mut output).unwrap();
             assert_eq!(output.as_ptr(), buffer);
             assert_eq!(output.capacity(), maximum);
             assert_eq!(encoding.pointers.as_ptr(), references);

@@ -2080,166 +2080,6 @@ pub enum SlotOccupancy<'a> {
     Slots(&'a [u64]),
 }
 
-/// Appends `addr` to `buf` as a little-endian field of `offset_size` bytes.
-///
-/// Encodes [`u64::MAX`] as the undefined address.
-///
-/// # Errors
-///
-/// Returns [`FormatError::AddressTooLarge`] if `addr` exceeds `offset_size` and is not
-/// [`u64::MAX`]. Leaves `buf` unchanged on error.
-pub fn write_stored_address(
-    buf: &mut Vec<u8>,
-    addr: StoredAddress,
-    offset_size: OffsetWidth,
-) -> Result<(), FormatError> {
-    bytes::try_write_offset(buf, addr.get(), offset_size)
-}
-
-/// Appends a block's offset in the array's element space as a little-endian field of `width`
-/// bytes.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ValueTooLargeForRepresentation`] if `block_offset` exceeds `width`.
-fn write_block_offset(
-    buf: &mut Vec<u8>,
-    block_offset: u64,
-    width: BlockOffsetWidth,
-) -> Result<(), FormatError> {
-    let blk_off_size = width.bytes();
-    let bytes = block_offset.to_le_bytes();
-    if bytes[blk_off_size..].iter().any(|&byte| byte != 0) {
-        return Err(FormatError::ValueTooLargeForRepresentation {
-            value: block_offset,
-            target: "Extensible Array block offset",
-        });
-    }
-    buf.extend_from_slice(&bytes[..blk_off_size]);
-    Ok(())
-}
-
-/// Builds the data block (`EADB`) of the elements in slots `elem_start..elem_start + dblk_nelmts`,
-/// with `block_offset_rel` as its block offset.
-///
-/// An unoccupied slot stores the undefined address. A block of more than
-/// [`bits.page_nelmts()`](ExtensibleArrayBitGeometry::page_nelmts) elements is paged: its prefix
-/// has its own checksum, and each page has a checksum.
-///
-/// # Errors
-///
-/// Returns [`FormatError::Internal`] if the stored size of a chunk does not fit the chunk size
-/// field, and [`FormatError::ValueTooLargeForPlatform`] if the page element count does not fit a
-/// [`usize`].
-///
-/// Returns [`FormatError::AddressTooLarge`] if an occupied chunk's address exceeds `offset_size`,
-/// or `ea_address` exceeds `offset_size` and is not [`u64::MAX`]. Returns
-/// [`FormatError::DefinedAddressIsUndefined`] if an occupied chunk's address equals that width's
-/// undefined marker, or [`FormatError::ValueTooLargeForRepresentation`] if `block_offset_rel`
-/// exceeds the block-offset width in `bits`.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_data_block(
-    slots: &IndexSlots<'_>,
-    elem_start: usize,
-    dblk_nelmts: usize,
-    block_offset_rel: u64,
-    ea_address: StoredAddress,
-    offset_size: OffsetWidth,
-    has_filters: bool,
-    chunk_size_bytes: usize,
-    client_id: u8,
-    bits: ExtensibleArrayBitGeometry,
-) -> Result<Vec<u8>, FormatError> {
-    let page_element_count = bits.page_nelmts();
-    let page_nelmts = page_element_count.get().to_usize()?;
-    let mut buf = Vec::new();
-    buf.extend_from_slice(b"EADB");
-    buf.push(0); // version
-    buf.push(client_id);
-    write_stored_address(&mut buf, ea_address, offset_size)?;
-    write_block_offset(&mut buf, block_offset_rel, bits.block_offset_width())?;
-
-    // The counts are `usize` loop bounds, and the page arithmetic below stays in `usize`.
-    let blocks = DataBlockGeometry {
-        dblk_nelmts: dblk_nelmts as u64,
-        page_nelmts: page_element_count,
-    };
-    let write_elements = |buf: &mut Vec<u8>, start: usize, count: usize| {
-        for slot in start..start + count {
-            match slots.at(slot) {
-                Some(chunk) => chunk_record::write_chunk_element(
-                    buf,
-                    chunk,
-                    offset_size,
-                    has_filters,
-                    chunk_size_bytes,
-                )?,
-                None => chunk_record::write_undefined_element(
-                    buf,
-                    offset_size,
-                    has_filters,
-                    chunk_size_bytes,
-                ),
-            }
-        }
-        Ok::<(), FormatError>(())
-    };
-    if !blocks.is_paged() {
-        // Non-paged: elements inline, single checksum.
-        write_elements(&mut buf, elem_start, dblk_nelmts)?;
-        let cks = checksum::jenkins_lookup3(&buf);
-        buf.extend_from_slice(&cks.to_le_bytes());
-    } else {
-        // Paged: the prefix and its checksum, then every page, as the C library allocates them
-        // (`H5EAdblock.c`, HDF5 2.2.0).
-        let header_cks = checksum::jenkins_lookup3(&buf);
-        buf.extend_from_slice(&header_cks.to_le_bytes());
-
-        for page in 0..dblk_nelmts / page_nelmts {
-            let page_at = buf.len();
-            write_elements(&mut buf, elem_start + page * page_nelmts, page_nelmts)?;
-            let page_cks = checksum::jenkins_lookup3(&buf[page_at..]);
-            buf.extend_from_slice(&page_cks.to_le_bytes());
-        }
-    }
-    Ok(buf)
-}
-
-/// Builds the super block (`EASB`) that addresses `dblk_addrs`, with `block_offset_rel` as its
-/// block offset.
-///
-/// A non-empty `page_bitmap` is the page-init bitmap of paged data blocks, which the super block
-/// stores between its block offset and its data block addresses.
-///
-/// # Errors
-///
-/// Returns [`FormatError::AddressTooLarge`] if an address exceeds `offset_size` and is not
-/// [`u64::MAX`], or [`FormatError::ValueTooLargeForRepresentation`] if `block_offset_rel` exceeds
-/// `width`.
-pub fn encode_super_block(
-    ea_address: StoredAddress,
-    block_offset_rel: u64,
-    page_bitmap: &[u8],
-    dblk_addrs: &[StoredAddress],
-    offset_size: OffsetWidth,
-    client_id: u8,
-    width: BlockOffsetWidth,
-) -> Result<Vec<u8>, FormatError> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(b"EASB");
-    buf.push(0); // version
-    buf.push(client_id);
-    write_stored_address(&mut buf, ea_address, offset_size)?;
-    write_block_offset(&mut buf, block_offset_rel, width)?;
-    buf.extend_from_slice(page_bitmap);
-    for &addr in dblk_addrs {
-        write_stored_address(&mut buf, addr, offset_size)?;
-    }
-    let cks = checksum::jenkins_lookup3(&buf);
-    buf.extend_from_slice(&cks.to_le_bytes());
-    Ok(buf)
-}
-
 /// The six statistics of an Extensible Array header, in the order the header stores them.
 ///
 /// [`ExtensibleArrayHeader::stored_statistics`] reports the values read from a header.
@@ -2814,25 +2654,13 @@ mod tests {
         assert_eq!(geometry.block_offset_width().bytes(), offset_size);
 
         let offset = u64::MAX >> (8 * (8 - offset_size));
-        let block = encode_super_block(
-            StoredAddress::new(0),
-            offset,
-            &[],
-            &[],
-            OffsetWidth::Eight,
-            EA_CLIENT_ID_UNFILTERED,
-            geometry.block_offset_width(),
-        )
-        .unwrap();
         assert_eq!(
-            &block[14..14 + offset_size],
-            &offset.to_le_bytes()[..offset_size]
-        );
-        assert_eq!(
-            geometry.block_offset_width().read(&block[14..]).unwrap(),
+            geometry
+                .block_offset_width()
+                .read(&offset.to_le_bytes())
+                .unwrap(),
             offset
         );
-        checksum::verify_trailing(&block).unwrap();
     }
 
     /// Returns the records of the Extensible Array whose header is at `header_offset` in
