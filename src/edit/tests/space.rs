@@ -1485,6 +1485,73 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
 }
 
 #[test]
+fn flat_tail_reservation_reduces_a_section_to_a_storable_size() {
+    const EXTENSION_LEN: u64 = 100;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("flat_tail_narrow_lengths.h5");
+    let mut builder = crate::writer::FileBuilder::new();
+    builder
+        .create_dataset("values")
+        .with_i32_data(&vec![0; 16_384])
+        .with_shape(&[16_384]);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
+    builder.write(&path).unwrap();
+
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::FsmAggr),
+        ByteLength::new(0),
+        FileSpacePageSize::DEFAULT,
+    );
+    let start = StoredAddress::new(512);
+    let free = FreeExtent::new(start, ByteLength::new(32_780)).unwrap();
+    engine.space.seed_persisted(Some(ManagerKind::Flat), free);
+    let widths = FormatWidths::from_sizes(8, 2).unwrap();
+    let eoa = engine.end_of_allocation().unwrap();
+    let layout = engine
+        .flat_tail_layout(
+            eoa,
+            &ReturnedExtents::default(),
+            &[],
+            EXTENSION_LEN,
+            widths,
+            None,
+            PublicationPurpose::Commit,
+        )
+        .unwrap();
+    let (post, managers, location, length, end) = layout.into_parts();
+    let section = FreeExtent::between(start.checked_add(169).unwrap(), free.end()).unwrap();
+    assert_eq!(post.extents(), [section]);
+    assert_eq!((location, length, end), (Some(start), 169, eoa));
+    let manager = managers
+        .into_plan(start.checked_add(EXTENSION_LEN).unwrap())
+        .unwrap()
+        .encode_allocations()
+        .next()
+        .unwrap()
+        .unwrap();
+    let header = FreeSpaceManagerHeader::parse(widths, manager.header()).unwrap();
+    let actual = format::parse_section_info(
+        widths,
+        manager.section_list(),
+        manager.header_address,
+        &header,
+    )
+    .unwrap();
+    assert_eq!(
+        actual,
+        [format::FreeSection {
+            addr: section.start(),
+            size: section.len().get(),
+        }]
+    );
+}
+
+#[test]
 fn a_flat_tail_takes_exactly_the_extent_it_records() {
     use crate::writer::FileBuilder;
     const EXT_LEN: u64 = 100;

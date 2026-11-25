@@ -4,8 +4,6 @@
 //! The caller can adjust section-list lengths within one count-field width using one-byte gaps
 //! between padding chunks, then admits the gaps and checks the final manager projection.
 
-use std::collections::BTreeSet;
-
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_format::__private::ObjectHeaderAllocationGeometry;
@@ -18,7 +16,7 @@ use hdf5_pure_space::__private::ReservationRequest;
 use crate::address::StoredAddress;
 use crate::error::FormatError;
 use crate::file_space_info::FileSpacePageSize;
-use crate::free_space_manager::ManagerProjection;
+use crate::free_space_manager::{ManagerProjection, ManagerSectionSizes};
 use crate::width::FormatWidths;
 
 /// Complete stored block placements and free gaps before encoding or session adoption.
@@ -49,7 +47,6 @@ impl PageLayout {
         start: StoredAddress,
         end: Option<StoredAddress>,
         base: &ManagerProjection,
-        sizes: &BTreeSet<u64>,
         controls: bool,
     ) -> Result<Option<Self>, FormatError> {
         if end.is_none() && start.get() % page.get() != 0 {
@@ -65,7 +62,7 @@ impl PageLayout {
         let window = (minimum - 1).div_ceil(step);
         let appended = end.is_none();
         let section_count = add(
-            base.sections(ManagerKind::PagedSmallMetadata).len() as u64,
+            base.section_count(ManagerKind::PagedSmallMetadata),
             u64::from(appended),
         )?;
         let control_count = if controls {
@@ -77,8 +74,8 @@ impl PageLayout {
         let mut gaps = arena.leading.into_iter().collect::<Vec<_>>();
         let mut cursor = arena.end();
         let mut summary = SectionSummary {
-            sections: base.sections(ManagerKind::PagedSmallMetadata).len() as u64,
-            sizes,
+            sections: base.section_count(ManagerKind::PagedSmallMetadata),
+            sizes: base.section_sizes(ManagerKind::PagedSmallMetadata),
             extra: Vec::new(),
         };
         let mut managers = Vec::new();
@@ -325,7 +322,7 @@ pub(super) fn root_allocation(
 /// Metadata section counts and additional sizes relative to one retained projection.
 struct SectionSummary<'a> {
     sections: u64,
-    sizes: &'a BTreeSet<u64>,
+    sizes: ManagerSectionSizes<'a>,
     extra: Vec<u64>,
 }
 
@@ -337,7 +334,7 @@ impl SectionSummary<'_> {
             extra,
         } = self;
         *sections = add(*sections, 1)?;
-        if !sizes.contains(&size) && !extra.contains(&size) {
+        if !sizes.contains(size) && !extra.contains(&size) {
             extra.push(size);
         }
         Ok(())
@@ -358,8 +355,8 @@ impl SectionSummary<'_> {
             add(*sections, controls)?,
             u64::from(tail.is_some() || unknown_tail),
         )?;
-        let mut groups = add(sizes.len() as u64, extra.len() as u64)?;
-        let contains = |size| sizes.contains(&size) || extra.contains(&size);
+        let mut groups = add(sizes.count(), extra.len() as u64)?;
+        let contains = |size| sizes.contains(size) || extra.contains(&size);
         if controls > 0 && !contains(1) {
             groups = add(groups, 1)?;
         }

@@ -56,12 +56,12 @@ use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_allocation::FileAllocation;
-use crate::file_allocation::FileManager;
 use crate::file_emission::EmissionError;
 use crate::file_emission::Reservation;
 use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceStrategy;
+use crate::free_space_manager::EncodedManager;
 use crate::libver::LibVer;
 use crate::libver::WritableTarget;
 use crate::link_info::LinkInfoMessage;
@@ -656,7 +656,7 @@ pub(crate) struct Plan<S> {
     records: Vec<Record>,
     libver: LibVer,
     extension: Option<(Allocation, Vec<u8>)>,
-    managers: Vec<FileManager>,
+    managers: Vec<EncodedManager>,
     end: StoredAddress,
 }
 
@@ -866,13 +866,13 @@ impl<S: ObjectSource> Plan<S> {
             spans.push(Reservation::new(
                 BaseAddress::ZERO,
                 manager.header_address,
-                ByteLength::new(manager.header.len() as u64),
+                ByteLength::new(manager.header().len() as u64),
                 Part::ManagerHeader(index),
             )?);
             spans.push(Reservation::new(
                 BaseAddress::ZERO,
                 manager.section_list_address,
-                ByteLength::new(manager.section_list.len() as u64),
+                ByteLength::new(manager.section_list().len() as u64),
                 Part::ManagerSections(index),
             )?);
         }
@@ -910,8 +910,8 @@ impl<S: ObjectSource> Plan<S> {
                     },
                 )?)?,
                 Part::Extension => sink.put(&extension.as_ref().ok_or_else(inconsistent)?.1)?,
-                Part::ManagerHeader(index) => sink.put(&managers[index].header)?,
-                Part::ManagerSections(index) => sink.put(&managers[index].section_list)?,
+                Part::ManagerHeader(index) => sink.put(managers[index].header())?,
+                Part::ManagerSections(index) => sink.put(managers[index].section_list())?,
                 part => {
                     let (index, object, chunks) = working.as_mut().ok_or_else(inconsistent)?;
                     if chunks.is_none() && matches!(part, Part::Header(_) | Part::Data(_)) {
@@ -1570,7 +1570,7 @@ fn reserve_metadata(
 struct FileLayout {
     extension: Option<(Allocation, Vec<u8>)>,
     end: StoredAddress,
-    managers: Vec<FileManager>,
+    managers: Vec<EncodedManager>,
 }
 
 impl FileLayout {
@@ -1874,9 +1874,9 @@ mod tests {
     use crate::datatype::CharacterSet;
     use crate::error::Error;
     use crate::error::FormatError;
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    use crate::file_allocation::FileManager;
     use crate::file_writer;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use crate::free_space_manager::EncodedManager;
     use crate::object_path::ObjectPathBuf;
     use crate::type_builders::DatasetBuilder;
 
@@ -2565,11 +2565,11 @@ mod tests {
                 .extension
                 .as_ref()
                 .map_or(0, |(_, bytes)| bytes.capacity())
-            + plan.managers.capacity() * mem::size_of::<FileManager>()
+            + plan.managers.capacity() * mem::size_of::<EncodedManager>()
             + plan
                 .managers
                 .iter()
-                .map(|manager| manager.header.capacity() + manager.section_list.capacity())
+                .map(|manager| manager.section_list_capacity())
                 .sum::<usize>()
     }
 

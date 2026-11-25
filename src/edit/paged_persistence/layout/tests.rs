@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
@@ -81,8 +83,8 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
     let geometry = ObjectHeaderAllocationGeometry::new(prefix, widths, &records).unwrap();
     let append = space.plan_paged_append(eoa, &[], &[]).unwrap();
     let original = append.admitted_snapshot().reusable_bytes().unwrap();
-    let (base, sizes) = ManagerProjection::indexed(append.admitted_snapshot(), widths).unwrap();
-    let planned = PageLayout::new(&geometry, page, eoa, None, &base, &sizes, true)
+    let base = ManagerProjection::new(append.admitted_snapshot(), widths).unwrap();
+    let planned = PageLayout::new(&geometry, page, eoa, None, &base, true)
         .unwrap()
         .unwrap();
     assert!(
@@ -106,11 +108,13 @@ fn controlled_append_layouts_preserve_counts_geometry_and_free_bytes(
                 + planned.gaps.iter().map(|gap| gap.len().get()).sum::<u64>()
         )
     );
-    let (projection, sizes) = ManagerProjection::indexed(snapshot, widths).unwrap();
+    let projection = ManagerProjection::new(snapshot, widths).unwrap();
     assert_eq!(
         (
-            projection.sections(ManagerKind::PagedSmallMetadata).len() as u64,
-            sizes.len() as u64
+            projection.section_count(ManagerKind::PagedSmallMetadata),
+            projection
+                .section_sizes(ManagerKind::PagedSmallMetadata)
+                .count()
         ),
         planned.metadata_counts
     );
@@ -273,15 +277,13 @@ fn appended_layout_rejects_an_unaligned_start() {
         ByteLength::new(1),
         FileSpacePageSize::DEFAULT,
     );
-    let (base, sizes) =
-        ManagerProjection::indexed(space.admitted_snapshot(), geometry.widths()).unwrap();
+    let base = ManagerProjection::new(space.admitted_snapshot(), geometry.widths()).unwrap();
     let error = PageLayout::new(
         &geometry,
         FileSpacePageSize::DEFAULT,
         StoredAddress::new(1),
         None,
         &base,
-        &sizes,
         false,
     )
     .err()
@@ -413,8 +415,8 @@ proptest::proptest! {
         };
         let records = v2::message_records(&messages, flags);
         let geometry = ObjectHeaderAllocationGeometry::new(prefix, widths, &records).unwrap();
-        let (base, sizes) = ManagerProjection::indexed(append.admitted_snapshot(), widths).unwrap();
-        let layout = PageLayout::new(&geometry, page, eoa, None, &base, &sizes, true)
+        let base = ManagerProjection::new(append.admitted_snapshot(), widths).unwrap();
+        let layout = PageLayout::new(&geometry, page, eoa, None, &base, true)
             .unwrap().unwrap();
         let capacity = layout.end.checked_distance_from(eoa).unwrap();
         let tail = append.reserve(ByteLength::new(capacity)).unwrap().with_metadata_padding(&layout.gaps).unwrap();
@@ -424,9 +426,9 @@ proptest::proptest! {
             ByteLength::new(original_bytes + tail.final_eoa.checked_distance_from(layout.end).unwrap()
                 + layout.gaps.iter().map(|gap| gap.len().get()).sum::<u64>())
         );
-        let (projection, sizes) = ManagerProjection::indexed(snapshot, widths).unwrap();
+        let projection = ManagerProjection::new(snapshot, widths).unwrap();
         assert_eq!(
-            (projection.sections(ManagerKind::PagedSmallMetadata).len() as u64, sizes.len() as u64),
+            (projection.section_count(ManagerKind::PagedSmallMetadata), projection.section_sizes(ManagerKind::PagedSmallMetadata).count()),
             layout.metadata_counts
         );
         let managers = projection.place_with_kind(|kind, lengths| {
@@ -493,9 +495,14 @@ fn assert_planned_ranges_cover_the_reservation(
 ) {
     let mut allocations = plan.extension.clone();
     for block in &plan.blocks {
-        allocations.push(extent(block.header_address, block.header.len() as u64).unwrap());
-        allocations
-            .push(extent(block.section_list_address, block.section_list.len() as u64).unwrap());
+        allocations.push(extent(block.header_address, block.header().len() as u64).unwrap());
+        allocations.push(
+            extent(
+                block.section_list_address,
+                block.section_list().len() as u64,
+            )
+            .unwrap(),
+        );
     }
     allocations.sort_unstable();
     let snapshot = plan.tail.post.admitted_snapshot();

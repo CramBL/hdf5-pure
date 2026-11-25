@@ -1315,8 +1315,8 @@ fn section_list_len(widths: FormatWidths, sets: usize, sections: usize) -> u64 {
 }
 
 /// Returns the length in bytes of a header at `widths`, checksum included.
-fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> usize {
-    let (os, ls) = (usize::from(offsets.get()), usize::from(lengths.get()));
+const fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> usize {
+    let (os, ls) = (offsets.get() as usize, lengths.get() as usize);
     // sig(4) ver(1) client(1) + 4*L + classes/shrink/expand/abits (2 each) +
     // max(L) + fsse_addr(O) + used(L) + alloc(L) + checksum(4)
     4 + 1 + 1 + 4 * ls + 2 * 4 + ls + os + ls + ls + CHECKSUM_LEN

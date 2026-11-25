@@ -725,10 +725,10 @@ fn legacy_per_page_input_is_persisted_as_a_complete_run() {
         .iter()
         .find(|block| block.header_address == plan.slots[slot])
         .unwrap();
-    let header = format::FreeSpaceManagerHeader::parse(widths, &generic.header).unwrap();
+    let header = format::FreeSpaceManagerHeader::parse(widths, generic.header()).unwrap();
     let sections = format::parse_section_info(
         widths,
-        &generic.section_list,
+        generic.section_list(),
         generic.header_address,
         &header,
     )
@@ -824,7 +824,7 @@ fn measure_manager_plan(
         let emitted = plan
             .blocks
             .iter()
-            .map(|block| (block.header.len() + block.section_list.len()) as u64)
+            .map(|block| (block.header().len() + block.section_list().len()) as u64)
             .sum::<u64>();
         assert_ne!(emitted, 0);
         // The retained encodings give a positive allocation floor for the call.
@@ -851,11 +851,11 @@ fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, e
     for block in &plan.blocks {
         allocations.push(extent(
             block.header_address.get(),
-            block.header.len() as u64,
+            block.header().len() as u64,
         ));
         allocations.push(extent(
             block.section_list_address.get(),
-            block.section_list.len() as u64,
+            block.section_list().len() as u64,
         ));
     }
     let page = plan
@@ -877,18 +877,18 @@ fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, e
         }
     }
     for block in &plan.blocks {
-        let header = format::FreeSpaceManagerHeader::parse(widths, &block.header).unwrap();
+        let header = format::FreeSpaceManagerHeader::parse(widths, block.header()).unwrap();
         assert_eq!(
             header.section_list_allocated(),
-            block.section_list.len() as u64
+            block.section_list().len() as u64
         );
         assert_eq!(header.section_list_used(), header.section_list_allocated());
         let sections =
-            format::parse_section_info(widths, &block.section_list, block.header_address, &header)
+            format::parse_section_info(widths, block.section_list(), block.header_address, &header)
                 .unwrap();
         assert_eq!(
             format::free_space_manager_len(widths, &sections),
-            (block.header.len() + block.section_list.len()) as u64
+            (block.header().len() + block.section_list().len()) as u64
         );
         assert!(
             sections.iter().all(

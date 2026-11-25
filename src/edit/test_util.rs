@@ -132,14 +132,14 @@ pub(super) fn decode_manager_sections(
     let mut sections = Vec::new();
     let mut used = 0;
     for block in blocks {
-        let header = format::FreeSpaceManagerHeader::parse(widths, &block.header).unwrap();
+        let header = format::FreeSpaceManagerHeader::parse(widths, block.header()).unwrap();
         assert_eq!(header.section_list_addr(), block.section_list_address);
         assert_eq!(
             header.section_list_allocated(),
-            block.section_list.len() as u64
+            block.section_list().len() as u64
         );
         let decoded =
-            format::parse_section_info(widths, &block.section_list, block.header_address, &header)
+            format::parse_section_info(widths, block.section_list(), block.header_address, &header)
                 .unwrap();
         assert_eq!(decoded.len() as u64, header.total_sections());
         sections.extend(
@@ -147,7 +147,7 @@ pub(super) fn decode_manager_sections(
                 FreeExtent::new(section.addr, ByteLength::new(section.size)).unwrap()
             }),
         );
-        used += block.header.len() as u64 + header.section_list_used();
+        used += block.header().len() as u64 + header.section_list_used();
     }
     sections.sort_unstable_by_key(|section| section.start());
     (sections, used)

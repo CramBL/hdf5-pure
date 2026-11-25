@@ -13,10 +13,14 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
+use core::borrow::Borrow;
+
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_pure_format::__private::FreeSpaceManagerHeaderEncoding;
+use hdf5_pure_format::__private::PreparedFreeSpaceManager;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
@@ -241,15 +245,12 @@ pub(crate) fn manager_kind(strategy: FileSpaceStrategy, slot: usize) -> Option<M
     }
 }
 
-/// A semantic manager's complete stored allocations, section class, and wire sections.
+/// A manager's checked section groups and complete allocations in stored coordinates.
 pub(crate) struct ManagerBlock {
     kind: ManagerKind,
     header: Extent,
     section_list: Extent,
-    class: u8,
-    sections: Vec<FreeSection>,
-    /// The encoded section-list length before any surplus allocation padding.
-    section_list_len: u64,
+    prepared: PreparedFreeSpaceManager,
 }
 
 impl ManagerBlock {
@@ -305,15 +306,10 @@ impl ManagerPlan {
                 kind,
                 header,
                 section_list,
-                class: _,
-                sections: _,
-                section_list_len,
+                prepared,
             } = block;
-            if header.len()
-                != ByteLength::new(hdf5_pure_format::__private::free_space_manager_header_len(
-                    widths,
-                ))
-                || section_list.len() < ByteLength::new(*section_list_len)
+            if header.len() != ByteLength::new(prepared.header_len().to_u64())
+                || section_list.len() < ByteLength::new(prepared.section_list_len().to_u64())
             {
                 return Err(FormatError::Internal(
                     "manager allocations differ from their measured lengths".into(),
@@ -339,7 +335,7 @@ impl ManagerPlan {
                     });
                 }
                 if blocks.iter().any(|manager| {
-                    manager.sections.iter().any(|section| {
+                    manager.prepared.sections().any(|section| {
                         extent.start().get() < section.addr.get().saturating_add(section.size)
                             && section.addr < extent.end()
                     })
@@ -381,10 +377,8 @@ impl ManagerPlan {
     /// section list cannot be extended, or the added capacity overlaps a projected free section.
     /// Returns [`FormatError::OffsetOverflow`] if padded section-list arithmetic overflows, or
     /// [`FormatError::AddressTooLarge`] or [`FormatError::LengthTooLarge`] if the padded allocation
-    /// cannot be encoded at the file's widths. Serialization errors from
-    /// [`serialize_free_space_manager_with_allocation`][serialize] are returned in iterator items.
-    ///
-    /// [serialize]: hdf5_pure_format::__private::serialize_free_space_manager_with_allocation
+    /// cannot be encoded at the file's widths. Each iterator item can return an error from
+    /// [`EncodedManager::new`].
     pub(crate) fn encode(
         self,
         allocation_end: StoredAddress,
@@ -460,58 +454,103 @@ impl ManagerPlan {
     ///
     /// # Errors
     ///
-    /// Serialization errors from [`serialize_free_space_manager_with_allocation`][serialize]
-    /// are returned in iterator items.
-    ///
-    /// [serialize]: hdf5_pure_format::__private::serialize_free_space_manager_with_allocation
+    /// Each iterator item can return an error from [`EncodedManager::new`].
     pub(crate) fn encode_allocations(
         self,
     ) -> impl Iterator<Item = Result<EncodedManager, FormatError>> {
-        let Self {
-            widths,
-            slots: _,
-            blocks,
-            end_of_managers: _,
-        } = self;
-        blocks.into_iter().map(move |block| {
+        self.blocks.into_iter().map(|block| {
             let ManagerBlock {
                 kind: _,
                 header,
                 section_list,
-                class,
-                sections,
-                section_list_len: _,
+                prepared,
             } = block;
-            let (header_bytes, section_list_bytes) =
-                hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
-                    widths,
-                    &sections,
-                    header.start(),
-                    section_list.start(),
-                    class,
-                    Some(section_list.len().get()),
-                )?;
-            Ok(EncodedManager {
-                header_address: header.start(),
-                header: header_bytes,
-                section_list_address: section_list.start(),
-                section_list: section_list_bytes,
-            })
+            EncodedManager::new(
+                &prepared,
+                header.start(),
+                section_list.start(),
+                Some(section_list.len().get()),
+            )
         })
     }
 }
 
 /// Serialized manager metadata and its stored emission addresses.
 ///
-/// The section-list buffer includes its complete planned allocation capacity.
+/// The header occupies an inline buffer. The section-list buffer includes the padding and
+/// checksum for its complete planned allocation.
+#[derive(Debug)]
 pub(crate) struct EncodedManager {
     pub(crate) header_address: StoredAddress,
-    pub(crate) header: Vec<u8>,
     pub(crate) section_list_address: StoredAddress,
-    pub(crate) section_list: Vec<u8>,
+    header_len: usize,
+    header: [u8; FreeSpaceManagerHeaderEncoding::MAX_ENCODED_SIZE],
+    section_list: Vec<u8>,
 }
 
-/// Manager sections and their measured wire lengths, retained before address assignment.
+impl EncodedManager {
+    /// Serializes both blocks of a prepared manager at their stored addresses.
+    ///
+    /// Pass `None` for the shortest section list. Pass `Some` with the complete section-list length
+    /// in bytes, including any padding and the checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns the placement errors of [`PreparedFreeSpaceManager::place`] or
+    /// [`FormatError::AllocationFailed`] if the section-list buffer cannot be allocated.
+    pub(crate) fn new(
+        prepared: &PreparedFreeSpaceManager,
+        header_address: StoredAddress,
+        section_list_address: StoredAddress,
+        section_list_allocation: Option<u64>,
+    ) -> Result<Self, FormatError> {
+        let encoding = prepared.place(
+            header_address,
+            section_list_address,
+            section_list_allocation,
+        )?;
+        let header = encoding.header();
+        let section_list = encoding.section_list();
+        let mut header_bytes = [0; FreeSpaceManagerHeaderEncoding::MAX_ENCODED_SIZE];
+        let header_len = header.write_into(&mut header_bytes)?;
+        let mut section_list_bytes = Vec::new();
+        crate::bytes::resize_buffer(&mut section_list_bytes, section_list.encoded_size())?;
+        section_list.write_into(&mut section_list_bytes)?;
+        Ok(Self {
+            header_address,
+            section_list_address,
+            header_len,
+            header: header_bytes,
+            section_list: section_list_bytes,
+        })
+    }
+
+    /// Returns the written header bytes, including the checksum.
+    pub(crate) fn header(&self) -> &[u8] {
+        &self.header[..self.header_len]
+    }
+
+    /// Returns the entire allocated section list, including padding and the checksum.
+    pub(crate) fn section_list(&self) -> &[u8] {
+        &self.section_list
+    }
+
+    /// Returns the stored addresses and bytes, with the header first.
+    pub(crate) fn blocks(&self) -> [(StoredAddress, &[u8]); 2] {
+        [
+            (self.header_address, self.header()),
+            (self.section_list_address, self.section_list()),
+        ]
+    }
+
+    /// Returns the capacity in bytes of the section-list buffer.
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    pub(crate) fn section_list_capacity(&self) -> usize {
+        self.section_list.capacity()
+    }
+}
+
+/// The measured manager lengths and section groups before address assignment.
 pub(crate) struct ManagerProjection {
     blocks: Vec<ProjectedManager>,
     widths: FormatWidths,
@@ -521,97 +560,62 @@ pub(crate) struct ManagerProjection {
 impl ManagerProjection {
     /// Projects admitted sections and measures their manager encodings at `widths`.
     ///
-    /// Retains the projected sections for placement and encoding without repeating projection.
+    /// Retains checked section groups for placement and encoding. When preparation fails, keeps
+    /// the error and measures the section list from counts. The caller can use that measurement
+    /// to select a reservation that changes the available sections before the final projection.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::OffsetOverflow`] if the combined manager length exceeds [`u64::MAX`].
+    /// Returns the measurement errors of [`SectionInfoCounts::encoded_len`] or
+    /// [`FormatError::OffsetOverflow`] if the combined length exceeds [`u64::MAX`].
     pub(crate) fn new(
         snapshot: AdmittedFreeSnapshot<'_>,
         widths: FormatWidths,
     ) -> Result<Self, FormatError> {
-        Self::from_managers(&ManagerSections::from_snapshot(snapshot), widths)
+        Self::from_managers(widths, ManagerSections::from_snapshot(snapshot))
     }
 
-    /// Projects admitted sections and returns the small metadata manager's distinct sizes.
-    ///
-    /// Retains sections and measured lengths for placement and encoding. The size index supports
-    /// measurement of additional padding sections without rebuilding the base size groups.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::OffsetOverflow`] if the combined manager length exceeds [`u64::MAX`].
-    pub(crate) fn indexed(
-        snapshot: AdmittedFreeSnapshot<'_>,
-        widths: FormatWidths,
-    ) -> Result<(Self, BTreeSet<u64>), FormatError> {
-        let mut sizes = BTreeSet::new();
-        let projection = Self::from_managers_indexed(
-            &ManagerSections::from_snapshot(snapshot),
-            widths,
-            Some(&mut sizes),
-        )?;
-        Ok((projection, sizes))
+    /// Borrows the distinct sizes for `kind`, with an empty view for an absent manager.
+    pub(crate) fn section_sizes(&self, kind: ManagerKind) -> ManagerSectionSizes<'_> {
+        ManagerSectionSizes(
+            self.blocks
+                .iter()
+                .find(|block| block.kind == kind)
+                .map(|block| &block.encoding),
+        )
     }
 
-    /// Borrows the projected sections of `kind`, or an empty slice for an inactive manager.
-    pub(crate) fn sections(&self, kind: ManagerKind) -> &[FreeSection] {
+    /// Returns zero for an absent manager.
+    pub(crate) fn section_count(&self, kind: ManagerKind) -> u64 {
         self.blocks
             .iter()
             .find(|block| block.kind == kind)
-            .map_or(&[], |block| block.sections.as_slice())
+            .map_or(0, |block| block.section_count)
     }
 
     /// Returns manager kinds and measured header/list lengths in File Space Info slot order.
     pub(crate) fn measurements(&self) -> impl Iterator<Item = (ManagerKind, [u64; 2])> + '_ {
-        self.blocks
-            .iter()
-            .zip(self.block_lengths())
-            .map(|(block, lengths)| (block.kind, lengths))
+        self.blocks.iter().map(|block| (block.kind, block.lengths))
     }
 
+    /// Retains the managers in File Space Info slot order and sums their measured lengths.
+    ///
+    /// # Errors
+    ///
+    /// Returns the measurement errors of [`ProjectedManager::new`] or
+    /// [`FormatError::OffsetOverflow`] if the combined length exceeds [`u64::MAX`].
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if two managers use the same File Space Info slot.
     fn from_managers(
-        managers: &[ManagerSections],
         widths: FormatWidths,
+        managers: impl IntoIterator<Item = impl Borrow<ManagerSections>>,
     ) -> Result<Self, FormatError> {
-        Self::from_managers_indexed(managers, widths, None)
-    }
-
-    fn from_managers_indexed(
-        managers: &[ManagerSections],
-        widths: FormatWidths,
-        mut metadata_sizes: Option<&mut BTreeSet<u64>>,
-    ) -> Result<Self, FormatError> {
-        let mut blocks = Vec::with_capacity(managers.len());
-        for manager in managers {
-            let sections: Vec<_> = manager
-                .sections()
-                .iter()
-                .map(|extent| FreeSection {
-                    addr: extent.start(),
-                    size: extent.len().get(),
-                })
-                .collect();
-            let section_list_len = if let Some(index) = metadata_sizes
-                .as_deref_mut()
-                .filter(|_| manager.kind() == ManagerKind::PagedSmallMetadata)
-            {
-                index.extend(sections.iter().map(|section| section.size));
-                SectionInfoCounts::new(sections.len() as u64, index.len() as u64)?
-                    .encoded_len(widths)?
-            } else {
-                let sizes: Vec<_> = sections.iter().map(|section| section.size).collect();
-                hdf5_pure_format::__private::section_info_len(widths, &sizes)
-            };
-            let (slot, class) = manager_wire(manager.kind());
-            blocks.push(ProjectedManager {
-                kind: manager.kind(),
-                slot,
-                class,
-                sections,
-                section_list_len,
-            });
-        }
+        let mut blocks = managers
+            .into_iter()
+            .map(|manager| ProjectedManager::new(manager.borrow(), widths))
+            .collect::<Result<Vec<_>, _>>()?;
         blocks.sort_unstable_by_key(|block| block.slot);
         debug_assert!(
             blocks.windows(2).all(|pair| pair[0].slot != pair[1].slot),
@@ -673,23 +677,13 @@ impl ManagerProjection {
     ///
     /// Pairs are in File Space Info slot order. Lengths are in bytes and exclude surplus capacity.
     pub(crate) fn block_lengths(&self) -> impl ExactSizeIterator<Item = [u64; 2]> + '_ {
-        let Self {
-            blocks,
-            widths,
-            encoded_len: _,
-        } = self;
-        blocks.iter().map(|block| {
-            [
-                hdf5_pure_format::__private::free_space_manager_header_len(*widths),
-                block.section_list_len,
-            ]
-        })
+        self.blocks.iter().map(|block| block.lengths)
     }
 
     /// Constructs a checked manager layout from the caller's allocations.
     ///
-    /// Calls `place` once per active manager, in File Space Info slot order, with the measured
-    /// header and section-list lengths. The caller returns their complete allocations.
+    /// Passes the measured header and section-list lengths to `place` in File Space Info slot
+    /// order. The caller returns their complete allocations.
     /// Header lengths must match exactly, and section lists may include surplus capacity.
     /// Allocation ownership and PAGE placement remain the caller's responsibility.
     ///
@@ -699,6 +693,7 @@ impl ManagerProjection {
     /// list is too short, or allocations overlap each other or projected free sections, or
     /// [`FormatError::DefinedAddressIsUndefined`], [`FormatError::AddressTooLarge`], or
     /// [`FormatError::LengthTooLarge`] if an allocation cannot be encoded at the file's widths.
+    /// Returns a retained preparation error before calling `place` for the affected manager.
     pub(crate) fn place(
         self,
         mut place: impl FnMut([u64; 2]) -> Result<[Extent; 2], FormatError>,
@@ -724,31 +719,19 @@ impl ManagerProjection {
         } = self;
         let blocks = blocks
             .into_iter()
-            .map(
-                |ProjectedManager {
-                     kind,
-                     slot: _,
-                     class,
-                     sections,
-                     section_list_len,
-                 }| {
-                    let [header, section_list] = place(
-                        kind,
-                        [
-                            hdf5_pure_format::__private::free_space_manager_header_len(widths),
-                            section_list_len,
-                        ],
-                    )?;
-                    Ok(ManagerBlock {
-                        kind,
-                        header,
-                        section_list,
-                        class,
-                        sections,
-                        section_list_len,
-                    })
-                },
-            )
+            .map(|block| {
+                let prepared = match block.encoding {
+                    ProjectedEncoding::Prepared(prepared) => prepared,
+                    ProjectedEncoding::Unencodable { error, .. } => return Err(error),
+                };
+                let [header, section_list] = place(block.kind, block.lengths)?;
+                Ok(ManagerBlock {
+                    kind: block.kind,
+                    header,
+                    section_list,
+                    prepared,
+                })
+            })
             .collect::<Result<Vec<_>, FormatError>>()?;
         ManagerPlan::new(widths, blocks, StoredAddress::ZERO)
     }
@@ -766,13 +749,97 @@ fn manager_extent(start: StoredAddress, length: u64) -> Result<Extent, FormatErr
     })
 }
 
-/// One manager's semantic sections, wire class, slot, and measured section-list length.
+/// The slot, measured lengths, and encoding state for one manager.
 struct ProjectedManager {
     kind: ManagerKind,
     slot: usize,
-    class: u8,
-    sections: Vec<FreeSection>,
-    section_list_len: u64,
+    section_count: u64,
+    lengths: [u64; 2],
+    encoding: ProjectedEncoding,
+}
+
+impl ProjectedManager {
+    /// Measures one manager at `widths` and records its File Space Info slot.
+    ///
+    /// Retains the result of section preparation. If preparation fails, measures the section-list
+    /// length from the section count and the number of distinct sizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`SectionInfoCounts::new`] or [`SectionInfoCounts::encoded_len`] when
+    /// measuring a section list after a preparation failure.
+    fn new(manager: &ManagerSections, widths: FormatWidths) -> Result<Self, FormatError> {
+        let kind = manager.kind();
+        let (slot, class) = manager_wire(kind);
+        let section_count = manager.sections().len().to_u64();
+        let prepared = PreparedFreeSpaceManager::new(
+            widths,
+            manager.sections().iter().map(|extent| FreeSection {
+                addr: extent.start(),
+                size: extent.len().get(),
+            }),
+            class,
+        );
+        let (encoding, list_len) = match prepared {
+            Ok(prepared) => {
+                let length = prepared.section_list_len().to_u64();
+                (ProjectedEncoding::Prepared(prepared), length)
+            }
+            Err(error) => {
+                // A reservation can consume part of a section before the final projection.
+                let sizes = manager
+                    .sections()
+                    .iter()
+                    .map(|section| section.len().get())
+                    .collect::<BTreeSet<_>>();
+                let length = SectionInfoCounts::new(section_count, sizes.len().to_u64())?
+                    .encoded_len(widths)?;
+                (ProjectedEncoding::Unencodable { sizes, error }, length)
+            }
+        };
+        Ok(Self {
+            kind,
+            slot,
+            section_count,
+            lengths: [
+                hdf5_pure_format::__private::free_space_manager_header_len(widths),
+                list_len,
+            ],
+            encoding,
+        })
+    }
+}
+
+/// The result of preparing a manager, with size-group information for measurement.
+enum ProjectedEncoding {
+    Prepared(PreparedFreeSpaceManager),
+    Unencodable {
+        sizes: BTreeSet<u64>,
+        error: FormatError,
+    },
+}
+
+/// The distinct section sizes in a projected manager, in bytes.
+pub(crate) struct ManagerSectionSizes<'a>(Option<&'a ProjectedEncoding>);
+
+impl ManagerSectionSizes<'_> {
+    /// Returns the number of groups the section list needs.
+    pub(crate) fn count(&self) -> u64 {
+        match self.0 {
+            None => 0,
+            Some(ProjectedEncoding::Prepared(prepared)) => prepared.distinct_size_count().to_u64(),
+            Some(ProjectedEncoding::Unencodable { sizes, .. }) => sizes.len().to_u64(),
+        }
+    }
+
+    /// Returns whether any projected section has a length of `size` bytes.
+    pub(crate) fn contains(&self, size: u64) -> bool {
+        match self.0 {
+            None => false,
+            Some(ProjectedEncoding::Prepared(prepared)) => prepared.contains_section_size(size),
+            Some(ProjectedEncoding::Unencodable { sizes, .. }) => sizes.contains(&size),
+        }
+    }
 }
 
 /// Returns the encoded length of `managers` without assigning them file positions.
@@ -785,7 +852,7 @@ pub(crate) fn manager_blocks_len(
     managers: &[ManagerSections],
     widths: FormatWidths,
 ) -> Result<u64, FormatError> {
-    Ok(ManagerProjection::from_managers(managers, widths)?.encoded_len())
+    Ok(ManagerProjection::from_managers(widths, managers)?.encoded_len())
 }
 
 /// Returns the File Space Info slot and section class for `kind`.
@@ -824,7 +891,7 @@ pub(crate) fn plan_managers(
     start: StoredAddress,
     widths: FormatWidths,
 ) -> Result<ManagerPlan, FormatError> {
-    ManagerProjection::from_managers(managers, widths)?.into_plan(start)
+    ManagerProjection::from_managers(widths, managers)?.into_plan(start)
 }
 
 #[cfg(test)]
@@ -1128,12 +1195,12 @@ mod tests {
         assert_eq!(encoded.len(), 1);
         assert_eq!(encoded[0].header_address, StoredAddress::new(619));
         assert_eq!(encoded[0].section_list_address, StoredAddress::new(701));
-        assert_eq!(encoded[0].header.len(), 82);
+        assert_eq!(encoded[0].header().len(), 82);
         assert_eq!(
-            u64::try_from(encoded[0].section_list.len()).unwrap(),
+            u64::try_from(encoded[0].section_list().len()).unwrap(),
             35 + padding
         );
-        let header = FreeSpaceManagerHeader::parse(widths(8, 8), &encoded[0].header).unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths(8, 8), encoded[0].header()).unwrap();
         assert_eq!(header.section_list_used(), 35 + padding);
         assert_eq!(header.section_list_allocated(), 35 + padding);
         assert_eq!(header.total_space(), 1600);
@@ -1141,7 +1208,7 @@ mod tests {
         assert_eq!(
             hdf5_pure_format::__private::parse_section_info(
                 widths(8, 8),
-                &encoded[0].section_list,
+                encoded[0].section_list(),
                 StoredAddress::new(619),
                 &header,
             )
@@ -1317,14 +1384,17 @@ mod tests {
         assert_eq!(plan.blocks[0].kind, ManagerKind::PagedSmallMetadata);
         assert_eq!(plan.blocks[1].kind, ManagerKind::PagedSmallRaw);
         assert_eq!(plan.blocks[2].kind, ManagerKind::PagedLargeGeneric);
-        assert_eq!(plan.blocks[0].class, SECTION_CLASS_SMALL);
-        assert_eq!(plan.blocks[1].class, SECTION_CLASS_SMALL);
-        assert_eq!(plan.blocks[2].class, SECTION_CLASS_LARGE);
-        assert_eq!(plan.blocks[0].sections, vec![section(100, 200)]);
-        assert_eq!(plan.blocks[1].sections, vec![section(5000, 200)]);
         assert_eq!(
-            plan.blocks[2].sections,
-            vec![section(8192, page_size.get())]
+            plan.blocks[0].prepared.sections().collect::<Vec<_>>(),
+            [section(100, 200)]
+        );
+        assert_eq!(
+            plan.blocks[1].prepared.sections().collect::<Vec<_>>(),
+            [section(5000, 200)]
+        );
+        assert_eq!(
+            plan.blocks[2].prepared.sections().collect::<Vec<_>>(),
+            [section(8192, page_size.get())]
         );
         assert!(
             plan.slots
@@ -1334,39 +1404,34 @@ mod tests {
                     || addr.is_undefined(OffsetWidth::Eight))
         );
 
-        for block in &plan.blocks {
-            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
-                widths(8, 8),
-                &block.sections,
-                block.header.start(),
-                block.section_list.start(),
-                block.class,
-            )
-            .unwrap();
+        let end = plan.end();
+        let mut managers = plan.encode_allocations().peekable();
+        for class in [
+            SECTION_CLASS_SMALL,
+            SECTION_CLASS_SMALL,
+            SECTION_CLASS_LARGE,
+        ] {
+            let block = managers.next().unwrap().unwrap();
+            let fshd = block.header();
+            let fsse = block.section_list();
+            assert_eq!(fsse[fsse.len() - size_of::<u32>() - size_of::<u8>()], class);
             assert_eq!(
-                block.section_list.start(),
-                block.header.start().checked_add(fshd.len() as u64).unwrap(),
-                "FSSE follows its FSHD"
+                block.section_list_address,
+                block.header_address.checked_add(fshd.len() as u64).unwrap(),
             );
             assert_eq!(
                 block
-                    .section_list
-                    .start()
+                    .section_list_address
                     .checked_add(fsse.len() as u64)
                     .unwrap(),
-                if block.kind == ManagerKind::PagedLargeGeneric {
-                    plan.end_of_managers
+                if let Some(next) = managers.peek() {
+                    next.as_ref().unwrap().header_address
                 } else {
-                    plan.blocks
-                        .iter()
-                        .find(|candidate| candidate.header.start() > block.header.start())
-                        .unwrap()
-                        .header
-                        .start()
+                    end
                 },
-                "manager blocks remain contiguous"
             );
         }
+        assert!(managers.next().is_none());
     }
 
     #[test]

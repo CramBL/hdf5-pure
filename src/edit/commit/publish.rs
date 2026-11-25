@@ -788,12 +788,13 @@ impl WriteEngine {
         }
         let new_old_blocks = vec![region];
 
+        let manager = plan.encode(region.end())?.next().transpose()?;
         // The extension and manager blocks remain unreferenced until superblock publication.
         self.write_tail_block(region, ext_addr, &ext_oh)?;
-        for block in plan.encode(region.end())? {
-            let block = block?;
-            self.write_tail_block(region, block.header_address, &block.header)?;
-            self.write_tail_block(region, block.section_list_address, &block.section_list)?;
+        if let Some(manager) = manager {
+            for (address, bytes) in manager.blocks() {
+                self.write_tail_block(region, address, bytes)?;
+            }
         }
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.persistence_barrier(purpose)?;
@@ -1203,12 +1204,7 @@ impl WriteEngine {
     ) -> Result<(), Error> {
         let mut blocks = managers
             .iter()
-            .flat_map(|block| {
-                [
-                    (block.header_address, block.header.as_slice()),
-                    (block.section_list_address, block.section_list.as_slice()),
-                ]
-            })
+            .flat_map(EncodedManager::blocks)
             .collect::<Vec<_>>();
         blocks.sort_unstable_by_key(|(address, _)| *address);
         let mut blocks = blocks.into_iter().peekable();
