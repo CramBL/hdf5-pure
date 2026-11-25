@@ -632,6 +632,9 @@ impl FilterRecordHeader {
 const FILTER_DEFINITION_FLAG_MASK: u16 = 0x00ff;
 
 /// An error reading a Filter Pipeline body or checking descriptions for encoding.
+///
+/// [`Error::source`] returns the wrapped [`FormatError`] for [`Self::Format`]. Field and name
+/// errors have no source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterPipelineError {
     /// A filter count or stored field length exceeds its format limit.
@@ -643,7 +646,7 @@ pub enum FilterPipelineError {
         /// The maximum value permitted for this field by the format.
         maximum: usize,
     },
-    /// A format error in the version, framing, flags, reserved bytes, or client data padding.
+    /// A wrapped format error, such as an unsupported version or a truncated record.
     Format(FormatError),
     /// A filter name cannot be parsed or serialized in its message version.
     InvalidName {
@@ -652,6 +655,34 @@ pub enum FilterPipelineError {
         /// The name constraint that failed.
         reason: &'static str,
     },
+}
+
+impl fmt::Display for FilterPipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FieldTooLarge {
+                field,
+                value,
+                maximum,
+            } => write!(
+                f,
+                "filter pipeline {field:?} is {value}, above maximum {maximum}"
+            ),
+            Self::Format(error) => fmt::Display::fmt(error, f),
+            Self::InvalidName { filter_id, reason } => {
+                write!(f, "invalid name for filter {filter_id}: {reason:?}")
+            }
+        }
+    }
+}
+
+impl Error for FilterPipelineError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Format(error) => Some(error),
+            Self::FieldTooLarge { .. } | Self::InvalidName { .. } => None,
+        }
+    }
 }
 
 impl From<FormatError> for FilterPipelineError {

@@ -23,6 +23,34 @@ mod partial_edge;
 mod verbatim;
 mod zfp;
 
+#[test]
+fn chunk_writer_reports_the_filter_count_and_limit() {
+    // "The Data Storage - Filter Pipeline Message" in the format specification, version 4.0,
+    // limits the version 2 filter count to 32.
+    const MAX_FILTERS: usize = 32;
+    let options = ChunkOptions {
+        filters: vec![
+            FilterSpec {
+                kind: FilterKind::Fletcher32,
+                optional: false,
+            };
+            MAX_FILTERS + 1
+        ],
+        ..ChunkOptions::default()
+    };
+
+    assert_eq!(
+        options
+            .build_pipeline(&ChunkContext::basic(&[4], 4), FillPattern::ZERO)
+            .unwrap_err(),
+        FormatError::InvalidFilterPipelineField {
+            field: "filter count",
+            value: MAX_FILTERS + 1,
+            maximum: MAX_FILTERS,
+        }
+    );
+}
+
 #[rstest]
 #[case::empty(5, 5, 0)]
 #[case::gap(5, 7, 2)]
