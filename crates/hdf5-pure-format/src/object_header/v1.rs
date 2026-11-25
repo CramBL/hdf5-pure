@@ -79,25 +79,15 @@ impl ObjectHeader {
 
         bytes::ensure_len(data, msg_start, header_data_size)?;
 
-        // Reserve for root records only, bounded by the number of minimum-size records
-        // in the chunk. Continuation records are appended to the same vector.
-        let mut messages = Vec::with_capacity(if filter.keeps_all() {
-            (num_messages as usize).min(header_data_size / 8)
-        } else {
-            0
-        });
+        let records = &data[msg_start..msg_start + header_data_size];
+        let mut messages = root_messages(records, num_messages, filter);
         let mut collector = HeaderCollector {
             context,
             traversal: Traversal::new(),
             messages: &mut messages,
             filter,
         };
-        collector.collect_buffered(
-            data,
-            &data[msg_start..msg_start + header_data_size],
-            Some(num_messages),
-            0,
-        )?;
+        collector.collect_buffered(data, records, Some(num_messages), 0)?;
 
         Ok(ObjectHeader {
             version: 1,
@@ -114,6 +104,7 @@ impl ObjectHeader {
 
     /// Parses a version 1 header and observes each chunk before decoding its records.
     ///
+    /// Reads the complete root chunk before reserving space for decoded messages.
     /// Continuations are visited depth-first. The observer borrows the current record buffer.
     ///
     /// # Errors
@@ -145,13 +136,6 @@ impl ObjectHeader {
                     length: ALIGNED_HEADER_PREFIX_LEN,
                 })?;
 
-        // Capacity is bounded by the header's message count and the number of
-        // minimum-size records the chunk can hold. [`parse_v1`] uses the same bound.
-        let mut messages = Vec::with_capacity(if filter.keeps_all() {
-            (num_messages as usize).min((header_data_size / 8).to_usize()?)
-        } else {
-            0
-        });
         let records = FileRange::new(PhysicalAddress::new(region_addr), header_data_size)?;
         let allocation = FileRange::new(
             PhysicalAddress::new(address),
@@ -164,6 +148,7 @@ impl ObjectHeader {
         )?;
         let region = source.read_metadata(region_addr, header_data_size.to_usize()?)?;
         observe_chunk(&region, records, allocation, observer)?;
+        let mut messages = root_messages(&region, num_messages, filter);
         let mut collector = HeaderCollector {
             context,
             traversal: Traversal::new(),
@@ -184,6 +169,23 @@ impl ObjectHeader {
             birth_time: None,
         })
     }
+}
+
+/// Reserves space for decoded messages from the acquired root chunk.
+///
+/// When the filter keeps all messages, caps the reservation by the declared count and
+/// the number of record prefixes that fit in `records`. Returns an empty buffer with
+/// zero capacity for a selective filter.
+fn root_messages(
+    records: &[u8],
+    num_messages: u16,
+    filter: &MessageFilter<'_>,
+) -> Vec<HeaderMessage> {
+    Vec::with_capacity(if filter.keeps_all() {
+        usize::from(num_messages).min(records.len() / MESSAGE_PREFIX_LEN)
+    } else {
+        0
+    })
 }
 
 /// Collects retained messages depth-first with one traversal allowance per header.

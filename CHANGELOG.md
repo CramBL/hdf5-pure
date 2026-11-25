@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::groups` reserving space for decoded messages while reading a truncated version 1
+  object header root chunk from a source.
 - Fixed `File::persisted_free_sections` reporting an invalid count for a truncated free-space
   section-group prefix or an invalid class for an incomplete group of records ([#1372](https://github.com/CramBL/hdf5-pure/pull/1372)).
 - Fixed `FileBuilder::finish` accepting enumeration members whose value widths differ from

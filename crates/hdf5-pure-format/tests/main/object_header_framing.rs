@@ -14,6 +14,36 @@ use test_util::object_header::{
 use test_util::widths::Widths;
 
 #[rstest]
+fn version_1_readers_report_an_incomplete_root_extent_before_interpreting_records(
+    #[values(Backend::Buffered, Backend::Source, Backend::ObservedSource)] backend: Backend,
+) {
+    let message = Message::new(FixtureType::UNKNOWN, &[0x42; v1::MESSAGE_ALIGNMENT])
+        .with_flags(FixtureFlags::FAIL_IF_UNKNOWN_ALWAYS);
+    let declared = v1::RECORD_PREFIX + 2 * v1::MESSAGE_ALIGNMENT;
+    let bytes = v1::Header::new()
+        .message(message)
+        .declared_data_size(u32::try_from(declared).unwrap())
+        .build();
+    let expected = v1::PREFIX + declared;
+    let available = bytes.len();
+    let error = match backend {
+        Backend::Buffered => FormatError::UnexpectedEof {
+            expected,
+            available,
+        },
+        Backend::Source | Backend::ObservedSource => FormatError::UnexpectedSourceEof {
+            expected: u64::try_from(expected).unwrap(),
+            available: u64::try_from(available).unwrap(),
+        },
+    };
+
+    assert_eq!(
+        backend.parse(&bytes, MessageFilter::All).unwrap_err(),
+        error
+    );
+}
+
+#[rstest]
 #[case::unaligned_without_body(1, 0, FormatError::InvalidObjectHeaderMessageSize(1))]
 #[case::unaligned_with_body(1, 1, FormatError::InvalidObjectHeaderMessageSize(1))]
 #[case::aligned_without_body(8, 0, FormatError::UnexpectedEof {

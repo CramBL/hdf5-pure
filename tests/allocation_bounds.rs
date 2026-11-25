@@ -135,6 +135,8 @@ mod free_space;
 
 #[path = "allocation_bounds/global_heap.rs"]
 mod global_heap;
+#[path = "allocation_bounds/object_header.rs"]
+mod object_header;
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();

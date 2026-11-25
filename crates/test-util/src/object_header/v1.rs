@@ -13,6 +13,7 @@ use crate::widths::Widths;
 #[derive(Clone, Debug)]
 pub struct Header {
     reference_count: u32,
+    declared_message_count: Option<u16>,
     declared_data_size: Option<u32>,
     messages: Vec<Message>,
 }
@@ -21,6 +22,7 @@ impl Header {
     pub fn new() -> Self {
         Self {
             reference_count: 1,
+            declared_message_count: None,
             declared_data_size: None,
             messages: Vec::new(),
         }
@@ -42,6 +44,12 @@ impl Header {
         self
     }
 
+    /// Sets the count written in the header prefix independently of the messages written.
+    pub fn declared_message_count(mut self, count: u16) -> Self {
+        self.declared_message_count = Some(count);
+        self
+    }
+
     /// An Object Header Continuation message naming `chunk` at `at`.
     pub fn continuation(self, at: usize, chunk: &[u8], widths: Widths) -> Self {
         self.message(Message::continuation(at as u64, chunk.len() as u64, widths))
@@ -56,7 +64,9 @@ impl Header {
 
     pub fn build(&self) -> Vec<u8> {
         let records = message_records(&self.messages);
-        let message_count = u16::try_from(self.messages.len()).expect("a message count");
+        let message_count = self
+            .declared_message_count
+            .unwrap_or_else(|| u16::try_from(self.messages.len()).expect("a message count"));
         let data_size = self
             .declared_data_size
             .unwrap_or_else(|| u32::try_from(records.len()).expect("a chunk zero size"));
