@@ -845,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_v2_checksum_is_validated() {
+    fn parse_v2_verifies_checksums_only_with_the_checksum_feature() {
         let mut data = v2_bytes::Header::new()
             .message(Message::new(RecordType::DATASPACE, &[1, 2, 3]))
             .build();
@@ -861,14 +861,18 @@ mod tests {
         assert_eq!(message.data, [1, 2, 3]);
 
         *data.last_mut().unwrap() ^= 0xFF;
-        let (body, stored) = data.split_last_chunk::<CHECKSUM>().unwrap();
-        assert_eq!(
-            parse(&data).unwrap_err(),
-            FormatError::ChecksumMismatch {
-                expected: u32::from_le_bytes(*stored),
-                computed: test_util::checksum::lookup3(body),
-            }
-        );
+        if cfg!(feature = "checksum") {
+            let (body, stored) = data.split_last_chunk::<CHECKSUM>().unwrap();
+            assert_eq!(
+                parse(&data).unwrap_err(),
+                FormatError::ChecksumMismatch {
+                    expected: u32::from_le_bytes(*stored),
+                    computed: test_util::checksum::lookup3(body),
+                }
+            );
+        } else {
+            assert_same_header(&parse(&data).unwrap(), &header);
+        }
     }
 
     #[test]

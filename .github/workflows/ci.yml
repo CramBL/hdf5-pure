@@ -139,6 +139,11 @@ jobs:
       - name: Tests
         run: just ${{ matrix.config.name == 'full' && 'test-full' || 'test' }}
 
+      # Run Format's tests with checksum verification disabled.
+      - name: Test Format without default features
+        if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
+        run: cargo nextest run --locked -p hdf5-pure-format --no-default-features
+
       # Execute each Miri family with its native feature configuration.
       - name: Check Miri test selection
         if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
