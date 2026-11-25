@@ -456,6 +456,20 @@ pub enum FormatError {
         /// The input index of the second overlapping block in address order.
         second: usize,
     },
+    /// The allocation for a free-space section list is smaller than its encoding.
+    FreeSpaceSectionListAllocationTooSmall {
+        /// The encoded length of the section list, including its checksum, in bytes.
+        required: u64,
+        /// The allocation length in bytes.
+        allocated: u64,
+    },
+    /// The total size of the free sections exceeds [`u64::MAX`].
+    FreeSpaceSectionSizeOverflow {
+        /// The sum of the preceding section sizes in bytes.
+        total: u64,
+        /// The size in bytes of the section that caused the overflow.
+        size: u64,
+    },
     /// A global heap collection's members exceed its requested allocation size.
     GlobalHeapCapacityExceeded {
         /// The capacity passed to preparation, in bytes.
@@ -947,6 +961,13 @@ pub enum FormatError {
     InvalidFreeSpaceSectionGroupSize {
         /// The start of the group, in bytes from the start of the section list.
         offset: usize,
+    },
+    /// A free-space section size is zero or exceeds the maximum for the length width.
+    InvalidFreeSpaceSectionSize {
+        /// The supplied section size in bytes.
+        size: u64,
+        /// The largest supported section size in bytes.
+        maximum: u64,
     },
     /// The file free-space section sizes do not sum to the total in the manager header.
     InvalidFreeSpaceSectionSizeSum {
@@ -2129,6 +2150,17 @@ impl fmt::Display for FormatError {
             Self::InvalidFreeSpaceManager(reason) => {
                 write!(f, "invalid free-space manager: {reason}")
             }
+            Self::FreeSpaceSectionListAllocationTooSmall {
+                required,
+                allocated,
+            } => write!(
+                f,
+                "the section list uses {required} bytes, more than the {allocated} bytes allocated to it"
+            ),
+            Self::FreeSpaceSectionSizeOverflow { total, size } => write!(
+                f,
+                "adding a free section of {size} bytes to {total} tracked bytes exceeds the 8-byte total space field"
+            ),
             Self::InvalidFreeSpaceSectionClass { offset, class_id } => write!(
                 f,
                 "unsupported file free-space section class {class_id} at byte {offset} of the section list"
@@ -2157,6 +2189,10 @@ impl fmt::Display for FormatError {
                     "a free-space section group at byte {offset} has zero section size"
                 )
             }
+            Self::InvalidFreeSpaceSectionSize { size, maximum } => write!(
+                f,
+                "free-space section size {size} is outside the range 1..={maximum} bytes"
+            ),
             Self::InvalidFreeSpaceSectionSizeSum { expected, actual } => write!(
                 f,
                 "the free-space section sizes sum to {actual} bytes, expected {expected}"

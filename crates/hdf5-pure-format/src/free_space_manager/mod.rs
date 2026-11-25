@@ -11,7 +11,6 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
@@ -34,6 +33,13 @@ use crate::width;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+
+mod write;
+
+pub use write::{
+    FreeSpaceManagerEncoding, FreeSpaceManagerHeaderEncoding, FreeSpaceManagerSectionListEncoding,
+    PreparedFreeSpaceManager,
+};
 
 const FSHD_SIGNATURE: &[u8; 4] = b"FSHD";
 const FSSE_SIGNATURE: &[u8; 4] = b"FSSE";
@@ -776,46 +782,6 @@ impl FreeSpaceManagerHeader {
             enc_size(self.max_section_size)
         }
     }
-
-    /// Serializes the header at `widths`, checksum included.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AddressTooLarge`] or [`FormatError::LengthTooLarge`] if a field does
-    /// not fit its width.
-    fn encode(
-        &self,
-        widths @ FormatWidths { offsets, lengths }: FormatWidths,
-    ) -> Result<Vec<u8>, FormatError> {
-        let Self {
-            total_space,
-            total_sections,
-            addr_space_bits,
-            max_section_size,
-            section_list_addr,
-            section_list_used,
-            section_list_allocated,
-        } = *self;
-        let mut fshd = Vec::with_capacity(header_len(widths));
-        fshd.extend_from_slice(FSHD_SIGNATURE);
-        fshd.push(FSHD_VERSION);
-        fshd.push(FILE_FSM_CLIENT_ID);
-        bytes::try_write_length(&mut fshd, total_space, lengths)?;
-        bytes::try_write_length(&mut fshd, total_sections, lengths)?;
-        bytes::try_write_length(&mut fshd, total_sections, lengths)?; // serialized (all of them)
-        bytes::try_write_length(&mut fshd, 0, lengths)?; // ghost (none)
-        fshd.extend_from_slice(&FILE_FSM_NUM_CLASSES.to_le_bytes());
-        fshd.extend_from_slice(&FILE_FSM_SHRINK_PCT.to_le_bytes());
-        fshd.extend_from_slice(&FILE_FSM_EXPAND_PCT.to_le_bytes());
-        fshd.extend_from_slice(&addr_space_bits.get().to_le_bytes());
-        bytes::try_write_length(&mut fshd, max_section_size, lengths)?;
-        bytes::try_write_offset(&mut fshd, section_list_addr.get(), offsets)?;
-        bytes::try_write_length(&mut fshd, section_list_used, lengths)?; // section info used
-        bytes::try_write_length(&mut fshd, section_list_allocated, lengths)?;
-        let checksum = checksum::jenkins_lookup3(&fshd);
-        fshd.extend_from_slice(&checksum.to_le_bytes());
-        Ok(fshd)
-    }
 }
 
 /// The number of section classes the header of a file free-space manager stores, the three
@@ -846,13 +812,6 @@ pub const SECTION_CLASS_SMALL: u8 = 1;
 /// The class identifies the manager, and a section of it may be smaller than a page.
 pub const SECTION_CLASS_LARGE: u8 = 2;
 
-/// Appends the low `width` bytes of `value` to `buf`, little-endian.
-fn push_uint_le(buf: &mut Vec<u8>, value: u64, width: usize) {
-    // `width` is always 1..=8 (the count, size, and length widths). Take the low bytes of
-    // the little-endian encoding without a narrowing cast.
-    buf.extend_from_slice(&value.to_le_bytes()[..width]);
-}
-
 /// Serializes the header, for `fshd_addr`, and the section list, for `fsse_addr`, of a file
 /// free-space manager that holds `sections`.
 ///
@@ -873,11 +832,8 @@ fn push_uint_le(buf: &mut Vec<u8>, value: u64, width: usize) {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidFreeSpaceManager`] if a section is not smaller than that power of
-/// two, [`FormatError::AddressTooLarge`] if `fshd_addr`, `fsse_addr`, or the address of a section
-/// does not fit the offset width of `widths`, [`FormatError::LengthTooLarge`] if the total size
-/// of the sections, their number, or the length of the section list does not fit the length width,
-/// and [`FormatError::Internal`] if the sizes of `sections` sum past `u64::MAX`.
+/// Returns the errors of [`PreparedFreeSpaceManager::new`] and [`PreparedFreeSpaceManager::place`],
+/// or [`FormatError::AllocationFailed`] if the output buffers could not be allocated.
 pub fn serialize_free_space_manager(
     widths: FormatWidths,
     sections: &[FreeSection],
@@ -933,10 +889,9 @@ pub fn serialize_free_space_manager(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidFreeSpaceManager`] if `section_list_allocated` is shorter than
-/// the shortest serialized section list, [`FormatError::LengthTooLarge`] if it exceeds the length
-/// width of `widths`, and [`FormatError::ValueTooLargeForPlatform`] if the allocation length does
-/// not fit a [`usize`]. Other failures are the errors of [`serialize_free_space_manager`].
+/// Returns [`FormatError::FreeSpaceSectionListAllocationTooSmall`] if `section_list_allocated`
+/// is shorter than the shortest serialized section list. Other failures are the errors of
+/// [`serialize_free_space_manager`].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
 pub fn serialize_free_space_manager_with_allocation(
@@ -947,62 +902,12 @@ pub fn serialize_free_space_manager_with_allocation(
     class_id: u8,
     section_list_allocated: Option<u64>,
 ) -> Result<(Vec<u8>, Vec<u8>), FormatError> {
-    let max_section_size = written_max_section_size(widths.lengths);
-    let limit = 1 << max_section_size.ilog2();
-    if let Some(section) = sections.iter().find(|s| s.size >= limit) {
-        return Err(FormatError::InvalidFreeSpaceManager(format!(
-            "a free section of {} bytes is not below the {limit}-byte limit of a manager at {}-byte \
-             lengths",
-            section.size,
-            widths.lengths.get()
-        )));
-    }
-    let mut fsse = SectionFields::written(widths, sections.len().to_u64()).encode_list(
-        widths.offsets,
-        fshd_addr,
-        &size_sets(sections),
-        class_id,
-    )?;
-    let section_list_used = fsse.len().to_u64();
-    let section_list_allocated = section_list_allocated.unwrap_or(section_list_used);
-    if section_list_allocated < section_list_used {
-        return Err(FormatError::InvalidFreeSpaceManager(format!(
-            "the section list uses {section_list_used} bytes, more than the \
-             {section_list_allocated} bytes allocated to it"
-        )));
-    }
-    if !width::length_width_holds(widths.lengths, section_list_allocated) {
-        return Err(FormatError::LengthTooLarge {
-            length: section_list_allocated,
-            length_size: widths.lengths.get(),
-        });
-    }
-    if section_list_allocated > section_list_used {
-        // H5FS__sinfo_unlock in H5FSsection.c, HDF5 2.2.0, requires equal used and allocated
-        // lengths. H5FS__cache_sinfo_serialize in H5FScache.c puts padding before the checksum.
-        fsse.truncate(fsse.len() - CHECKSUM_LEN);
-        fsse.resize(section_list_allocated.to_usize()? - CHECKSUM_LEN, 0);
-        let checksum = checksum::jenkins_lookup3(&fsse);
-        fsse.extend_from_slice(&checksum.to_le_bytes());
-    }
-    let header = FreeSpaceManagerHeader {
-        total_space: sections
-            .iter()
-            .try_fold(0, |total: u64, section| total.checked_add(section.size))
-            .ok_or_else(|| {
-                FormatError::Internal(format!(
-                    "the sizes of {} free sections sum past u64::MAX",
-                    sections.len()
-                ))
-            })?,
-        total_sections: sections.len().to_u64(),
-        addr_space_bits: AddressSpaceBits::written(widths.offsets),
-        max_section_size: max_section_size.get(),
-        section_list_addr: fsse_addr,
-        section_list_used: section_list_allocated,
-        section_list_allocated,
-    };
-    Ok((header.encode(widths)?, fsse))
+    let plan = PreparedFreeSpaceManager::new(widths, sections.iter().copied(), class_id)?;
+    let manager = plan.place(fshd_addr, fsse_addr, section_list_allocated)?;
+    Ok((
+        write::encode_to_vec(manager.header())?,
+        write::encode_to_vec(manager.section_list())?,
+    ))
 }
 
 /// Returns the length in bytes of the header and the section list of a file free-space manager
@@ -1283,7 +1188,7 @@ impl<'a> SectionInfo<'a> {
 
 /// The widths in bytes of the variable-size fields of a section list: the number of sections in a
 /// set, the section size of a set, and the offset of a section.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct SectionFields {
     count: usize,
     size: usize,
@@ -1377,38 +1282,6 @@ impl SectionFields {
         }
         Ok(())
     }
-
-    /// Serializes the section list of the manager whose header is at `fshd_addr`, with the sets
-    /// [`size_sets`] groups and every section of class `class_id`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::AddressTooLarge`] if `fshd_addr` or the address of a section does not
-    /// fit `offsets`.
-    fn encode_list(
-        self,
-        offsets: OffsetWidth,
-        fshd_addr: StoredAddress,
-        sets: &BTreeMap<u64, Vec<StoredAddress>>,
-        class_id: u8,
-    ) -> Result<Vec<u8>, FormatError> {
-        let Self { count, size, .. } = self;
-        let mut fsse = Vec::new();
-        fsse.extend_from_slice(FSSE_SIGNATURE);
-        fsse.push(FSSE_VERSION);
-        bytes::try_write_offset(&mut fsse, fshd_addr.get(), offsets)?;
-        for (&section_size, addresses) in sets {
-            push_uint_le(&mut fsse, addresses.len().to_u64(), count);
-            push_uint_le(&mut fsse, section_size, size);
-            for addr in addresses {
-                bytes::try_write_offset(&mut fsse, addr.get(), offsets)?;
-                fsse.push(class_id); // section class id (no class-specific data)
-            }
-        }
-        let checksum = checksum::jenkins_lookup3(&fsse);
-        fsse.extend_from_slice(&checksum.to_le_bytes());
-        Ok(fsse)
-    }
 }
 
 /// Returns the maximum section size the serializer writes at `lengths`.
@@ -1428,19 +1301,6 @@ fn written_max_section_size(lengths: LengthWidth) -> NonZeroU64 {
         }
         LengthWidth::Eight => const { NonZeroU64::new(FILE_FSM_MAX_SECTION_SIZE).unwrap() },
     }
-}
-
-/// Groups the addresses of `sections` into one set per section size, the sets in ascending order of
-/// size and the addresses of a set in ascending order.
-fn size_sets(sections: &[FreeSection]) -> BTreeMap<u64, Vec<StoredAddress>> {
-    let mut sets = BTreeMap::<u64, Vec<StoredAddress>>::new();
-    for section in sections {
-        sets.entry(section.size).or_default().push(section.addr);
-    }
-    for addresses in sets.values_mut() {
-        addresses.sort_unstable();
-    }
-    sets
 }
 
 /// Returns the length in bytes of the section list [`serialize_free_space_manager`] writes at
@@ -2392,7 +2252,7 @@ mod tests {
     #[case::eight_byte_widths(widths(8, 8))]
     fn section_list_capacity_is_independent_of_its_parse_length(#[case] widths: FormatWidths) {
         let sections = vec![section(0x1000, 100)];
-        let (fshd, fsse) = serialize_free_space_manager(
+        let (mut fshd, fsse) = serialize_free_space_manager(
             widths,
             &sections,
             StoredAddress::new(0x80),
@@ -2400,11 +2260,16 @@ mod tests {
             SECTION_CLASS_SIMPLE,
         )
         .unwrap();
-        let mut header = FreeSpaceManagerHeader::parse(widths, &fshd).unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths, &fshd).unwrap();
         assert_eq!(header.section_list_allocated(), fsse.len().to_u64());
-        header.section_list_allocated += 16;
-        let header =
-            FreeSpaceManagerHeader::parse(widths, &header.encode(widths).unwrap()).unwrap();
+        let allocated = header.section_list_allocated() + 16;
+        let checksum_start = fshd.len() - CHECKSUM_LEN;
+        let allocated_start = checksum_start - usize::from(widths.lengths.get());
+        let field = &mut fshd[allocated_start..checksum_start];
+        field.copy_from_slice(&allocated.to_le_bytes()[..field.len()]);
+        fshd.truncate(checksum_start);
+        test_util::checksum::append(&mut fshd);
+        let header = FreeSpaceManagerHeader::parse(widths, &fshd).unwrap();
         assert_eq!(header.section_list_used(), fsse.len().to_u64());
         assert_eq!(header.section_list_allocated(), fsse.len().to_u64() + 16);
         assert_eq!(
@@ -2559,11 +2424,10 @@ mod tests {
         assert_eq!(1 << header.max_section_size.ilog2(), limit);
         assert_eq!(
             serialize(limit),
-            Err(FormatError::InvalidFreeSpaceManager(format!(
-                "a free section of {limit} bytes is not below the {limit}-byte limit of a manager \
-                 at {}-byte lengths",
-                widths.lengths.get()
-            )))
+            Err(FormatError::InvalidFreeSpaceSectionSize {
+                size: limit,
+                maximum: limit - 1,
+            })
         );
     }
 
@@ -3154,9 +3018,10 @@ mod tests {
                 Some(allocated),
             )
             .unwrap_err(),
-            FormatError::InvalidFreeSpaceManager(format!(
-                "the section list uses {used} bytes, more than the {allocated} bytes allocated to it"
-            ))
+            FormatError::FreeSpaceSectionListAllocationTooSmall {
+                required: used,
+                allocated,
+            }
         );
     }
 
@@ -3265,7 +3130,7 @@ mod tests {
     }
 
     #[test]
-    fn sections_whose_sizes_overflow_a_u64_return_an_internal_error() {
+    fn serializing_sections_reports_the_addition_that_overflows_the_total() {
         let sections: Vec<FreeSection> = (0..5)
             .map(|i| section(0x1000 * (i + 1), (1 << 62) - 1))
             .collect();
@@ -3278,9 +3143,10 @@ mod tests {
                 StoredAddress::new(0x100),
                 SECTION_CLASS_SIMPLE,
             ),
-            Err(FormatError::Internal(
-                "the sizes of 5 free sections sum past u64::MAX".to_owned()
-            ))
+            Err(FormatError::FreeSpaceSectionSizeOverflow {
+                total: u64::MAX - 3,
+                size: (1 << 62) - 1,
+            })
         );
     }
 
