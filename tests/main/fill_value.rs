@@ -17,12 +17,14 @@ use rstest::rstest;
 
 use test_util::data_layout;
 use test_util::dataspace;
+use test_util::datatype;
 use test_util::image::Image;
 use test_util::object_header::{Message, MessageType};
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
 use test_util_hdf5::dataset_writer::ScaleOffsetWriter;
 use test_util_hdf5::file_builder;
+use test_util_hdf5::reader::ReadBackend;
 
 #[test]
 fn contiguous_fill_round_trips_and_keeps_data() {
@@ -419,6 +421,75 @@ fn fill_time_invalid_flag_is_rejected() {
         panic!("expected InvalidFillTime, got {err_val:?}");
     };
     assert_eq!(code, 3);
+}
+
+#[rstest]
+#[case::short_prefix_with_invalid_allocation_time(
+    &[1, 4, 2, 1],
+    FormatError::UnexpectedEof { expected: 8, available: 4 }
+)]
+#[case::short_value(
+    &[1, 2, 2, 1, 8, 0, 0, 0, 0, 0, 0],
+    FormatError::UnexpectedEof { expected: 16, available: 11 }
+)]
+#[case::complete_prefix_with_invalid_allocation_time(
+    &[1, 4, 2, 1, 8, 0, 0, 0],
+    FormatError::InvalidSpaceAllocationTime(4)
+)]
+fn reports_version_1_fill_truncation_and_field_errors(
+    #[case] body: &[u8],
+    #[case] expected: FormatError,
+    #[values(ReadBackend::Bytes, ReadBackend::Source)] backend: ReadBackend,
+) {
+    let file = backend.open_image(version_1_fill_image(body)).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    for error in [
+        dataset.fill_time().unwrap_err(),
+        dataset.fill_value::<f64>().unwrap_err(),
+    ] {
+        let Error::Format(actual) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(actual, expected);
+    }
+    drop(dataset);
+    file.close().unwrap();
+}
+
+#[rstest]
+fn dataset_reads_a_complete_version_1_fill_value(
+    #[values(ReadBackend::Bytes, ReadBackend::Source)] backend: ReadBackend,
+) {
+    const VERSION: u8 = 1;
+    const LATE_ALLOCATION: u8 = 2;
+    const NEVER_WRITE: u8 = 1;
+    const DEFINED: u8 = 1;
+
+    let value = 3.5_f64.to_le_bytes();
+    let mut body = Vec::from([VERSION, LATE_ALLOCATION, NEVER_WRITE, DEFINED]);
+    body.extend_from_slice(&u32::try_from(value.len()).unwrap().to_le_bytes());
+    body.extend_from_slice(&value);
+    let file = backend.open_image(version_1_fill_image(&body)).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.fill_time().unwrap(), FillTime::Never);
+    assert_eq!(dataset.fill_value::<f64>().unwrap(), Some(3.5));
+    drop(dataset);
+    file.close().unwrap();
+}
+
+fn version_1_fill_image(body: &[u8]) -> Vec<u8> {
+    Image::starting_with(&vec![0; Superblock::new(Widths::EIGHT).build().len()]).build_with_dataset(
+        "d",
+        [
+            Message::new(MessageType::DATASPACE, &dataspace::scalar()),
+            Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+            Message::new(MessageType::FILL_VALUE, body),
+            Message::new(
+                MessageType::DATA_LAYOUT,
+                &data_layout::compact(&42.0_f64.to_le_bytes()),
+            ),
+        ],
+    )
 }
 
 #[rstest]
