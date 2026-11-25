@@ -456,8 +456,9 @@ impl<'a> PreparedDatatype<'a> {
     /// Prepares a datatype message with canonical versions and the file's offset width.
     ///
     /// Counts the encoded bytes without allocating an output buffer. Uses `offset_width` to size
-    /// variable-length descriptors at every level. Checks compound member ranges at that width
-    /// and compares each enumeration's declared size with its base datatype's stored size.
+    /// variable-length descriptors at every level. Checks compound member ranges at that width.
+    /// Requires each enumeration's declared size and value widths to match the stored size of
+    /// its base datatype.
     ///
     /// The writer uses at least version 3 for compounds, enumerations, and arrays, and at least
     /// version 1 for variable-length descriptions. The writer raises each container's version
@@ -476,9 +477,12 @@ impl<'a> PreparedDatatype<'a> {
     /// array sizes fails.
     ///
     /// Returns [`FormatError::CompoundFieldOutOfBounds`] if a member extends past the end of
-    /// its compound element, [`FormatError::CompoundFieldOverlap`] if nonempty member ranges
-    /// overlap, or [`FormatError::EnumBaseSizeMismatch`] if an enumeration's declared size
-    /// differs from its base datatype's stored size.
+    /// its compound element or [`FormatError::CompoundFieldOverlap`] if nonempty member ranges
+    /// overlap.
+    ///
+    /// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's declared size differs
+    /// from its base datatype's stored size, or [`FormatError::EnumMemberValueSize`] if a member
+    /// value's byte length differs from that size.
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the message body would exceed [`isize::MAX`]
     /// bytes, or [`FormatError::Internal`] for a datatype or reference kind without a canonical
@@ -898,9 +902,18 @@ impl ContainerProperties<'_> {
                 }
                 for member in *members {
                     let (name, value) = __private::enum_member_parts(member);
+                    // The format specification, version 4.0, defines packed enumeration values
+                    // of the parent type's width in "The Datatype Message".
+                    if value.len().to_u64() != u64::from(parent_size) {
+                        return Err(FormatError::EnumMemberValueSize(
+                            name.into(),
+                            parent_size,
+                            value.len(),
+                        ));
+                    }
                     preparation.add(1)?;
                     preparation.add(name.len())?;
-                    preparation.add(value.len())?;
+                    preparation.add(parent_size as usize)?;
                 }
                 Ok(parent_size)
             }
@@ -981,7 +994,9 @@ impl ContainerProperties<'_> {
                 }
                 for member in *members {
                     let (_, value) = __private::enum_member_parts(member);
-                    output.write(value);
+                    // The borrowed values each have the child's checked stored size.
+                    let position = output.advance(child.size as usize);
+                    (output.write_field)(position, value);
                 }
                 (
                     ENUMERATION_CLASS,

@@ -39,6 +39,48 @@ fn writer_rejects_invalid_datatype_geometry_before_output(
     assert_eq!(destination, b"previous bytes");
 }
 
+#[rstest]
+#[case::inline_dataset(false)]
+#[case::committed_datatype(true)]
+fn writer_rejects_mismatched_enumeration_value_widths_before_output(#[case] committed: bool) {
+    let build = || {
+        let mut datatype = EnumTypeBuilder::u8_based()
+            .u8_value("first", 1)
+            .u8_value("last", 2)
+            .build()
+            .unwrap();
+        let Datatype::Enumeration { members, .. } = &mut datatype else {
+            panic!("expected an enumeration datatype");
+        };
+        members[0].value.push(2);
+        members[1].value.clear();
+
+        let mut builder = FileBuilder::new();
+        if committed {
+            builder.commit_datatype("value", datatype);
+        } else {
+            builder
+                .create_dataset("value")
+                .with_enum_u8_data(datatype, &[1, 2]);
+        }
+        builder
+    };
+    let expected = FormatError::EnumMemberValueSize("first".into(), 1, 2);
+    let error = build().finish().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, expected);
+
+    let mut destination = b"previous bytes".to_vec();
+    let error = build().finish_to(&mut destination).unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, expected);
+    assert_eq!(destination, b"previous bytes");
+}
+
 fn overlapping_compound() -> Datatype {
     let mut datatype = CompoundTypeBuilder::with_size(8)
         .field("first", 0, hdf5_pure::make_i32_type())

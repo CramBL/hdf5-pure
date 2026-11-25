@@ -97,6 +97,31 @@ fn inline_attribute_writer_rejects_mismatched_enumeration_datatype_size_before_o
     assert_eq!(destination, b"previous bytes");
 }
 
+#[test]
+fn inline_attribute_writer_rejects_a_short_enumeration_value_before_output() {
+    let mut writer = FileWriter::new();
+    let mut message = type_builders::build_attr_message("invalid", &AttrValue::U8(1)).unwrap();
+    let mut datatype = crate::EnumTypeBuilder::u8_based()
+        .u8_value("first", 1)
+        .u8_value("last", 2)
+        .build()
+        .unwrap();
+    let Datatype::Enumeration { members, .. } = &mut datatype else {
+        panic!("expected an enumeration datatype");
+    };
+    members[1].value.clear();
+    message.datatype = datatype;
+    writer.set_root_attr_verbatim(message, None);
+
+    let mut destination = b"previous bytes".to_vec();
+    let error = writer
+        .finish_to_sink(&mut destination)
+        .unwrap_err()
+        .into_format();
+    assert_eq!(error, FormatError::EnumMemberValueSize("last".into(), 1, 0));
+    assert_eq!(destination, b"previous bytes");
+}
+
 #[rstest]
 #[case::unbounded(None)]
 #[case::v18(Some(LibVer::V18))]

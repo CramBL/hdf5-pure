@@ -377,8 +377,8 @@ fn parse_nested_datatype(
 /// compound member ranges and computes array sizes from the stored element sizes at that width.
 ///
 /// Canonical serialization accepts empty compound or enumeration member sets and zero
-/// array extents. An enumeration's declared size must match its base datatype's stored size.
-/// Writes enumeration value bytes as supplied.
+/// array extents. Each enumeration's declared size and value widths must match the stored size
+/// of its base datatype. Writes each enumeration value as supplied.
 ///
 /// # Errors
 ///
