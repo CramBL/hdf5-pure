@@ -30,6 +30,7 @@ use self::header::{Context, Header};
 use self::message::atomic::{self, AtomicReservedFlagPolicy};
 use self::message::decode::{self, Decoded, Layout, Member, Projection};
 use self::message::{CompoundLayout, MessageDepth};
+pub use self::slots::{EmbeddedReferenceSlots, embedded_reference_slots};
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -40,6 +41,7 @@ mod header;
 pub(crate) mod layout;
 mod legacy_member;
 pub(crate) mod message;
+pub(crate) mod slots;
 
 /// Returns the datatype's element size as a nonzero host-sized integer.
 ///
@@ -869,192 +871,6 @@ pub fn datatype_holds_file_address(dt: &Datatype) -> bool {
         Datatype::Complex(_) => false,
         _ => false,
     }
-}
-
-/// Locates the 8-byte object references within one element of `datatype`.
-///
-/// Visits compound members in declaration order and array entries in element order. A top-level
-/// 8-byte object reference has a slot at offset zero.
-///
-/// Returns `None` if an offset exceeds [`usize::MAX`], the reference slots do not fit in the
-/// declared element size, or the walker cannot locate a reference identified by
-/// [`datatype_holds_object_address`]. Returns an empty list if the walk succeeds and finds zero
-/// slots.
-pub fn embedded_reference_slots(datatype: &Datatype) -> Option<EmbeddedReferenceSlots> {
-    /// Returns `false` when the datatype cannot be walked on this target, for the
-    /// reasons [`embedded_vlen_slots`]' walker documents.
-    fn collect(datatype: &Datatype, base: usize, capacity: usize, out: &mut Vec<usize>) -> bool {
-        if out.len() > capacity {
-            return true;
-        }
-        match datatype {
-            Datatype::Reference {
-                ref_type: ReferenceType::Object,
-                size: 8,
-            } => {
-                out.push(base);
-                true
-            }
-            Datatype::Compound { members, .. } => {
-                for m in members {
-                    let Some(at) = usize::try_from(m.byte_offset)
-                        .ok()
-                        .and_then(|off| base.checked_add(off))
-                    else {
-                        return false;
-                    };
-                    if !collect(&m.datatype, at, capacity, out) {
-                        return false;
-                    }
-                }
-                true
-            }
-            Datatype::Array {
-                base_type,
-                dimensions,
-            } => {
-                // As in `embedded_vlen_slots`: probe once so that entries which can
-                // never contribute do not drive a walk over huge declared
-                // dimensions, and so every iteration below pushes at least one slot.
-                // Walked once and translated per entry, for the reason
-                // `embedded_vlen_slots` documents: re-walking is exponential in
-                // nesting depth.
-                let mut probe = Vec::new();
-                if !collect(base_type, 0, capacity, &mut probe) {
-                    return false;
-                }
-                if probe.is_empty() {
-                    return true;
-                }
-                let count = dimensions
-                    .iter()
-                    .copied()
-                    .fold(1u64, |a, b| a.saturating_mul(u64::from(b)));
-                // As in `embedded_vlen_slots`: more entries than the element has
-                // room for cannot fit, so reject without walking them.
-                if count > capacity as u64 {
-                    return false;
-                }
-                let entries = usize::try_from(count).unwrap_or(usize::MAX);
-                let stride = base_type.type_size() as usize;
-                for i in 0..entries {
-                    let Some(at) = i.checked_mul(stride).and_then(|off| base.checked_add(off))
-                    else {
-                        return false;
-                    };
-                    for &slot in &probe {
-                        let Some(off) = at.checked_add(slot) else {
-                            return false;
-                        };
-                        out.push(off);
-                        if out.len() > capacity {
-                            return true;
-                        }
-                    }
-                }
-                true
-            }
-            Datatype::Complex(_) => true,
-            // The walker maps none of these variants. A datatype here can still contain
-            // an object reference, through a width other than 8, an enumeration over one,
-            // or a variable-length sequence of them. Its addresses exist with no location
-            // the walker can report, so the caller must not treat a `false` result as an
-            // empty slot list. Consulting the predicate keeps the pair in sync as either
-            // grows.
-            _ => !datatype_holds_object_address(datatype),
-        }
-    }
-
-    let element_size = datatype.type_size() as usize;
-    let capacity = element_size / 8;
-    let mut slots = Vec::new();
-    if !collect(datatype, 0, capacity, &mut slots) {
-        return None;
-    }
-    // `checked_add`: an offset near the top of the address space would otherwise
-    // wrap here and read as "fits".
-    if slots.len() > capacity
-        || slots
-            .iter()
-            .any(|&s| s.checked_add(8).is_none_or(|end| end > element_size))
-    {
-        return None;
-    }
-    Some(EmbeddedReferenceSlots {
-        element_size,
-        offsets: slots,
-    })
-}
-
-/// The size of an element and the checked offsets of its 8-byte object references.
-#[derive(Debug)]
-pub struct EmbeddedReferenceSlots {
-    element_size: usize,
-    offsets: Vec<usize>,
-}
-
-impl EmbeddedReferenceSlots {
-    /// Returns the datatype's element size in bytes, as used to bound the slot offsets.
-    pub const fn element_size(&self) -> usize {
-        self.element_size
-    }
-
-    /// Returns the number of reference slots per element.
-    pub fn len(&self) -> usize {
-        self.offsets.len()
-    }
-
-    /// Returns whether the datatype has zero reference slots.
-    pub fn is_empty(&self) -> bool {
-        self.offsets.is_empty()
-    }
-
-    /// Yields each reference's byte offset from the start of `raw` and its stored address.
-    ///
-    /// Pass bytes encoded with the datatype used to obtain these slots. Visits complete
-    /// elements in order and skips a trailing partial element.
-    ///
-    /// # Errors
-    ///
-    /// Yields [`FormatError::Internal`] if an address field extends past its element.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hdf5_pure_format::{Datatype, FormatError, ReferenceType};
-    /// use hdf5_pure_format::__private::embedded_reference_slots;
-    ///
-    /// let datatype = Datatype::Reference { size: 8, ref_type: ReferenceType::Object };
-    /// let slots = embedded_reference_slots(&datatype).unwrap();
-    /// let raw = 0x1000u64.to_le_bytes();
-    /// let references = slots.stored_references(&raw).collect::<Result<Vec<_>, _>>()?;
-    /// assert_eq!(references, [(0, 0x1000)]);
-    /// # Ok::<(), FormatError>(())
-    /// ```
-    pub fn stored_references<'a>(
-        &'a self,
-        raw: &'a [u8],
-    ) -> impl Iterator<Item = Result<(usize, u64), FormatError>> + 'a {
-        raw.chunks_exact(self.element_size.max(1))
-            .enumerate()
-            .flat_map(move |(index, element)| {
-                self.offsets.iter().map(move |&offset| {
-                    let field = element
-                        .get(offset..)
-                        .and_then(<[u8]>::first_chunk::<8>)
-                        .ok_or_else(reference_slot_outside_element)?;
-                    Ok((
-                        index * self.element_size + offset,
-                        u64::from_le_bytes(*field),
-                    ))
-                })
-            })
-    }
-}
-
-#[cold]
-fn reference_slot_outside_element() -> FormatError {
-    FormatError::Internal("an object reference slot extends past its element".into())
 }
 
 /// Build a datatype header (8 bytes) for testing.

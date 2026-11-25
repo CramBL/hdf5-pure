@@ -123,6 +123,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+use hdf5_pure_core::__private::ElementCount;
+
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
 #[cfg(test)]
@@ -140,7 +142,7 @@ use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataset_request::StagedFill;
-use crate::dataspace::MaxExtent;
+use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::{self, Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
 use crate::file_writer::source::InheritedHeader;
@@ -167,7 +169,7 @@ use crate::source::Source;
 use crate::type_builders::{
     AttrValue, DatasetBuilder, GroupBuilder, ObjectRefPatch, ObjectRefTarget, VlStringElement,
 };
-use crate::vl_data::{self, EmbeddedVlSlot, VlByteObject, VlenStringReadOptions};
+use crate::vl_data::{self, EmbeddedVlenSlots, VlByteObject, VlenStringReadOptions};
 use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 #[cfg(test)]
@@ -813,7 +815,7 @@ fn emit_dataset(
     }
 
     let dims = dataspace.dimensions.clone();
-    let n_elements: u64 = dims.iter().product();
+    let n_elements = dataspace.num_elements().get();
 
     // The chunks the source holds, walked once. Both the unallocated test below
     // and the verbatim planner further down need the list, and each walk is the
@@ -936,7 +938,7 @@ fn emit_dataset(
             ds,
             path,
             &datatype,
-            &dims,
+            &dataspace,
             &layout,
             &pipeline,
             &vlen_slots,
@@ -1218,10 +1220,10 @@ fn emit_embedded_address_dataset(
     ds: &Dataset,
     path: &ObjectPathBuf,
     datatype: &Datatype,
-    dims: &[u64],
+    dataspace: &Dataspace,
     layout: &DataLayout,
     pipeline: &Option<FilterPipeline>,
-    vlen_slots: &[EmbeddedVlSlot],
+    vlen_slots: &EmbeddedVlenSlots,
     reference_slots: &datatype::EmbeddedReferenceSlots,
     file: &Arc<File>,
     objects: &SourceObjects,
@@ -1236,22 +1238,24 @@ fn emit_embedded_address_dataset(
     // checked before anything is read, and before the variable-length work, so a
     // compound carrying both kinds is refused rather than half-rewritten.
     if !reference_slots.is_empty() {
-        check_embedded_reference_layout(ds, path, layout, file)?;
+        check_embedded_reference_layout(dataspace, path, layout, file)?;
     }
 
-    let n_elements: u64 = dims.iter().product();
+    let dims = &dataspace.dimensions;
+    let n_elements = dataspace.num_elements();
 
     // Read the element bytes once, resolving the variable-length payloads in the
     // same pass when there are any.
     let (raw, vl_offsets, vl_elements) = if vlen_slots.is_empty() {
-        let raw = if n_elements == 0 {
+        let raw = if n_elements.is_zero() {
             Vec::new()
         } else {
             ds.read_raw()?
         };
         (raw, Vec::new(), Vec::new())
     } else {
-        let data = ds.read_embedded_vlen_bytes(vlen_slots, VlenStringReadOptions::default())?;
+        let data =
+            ds.read_embedded_vlen_bytes(vlen_slots, n_elements, VlenStringReadOptions::default())?;
         let elements: Vec<VlStringElement> = data
             .objects
             .into_iter()
@@ -1267,15 +1271,20 @@ fn emit_embedded_address_dataset(
     // variable-length staging below consumes `raw`. The two kinds occupy disjoint
     // slots, so reading one is unaffected by rewriting the other.
     let reference_patches =
-        resolve_embedded_references(&raw, dims, path, objects, reference_slots)?;
+        resolve_embedded_references(&raw, n_elements, path, objects, reference_slots)?;
 
     if vlen_slots.is_empty() {
-        db.with_embedded_object_references(datatype.clone(), raw, n_elements, reference_patches);
+        db.with_embedded_object_references(
+            datatype.clone(),
+            raw,
+            n_elements.get(),
+            reference_patches,
+        );
     } else {
         db.with_embedded_vlen_elements(
             datatype.clone(),
             raw,
-            n_elements,
+            n_elements.get(),
             &vl_offsets,
             &vl_elements,
         );
@@ -1287,7 +1296,7 @@ fn emit_embedded_address_dataset(
     carry_shape_and_pipeline(
         db,
         dims,
-        ds.dataspace()?.extensible_max_dimensions(),
+        dataspace.extensible_max_dimensions(),
         layout,
         &filters,
     );
@@ -1298,7 +1307,7 @@ fn emit_embedded_address_dataset(
 /// resolves at serialization time.
 fn resolve_embedded_references(
     raw: &[u8],
-    dims: &[u64],
+    element_count: ElementCount,
     path: &ObjectPathBuf,
     objects: &SourceObjects,
     slots: &datatype::EmbeddedReferenceSlots,
@@ -1307,11 +1316,11 @@ fn resolve_embedded_references(
         return Ok(Vec::new());
     }
     let stride = slots.element_size();
-    let n_elements: usize = dims.iter().product::<u64>().to_usize()?;
+    let n_elements: usize = element_count.to_usize()?;
     let needed = n_elements
         .checked_mul(stride)
         .ok_or(FormatError::OffsetOverflow {
-            offset: n_elements as u64,
+            offset: element_count.get(),
             length: stride as u64,
         })?;
     let elements = raw.get(..needed).ok_or(FormatError::UnexpectedEof {
@@ -1792,7 +1801,7 @@ fn emit_object_reference_dataset(
 /// base this rewrite path does not model. Each is refused by name rather than
 /// risking a mis-resolved address.
 fn check_embedded_reference_layout(
-    ds: &Dataset,
+    dataspace: &Dataspace,
     path: &ObjectPathBuf,
     layout: &DataLayout,
     file: &Arc<File>,
@@ -1804,7 +1813,7 @@ fn check_embedded_reference_layout(
              in place)"
         )));
     }
-    if ds.dataspace()?.extensible_max_dimensions().is_some() {
+    if dataspace.extensible_max_dimensions().is_some() {
         return Err(Error::RepackUnsupported(format!(
             "dataset {path}: resizable datasets with an object-reference member cannot be repacked"
         )));

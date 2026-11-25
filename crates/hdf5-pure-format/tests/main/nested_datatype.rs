@@ -9,6 +9,7 @@ use rstest::rstest;
 use test_util::dataspace;
 use test_util::datatype;
 use test_util::datatype::Class;
+use test_util::datatype::containers::{self, CompoundField, MemberOffset};
 
 #[test]
 fn object_reference_slots_scan_complete_elements_in_order() {
@@ -43,6 +44,90 @@ fn object_reference_slots_scan_complete_elements_in_order() {
             .unwrap(),
         [(1, first), (11, second)]
     );
+}
+
+#[test]
+fn nested_reference_slots_preserve_member_and_array_order() {
+    let reference = datatype::object_reference(8);
+    let pair = containers::compound(
+        3,
+        [2, 0, 0],
+        24,
+        MemberOffset::One,
+        &[
+            CompoundField {
+                name: b"last",
+                offset: 16,
+                datatype: &reference,
+            },
+            CompoundField {
+                name: b"first",
+                offset: 0,
+                datatype: &reference,
+            },
+        ],
+    );
+    let inner = datatype::array(3, [0; 3], 48, 1, &[2], &pair);
+    let outer = datatype::array(3, [0; 3], 96, 1, &[2], &inner);
+    let (datatype, consumed) = format::parse_datatype(&outer).unwrap();
+    assert_eq!(consumed, outer.len());
+
+    let slots = format::embedded_reference_slots(&datatype).unwrap();
+    assert_eq!(slots.element_size(), 96);
+    assert_eq!(slots.len(), 8);
+
+    let mut raw = vec![0xf0; 2 * 96 + 95];
+    let positions = [
+        16, 0, 40, 24, 64, 48, 88, 72, 112, 96, 136, 120, 160, 144, 184, 168,
+    ];
+    let expected: Vec<(usize, u64)> = positions.into_iter().zip(1..=16).collect();
+    for &(offset, value) in &expected {
+        raw[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    assert_eq!(
+        slots
+            .stored_references(&raw)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        expected
+    );
+}
+
+#[rstest]
+#[case::nested_member_outside_its_record(4)]
+#[case::offset_overflow(u64::MAX)]
+fn reference_slot_must_fit_its_own_record(#[case] offset: u64) {
+    let datatype = Datatype::Compound {
+        size: 32,
+        members: vec![__private::compound_member(
+            "inner".into(),
+            0,
+            Datatype::Compound {
+                size: 8,
+                members: vec![__private::compound_member(
+                    "r".into(),
+                    offset,
+                    Datatype::Reference {
+                        size: 8,
+                        ref_type: ReferenceType::Object,
+                    },
+                )],
+            },
+        )],
+    };
+    assert!(format::embedded_reference_slots(&datatype).is_none());
+}
+
+#[test]
+fn reference_array_size_must_fit_the_datatype_size_field() {
+    let datatype = Datatype::Array {
+        base_type: Box::new(Datatype::Reference {
+            size: 8,
+            ref_type: ReferenceType::Object,
+        }),
+        dimensions: vec![u32::MAX / 8 + 1],
+    };
+    assert!(format::embedded_reference_slots(&datatype).is_none());
 }
 
 #[rstest]

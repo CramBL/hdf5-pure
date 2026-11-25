@@ -20,6 +20,7 @@ use crate::dataspace::DataspaceType;
 use crate::image::WriteBuffering;
 use crate::source;
 use crate::source::PhysicalBytes;
+use crate::width::OffsetWidth;
 
 use crate::message_flags::MessageFlags;
 use crate::{DatatypeByteOrder, FileBuilder};
@@ -2155,6 +2156,63 @@ fn compact_regions_read_selected_columns() {
         )
         .unwrap(),
         [6, 7, 10, 11]
+    );
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 10)]
+#[case::four(OffsetWidth::Four, 12)]
+#[case::eight(OffsetWidth::Eight, 16)]
+fn embedded_variable_length_reader_uses_the_file_address_width(
+    #[case] width: OffsetWidth,
+    #[case] descriptor_size: usize,
+) {
+    let mut builder = FileBuilder::new();
+    builder.with_offset_width(width);
+    builder
+        .create_dataset("values")
+        .with_vlen_strings(&["a", "bc"]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let slots = vl_data::embedded_vlen_slots_with_offset_width(&dataset.datatype().unwrap(), width)
+        .unwrap()
+        .unwrap();
+    let read = dataset
+        .read_embedded_vlen_bytes(&slots, ElementCount::new(2), VlenStringReadOptions::new())
+        .unwrap();
+    assert_eq!(read.raw.len(), 2 * descriptor_size);
+    assert_eq!(read.offsets, [0, descriptor_size]);
+    assert_eq!(
+        read.objects,
+        [
+            vl_data::VlByteObject::Bytes(b"a".to_vec()),
+            vl_data::VlByteObject::Bytes(b"bc".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn embedded_variable_length_reader_rejects_a_plan_for_another_width() {
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("values").with_vlen_strings(&["a"]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let slots = vl_data::embedded_vlen_slots_with_offset_width(
+        &dataset.datatype().unwrap(),
+        OffsetWidth::Two,
+    )
+    .unwrap()
+    .unwrap();
+    let error = dataset
+        .read_embedded_vlen_bytes(&slots, ElementCount::new(1), VlenStringReadOptions::new())
+        .err()
+        .unwrap();
+    let Error::Format(FormatError::Internal(reason)) = error else {
+        panic!("expected Internal, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "embedded variable-length descriptor width differs from the file's offset width"
     );
 }
 

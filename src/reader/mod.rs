@@ -49,7 +49,7 @@ use crate::edit::StagedObject;
 use crate::edit::SyncPolicy;
 use crate::edit::WriteEngine;
 use crate::element::{ElementDecoder, H5Element};
-use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
+use crate::type_builders::DatasetBuilder;
 
 #[cfg(any(doc, test))]
 use crate::FileSpaceStrategy;
@@ -7727,26 +7727,31 @@ the same commit to replace it",
         Ok((objects, element_size))
     }
 
-    /// Read a dataset whose datatype *contains* variable-length references
-    /// without being variable-length itself — a compound with a VL member, or an
-    /// array of them (issue #201).
+    /// Reads stored elements, their variable-length descriptor offsets, and their heap payloads.
     ///
-    /// Returns everything a rewrite needs: the element bytes, where each embedded
-    /// reference sits within them, and the heap payload each one names. That lets
-    /// the writer re-stage the payloads into a new file's global heap and rewrite
-    /// the references in place, which is what keeps a rewrite from carrying the
-    /// source file's heap addresses into the destination.
+    /// Pass `slots` prepared for this dataset's datatype at the file's address width. The reader
+    /// acquires `n` complete elements before visiting any descriptors. It applies the heap read
+    /// limits in `options` to each slot across those elements.
     ///
-    /// The references are resolved one slot at a time, so `options`' limits apply
-    /// per slot rather than across the whole dataset.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the slots use an address width different from the
+    /// file's. Returns [`FormatError::UnexpectedEof`] if the element bytes are incomplete.
+    /// Propagates errors from reading the elements or resolving their descriptors.
     pub(crate) fn read_embedded_vlen_bytes(
         &self,
-        slots: &[vl_data::EmbeddedVlSlot],
+        slots: &vl_data::EmbeddedVlenSlots,
+        n: ElementCount,
         options: VlenStringReadOptions,
     ) -> Result<vl_data::EmbeddedVlData, Error> {
-        let stride = self.datatype()?.type_size() as usize;
-        let dataspace = self.dataspace()?;
-        let n = dataspace.num_elements();
+        if slots.offset_width() != self.file.widths.offsets {
+            return Err(FormatError::Internal(
+                "embedded variable-length descriptor width differs from the file's offset width"
+                    .into(),
+            )
+            .into());
+        }
+        let stride = slots.element_size();
         if let Some(limit) = options.max_elements()
             && n > ElementCount::new(limit as u64)
         {
@@ -7772,26 +7777,22 @@ the same commit to replace it",
                 offset: n.get(),
                 length: stride as u64,
             })?;
-        if raw.len() < needed {
-            return Err(FormatError::UnexpectedEof {
-                expected: needed,
-                available: raw.len(),
-            }
-            .into());
-        }
+        let elements = raw.get(..needed).ok_or(FormatError::UnexpectedEof {
+            expected: needed,
+            available: raw.len(),
+        })?;
 
         let mut offsets = Vec::with_capacity(n_usize * slots.len());
         let mut objects = Vec::with_capacity(n_usize * slots.len());
-        for slot in slots {
+        for (descriptor, element_size) in slots.slots_in(elements) {
             // Gather this slot's reference from every element into a dense buffer,
             // which is the shape the shared VL reader consumes. Each slot has its
             // own base-type width, so they are resolved a slot at a time rather
             // than in one pass.
-            let mut dense = Vec::with_capacity(n_usize * VL_REF_SIZE);
-            for e in 0..n_usize {
-                let at = e * stride + slot.byte_offset;
-                dense.extend_from_slice(&raw[at..at + VL_REF_SIZE]);
-                offsets.push(at);
+            let mut dense = Vec::with_capacity(n_usize * descriptor.len());
+            for (index, element) in elements.chunks_exact(stride).enumerate() {
+                dense.extend_from_slice(&element[descriptor.clone()]);
+                offsets.push(index * stride + descriptor.start);
             }
             let resolved = self.file.with_source(|source| {
                 vl_data::read_vl_byte_objects_from_source(
@@ -7800,7 +7801,7 @@ the same commit to replace it",
                     n,
                     self.file.widths,
                     self.file.addresses(),
-                    slot.element_size,
+                    element_size,
                     options,
                 )
             })?;
