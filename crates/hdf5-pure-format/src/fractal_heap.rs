@@ -14,6 +14,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree::v2::HugeObjectDirectRecord;
 use crate::bytes;
+use crate::checksum;
 use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -343,39 +344,68 @@ impl FractalHeapHeader {
 
     /// Parses the complete version 0 header at the start of `data`.
     ///
-    /// `offsets` and `lengths` are the file's address and length widths. The parser retains the
-    /// optional root filter fields and decoded filter pipeline, and ignores bytes after the
-    /// header's checksum. With the `checksum` feature, it verifies the checksum over all preceding
-    /// header bytes, including the encoded filter pipeline.
+    /// `offsets` and `lengths` are the file's address and length widths. The parser acquires the
+    /// complete fixed prefix before checking the signature and version. It uses the prefix to
+    /// determine the complete header length and ignores bytes after the checksum.
+    ///
+    /// With the `checksum` feature, the parser verifies the checksum over all preceding header
+    /// bytes before decoding any body fields, including the optional root filter fields and
+    /// filter pipeline.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the header is incomplete, and the other errors
-    /// [`FractalHeapHeaderFrame::parse`] returns for its prefix.
+    /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than the fixed prefix or the
+    /// complete header length derived from it. Propagates the other errors of
+    /// [`FractalHeapHeaderFrame::parse`].
+    ///
+    /// With the `checksum` feature, returns [`FormatError::ChecksumMismatch`] if the stored
+    /// checksum differs from the computed one.
     ///
     /// Returns [`FormatError::InvalidFilterPipelineVersion`] if the filter pipeline version is
     /// not 1 or 2, [`FormatError::InvalidFilterPipelineField`] if a pipeline field exceeds its
     /// format limit, and [`FormatError::InvalidFilterName`] if a stored filter name is malformed.
-    ///
-    /// With the `checksum` feature, returns [`FormatError::ChecksumMismatch`] if the stored
-    /// checksum differs from the computed one.
+    /// Returns [`FormatError::UnexpectedEof`] if a field within the encoded pipeline is incomplete.
     pub fn parse_bytes(
         data: &[u8],
         offsets: OffsetWidth,
         lengths: LengthWidth,
     ) -> Result<Self, FormatError> {
-        let frame = FractalHeapHeaderFrame::parse(data, offsets, lengths)?;
+        let prefix = FractalHeapHeaderPrefix::parse(data, offsets, lengths)?;
         let data = data
-            .get(..frame.encoded_len())
+            .get(..prefix.frame.encoded_len())
             .ok_or(FormatError::UnexpectedEof {
-                expected: frame.encoded_len(),
+                expected: prefix.frame.encoded_len(),
                 available: data.len(),
             })?;
-        let mut cursor = bytes::ByteCursor::new(data);
-        cursor.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()?;
-        cursor.u8()?;
-        let heap_id_length = cursor.u16()?;
-        let filter_encoded_len = cursor.u16()?;
+        Self::parse_framed(data, prefix)
+    }
+
+    /// Decodes the header body at the field widths used to frame it.
+    ///
+    /// The caller supplies exactly the header bytes from the signature through the checksum.
+    /// With the `checksum` feature, verifies the checksum before reading the body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChecksumMismatch`] if the `checksum` feature is enabled and the
+    /// checksum differs from the computed one. Propagates the errors of
+    /// [`FractalHeapFiltering::parse`].
+    fn parse_framed(data: &[u8], prefix: FractalHeapHeaderPrefix) -> Result<Self, FormatError> {
+        let FractalHeapHeaderPrefix {
+            heap_id_length,
+            filter_encoded_len,
+            frame: _,
+            widths: FormatWidths { offsets, lengths },
+        } = prefix;
+        let (payload, _) = data.split_last_chunk::<FRACTAL_HEAP_CHECKSUM_LEN>().ok_or(
+            FormatError::UnexpectedEof {
+                expected: FRACTAL_HEAP_CHECKSUM_LEN,
+                available: data.len(),
+            },
+        )?;
+        checksum::verify_trailing(data)?;
+        let mut cursor =
+            bytes::ByteCursor::with_position(payload, FractalHeapHeaderFrame::PREFIX_LEN)?;
         let flags = cursor.u8()?;
         let max_managed_object_size = cursor.u32()?;
         let next_huge_object_id = cursor.length(lengths)?;
@@ -397,27 +427,7 @@ impl FractalHeapHeader {
         let start_root_rows = cursor.u16()?;
         let root_block_address = cursor.address(offsets)?;
         let current_rows_in_root_indirect_block = cursor.u16()?;
-        let filtering =
-            FractalHeapFiltering::parse(data, lengths, cursor.position(), filter_encoded_len)?;
-        let (payload, checksum) = data.split_last_chunk::<FRACTAL_HEAP_CHECKSUM_LEN>().ok_or(
-            FormatError::UnexpectedEof {
-                expected: FRACTAL_HEAP_CHECKSUM_LEN,
-                available: data.len(),
-            },
-        )?;
-        let stored = u32::from_le_bytes(*checksum);
-        #[cfg(feature = "checksum")]
-        {
-            let computed = crate::checksum::jenkins_lookup3(payload);
-            if computed != stored {
-                return Err(FormatError::ChecksumMismatch {
-                    expected: stored,
-                    computed,
-                });
-            }
-        }
-        #[cfg(not(feature = "checksum"))]
-        let _ = (payload, stored);
+        let filtering = FractalHeapFiltering::parse(&mut cursor, lengths, filter_encoded_len)?;
 
         Ok(FractalHeapHeader {
             heap_id_length,
@@ -1031,7 +1041,7 @@ pub enum FractalHeapFiltering {
 }
 
 impl FractalHeapFiltering {
-    /// Parses optional root filter fields and `encoded_len` bytes of filter information at `offset`.
+    /// Parses optional root filter fields and `encoded_len` bytes of filter information.
     ///
     /// The parser reads the full embedded pipeline body before parsing its fields.
     ///
@@ -1040,15 +1050,13 @@ impl FractalHeapFiltering {
     /// Returns [`FormatError::UnexpectedEof`] if the root filter fields or declared pipeline
     /// body are incomplete. Converts errors from [`FilterPipeline::parse`] to [`FormatError`].
     fn parse(
-        data: &[u8],
+        cursor: &mut bytes::ByteCursor<'_>,
         lengths: LengthWidth,
-        offset: usize,
         encoded_len: u16,
     ) -> Result<Self, FormatError> {
         if encoded_len == 0 {
             return Ok(Self::Unfiltered);
         }
-        let mut cursor = bytes::ByteCursor::with_position(data, offset)?;
         let root_direct_block_size = cursor.length(lengths)?;
         let root_filter_mask = cursor.u32()?;
         let pipeline_bytes = cursor.take(usize::from(encoded_len))?;
@@ -1159,7 +1167,7 @@ impl FractalHeapHeaderLocator {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the range end exceeds [`u64::MAX`].
     pub fn parse_range(&self) -> Result<FileRange, FormatError> {
-        FileRange::new(self.address, FractalHeapHeaderFrame::PREFIX_LEN as u64)
+        FractalHeapHeaderFrame::prefix_range(self.address)
     }
 }
 
@@ -1180,15 +1188,16 @@ pub struct FractalHeapHeaderRef {
 impl FractalHeapHeaderRef {
     /// Parses the complete header in the reference's physical range.
     ///
-    /// The parser reads the framing fields from the complete header and ignores bytes after
-    /// its checksum. With the `checksum` feature, it verifies the header checksum.
+    /// The parser acquires the fixed prefix first, checks the signature and version, and derives
+    /// the header length from the prefix. It ignores bytes after the checksum. With the
+    /// `checksum` feature, it verifies the checksum before decoding the body.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
-    /// [`parse_range`](Self::parse_range), or if the complete header's framing fields require
-    /// more bytes than that range contains. Returns [`FormatError::OffsetOverflow`] if the
-    /// derived range end exceeds [`u64::MAX`], and the parsing errors of
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain the fixed prefix
+    /// or [`parse_range`](Self::parse_range), or if the length derived from the prefix exceeds
+    /// that range. Returns [`FormatError::OffsetOverflow`] if the derived range end exceeds
+    /// [`u64::MAX`]. Propagates the framing, checksum, and body errors of
     /// [`FractalHeapHeader::parse_bytes`].
     pub fn parse(&self, region: FileRegion<'_>) -> Result<FractalHeapHeader, FormatError> {
         let Self {
@@ -1196,14 +1205,15 @@ impl FractalHeapHeaderRef {
             offsets,
             lengths,
         } = *self;
-        let bytes = region.subregion(range)?.bytes();
-        let frame = FractalHeapHeaderFrame::parse(bytes, offsets, lengths)?;
-        let required = FileRange::new(range.start(), frame.encoded_len() as u64)?;
-        FractalHeapHeader::parse_bytes(
-            FileRegion::new(range, bytes)?.subregion(required)?.bytes(),
+        let prefix_range = FractalHeapHeaderFrame::prefix_range(range.start())?;
+        let prefix = FractalHeapHeaderPrefix::parse(
+            region.subregion(prefix_range)?.bytes(),
             offsets,
             lengths,
-        )
+        )?;
+        let required = FileRange::new(range.start(), prefix.frame.encoded_len() as u64)?;
+        let bytes = region.subregion(range)?.subregion(required)?.bytes();
+        FractalHeapHeader::parse_framed(bytes, prefix)
     }
 
     /// Returns the complete physical header range derived from the prefix.
@@ -1232,16 +1242,17 @@ pub struct FractalHeapHeaderFrame {
 }
 
 impl FractalHeapHeaderFrame {
-    /// Parses the fixed prefix at the start of `bytes` to compute the complete header length.
+    /// Computes the complete header length from the fixed prefix at the start of `bytes`.
     ///
     /// `offsets` and `lengths` are the superblock's "Size of Offsets" and "Size of Lengths"
     /// fields. Bytes after [`PREFIX_LEN`](Self::PREFIX_LEN) are ignored.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidFractalHeapSignature`] if the prefix does not begin with
-    /// `FRHP`, [`FormatError::InvalidFractalHeapVersion`] if its version is not 0, and
-    /// [`FormatError::UnexpectedEof`] if a prefix field is incomplete.
+    /// Returns [`FormatError::UnexpectedEof`] if `bytes` is shorter than
+    /// [`PREFIX_LEN`](Self::PREFIX_LEN). After acquiring the prefix, returns
+    /// [`FormatError::InvalidFractalHeapSignature`] if the signature is not `FRHP`, or
+    /// [`FormatError::InvalidFractalHeapVersion`] if the version is not 0.
     ///
     /// Returns [`FormatError::Internal`] if the length arithmetic overflows, and
     /// [`FormatError::ValueTooLargeForPlatform`] if the length exceeds [`usize::MAX`].
@@ -1250,16 +1261,23 @@ impl FractalHeapHeaderFrame {
         offsets: OffsetWidth,
         lengths: LengthWidth,
     ) -> Result<Self, FormatError> {
-        let mut cursor = bytes::ByteCursor::new(bytes);
-        if cursor.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()? != FRACTAL_HEAP_SIGNATURE {
-            return Err(FormatError::InvalidFractalHeapSignature);
-        }
-        let version = cursor.u8()?;
-        if version != FRACTAL_HEAP_VERSION {
-            return Err(FormatError::InvalidFractalHeapVersion(version));
-        }
-        cursor.u16()?;
-        let filter_encoded_len = cursor.u16()?;
+        Ok(FractalHeapHeaderPrefix::parse(bytes, offsets, lengths)?.frame)
+    }
+
+    /// Returns the header length in bytes, including the checksum and any filter fields.
+    pub const fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+
+    fn prefix_range(address: PhysicalAddress) -> Result<FileRange, FormatError> {
+        FileRange::new(address, Self::PREFIX_LEN as u64)
+    }
+
+    fn new(
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+        filter_encoded_len: u16,
+    ) -> Result<Self, FormatError> {
         let overflow = || FormatError::Internal("fractal heap header length exceeds u64".into());
         let length_fields_len = FRACTAL_HEAP_HEADER_LENGTH_FIELDS
             .checked_mul(u64::from(lengths.get()))
@@ -1283,11 +1301,6 @@ impl FractalHeapHeaderFrame {
         })
     }
 
-    /// Returns the header length in bytes, including the checksum and any filter fields.
-    pub const fn encoded_len(&self) -> usize {
-        self.encoded_len
-    }
-
     /// The prefix length in bytes: the signature (4), version (1), heap ID length (2), and
     /// encoded filter pipeline length (2).
     ///
@@ -1296,6 +1309,42 @@ impl FractalHeapHeaderFrame {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
     pub const PREFIX_LEN: usize = 9;
+}
+
+/// The heap ID and pipeline lengths from a checked version 0 header prefix.
+///
+/// The body parser uses the same field widths as the header length calculation.
+struct FractalHeapHeaderPrefix {
+    heap_id_length: u16,
+    filter_encoded_len: u16,
+    frame: FractalHeapHeaderFrame,
+    widths: FormatWidths,
+}
+
+impl FractalHeapHeaderPrefix {
+    fn parse(
+        bytes: &[u8],
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+    ) -> Result<Self, FormatError> {
+        let prefix = bytes::ByteCursor::new(bytes).take(FractalHeapHeaderFrame::PREFIX_LEN)?;
+        let mut prefix = bytes::ByteCursor::new(prefix);
+        if prefix.array::<{ FRACTAL_HEAP_SIGNATURE.len() }>()? != FRACTAL_HEAP_SIGNATURE {
+            return Err(FormatError::InvalidFractalHeapSignature);
+        }
+        let version = prefix.u8()?;
+        if version != FRACTAL_HEAP_VERSION {
+            return Err(FormatError::InvalidFractalHeapVersion(version));
+        }
+        let heap_id_length = prefix.u16()?;
+        let filter_encoded_len = prefix.u16()?;
+        Ok(Self {
+            heap_id_length,
+            filter_encoded_len,
+            frame: FractalHeapHeaderFrame::new(offsets, lengths, filter_encoded_len)?,
+            widths: FormatWidths { offsets, lengths },
+        })
+    }
 }
 
 /// The immutable decoding parameters for the IDs of a fractal heap.
@@ -2042,45 +2091,74 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty(0, FRACTAL_HEAP_SIGNATURE.len())]
-    #[case::partial_signature(FRACTAL_HEAP_SIGNATURE.len() - 1, FRACTAL_HEAP_SIGNATURE.len())]
-    #[case::signature(FRACTAL_HEAP_SIGNATURE.len(), HEADER_VERSION_END)]
-    #[case::version(HEADER_VERSION_END, HEADER_ID_LENGTH_END)]
-    #[case::partial_id_length(HEADER_VERSION_END + 1, HEADER_ID_LENGTH_END)]
-    #[case::id_length(HEADER_ID_LENGTH_END, FractalHeapHeaderFrame::PREFIX_LEN)]
-    #[case::partial_filter_length(FractalHeapHeaderFrame::PREFIX_LEN - 1, FractalHeapHeaderFrame::PREFIX_LEN)]
-    fn an_incomplete_header_prefix_reports_the_missing_field(
-        #[case] available: usize,
-        #[case] expected: usize,
+    #[case::signature(*b"XXXX", FRACTAL_HEAP_VERSION)]
+    #[case::version(FRACTAL_HEAP_SIGNATURE, UNSUPPORTED_HEADER_VERSION)]
+    fn header_parsers_acquire_the_complete_prefix_before_interpreting_it(
+        #[case] signature: [u8; 4],
+        #[case] version: u8,
+        #[values(0, 1, 2, 3, 4, 5, 6, 7, 8)] available: usize,
     ) {
-        let mut prefix = header_prefix(0);
-        prefix.truncate(available);
+        let bytes = header_with_prefix(signature, version);
+        let prefix = &bytes[..available];
+        let error = FormatError::UnexpectedEof {
+            expected: FractalHeapHeaderFrame::PREFIX_LEN,
+            available,
+        };
         assert_eq!(
-            FractalHeapHeaderFrame::parse(&prefix, OffsetWidth::Eight, LengthWidth::Eight),
-            Err(FormatError::UnexpectedEof {
-                expected,
-                available,
-            })
+            FractalHeapHeaderFrame::parse(prefix, OffsetWidth::Eight, LengthWidth::Eight),
+            Err(error.clone())
         );
+        assert_eq!(FractalHeapHeader::parse(prefix, 0, 8, 8), Err(error));
+        let error = FormatError::InsufficientRegion {
+            required_start: 0,
+            required_length: FractalHeapHeaderFrame::PREFIX_LEN as u64,
+            provided_start: 0,
+            provided_length: available as u64,
+        };
+        let locator = FractalHeapHeaderLocator::new(
+            PhysicalAddress::new(0),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
+        let short_region = header_region(prefix);
+        assert_eq!(locator.parse(short_region), Err(error.clone()));
+        let original = header_prefix(0);
+        let reference = locator.parse(header_region(&original)).unwrap();
+        assert_eq!(reference.parse(short_region), Err(error));
     }
 
     #[rstest]
-    #[case::signature(true, FRACTAL_HEAP_VERSION, FormatError::InvalidFractalHeapSignature)]
-    #[case::version(false, FRACTAL_HEAP_VERSION + 1, FormatError::InvalidFractalHeapVersion(FRACTAL_HEAP_VERSION + 1))]
-    fn a_header_frame_rejects_an_invalid_signature_or_version(
-        #[case] corrupt_signature: bool,
+    #[case::signature(*b"XXXX", FRACTAL_HEAP_VERSION, FormatError::InvalidFractalHeapSignature)]
+    #[case::version(
+        FRACTAL_HEAP_SIGNATURE,
+        UNSUPPORTED_HEADER_VERSION,
+        FormatError::InvalidFractalHeapVersion(UNSUPPORTED_HEADER_VERSION)
+    )]
+    fn header_parsers_reject_invalid_framing_before_acquiring_the_body(
+        #[case] signature: [u8; 4],
         #[case] version: u8,
         #[case] error: FormatError,
     ) {
-        let mut prefix = header_prefix(0);
-        if corrupt_signature {
-            prefix[..FRACTAL_HEAP_SIGNATURE.len()].fill(0);
-        }
-        prefix[FRACTAL_HEAP_SIGNATURE.len()] = version;
+        let offsets = OffsetWidth::Eight;
+        let lengths = LengthWidth::Eight;
+        let bytes = header_with_prefix(signature, version);
+        let prefix = &bytes[..FractalHeapHeaderFrame::PREFIX_LEN];
         assert_eq!(
-            FractalHeapHeaderFrame::parse(&prefix, OffsetWidth::Eight, LengthWidth::Eight),
-            Err(error)
+            FractalHeapHeaderFrame::parse(prefix, offsets, lengths),
+            Err(error.clone())
         );
+        assert_eq!(
+            FractalHeapHeader::parse(prefix, 0, 8, 8),
+            Err(error.clone())
+        );
+        assert_eq!(
+            parse_header_region(prefix, offsets, lengths),
+            Err(error.clone())
+        );
+        let locator = FractalHeapHeaderLocator::new(PhysicalAddress::new(0), offsets, lengths);
+        let original = header_prefix(0);
+        let reference = locator.parse(header_region(&original)).unwrap();
+        assert_eq!(reference.parse(header_region(prefix)), Err(error));
     }
 
     #[rstest]
@@ -2271,7 +2349,7 @@ mod tests {
             Err(error.clone())
         );
         assert_eq!(
-            parse_header_region(&bytes),
+            parse_header_region(&bytes, OffsetWidth::Eight, LengthWidth::Eight),
             Err(FormatError::InsufficientRegion {
                 required_start: 0,
                 required_length: expected as u64,
@@ -2297,7 +2375,50 @@ mod tests {
             FractalHeapHeader::parse(&bytes, 0, 8, 8),
             Err(error.clone())
         );
-        assert_eq!(parse_header_region(&bytes), Err(error));
+        assert_eq!(
+            parse_header_region(&bytes, OffsetWidth::Eight, LengthWidth::Eight),
+            Err(error)
+        );
+    }
+
+    #[rstest]
+    #[case::two_eight(Widths { offset: 2, length: 8 }, OffsetWidth::Two, LengthWidth::Eight, 142)]
+    #[case::eight_two(Widths { offset: 8, length: 2 }, OffsetWidth::Eight, LengthWidth::Two, 82)]
+    fn header_parsers_apply_checksum_policy_before_decoding_the_filter_pipeline(
+        #[case] widths: Widths,
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
+        #[case] extent: usize,
+    ) {
+        let mut bytes = fractal_heap::Header::new(256)
+            .filtering(91, 1, vec![0xFF, 0])
+            .build(widths);
+        assert_eq!(bytes.len(), extent);
+        let checksum_pos = extent - test_util::checksum::CHECKSUM;
+        let computed = test_util::checksum::lookup3(&bytes[..checksum_pos]);
+        let expected = computed ^ 1;
+        bytes[checksum_pos..].copy_from_slice(&expected.to_le_bytes());
+        let invalid_pipeline = FormatError::InvalidFilterPipelineVersion(0xFF);
+        let error = if cfg!(feature = "checksum") {
+            FormatError::ChecksumMismatch { expected, computed }
+        } else {
+            invalid_pipeline.clone()
+        };
+        assert_eq!(
+            FractalHeapHeader::parse_bytes(&bytes, offsets, lengths),
+            Err(error.clone())
+        );
+        assert_eq!(parse_header_region(&bytes, offsets, lengths), Err(error));
+
+        test_util::checksum::restamp(&mut bytes, 0, extent);
+        assert_eq!(
+            FractalHeapHeader::parse_bytes(&bytes, offsets, lengths),
+            Err(invalid_pipeline.clone())
+        );
+        assert_eq!(
+            parse_header_region(&bytes, offsets, lengths),
+            Err(invalid_pipeline)
+        );
     }
 
     #[cfg(feature = "checksum")]
@@ -2319,7 +2440,10 @@ mod tests {
             FractalHeapHeader::parse(&bytes, 0, 8, 8),
             Err(error.clone())
         );
-        assert_eq!(parse_header_region(&bytes), Err(error));
+        assert_eq!(
+            parse_header_region(&bytes, OffsetWidth::Eight, LengthWidth::Eight),
+            Err(error)
+        );
     }
 
     #[test]
@@ -2355,7 +2479,10 @@ mod tests {
             FractalHeapHeader::parse(&file_data, 0, 8, 8),
             Ok(expected.clone())
         );
-        assert_eq!(parse_header_region(&file_data), Ok(expected));
+        assert_eq!(
+            parse_header_region(&file_data, OffsetWidth::Eight, LengthWidth::Eight),
+            Ok(expected)
+        );
     }
 
     #[test]
@@ -2798,23 +2925,6 @@ mod tests {
         data
     }
 
-    #[test]
-    fn a_header_without_frhp_is_an_invalid_signature() {
-        let mut data = vec![0u8; 128];
-        data[0..4].copy_from_slice(b"XXXX");
-        let err = FractalHeapHeader::parse(&data, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidFractalHeapSignature);
-    }
-
-    #[test]
-    fn a_header_of_version_1_is_an_invalid_version() {
-        let mut data = vec![0u8; 128];
-        data[0..4].copy_from_slice(b"FRHP");
-        data[4] = 1;
-        let err = FractalHeapHeader::parse(&data, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidFractalHeapVersion(1));
-    }
-
     #[rstest]
     #[case::managed(MANAGED_ID, false)]
     #[case::tiny_normal(&[0x20, 0xAB], false)]
@@ -3197,18 +3307,23 @@ mod tests {
         }
     }
 
-    fn parse_header_region(bytes: &[u8]) -> Result<FractalHeapHeader, FormatError> {
-        let region = FileRegion::new(
-            FileRange::new(PhysicalAddress::new(0), bytes.len() as u64)?,
+    fn parse_header_region(
+        bytes: &[u8],
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+    ) -> Result<FractalHeapHeader, FormatError> {
+        let region = header_region(bytes);
+        FractalHeapHeaderLocator::new(PhysicalAddress::new(0), offsets, lengths)
+            .parse(region)?
+            .parse(region)
+    }
+
+    fn header_region(bytes: &[u8]) -> FileRegion<'_> {
+        FileRegion::new(
+            FileRange::new(PhysicalAddress::new(0), bytes.len() as u64).unwrap(),
             bytes,
-        )?;
-        FractalHeapHeaderLocator::new(
-            PhysicalAddress::new(0),
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
         )
-        .parse(region)?
-        .parse(region)
+        .unwrap()
     }
 
     fn filter_pipeline(version: u8, client_count: usize) -> FilterPipeline {
@@ -3265,8 +3380,16 @@ mod tests {
         prefix
     }
 
+    fn header_with_prefix(signature: [u8; 4], version: u8) -> Vec<u8> {
+        let mut bytes = fractal_heap::Header::new(256).build(Widths::EIGHT);
+        bytes[..signature.len()].copy_from_slice(&signature);
+        bytes[signature.len()] = version;
+        bytes
+    }
+
     const HEADER_VERSION_END: usize = FRACTAL_HEAP_SIGNATURE.len() + mem::size_of::<u8>();
     const HEADER_ID_LENGTH_END: usize = HEADER_VERSION_END + mem::size_of::<u16>();
+    const UNSUPPORTED_HEADER_VERSION: u8 = FRACTAL_HEAP_VERSION + 1;
     // "The Data Storage - Filter Pipeline Message", format specification version 4.0, defines
     // versions 1 and 2 and deflate ID 1.
     const PIPELINE_VERSION_ONE: u8 = 1;

@@ -38,8 +38,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::datasets` and related metadata reads returning a filter pipeline error for a
+  fractal heap header with a checksum mismatch when checksum verification is enabled ([#1364](https://github.com/CramBL/hdf5-pure/pull/1364)).
 - Fixed `Group::datasets` and related metadata reads accepting unsupported fractal heap ID
-  versions or set reserved bits in managed and unfiltered huge IDs.
+  versions or set reserved bits in managed and unfiltered huge IDs ([#1364](https://github.com/CramBL/hdf5-pure/pull/1364)).
 - Fixed `Dataset::datatype` reserving memory for a compound's declared member count before
   reading any members ([#1363](https://github.com/CramBL/hdf5-pure/pull/1363)).
 - Fixed `FileBuilder::finish_to` writing compounds with overlapping members and enumerations
