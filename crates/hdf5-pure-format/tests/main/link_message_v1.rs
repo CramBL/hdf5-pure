@@ -1,3 +1,5 @@
+use core::error::Error;
+
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{CharacterSet, FormatError, OffsetWidth, StoredAddress};
 use hdf5_pure_format::__private::{
@@ -513,16 +515,21 @@ fn explicit_name_widths_accept_their_maximum(#[case] len: usize, #[case] width: 
 }
 
 #[rstest]
-#[case::one_byte_overflow(256, UintWidth::One)]
-#[case::two_byte_overflow(65_536, UintWidth::Two)]
+#[case::one_byte_overflow(256, UintWidth::One, "link name length 256 exceeds its 1-byte field")]
+#[case::two_byte_overflow(
+    65_536,
+    UintWidth::Two,
+    "link name length 65536 exceeds its 2-byte field"
+)]
 fn explicit_name_widths_reject_lengths_that_do_not_fit(
     #[case] len: usize,
     #[case] width: UintWidth,
+    #[case] display: &str,
 ) {
-    assert_eq!(
-        LinkName::with_width(vec![b'x'; len], width).unwrap_err(),
-        LinkWireError::NameWidth { length: len, width }
-    );
+    let error = LinkName::with_width(vec![b'x'; len], width).unwrap_err();
+    assert_eq!(error, LinkWireError::NameWidth { length: len, width });
+    assert_eq!(error.to_string(), display);
+    assert!(error.source().is_none());
 }
 
 #[test]
@@ -537,12 +544,30 @@ fn hard_target_width_errors_are_preserved_by_length_and_encoding() {
         None,
     )
     .unwrap();
-    let expected = LinkWireError::Storage(LinkStorageError::Format(FormatError::AddressTooLarge {
+    let format = FormatError::AddressTooLarge {
         address: 65_536,
         offset_size: 2,
-    }));
+    };
+    let storage = LinkStorageError::Format(format.clone());
+    let expected = LinkWireError::Storage(storage.clone());
     assert_eq!(link.encoded_len(OffsetWidth::Two).unwrap_err(), expected);
-    assert_eq!(link.serialize(OffsetWidth::Two).unwrap_err(), expected);
+    let error = link.serialize(OffsetWidth::Two).unwrap_err();
+    assert_eq!(error, expected);
+    let storage_source = error
+        .source()
+        .unwrap()
+        .downcast_ref::<LinkStorageError>()
+        .unwrap();
+    assert_eq!(storage_source, &storage);
+    let format_source = storage_source
+        .source()
+        .unwrap()
+        .downcast_ref::<FormatError>()
+        .unwrap();
+    assert_eq!(format_source, &format);
+    assert!(format_source.source().is_none());
+    assert_eq!(storage_source.to_string(), format.to_string());
+    assert_eq!(error.to_string(), storage.to_string());
 }
 
 #[rstest]

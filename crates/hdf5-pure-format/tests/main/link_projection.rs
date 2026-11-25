@@ -1,3 +1,6 @@
+use core::error::Error;
+use core::str::Utf8Error;
+
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::{CharacterSet, FormatError, OffsetWidth, StoredAddress};
 use hdf5_pure_format::__private::{
@@ -87,6 +90,13 @@ fn supported_models_report_typed_user_kind_projection_errors(
     );
 }
 
+#[test]
+fn unsupported_kind_projection_error_displays_the_kind_without_a_source() {
+    let error = LinkProjectionError::UnsupportedKind(UserLinkKind::new(u8::MAX).unwrap());
+    assert_eq!(error.to_string(), "unsupported link kind: 255");
+    assert!(error.source().is_none());
+}
+
 #[rstest]
 #[case::missing_length(b"\x01\x08\x41\x01u", 7, 5)]
 #[case::partial_length(b"\x01\x08\xff\x01u\x00", 7, 6)]
@@ -157,16 +167,27 @@ fn text_projection_retains_invalid_soft_utf8_error() {
     let bytes = b"\x01\x08\x01\x01x\x01\x00\xff";
     let wire = LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap();
     let error = LinkMessage::try_from(wire).unwrap_err();
-    let LinkProjectionError::Format(FormatError::InvalidSoftLinkEncoding { source }) = &error
-    else {
+    let expected = LinkMessage::parse(bytes, 2).unwrap_err();
+    let format = error
+        .source()
+        .unwrap()
+        .downcast_ref::<FormatError>()
+        .unwrap();
+    let FormatError::InvalidSoftLinkEncoding { source } = format else {
         panic!("expected InvalidSoftLinkEncoding, got {error:?}");
     };
-    assert_eq!(source.valid_up_to(), 0);
-    assert_eq!(source.error_len(), Some(1));
-    assert_eq!(
-        error,
-        LinkProjectionError::Format(LinkMessage::parse(bytes, 2).unwrap_err())
-    );
+    assert_eq!(format, &expected);
+    let utf8 = format
+        .source()
+        .unwrap()
+        .downcast_ref::<Utf8Error>()
+        .unwrap();
+    assert_eq!(utf8, source);
+    assert_eq!(utf8.valid_up_to(), 0);
+    assert_eq!(utf8.error_len(), Some(1));
+    assert!(utf8.source().is_none());
+    assert_eq!(error.to_string(), format.to_string());
+    assert_eq!(error, LinkProjectionError::Format(expected));
 }
 
 #[test]

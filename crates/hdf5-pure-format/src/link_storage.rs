@@ -9,6 +9,8 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 
 use crate::address::StoredAddress;
 use crate::convert::Narrow;
@@ -791,7 +793,11 @@ pub enum OwnedSymbolicLinkTarget {
     },
 }
 
-/// Reports link metadata that cannot be represented or combined faithfully.
+/// An error reading or writing link metadata or setting a group's storage policy.
+///
+/// [`Error::source`] returns the wrapped [`FormatError`] for [`Self::Format`].
+/// The other variants have no source. [`fmt::Display`] escapes the name bytes in
+/// [`Self::DuplicateName`] and [`Self::InvalidName`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkStorageError {
     /// A link's creation index is not below the group's next-index counter.
@@ -822,7 +828,7 @@ pub enum LinkStorageError {
     ExternalVersionFlags(u8),
     /// A message sets reserved flag bits.
     Flags(u8),
-    /// Parsing or address encoding failed.
+    /// An underlying format error.
     Format(FormatError),
     /// Creation-order indexing is enabled without tracking.
     IndexingWithoutTracking,
@@ -836,12 +842,81 @@ pub enum LinkStorageError {
     NotHardLink,
     /// The storage addresses disagree with each other or with the indexing policy.
     StorageAddresses,
-    /// A symbolic target value exceeds its two-byte length field.
+    /// A link target value exceeds its two-byte length field.
     TargetLength(usize),
     /// Bytes remain after the declared message fields.
     TrailingBytes,
     /// A required stored address is undefined at its encoded width.
     UndefinedAddress,
+}
+
+impl fmt::Display for LinkStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CreationOrderCounter { index, next } => {
+                write!(
+                    f,
+                    "link creation index {index} must be below counter {next}"
+                )
+            }
+            Self::CreationOrderCounterRange { next, maximum } => {
+                write!(
+                    f,
+                    "link creation order counter {next} exceeds maximum {maximum}"
+                )
+            }
+            Self::CreationOrderExhausted => f.write_str("link creation order counter is exhausted"),
+            Self::CreationOrderPresence => {
+                f.write_str("link creation index presence disagrees with tracking policy")
+            }
+            Self::DuplicateCreationOrder(index) => {
+                write!(f, "duplicate link creation index {index}")
+            }
+            Self::DuplicateName(name) => {
+                write!(f, "duplicate link name b\"{}\"", name.escape_ascii())
+            }
+            Self::ExternalValue => {
+                f.write_str("external link value lacks its version, separator, or terminator")
+            }
+            Self::ExternalVersionFlags(flags) => {
+                write!(
+                    f,
+                    "unsupported external link version or flags: {flags:#04x}"
+                )
+            }
+            Self::Flags(flags) => write!(f, "reserved link flag bits are set: {flags:#04x}"),
+            Self::Format(error) => fmt::Display::fmt(error, f),
+            Self::IndexingWithoutTracking => {
+                f.write_str("link creation order indexing requires tracking")
+            }
+            Self::InvalidName(name) => write!(f, "invalid link name b\"{}\"", name.escape_ascii()),
+            Self::InvalidTarget => {
+                f.write_str("symbolic link target is empty or contains a null byte")
+            }
+            Self::LengthOverflow => {
+                f.write_str("encoded link length exceeds the addressable buffer size")
+            }
+            Self::NotHardLink => f.write_str("replacing a hard link target requires a hard link"),
+            Self::StorageAddresses => f.write_str(
+                "link storage addresses disagree with each other or with the indexing policy",
+            ),
+            Self::TargetLength(length) => {
+                write!(f, "link target length {length} exceeds its two-byte field")
+            }
+            Self::TrailingBytes => f.write_str("trailing bytes after link message fields"),
+            Self::UndefinedAddress => f.write_str("required link address is undefined"),
+        }
+    }
+}
+
+impl Error for LinkStorageError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        if let Self::Format(error) = self {
+            Some(error)
+        } else {
+            None
+        }
+    }
 }
 
 impl From<FormatError> for LinkStorageError {
@@ -905,6 +980,7 @@ fn required_address(
 const MAX_LINK_CREATION_COUNTER: u64 = 0x7fff_ffff_ffff_ffff;
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
     use alloc::vec;
 
     use rstest::rstest;
@@ -913,6 +989,84 @@ mod tests {
     use crate::link_message::{LinkMessage, LinkTarget};
 
     use super::*;
+
+    #[rstest]
+    #[case::creation_order_counter(
+        LinkStorageError::CreationOrderCounter { index: 23, next: 17 },
+        "link creation index 23 must be below counter 17"
+    )]
+    #[case::creation_order_counter_range(
+        LinkStorageError::CreationOrderCounterRange { next: 23, maximum: 17 },
+        "link creation order counter 23 exceeds maximum 17"
+    )]
+    #[case::creation_order_exhausted(
+        LinkStorageError::CreationOrderExhausted,
+        "link creation order counter is exhausted"
+    )]
+    #[case::creation_order_presence(
+        LinkStorageError::CreationOrderPresence,
+        "link creation index presence disagrees with tracking policy"
+    )]
+    #[case::duplicate_creation_order(
+        LinkStorageError::DuplicateCreationOrder(23),
+        "duplicate link creation index 23"
+    )]
+    #[case::duplicate_name(
+        LinkStorageError::DuplicateName(b"a\n\xff".to_vec()),
+        r#"duplicate link name b"a\n\xff""#
+    )]
+    #[case::external_value(
+        LinkStorageError::ExternalValue,
+        "external link value lacks its version, separator, or terminator"
+    )]
+    #[case::external_version_flags(
+        LinkStorageError::ExternalVersionFlags(0x23),
+        "unsupported external link version or flags: 0x23"
+    )]
+    #[case::flags(LinkStorageError::Flags(0x80), "reserved link flag bits are set: 0x80")]
+    #[case::indexing_without_tracking(
+        LinkStorageError::IndexingWithoutTracking,
+        "link creation order indexing requires tracking"
+    )]
+    #[case::invalid_name(
+        LinkStorageError::InvalidName(b"\0\"\xff".to_vec()),
+        r#"invalid link name b"\x00\"\xff""#
+    )]
+    #[case::invalid_target(
+        LinkStorageError::InvalidTarget,
+        "symbolic link target is empty or contains a null byte"
+    )]
+    #[case::length_overflow(
+        LinkStorageError::LengthOverflow,
+        "encoded link length exceeds the addressable buffer size"
+    )]
+    #[case::not_hard_link(
+        LinkStorageError::NotHardLink,
+        "replacing a hard link target requires a hard link"
+    )]
+    #[case::storage_addresses(
+        LinkStorageError::StorageAddresses,
+        "link storage addresses disagree with each other or with the indexing policy"
+    )]
+    #[case::target_length(
+        LinkStorageError::TargetLength(usize::from(u16::MAX) + 1),
+        "link target length 65536 exceeds its two-byte field"
+    )]
+    #[case::trailing_bytes(
+        LinkStorageError::TrailingBytes,
+        "trailing bytes after link message fields"
+    )]
+    #[case::undefined_address(
+        LinkStorageError::UndefinedAddress,
+        "required link address is undefined"
+    )]
+    fn link_storage_errors_display_context_without_a_source(
+        #[case] error: LinkStorageError,
+        #[case] display: &str,
+    ) {
+        assert_eq!(error.to_string(), display);
+        assert!(error.source().is_none());
+    }
 
     #[rstest]
     #[case::hard(
