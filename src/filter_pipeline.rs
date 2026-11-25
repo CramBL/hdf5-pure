@@ -1,8 +1,4 @@
 use alloc::borrow::Cow;
-#[cfg(not(feature = "std"))]
-use alloc::format;
-
-use hdf5_pure_format::__private::FilterPipelineError;
 
 use crate::error::FormatError;
 
@@ -17,8 +13,15 @@ pub use hdf5_pure_filter::__private::H5Z_FLAG_OPTIONAL;
 pub use hdf5_pure_format::__private::FilterDescription;
 pub use hdf5_pure_format::__private::FilterPipeline;
 
+/// Reads the pipeline body and returns its checked descriptions for reuse.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidFilterPipelineField`] if the filter count exceeds 32 or
+/// [`FormatError::InvalidFilterName`] if a stored name is invalid. Propagates the other format
+/// errors from [`FilterPipeline::parse`].
 pub(crate) fn parse_filter_pipeline(data: &[u8]) -> Result<FilterPipeline, FormatError> {
-    FilterPipeline::parse(data).map_err(map_filter_pipeline_error)
+    FilterPipeline::parse(data).map_err(FormatError::from)
 }
 
 /// An original Filter Pipeline body checked by the parser and retained for verbatim emission.
@@ -51,22 +54,6 @@ impl<'a> RetainedFilterPipeline<'a> {
     }
 }
 
-pub(crate) fn map_filter_pipeline_error(error: FilterPipelineError) -> FormatError {
-    match error {
-        FilterPipelineError::Format(error) => error,
-        FilterPipelineError::InvalidName { filter_id, reason } => {
-            FormatError::FilterError(format!("invalid name for filter {filter_id}: {reason}"))
-        }
-        FilterPipelineError::FieldTooLarge {
-            field,
-            value,
-            maximum,
-        } => FormatError::FilterError(format!(
-            "filter pipeline {field} is {value}, above maximum {maximum}"
-        )),
-    }
-}
-
 /// Presents a pipeline's stored filter descriptions to the filter routines.
 pub(crate) struct FilterStepsRef<'a>(&'a [FilterDescription]);
 
@@ -96,24 +83,34 @@ impl hdf5_pure_filter::__private::FilterSteps for FilterStepsRef<'_> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
+    use test_util::filter_pipeline::{Pipeline, Version};
+
     use super::*;
 
     #[rstest::rstest]
-    #[case::invalid_name(
-        FilterPipelineError::InvalidName { filter_id: 300, reason: "invalid UTF-8" },
-        "invalid name for filter 300: invalid UTF-8"
-    )]
-    #[case::filter_count(
-        FilterPipelineError::FieldTooLarge { field: "filter count", value: 33, maximum: 32 },
-        "filter pipeline filter count is 33, above maximum 32"
-    )]
-    fn filter_pipeline_validation_errors_map_to_filter_error(
-        #[case] error: FilterPipelineError,
-        #[case] message: &str,
-    ) {
+    #[case::version_one(Version::One)]
+    #[case::version_two(Version::Two)]
+    fn retained_pipeline_keeps_the_source_suffix(#[case] version: Version) {
+        let mut fixture = Pipeline::new(version);
+        fixture.push(300, Some("custom"), 0x80, &[7, 13]).unwrap();
+        let body = fixture.build();
+        let mut source = body.clone();
+        source.extend_from_slice(&[0xa5; 5]);
+        let (pipeline, retained) = RetainedFilterPipeline::parse(Cow::Borrowed(&source)).unwrap();
+
+        assert_eq!(pipeline.version(), version.byte());
         assert_eq!(
-            map_filter_pipeline_error(error),
-            FormatError::FilterError(message.into())
+            pipeline.filters(),
+            &[FilterDescription {
+                filter_id: 300,
+                name: Some("custom".into()),
+                flags: 0x80,
+                client_data: vec![7, 13],
+            }]
         );
+        assert_eq!(pipeline.to_bytes(), body);
+        assert_eq!(retained.as_bytes(), source);
     }
 }

@@ -291,6 +291,7 @@ impl ChunkOptions {
     /// # Errors
     ///
     /// Returns [`FormatError::FilterError`] if filters conflict or their parameters are invalid.
+    /// Returns [`FormatError::InvalidFilterPipelineField`] if the filter count exceeds 32.
     /// Returns [`FormatError::UnreadableFillValue`] if scale-offset requires an unreadable fill
     /// value.
     /// Returns [`FormatError::UnsupportedZfp`] if ZFP cannot encode the element type or chunk
@@ -420,7 +421,7 @@ impl ChunkOptions {
         } else {
             FilterPipeline::new(FILTER_PIPELINE_VERSION_TWO, filters)
                 .map(Some)
-                .map_err(crate::filter_pipeline::map_filter_pipeline_error)
+                .map_err(FormatError::from)
         }
     }
 
@@ -441,9 +442,7 @@ impl ChunkOptions {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::FilterError`] if filter parameters are invalid or pipeline fields
-    /// exceed their encoded widths. Other filter-parameter errors from [`Self::build_pipeline`]
-    /// are propagated.
+    /// Propagates errors from [`Self::build_pipeline`].
     ///
     /// Returns [`FormatError::ChunkedReadError`] if the chunk-index geometry is unsupported or
     /// exceeds the writer's index limits, or [`FormatError::InvalidChunkGeometry`] if the layout

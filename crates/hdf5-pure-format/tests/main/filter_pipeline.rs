@@ -1,3 +1,6 @@
+use core::error::Error;
+use std::collections::TryReserveError;
+
 use hdf5_pure_format::__private::MessageFlags;
 use hdf5_pure_format::__private::{
     FilterDescription, FilterPipeline, FilterPipelineError, FilterPipelineOutputTooSmall,
@@ -7,6 +10,76 @@ use hdf5_pure_format::FormatError;
 use rstest::rstest;
 use test_util::filter_pipeline::{Pipeline, Version};
 use test_util::object_header::MessageType as FixtureMessageType;
+
+#[test]
+fn filter_pipeline_error_exposes_the_wrapped_format_error() {
+    let expected = FormatError::InvalidFilterFlags {
+        filter_id: FILTER_ID,
+        flags: 0x8000,
+    };
+    let error = FilterPipelineError::from(expected.clone());
+    let source = Error::source(&error)
+        .unwrap()
+        .downcast_ref::<FormatError>()
+        .unwrap();
+
+    assert_eq!(source, &expected);
+    assert!(source.source().is_none());
+    assert_eq!(error.to_string(), expected.to_string());
+    assert_eq!(FormatError::from(error), expected);
+}
+
+#[test]
+fn filter_pipeline_error_keeps_the_allocation_cause() {
+    let source = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err();
+    let expected = FormatError::AllocationFailed {
+        values: usize::MAX,
+        source: source.clone(),
+    };
+    let error = FilterPipelineError::from(expected.clone());
+    let format_error = error
+        .source()
+        .unwrap()
+        .downcast_ref::<FormatError>()
+        .unwrap();
+    let allocation_error = format_error
+        .source()
+        .unwrap()
+        .downcast_ref::<TryReserveError>()
+        .unwrap();
+    assert_eq!(format_error, &expected);
+    assert_eq!(allocation_error, &source);
+    assert!(allocation_error.source().is_none());
+}
+
+#[rstest]
+#[case::field(
+    FilterPipelineError::FieldTooLarge {
+        field: "client data count",
+        value: MAX_CLIENT_DATA_COUNT + 1,
+        maximum: MAX_CLIENT_DATA_COUNT
+    },
+    FormatError::InvalidFilterPipelineField {
+        field: "client data count",
+        value: MAX_CLIENT_DATA_COUNT + 1,
+        maximum: MAX_CLIENT_DATA_COUNT
+    },
+    "filter pipeline \"client data count\" is 65536, above maximum 65535"
+)]
+#[case::name(
+    FilterPipelineError::InvalidName { filter_id: FILTER_ID, reason: "invalid UTF-8" },
+    FormatError::InvalidFilterName { filter_id: FILTER_ID, reason: "invalid UTF-8" },
+    "invalid name for filter 300: \"invalid UTF-8\""
+)]
+fn filter_pipeline_field_and_name_errors_report_context_without_a_source(
+    #[case] error: FilterPipelineError,
+    #[case] expected: FormatError,
+    #[case] display: &str,
+) {
+    assert!(Error::source(&error).is_none());
+    assert_eq!(error.to_string(), display);
+    assert_eq!(FormatError::from(error), expected);
+}
 
 #[rstest]
 #[case::version_one(Version::One)]
@@ -445,3 +518,6 @@ const FILTER_ID: u16 = 300;
 const V1_NAME_LENGTH_AT: usize = 10;
 const V1_FLAGS_AT: usize = 12;
 const V1_FILTER_HEADER_END: usize = 16;
+// "The Data Storage - Filter Pipeline Message" in the format specification, version 4.0,
+// defines a two-byte client data count in versions 1 and 2.
+const MAX_CLIENT_DATA_COUNT: usize = u16::MAX as usize;

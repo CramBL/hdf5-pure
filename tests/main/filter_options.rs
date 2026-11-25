@@ -9,7 +9,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FilterDisposition;
 use hdf5_pure::FormatError;
-use hdf5_pure::{CustomFilterId, Error, FilterId, FilterParameters};
+use hdf5_pure::{CustomFilterId, Dataset, Error, FilterId, FilterParameters};
 use rstest::rstest;
 use test_util::filter_pipeline::{Pipeline, Version};
 use test_util::object_header::v2;
@@ -131,15 +131,54 @@ fn filter_accessors_report_malformed_metadata(
     }
     replace_pipeline(&mut bytes, &body);
     let dataset = File::from_bytes(bytes).unwrap().dataset("data").unwrap();
-    let error = match accessor {
-        FilterAccessor::Chunks => dataset.chunks().unwrap_err(),
-        FilterAccessor::Filters => dataset.filters().unwrap_err(),
-        FilterAccessor::Pipeline => dataset.filter_pipeline().unwrap_err(),
-    };
-    let Error::Format(actual) = error else {
-        panic!("expected format error, got {error:?}")
-    };
-    assert_eq!(actual, expected);
+    assert_eq!(accessor.format_error(&dataset), expected);
+}
+
+#[rstest]
+#[case::version_one_count(
+    pipeline_with_excessive_count(Version::One),
+    excessive_filter_count_error()
+)]
+#[case::version_two_count(
+    pipeline_with_excessive_count(Version::Two),
+    excessive_filter_count_error()
+)]
+#[case::version_one_name(pipeline_with_invalid_name(Version::One), invalid_filter_name_error())]
+#[case::version_two_name(pipeline_with_invalid_name(Version::Two), invalid_filter_name_error())]
+#[case::version_one_incomplete_reserved_bytes(
+    pipeline_with_excessive_count(Version::One)[..V1_PIPELINE_PREFIX - 1].to_vec(),
+    FormatError::UnexpectedEof { expected: V1_PIPELINE_PREFIX, available: V1_PIPELINE_PREFIX - 1 }
+)]
+#[case::missing_count(
+    vec![UNSUPPORTED_VERSION],
+    FormatError::UnexpectedEof { expected: V2_PIPELINE_PREFIX, available: FILTER_COUNT_AT }
+)]
+#[case::unknown_version(
+    vec![UNSUPPORTED_VERSION, MAX_FILTER_COUNT + 1],
+    FormatError::InvalidFilterPipelineVersion(UNSUPPORTED_VERSION)
+)]
+fn filter_accessors_preserve_pipeline_parse_errors(
+    #[case] body: Vec<u8>,
+    #[case] expected: FormatError,
+    #[values(
+        FilterAccessor::Chunks,
+        FilterAccessor::Filters,
+        FilterAccessor::Pipeline
+    )]
+    accessor: FilterAccessor,
+) {
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("data")
+        .with_i32_data(&[1, 2, 3, 4])
+        .with_lzf()
+        .with_shuffle()
+        .with_fletcher32();
+    let mut bytes = builder.finish().unwrap();
+    replace_pipeline(&mut bytes, &body);
+    let dataset = File::from_bytes(bytes).unwrap().dataset("data").unwrap();
+
+    assert_eq!(accessor.format_error(&dataset), expected);
 }
 
 #[rstest]
@@ -268,6 +307,20 @@ enum FilterAccessor {
     Pipeline,
 }
 
+impl FilterAccessor {
+    fn format_error(self, dataset: &Dataset) -> FormatError {
+        let error = match self {
+            Self::Chunks => dataset.chunks().unwrap_err(),
+            Self::Filters => dataset.filters().unwrap_err(),
+            Self::Pipeline => dataset.filter_pipeline().unwrap_err(),
+        };
+        let Error::Format(error) = error else {
+            panic!("expected format error, got {error:?}")
+        };
+        error
+    }
+}
+
 #[derive(Clone, Copy)]
 enum MalformedFilter {
     InvalidDeflateLevel,
@@ -277,6 +330,45 @@ enum MalformedFilter {
     UnknownVersion,
     ZeroShuffleSize,
 }
+
+fn pipeline_with_excessive_count(version: Version) -> Vec<u8> {
+    let mut bytes = Pipeline::new(version).build();
+    bytes[FILTER_COUNT_AT] = MAX_FILTER_COUNT + 1;
+    bytes
+}
+
+fn excessive_filter_count_error() -> FormatError {
+    FormatError::InvalidFilterPipelineField {
+        field: "filter count",
+        value: usize::from(MAX_FILTER_COUNT) + 1,
+        maximum: usize::from(MAX_FILTER_COUNT),
+    }
+}
+
+fn pipeline_with_invalid_name(version: Version) -> Vec<u8> {
+    let mut fixture = Pipeline::new(version);
+    fixture.push(NAMED_FILTER_ID, Some("odd"), 0, &[]).unwrap();
+    let mut bytes = fixture.build();
+    let name_at = bytes.windows(3).position(|bytes| bytes == b"odd").unwrap();
+    bytes[name_at] = 0xff;
+    bytes
+}
+
+fn invalid_filter_name_error() -> FormatError {
+    FormatError::InvalidFilterName {
+        filter_id: NAMED_FILTER_ID,
+        reason: "invalid UTF-8",
+    }
+}
+
+// "The Data Storage - Filter Pipeline Message" in the format specification, version 4.0,
+// defines the version 1 and 2 prefix fields and limits the filter count to 32.
+const FILTER_COUNT_AT: usize = 1;
+const MAX_FILTER_COUNT: u8 = 32;
+const V1_PIPELINE_PREFIX: usize = 8;
+const V2_PIPELINE_PREFIX: usize = 2;
+const NAMED_FILTER_ID: u16 = 300;
+const UNSUPPORTED_VERSION: u8 = 99;
 
 fn replace_pipeline(bytes: &mut [u8], body: &[u8]) {
     let header = bytes
