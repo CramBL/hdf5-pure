@@ -1,5 +1,5 @@
 use hdf5_pure_core::__private;
-use hdf5_pure_core::{Datatype, FormatError, ReferenceType, VariableLengthType};
+use hdf5_pure_core::{Datatype, FixedPointType, FormatError, ReferenceType, VariableLengthType};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{DatatypeMessage, OffsetWidth};
 use rstest::rstest;
@@ -304,6 +304,74 @@ fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
         ],
     );
     assert_prepared_capacity(&datatype, width, &expected);
+    assert_eq!(
+        DatatypeMessage::parse(&expected)
+            .unwrap()
+            .0
+            .to_datatype()
+            .unwrap(),
+        datatype
+    );
+}
+
+#[rstest]
+#[case::first(None, [vec![1, 2], vec![]], "first", 2)]
+#[case::later(None, [vec![1], vec![]], "last", 0)]
+#[case::nested(Some(Wrapper::Array), [vec![], vec![1, 2]], "first", 0)]
+#[case::nested_later(Some(Wrapper::Compound), [vec![1], vec![2, 3]], "last", 2)]
+fn datatype_canonical_enumeration_rejects_values_of_a_different_width(
+    #[case] wrapper: Option<Wrapper>,
+    #[case] values: [Vec<u8>; 2],
+    #[case] name: &str,
+    #[case] actual: usize,
+) {
+    let [first, last] = values;
+    let datatype = Datatype::Enumeration {
+        size: 1,
+        base_type: Box::new(Datatype::FixedPoint(FixedPointType::u8())),
+        members: vec![
+            __private::enum_member("first".into(), first),
+            __private::enum_member("last".into(), last),
+        ],
+    };
+    let datatype = match wrapper {
+        Some(wrapper) => wrapper.wrap(datatype),
+        None => datatype,
+    };
+    assert_eq!(
+        format::PreparedDatatype::new(&datatype, OffsetWidth::Eight).unwrap_err(),
+        FormatError::EnumMemberValueSize(name.into(), 1, actual)
+    );
+}
+
+#[rstest]
+fn datatype_canonical_enumeration_uses_the_stored_parent_width(
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+) {
+    let parent = Parent::Sequence;
+    let size = parent.size(width);
+    let base = parent.bytes(width, false);
+    let value = vec![0x5a; size as usize];
+    let datatype = Datatype::Enumeration {
+        size,
+        base_type: Box::new(format::parse_datatype(&base).unwrap().0),
+        members: vec![__private::enum_member("value".into(), value.clone())],
+    };
+    let expected = containers::enumeration(
+        Version::Three.get(),
+        [1, 0, 0],
+        size,
+        &base,
+        &[EnumValue {
+            name: b"value",
+            value: &value,
+        }],
+    );
+    assert_prepared_capacity(&datatype, width, &expected);
+    assert_eq!(
+        format::parse_datatype(&expected).unwrap(),
+        (datatype, expected.len())
+    );
 }
 
 #[rstest]

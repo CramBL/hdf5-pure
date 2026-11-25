@@ -1478,15 +1478,8 @@ fn serialize_parse_enum_large_member_count() {
     }
 }
 
-/// A member value wider than the base type serializes in full and truncates on
-/// parse.
-///
-/// `EnumTypeBuilder::build` and `Datatype::Enumeration` take the element size
-/// from the base type and do not check that member value blobs match it. A
-/// 4-byte value on a 1-byte base therefore parses back as its low byte. This
-/// test records that behavior, and the assertion fails if either side changes.
 #[test]
-fn enum_value_width_is_not_validated_against_base_size() {
+fn canonical_enumeration_serialization_rejects_an_oversized_value() {
     let dt = Datatype::Enumeration {
         size: 1,
         base_type: Box::new(enum_base_fp(1, false, false)),
@@ -1495,16 +1488,10 @@ fn enum_value_width_is_not_validated_against_base_size() {
             5i32.to_le_bytes().to_vec(),
         )],
     };
-    let bytes = serialize_datatype(&dt).unwrap();
-    let (parsed, _) = parse_datatype(&bytes).unwrap();
-    assert_ne!(
-        parsed, dt,
-        "a value wider than the base silently truncates on parse"
+    assert_eq!(
+        serialize_datatype(&dt).unwrap_err(),
+        FormatError::EnumMemberValueSize("X".into(), 1, 4)
     );
-    match parsed {
-        Datatype::Enumeration { members, .. } => assert_eq!(members[0].value, vec![5]),
-        other => panic!("expected Enumeration, got {other:?}"),
-    }
 }
 
 #[test]

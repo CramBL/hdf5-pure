@@ -106,22 +106,6 @@ fn canonical_array_sizes_preserve_constructed_models(
     assert_eq!(serialize_datatype(&datatype).unwrap(), expected);
 }
 
-#[test]
-fn canonical_enum_values_preserve_the_supplied_bytes() {
-    let datatype = Datatype::Enumeration {
-        size: 1,
-        base_type: Box::new(byte_member_type()),
-        members: vec![
-            __private::enum_member("wide".into(), vec![1, 2, 3]),
-            __private::enum_member("empty".into(), vec![]),
-        ],
-    };
-    let mut expected = build_dt_header(ENUMERATION_CLASS, DATATYPE_VERSION_THREE, [2, 0, 0], 1);
-    expected.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
-    expected.extend_from_slice(b"wide\0empty\0\x01\x02\x03");
-    assert_eq!(serialize_datatype(&datatype).unwrap(), expected);
-}
-
 #[rstest]
 #[case::vax(vax_float(), DATATYPE_VERSION_THREE, 4)]
 #[case::complex(complex_bytes(), DATATYPE_VERSION_FIVE, 8)]
