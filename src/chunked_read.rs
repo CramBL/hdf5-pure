@@ -378,8 +378,9 @@ impl StoredChunkSize {
 
 /// Returns chunk records in version 1 B-tree traversal order.
 ///
-/// Reads `file_data` in stored coordinates. `ndims` is the dataset rank plus one, including
-/// each key's trailing within-element offset.
+/// Reads `file_data` in stored coordinates and acquires each complete node header before
+/// interpreting it. `ndims` is the dataset rank plus one, including each key's trailing
+/// within-element offset.
 ///
 /// # Errors
 ///
@@ -453,9 +454,9 @@ pub(crate) fn collect_chunk_btree_node_spans<S: StoredRead + ?Sized>(
 
 /// Returns chunk records through stored-coordinate metadata reads in traversal order.
 ///
-/// The source-backed counterpart of [`collect_chunk_info`]. Reads each node's eight-byte
-/// prefix and remaining body through [`StoredRead::read_metadata`], retaining its metadata
-/// owner while consuming the node and queuing its children.
+/// The source-backed counterpart of [`collect_chunk_info`]. Reads each node's complete header
+/// before interpreting it, then reads its body through [`StoredRead::read_metadata`]. Retains
+/// the body's metadata owner while consuming the node and queuing its children.
 ///
 /// # Errors
 ///
@@ -4999,17 +5000,54 @@ mod tests {
                 (10, 10, 0)
             );
             assert!(stats.hits() > 0);
+            let header_len = chunk_node_header_len(widths);
+            let body_address = 0x100 + header_len.to_u64();
+            let body_len = nodes[0].1.len() - header_len;
             let first = framed
-                .read_metadata(StoredAddress::new(0x108), nodes[0].1.len() - 8)
+                .read_metadata(StoredAddress::new(body_address), body_len)
                 .unwrap();
             let second = framed
-                .read_metadata(StoredAddress::new(0x108), nodes[0].1.len() - 8)
+                .read_metadata(StoredAddress::new(body_address), body_len)
                 .unwrap();
-            assert_eq!(first.offset(), base.to_u64() + 0x108);
+            assert_eq!(first.offset(), base.to_u64() + body_address);
             assert_eq!(first.as_ptr(), second.as_ptr());
         } else {
             assert_eq!(stats, None);
         }
+    }
+
+    #[test]
+    fn chunk_collection_and_span_discovery_require_the_complete_header() {
+        let mut header = build_chunk_btree_internal(1, &[0x100], 2, WIDTHS);
+        header[0] = b'X';
+        let offset = 7;
+        let header_len = chunk_node_header_len(WIDTHS);
+        let mut image = vec![0; offset];
+        image.extend_from_slice(&header[..CHUNK_BTREE_PREFIX_LEN]);
+        let address = StoredAddress::new(offset.to_u64());
+        let width = OffsetWidth::Eight;
+        assert_eq!(
+            collect_chunk_info(&image, address, 2, width).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: offset + header_len,
+                available: image.len(),
+            }
+        );
+        let expected = FormatError::UnexpectedSourceEof {
+            expected: (offset + header_len).to_u64(),
+            available: image.len().to_u64(),
+        };
+        let source = PlacedSource::new(0, image);
+        assert_eq!(
+            collect_chunk_info_from_source(&source.framed(), address, 2, width).unwrap_err(),
+            expected,
+        );
+        assert_eq!(source.reads.take(), [(offset.to_u64(), header_len)]);
+        assert_eq!(
+            collect_chunk_btree_node_spans(&source.framed(), address, 2, width).unwrap_err(),
+            expected,
+        );
+        assert_eq!(source.reads.take(), [(offset.to_u64(), header_len)]);
     }
 
     #[rstest]
@@ -5133,12 +5171,13 @@ mod tests {
             FormatError::InvalidBTreeSignature
         };
         let mut expected_reads = Vec::new();
+        let header_len = chunk_node_header_len(widths);
         for index in visited {
             let (address, node) = &nodes[index];
-            expected_reads.push((base + address.to_u64(), CHUNK_BTREE_PREFIX_LEN));
+            expected_reads.push((base + address.to_u64(), header_len));
             expected_reads.push((
-                base + address.to_u64() + CHUNK_BTREE_PREFIX_LEN.to_u64(),
-                node.len() - CHUNK_BTREE_PREFIX_LEN,
+                base + address.to_u64() + header_len.to_u64(),
+                node.len() - header_len,
             ));
         }
         let source = PlacedSource::new(base, image);
@@ -5179,6 +5218,10 @@ mod tests {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
     const CHUNK_BTREE_PREFIX_LEN: usize = 8;
+
+    fn chunk_node_header_len(widths: Widths) -> usize {
+        CHUNK_BTREE_PREFIX_LEN + 2 * widths.offset
+    }
 
     #[cfg(feature = "std")]
     #[rstest]
@@ -5232,6 +5275,7 @@ mod tests {
             }
         };
         let reads = source.reads.take();
+        let header_len = chunk_node_header_len(WIDTHS);
         assert_eq!(reads.len(), 2 * walks * nodes.len());
         for pass in reads.chunks_exact(2 * nodes.len()) {
             let mut observed = pass
@@ -5239,9 +5283,9 @@ mod tests {
                 .0
                 .iter()
                 .map(|pair| {
-                    assert_eq!(pair[0].1, CHUNK_BTREE_PREFIX_LEN);
-                    assert_eq!(pair[1].0, pair[0].0 + CHUNK_BTREE_PREFIX_LEN.to_u64());
-                    (pair[0].0 - 512, pair[1].1 + CHUNK_BTREE_PREFIX_LEN)
+                    assert_eq!(pair[0].1, header_len);
+                    assert_eq!(pair[1].0, pair[0].0 + header_len.to_u64());
+                    (pair[0].0 - 512, pair[1].1 + header_len)
                 })
                 .collect::<Vec<_>>();
             observed.sort_unstable();
@@ -5297,7 +5341,7 @@ mod tests {
         #[case] control_region: &str,
     ) {
         struct NodeSource {
-            prefix: Vec<u8>,
+            header: Vec<u8>,
             body: core::cell::Cell<Option<Vec<u8>>>,
             len: u64,
         }
@@ -5313,8 +5357,8 @@ mod tests {
 
             fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
                 let bytes = match offset {
-                    0 => self.prefix.clone(),
-                    8 => self.body.take().unwrap(),
+                    0 => self.header.clone(),
+                    offset if offset == self.header.len().to_u64() => self.body.take().unwrap(),
                     _ => return Err(FormatError::Source("unexpected metadata offset".into())),
                 };
                 if bytes.len() != len {
@@ -5329,7 +5373,8 @@ mod tests {
 
         let mut bytes = build_chunk_btree_internal(1, &vec![0x1000; entries], 2, WIDTHS);
         let node_len = bytes.len();
-        let body = bytes.split_off(8);
+        let header_len = chunk_node_header_len(WIDTHS);
+        let body = bytes.split_off(header_len);
         let pointer = body.as_ptr();
         let body_len = body.len();
         let (copy, control) = test_util::allocation::measure(control_region, || body.clone());
@@ -5339,7 +5384,7 @@ mod tests {
         drop(copy);
         let source = MetadataCachingSource::new(
             NodeSource {
-                prefix: bytes,
+                header: bytes,
                 body: core::cell::Cell::new(Some(body)),
                 len: node_len.to_u64(),
             },
@@ -5349,11 +5394,23 @@ mod tests {
         let (cold, admission) = test_util::allocation::measure(cold_region, || {
             BTreeV1ChunkNodeBytes::read_from_source(&metadata, 0, 8, 2).unwrap()
         });
-        assert_eq!(source.read_metadata(8, body_len).unwrap().as_ptr(), pointer);
+        assert_eq!(
+            source
+                .read_metadata(header_len.to_u64(), body_len)
+                .unwrap()
+                .as_ptr(),
+            pointer
+        );
         let (warm, measured) = test_util::allocation::measure(warm_region, || {
             BTreeV1ChunkNodeBytes::read_from_source(&metadata, 0, 8, 2).unwrap()
         });
-        assert_eq!(source.read_metadata(8, body_len).unwrap().as_ptr(), pointer);
+        assert_eq!(
+            source
+                .read_metadata(header_len.to_u64(), body_len)
+                .unwrap()
+                .as_ptr(),
+            pointer
+        );
         for node in [cold.node(), warm.node()] {
             assert_eq!(
                 (node.node_level(), node.entries_used(), node.stored_len()),
