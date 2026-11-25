@@ -1136,7 +1136,7 @@ impl Layout {
     }
 
     fn pages_offset(self) -> u64 {
-        self.prefix_len() + u64::from(self.block_offset_len) + CHECKSUM_LEN.to_u64()
+        self.pages_offset_usize().to_u64()
     }
 
     fn page_len(self) -> Result<u64, FormatError> {
@@ -1147,7 +1147,15 @@ impl Layout {
     }
 
     fn prefix_len(self) -> u64 {
-        SIGNATURE_LEN + BLOCK_BYTE_FIELDS + u64::from(self.encoding.offsets().get())
+        self.prefix_len_usize().to_u64()
+    }
+
+    fn pages_offset_usize(self) -> usize {
+        self.prefix_len_usize() + usize::from(self.block_offset_len) + CHECKSUM_LEN
+    }
+
+    fn prefix_len_usize(self) -> usize {
+        INDEX_BLOCK_SIGNATURE.len() + BLOCK_BYTE_FIELDS + usize::from(self.encoding.offsets().get())
     }
 }
 
@@ -2560,14 +2568,13 @@ const INDEX_BLOCK_SIGNATURE: [u8; 4] = *b"EAIB";
 const SUPER_BLOCK_SIGNATURE: [u8; 4] = *b"EASB";
 const DATA_BLOCK_SIGNATURE: [u8; 4] = *b"EADB";
 const VERSION: u8 = 0;
-const SIGNATURE_LEN: u64 = 4;
 // The version, client ID, element size, and the five creation parameters of a header.
 const HEADER_BYTE_FIELDS: usize = 8;
 const HEADER_PREFIX_LEN: usize = HEADER_SIGNATURE.len() + HEADER_BYTE_FIELDS;
 // The six statistics of a header, each a length, of which "Max Index Set" is the fifth.
 const STATISTICS: u8 = 6;
 // The version and client ID of a block.
-const BLOCK_BYTE_FIELDS: u64 = 2;
+const BLOCK_BYTE_FIELDS: usize = 2;
 const CHECKSUM_LEN: usize = 4;
 // The bounds `H5EA__hdr_create` checks the creation parameters against (`H5EAhdr.c`, HDF5 2.2.0).
 const MAX_INDEX_BITS: u8 = 64;

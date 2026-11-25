@@ -13,17 +13,21 @@ use super::ExtensibleArrayStats;
 use super::Layout;
 use super::SlotOccupancy;
 use super::SuperBlock;
-use crate::address::StoredAddress;
+use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::chunk_record;
 use crate::chunk_record::ChunkElementEncoding;
 use crate::chunk_record::IndexSlots;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::width::FormatWidths;
+use crate::width::{FormatWidths, OffsetWidth};
 
+mod block;
 mod encode;
 mod header;
 
+pub use block::ExtensibleArrayBlockEncoding;
+pub use block::ExtensibleArrayBlockWriter;
+pub use block::ExtensibleArrayPageEncoding;
 pub use encode::ExtensibleArrayEmission;
 pub use encode::ExtensibleArrayEncoding;
 pub use header::ExtensibleArrayHeaderWithoutIndexBlock;
@@ -140,10 +144,10 @@ impl ExtensibleArrayPlan {
                         &mut blocks,
                         ExtensibleArrayBlock {
                             length,
-                            location: BlockLocation::Secondary(ChildBlock {
-                                slots,
-                                offset: block.offset,
-                                parent: (INDEX_BLOCK, pointer),
+                            location: BlockLocation::Secondary(SecondaryBlock {
+                                geometry: block,
+                                first_slot: slots.start,
+                                pointer,
                             }),
                         },
                     )?;
@@ -231,7 +235,7 @@ impl ExtensibleArrayPlan {
         }
         let mut ranges = Vec::with_capacity(addresses.len());
         for (&address, length) in addresses.iter().zip(self.block_lengths()) {
-            ranges.push(self.range(address, length)?);
+            ranges.push(stored_block_range(self.widths.offsets, address, length)?);
         }
         let mut ordered: Vec<_> = ranges
             .iter()
@@ -267,7 +271,7 @@ impl ExtensibleArrayPlan {
         slots: &IndexSlots<'_>,
         address: StoredAddress,
     ) -> Result<Vec<u8>, FormatError> {
-        let whole = self.range(address, self.total_length)?;
+        let whole = stored_block_range(self.widths.offsets, address, self.total_length)?;
         let mut ranges = Vec::new();
         ranges
             .try_reserve_exact(self.blocks.len())
@@ -301,34 +305,22 @@ impl ExtensibleArrayPlan {
         }
         Ok(output)
     }
+}
 
-    fn range(
-        &self,
-        address: StoredAddress,
-        length: u64,
-    ) -> Result<AddressRange<StoredAddress>, FormatError> {
-        let maximum = StoredAddress::undefined(self.widths.offsets).get();
-        if address.get() == maximum {
-            return Err(FormatError::DefinedAddressIsUndefined {
-                address: address.get(),
-                offset_size: self.widths.offsets.get(),
-            });
-        }
-        if address.get() > maximum {
-            return Err(FormatError::AddressTooLarge {
-                address: address.get(),
-                offset_size: self.widths.offsets.get(),
-            });
-        }
-        let range = AddressRange::new(address, length)?;
-        if range.end().get() > maximum {
-            return Err(FormatError::AddressTooLarge {
-                address: range.end().get(),
-                offset_size: self.widths.offsets.get(),
-            });
-        }
-        Ok(range)
+fn stored_block_range(
+    offsets: OffsetWidth,
+    address: StoredAddress,
+    length: u64,
+) -> Result<AddressRange<StoredAddress>, FormatError> {
+    let address = DecodedStoredAddress::Defined(address).to_stored(offsets)?;
+    let range = AddressRange::new(address, length)?;
+    if range.end() > StoredAddress::undefined(offsets) {
+        return Err(FormatError::AddressTooLarge {
+            address: range.end().get(),
+            offset_size: offsets.get(),
+        });
     }
+    Ok(range)
 }
 
 /// Disjoint complete block ranges with stored addresses that fit an Extensible Array plan.
@@ -383,9 +375,8 @@ impl ExtensibleArrayBlock {
         match &self.location {
             BlockLocation::Header => None,
             BlockLocation::Index { inline_elements } => Some(0..u64::from(*inline_elements)),
-            BlockLocation::Secondary(block) | BlockLocation::Data(block) => {
-                Some(block.slots.clone())
-            }
+            BlockLocation::Secondary(block) => Some(block.slots()),
+            BlockLocation::Data(block) => Some(block.slots.clone()),
         }
     }
     /// Returns the block offset relative to the end of the index block's inline slots.
@@ -394,7 +385,8 @@ impl ExtensibleArrayBlock {
     pub fn offset(&self) -> Option<u64> {
         match &self.location {
             BlockLocation::Header | BlockLocation::Index { .. } => None,
-            BlockLocation::Secondary(block) | BlockLocation::Data(block) => Some(block.offset),
+            BlockLocation::Secondary(block) => Some(block.geometry.offset),
+            BlockLocation::Data(block) => Some(block.offset),
         }
     }
     /// Returns the parent descriptor index and the pointer slot within its address table.
@@ -406,7 +398,8 @@ impl ExtensibleArrayBlock {
         match &self.location {
             BlockLocation::Header => None,
             BlockLocation::Index { .. } => Some((HEADER_BLOCK, 0)),
-            BlockLocation::Secondary(block) | BlockLocation::Data(block) => Some(block.parent),
+            BlockLocation::Secondary(block) => Some((INDEX_BLOCK, block.pointer)),
+            BlockLocation::Data(block) => Some(block.parent),
         }
     }
 }
@@ -416,11 +409,26 @@ impl ExtensibleArrayBlock {
 enum BlockLocation {
     Header,
     Index { inline_elements: u8 },
-    Secondary(ChildBlock),
+    Secondary(SecondaryBlock),
     Data(ChildBlock),
 }
 
-/// The logical slot range, stored offset, and parent pointer for a secondary or data block.
+/// A secondary block's checked geometry, first slot, and pointer in the secondary table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SecondaryBlock {
+    geometry: SuperBlock,
+    first_slot: u64,
+    pointer: u64,
+}
+
+impl SecondaryBlock {
+    fn slots(&self) -> Range<u64> {
+        // Planning checks the range of every secondary block before building the descriptor.
+        self.first_slot..self.first_slot + self.geometry.blocks * self.geometry.block_elements
+    }
+}
+
+/// The logical slot range, stored offset, and parent pointer for a data block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChildBlock {
     slots: Range<u64>,
