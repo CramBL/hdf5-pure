@@ -70,9 +70,8 @@ impl DatatypeMessage {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. For an
-    /// incomplete dimension or value list, `expected` is the list's end offset from the start
-    /// of `data`, including in nested descriptions. Returns
+    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. EOF byte counts
+    /// are relative to the start of `data`, including for nested descriptions. Returns
     /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
     /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported
     /// class, including references.

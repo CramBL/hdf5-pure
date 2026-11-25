@@ -7881,6 +7881,8 @@ the same commit to replace it",
     /// Returns [`Error::Format`] if the datatype message is incomplete or malformed, including
     /// [`FormatError::InvalidDatatypeMessageVersion`] if the outer header's version is outside
     /// `1..=5`.
+    /// When datatype parsing returns [`FormatError::UnexpectedEof`], the byte counts refer to
+    /// the start of the datatype message body.
     /// Reports [`FormatError::NestingDepthExceeded`] if a path through the datatype message
     /// contains more than 64 descriptions, including the outer description.
     /// Propagates errors resolving the dataset and reading the message.

@@ -252,19 +252,19 @@ fn datatype_variable_length_parser_rejects_invalid_float_parent(
 #[case::inner_header(15, 16)]
 #[case::missing_leaf(16, 24)]
 #[case::leaf_precision(27, 28)]
-fn datatype_variable_length_parser_reports_incomplete_nested_fields(
+fn variable_length_parsers_report_nested_eof_from_the_message_start(
     #[case] available: usize,
     #[case] expected: usize,
 ) {
     let nested = datatype::variable_length(3, [0; 3], 16, &Leaf::Integer.bytes(Version::One));
     let bytes = datatype::variable_length(5, [0; 3], 16, &nested);
-    assert_eq!(
-        DatatypeMessage::parse(&bytes[..available]).unwrap_err(),
-        FormatError::UnexpectedEof {
-            expected,
-            available
-        }
-    );
+    let input = &bytes[..available];
+    let error = FormatError::UnexpectedEof {
+        expected,
+        available,
+    };
+    assert_eq!(DatatypeMessage::parse(input).unwrap_err(), error);
+    assert_eq!(format::parse_datatype(input).unwrap_err(), error);
 }
 
 #[test]

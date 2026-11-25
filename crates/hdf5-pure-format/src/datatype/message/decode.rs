@@ -96,7 +96,7 @@ impl Layout {
                 Self::VariableLength(metadata)
             }
             DatatypeClass::Array => Self::Array(Array::from_header(header, projection)?),
-            DatatypeClass::Complex => Self::Complex(Complex::from_header(header, projection)?),
+            DatatypeClass::Complex => Self::Complex(Complex::from_header(header)?),
         })
     }
 }
@@ -426,7 +426,6 @@ pub(in crate::datatype) fn array_size(
 /// The declared size and parser for a homogeneous rectangular complex type.
 pub(in crate::datatype) struct Complex {
     size: u32,
-    projection: Projection,
 }
 
 impl Complex {
@@ -437,7 +436,7 @@ impl Complex {
     /// Returns [`FormatError::InvalidDatatypeVersion`] before version 5,
     /// [`FormatError::InvalidComplexFlags`] if reserved bits are set, or
     /// [`FormatError::UnsupportedComplexForm`] if the form is not homogeneous rectangular.
-    fn from_header(header: &Header, projection: Projection) -> Result<Self, FormatError> {
+    fn from_header(header: &Header) -> Result<Self, FormatError> {
         let &Header {
             class: _,
             version,
@@ -454,7 +453,7 @@ impl Complex {
         if !homogeneous || form != COMPLEX_RECTANGULAR_FORM {
             return Err(FormatError::UnsupportedComplexForm { homogeneous, form });
         }
-        Ok(Self { size, projection })
+        Ok(Self { size })
     }
 
     /// Reads the floating-point parent and returns the complex type and parent version.
@@ -462,43 +461,23 @@ impl Complex {
     /// # Errors
     ///
     /// Returns [`FormatError::NestingDepthExceeded`] before reading a parent beyond the nesting
-    /// limit. Returns [`FormatError::UnexpectedEof`] if the parent is incomplete. For an incomplete
-    /// property block in the semantic representation, the byte counts are relative to the
-    /// parent header. Returns [`FormatError::InvalidComplexSize`] if the declared size differs
-    /// from twice the component size, and propagates errors reading the parent and checking
-    /// the component size.
+    /// limit. Returns [`FormatError::UnexpectedEof`] if the parent is incomplete, with byte
+    /// counts relative to the cursor's original input. Returns [`FormatError::InvalidComplexSize`]
+    /// if the declared size differs from twice the component size. Propagates errors reading
+    /// the parent and checking the component size.
     pub(in crate::datatype) fn component(
         self,
         cursor: &mut ByteCursor<'_>,
         depth: MessageDepth,
     ) -> Result<(ComplexType, DatatypeVersion), FormatError> {
         depth.child()?;
-        let Self { size, projection } = self;
         let context = Context::ComplexParent;
-        let start = cursor.position();
         let parent = Header::parse(cursor, context)?;
-        let component = atomic::decode_floating_point(cursor, parent.fields(), context).map_err(
-            |error| match (projection, error) {
-                (
-                    Projection::Semantic,
-                    FormatError::UnexpectedEof {
-                        expected,
-                        available,
-                    },
-                ) => {
-                    // The complete parent header lies before the attempted property extent.
-                    FormatError::UnexpectedEof {
-                        expected: expected - start,
-                        available: available - start,
-                    }
-                }
-                (_, error) => error,
-            },
-        )?;
+        let component = atomic::decode_floating_point(cursor, parent.fields(), context)?;
         let complex = ComplexType::new(component)?;
-        if size != complex.size().get() {
+        if self.size != complex.size().get() {
             return Err(FormatError::InvalidComplexSize {
-                size,
+                size: self.size,
                 component_size: component.size().get(),
             });
         }

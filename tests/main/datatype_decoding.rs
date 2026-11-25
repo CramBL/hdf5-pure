@@ -1,7 +1,7 @@
 use hdf5_pure::{Datatype, Error, File, FixedPointType, FormatError, VariableLengthType};
 use rstest::rstest;
 use test_util::datatype::leaf::{self, Leaf, Version};
-use test_util::datatype::{self, Class};
+use test_util::datatype::{self, Class, VariableLengthSequence};
 use test_util::image::Image;
 use test_util::legacy_compound::{self, SequenceMemberShape};
 use test_util::object_header::{Message, MessageType};
@@ -24,6 +24,27 @@ fn dataset_datatype_rejects_message_version_fifteen() {
         panic!("expected an unsupported datatype version, got {error:?}");
     };
     assert_eq!(error, FormatError::InvalidDatatypeMessageVersion(15));
+}
+
+#[test]
+fn dataset_datatype_reports_child_eof_from_the_message_start() {
+    let datatype = VariableLengthSequence::new(Version::One, 8, &[]).build();
+    let file = dataset_file(
+        &datatype,
+        &dataspace::VersionTwo::scalar().build(),
+        &data_layout::compact(&[0; 16]),
+    );
+    let error = file.dataset("value").unwrap().datatype().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected a datatype EOF error, got {error:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::UnexpectedEof {
+            expected: 16,
+            available: 8,
+        }
+    );
 }
 
 #[test]

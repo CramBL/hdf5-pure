@@ -256,9 +256,9 @@ fn datatype_leaf_parser_preserves_numeric_layout_errors() {
 fn datatype_leaf_parser_rejects_nonzero_opaque_padding() {
     let mut bytes = Leaf::Opaque(OpaqueTag::NonAscii).bytes(Version::One);
     bytes[11] = 1;
-    assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
-        FormatError::InvalidOpaqueTagPadding { offset: 3, byte: 1 }
+    assert_leaf_errors(
+        &bytes,
+        FormatError::InvalidOpaqueTagPadding { offset: 3, byte: 1 },
     );
 }
 
@@ -266,13 +266,12 @@ fn datatype_leaf_parser_rejects_nonzero_opaque_padding() {
 fn incomplete_opaque_property_precedes_invalid_padding() {
     let mut bytes = Leaf::Opaque(OpaqueTag::NonAscii).bytes(Version::One);
     bytes[11] = 1;
-    let expected = usize::from(bytes[1]);
-    bytes.truncate(bytes.len() - 1);
+    let available = bytes.len() - 1;
     assert_leaf_errors(
-        &bytes,
+        &bytes[..available],
         FormatError::UnexpectedEof {
-            expected,
-            available: expected - 1,
+            expected: bytes.len(),
+            available,
         },
     );
 }
@@ -290,18 +289,11 @@ fn incomplete_complex_parent_properties_precede_invalid_flags() {
     parent[3] = 1;
     let parent_size = parent.len();
     let bytes = Context::Complex.bytes(&parent[..parent_size - 1]);
-    assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
-        FormatError::UnexpectedEof {
-            expected: parent_size,
-            available: parent_size - 1
-        },
-    );
-    assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
+    assert_leaf_errors(
+        &bytes,
         FormatError::UnexpectedEof {
             expected: bytes.len() + 1,
-            available: bytes.len()
+            available: bytes.len(),
         },
     );
 }
