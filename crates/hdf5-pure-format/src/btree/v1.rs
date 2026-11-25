@@ -1,7 +1,7 @@
 //! The version 1 B-tree node: the header layout both node types share, and the parsers of a
 //! group's node, node type 0, and of a chunk node, node type 1.
 
-use core::ops::{Deref, Range};
+use core::ops::Deref;
 
 use alloc::vec::Vec;
 
@@ -221,29 +221,28 @@ impl BTreeV1Node {
     }
 }
 
-/// The bytes of a version 1 B-tree chunk node after its 8-byte prefix, read from a
-/// [`MetadataSource`].
+/// The checked layout and body of a version 1 B-tree chunk node read from a [`MetadataSource`].
 ///
 /// Retains the source's byte owner, which may borrow resident bytes or share an immutable
-/// allocation. The body includes the sibling addresses, the entries in use, and the trailing key.
+/// allocation. The body begins after the sibling addresses and includes the entries in use and
+/// the key after the last child.
 /// [`node`](Self::node) returns a [`BTreeV1ChunkNode`] that borrows these bytes.
 #[derive(Clone, Debug)]
 pub struct BTreeV1ChunkNodeBytes<B> {
     layout: ChunkNodeLayout,
-    entries: Range<usize>,
     body: B,
 }
 
 impl<B: Deref<Target = [u8]>> BTreeV1ChunkNodeBytes<B> {
     /// Reads the chunk node at `address` in `source`.
     ///
-    /// Reads the 8-byte prefix for the number of entries in use, then the rest of the node through
-    /// [`MetadataSource::read_metadata`]. Retains the returned body bytes.
+    /// Acquires the complete header and body as described in
+    /// [`Self::read_from_source_with_offset_width`].
     ///
     /// # Errors
     ///
-    /// Returns the errors [`BTreeV1ChunkNode::parse`] returns, and the error `source` returns if
-    /// a read fails.
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8. Propagates
+    /// the errors from [`Self::read_from_source_with_offset_width`].
     pub fn read_from_source<'a>(
         source: &'a (impl MetadataSource<Bytes<'a> = B> + ?Sized),
         address: u64,
@@ -260,56 +259,53 @@ impl<B: Deref<Target = [u8]>> BTreeV1ChunkNodeBytes<B> {
 
     /// Reads the chunk node at `address` in `source` using a validated address width.
     ///
-    /// Reads the 8-byte prefix for the number of entries in use, then the rest of the node through
-    /// [`MetadataSource::read_metadata`]. Retains the returned body bytes.
+    /// Reads the complete header, including both sibling addresses, before checking the
+    /// signature and node type. Then reads through the key after the last child and retains
+    /// the body bytes returned by [`MetadataSource::read_metadata`].
+    ///
+    /// `ndims` is the dataset rank plus one, including the offset within the datatype.
     ///
     /// # Errors
     ///
-    /// Returns the errors [`BTreeV1ChunkNode::parse_with_offset_width`] returns, and the error
-    /// `source` returns if a read fails.
+    /// Propagates the source's read errors, including [`FormatError::UnexpectedSourceEof`]
+    /// when the source reports truncation. Returns [`FormatError::UnexpectedEof`] if a
+    /// successful read supplies fewer bytes than requested, with extents from the start of
+    /// the node. Returns the header and length errors of [`BTreeV1ChunkNode::parse_with_offset_width`]
+    /// and [`FormatError::OffsetOverflow`] if the body address exceeds [`u64::MAX`].
     pub fn read_from_source_with_offset_width<'a>(
         source: &'a (impl MetadataSource<Bytes<'a> = B> + ?Sized),
         address: u64,
         offset_width: OffsetWidth,
         ndims: usize,
     ) -> Result<Self, FormatError> {
-        let header = source.read_metadata(address, BTREE_V1_NODE_PREFIX_LEN)?;
-        let prefix = header.first_chunk().ok_or(FormatError::UnexpectedEof {
-            expected: BTREE_V1_NODE_PREFIX_LEN,
-            available: header.len(),
-        })?;
-        let layout = ChunkNodeLayout::parse(prefix, offset_width, ndims)?;
-        let body_address = address
-            .checked_add(BTREE_V1_NODE_PREFIX_LEN.to_u64())
-            .ok_or(FormatError::OffsetOverflow {
-                offset: address,
-                length: BTREE_V1_NODE_PREFIX_LEN.to_u64(),
-            })?;
+        let header =
+            source.read_metadata(address, btree_v1_node_header_size(offset_width.get()))?;
+        let layout =
+            ChunkNodeLayout::parse(&mut bytes::ByteCursor::new(&header), offset_width, ndims)?;
+        let header_len = layout.header_len();
+        let body_address =
+            address
+                .checked_add(header_len.to_u64())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: address,
+                    length: header_len.to_u64(),
+                })?;
         let body = source.read_metadata(body_address, layout.body_len())?;
-        let entries = layout.entries();
-        if body
-            .get(..layout.body_len())
-            .and_then(|body| body.get(entries.clone()))
-            .is_none()
-        {
+        if body.len() < layout.body_len() {
             return Err(FormatError::UnexpectedEof {
                 expected: layout.node_len,
-                available: BTREE_V1_NODE_PREFIX_LEN + body.len(),
+                available: header_len + body.len(),
             });
         }
-        Ok(Self {
-            layout,
-            entries,
-            body,
-        })
+        Ok(Self { layout, body })
     }
 
     /// Returns the node the bytes hold.
     pub fn node(&self) -> BTreeV1ChunkNode<'_> {
         BTreeV1ChunkNode {
             layout: self.layout,
-            // `read_from_source`, the only constructor, checked that `body` holds `entries`.
-            entries: &self.body[self.entries.clone()],
+            // The constructor acquires the full body, including the key after the entries.
+            entries: &self.body[..self.layout.entries_len()],
         }
     }
 }
@@ -333,15 +329,13 @@ impl<'a> BTreeV1ChunkNode<'a> {
     /// Parses the chunk node at `offset` in `file_data`, whose keys hold `ndims` offsets each.
     ///
     /// `ndims` is the rank of the dataset plus one, for the offset in the datatype that each key
-    /// stores after the chunk's offsets.
+    /// stores after the chunk's offsets. See [`Self::parse_with_offset_width`] for the acquisition
+    /// order.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the node runs past the end of `file_data`,
-    /// [`FormatError::InvalidBTreeSignature`] if the node does not begin with `TREE`,
-    /// [`FormatError::InvalidBTreeNodeType`] if its node type is not 1,
-    /// [`FormatError::OffsetOverflow`] if the length of the node does not fit a `usize`, and
-    /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8. Propagates
+    /// the errors from [`Self::parse_with_offset_width`].
     pub fn parse(
         file_data: &'a [u8],
         offset: usize,
@@ -361,33 +355,37 @@ impl<'a> BTreeV1ChunkNode<'a> {
     /// `ndims` is the rank of the dataset plus one, for the offset in the datatype that each key
     /// stores after the chunk's offsets.
     ///
+    /// Acquires the complete header, including both sibling addresses, before checking the
+    /// signature and node type. Then acquires the entries in use and the key after the last
+    /// child. Ignores unused node capacity.
+    ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the node runs past the end of `file_data`,
-    /// [`FormatError::InvalidBTreeSignature`] if the node does not begin with `TREE`,
-    /// [`FormatError::InvalidBTreeNodeType`] if its node type is not 1, and
-    /// [`FormatError::OffsetOverflow`] if the length of the node does not fit a `usize`.
+    /// Returns [`FormatError::UnexpectedEof`] if the header or the body runs past the end of
+    /// `file_data`, with extents from the start of `file_data`. After acquiring the header,
+    /// returns [`FormatError::InvalidBTreeSignature`] if it does not begin with `TREE`, or
+    /// [`FormatError::InvalidBTreeNodeType`] if its node type is not 1. Returns
+    /// [`FormatError::OffsetOverflow`] if the length of the node does not fit [`usize`].
     pub fn parse_with_offset_width(
         file_data: &'a [u8],
         offset: usize,
         offset_width: OffsetWidth,
         ndims: usize,
     ) -> Result<Self, FormatError> {
-        let rest = file_data.get(offset..).unwrap_or_default();
-        let eof = |len: usize| FormatError::UnexpectedEof {
-            expected: offset.saturating_add(len),
-            available: file_data.len(),
-        };
-        let prefix = rest
-            .first_chunk()
-            .ok_or_else(|| eof(btree_v1_node_header_size(offset_width.get())))?;
-        let layout = ChunkNodeLayout::parse(prefix, offset_width, ndims)?;
-        let entries = rest
-            .get(BTREE_V1_NODE_PREFIX_LEN..)
-            .and_then(|body| body.get(layout.entries()))
-            .filter(|_| rest.len() >= layout.node_len)
-            .ok_or_else(|| eof(layout.node_len))?;
-        Ok(Self { layout, entries })
+        let mut cursor = bytes::ByteCursor::with_position(file_data, offset).map_err(|error| {
+            bytes::UnexpectedEof::new(
+                error
+                    .expected
+                    .saturating_add(btree_v1_node_header_size(offset_width.get())),
+                error.available,
+            )
+        })?;
+        let layout = ChunkNodeLayout::parse(&mut cursor, offset_width, ndims)?;
+        let body = cursor.take(layout.body_len())?;
+        Ok(Self {
+            layout,
+            entries: &body[..layout.entries_len()],
+        })
     }
 
     /// Returns the level of the node in the tree, 0 for a leaf.
@@ -420,7 +418,7 @@ impl<'a> BTreeV1ChunkNode<'a> {
     {
         let layout = self.layout;
         self.entries
-            .chunks_exact(layout.entry_len())
+            .chunks_exact(layout.entry_len)
             .map(move |entry| layout.split_entry(entry))
     }
 
@@ -434,31 +432,36 @@ impl<'a> BTreeV1ChunkNode<'a> {
     }
 }
 
-/// The level and the number of entries of a chunk node, and the sizes of its parts.
+/// A chunk node's level, entry count, and checked lengths.
 #[derive(Clone, Copy, Debug)]
 struct ChunkNodeLayout {
     node_level: u8,
     entries_used: u16,
     key_size: usize,
+    entry_len: usize,
     offset_width: OffsetWidth,
-    /// The length of the node in bytes, the prefix included.
+    /// The length through the key after the last child, including the complete header.
     node_len: usize,
 }
 
 impl ChunkNodeLayout {
-    /// Parses the prefix of a chunk node whose keys hold `ndims` offsets each.
+    /// Acquires the complete header and derives the body length for keys of `ndims` offsets.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidBTreeSignature`] if the prefix does not begin with `TREE`,
-    /// [`FormatError::InvalidBTreeNodeType`] if its node type is not 1,
-    /// [`FormatError::OffsetOverflow`] if the length of the node does not fit a `usize`.
+    /// Returns [`FormatError::UnexpectedEof`] if the cursor cannot supply the complete header.
+    /// Returns [`FormatError::InvalidBTreeSignature`] if the header does not begin with `TREE`,
+    /// [`FormatError::InvalidBTreeNodeType`] if its node type is not 1, or
+    /// [`FormatError::OffsetOverflow`] if the length of the node does not fit [`usize`].
     fn parse(
-        prefix: &[u8; BTREE_V1_NODE_PREFIX_LEN],
+        cursor: &mut bytes::ByteCursor<'_>,
         offset_width: OffsetWidth,
         ndims: usize,
     ) -> Result<Self, FormatError> {
-        let [s0, s1, s2, s3, node_type, node_level, used0, used1] = *prefix;
+        let header_len = btree_v1_node_header_size(offset_width.get());
+        let header = cursor.take(header_len)?;
+        let [s0, s1, s2, s3, node_type, node_level, used0, used1] =
+            *bytes::array_at::<BTREE_V1_NODE_PREFIX_LEN>(header, 0)?;
         if [s0, s1, s2, s3] != *BTREE_V1_SIGNATURE {
             return Err(FormatError::InvalidBTreeSignature);
         }
@@ -467,32 +470,41 @@ impl ChunkNodeLayout {
         }
         let entries_used = u16::from_le_bytes([used0, used1]);
         let key_size = chunk_key_size(ndims)?;
+        let child_len = usize::from(offset_width.get());
+        let entry_len = key_size
+            .checked_add(child_len)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: key_size.to_u64(),
+                length: child_len.to_u64(),
+            })?;
+        let node_len = usize::from(entries_used)
+            .checked_mul(entry_len)
+            .and_then(|entries| entries.checked_add(key_size))
+            .and_then(|body| body.checked_add(header_len))
+            .ok_or(FormatError::OffsetOverflow {
+                offset: u64::from(entries_used),
+                length: entry_len.to_u64(),
+            })?;
         Ok(Self {
             node_level,
             entries_used,
             key_size,
+            entry_len,
             offset_width,
-            node_len: btree_v1_chunk_node_len(key_size, offset_width, entries_used)?,
+            node_len,
         })
     }
 
-    /// Returns the length of the node after its 8-byte prefix.
+    fn header_len(&self) -> usize {
+        btree_v1_node_header_size(self.offset_width.get())
+    }
+
     fn body_len(&self) -> usize {
-        // `node_len` counts the prefix.
-        self.node_len - BTREE_V1_NODE_PREFIX_LEN
+        self.node_len - self.header_len()
     }
 
-    /// Returns the range of the keys and children in use in the bytes after the prefix, between
-    /// the sibling addresses and the key after the last child.
-    fn entries(&self) -> Range<usize> {
-        // `node_len` counts the prefix, both siblings and the trailing key, so neither bound
-        // underflows.
-        2 * usize::from(self.offset_width.get())..self.body_len() - self.key_size
-    }
-
-    /// Returns the length of a key and the child address after it.
-    fn entry_len(&self) -> usize {
-        self.key_size + usize::from(self.offset_width.get())
+    fn entries_len(&self) -> usize {
+        self.body_len() - self.key_size
     }
 
     /// Splits `entry` into its key and its child address.
@@ -541,28 +553,6 @@ impl<'a> BTreeV1ChunkKey<'a> {
             .iter()
             .map(|&offset| u64::from_le_bytes(offset))
     }
-}
-
-/// Returns the length in bytes of a chunk node of `entries_used` children whose keys are
-/// `key_size` bytes: the header, the keys and children in use, and the key after the last child.
-///
-/// # Errors
-///
-/// Returns [`FormatError::OffsetOverflow`] if the length does not fit a `usize`.
-fn btree_v1_chunk_node_len(
-    key_size: usize,
-    offset_width: OffsetWidth,
-    entries_used: u16,
-) -> Result<usize, FormatError> {
-    let entry_len = key_size + usize::from(offset_width.get());
-    usize::from(entries_used)
-        .checked_mul(entry_len)
-        .and_then(|entries| entries.checked_add(key_size))
-        .and_then(|body| body.checked_add(btree_v1_node_header_size(offset_width.get())))
-        .ok_or(FormatError::OffsetOverflow {
-            offset: u64::from(entries_used),
-            length: entry_len.to_u64(),
-        })
 }
 
 /// Returns the size in bytes of a key in a version 1 B-tree of type 1 (raw data chunks): the chunk
@@ -852,10 +842,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case::a_leaf(0, Widths::EIGHT)]
-    #[case::a_leaf_with_4_byte_addresses(0, Widths::new(4, 8))]
-    #[case::an_internal_node(1, Widths::EIGHT)]
-    fn a_chunk_node_parses_from_bytes_and_from_a_source(#[case] level: u8, #[case] widths: Widths) {
+    #[case::leaf(0)]
+    #[case::internal(1)]
+    fn chunk_readers_decode_leaf_and_internal_nodes(
+        #[case] level: u8,
+        #[values(Widths::new(2, 8), Widths::new(4, 2), Widths::new(8, 4))] widths: Widths,
+    ) {
         let keys = [
             btree_v1::chunk_key(160, 0, &[0, 0]),
             btree_v1::chunk_key(96, 2, &[20, 0]),
@@ -893,16 +885,11 @@ mod tests {
             bytes: &node,
             reads: RefCell::new(Vec::new()),
         };
+        let header_len = chunk_fixture_header_len(widths);
         let read = BTreeV1ChunkNodeBytes::read_from_source(&source, 0, offset_size, 2).unwrap();
-        assert_eq!(
-            read.body.as_ptr(),
-            node[BTREE_V1_NODE_PREFIX_LEN..].as_ptr()
-        );
+        assert_eq!(read.body.as_ptr(), node[header_len..].as_ptr());
         let read = read.node();
-        assert_eq!(
-            read.entries.as_ptr(),
-            node[btree_v1_node_header_size(offset_size)..].as_ptr()
-        );
+        assert_eq!(read.entries.as_ptr(), node[header_len..].as_ptr());
         assert_eq!(
             (read.node_level(), read.entries_used(), read.stored_len()),
             (level, 2, node.len())
@@ -911,66 +898,123 @@ mod tests {
         assert_eq!(
             source.reads.into_inner(),
             vec![
-                (0, BTREE_V1_NODE_PREFIX_LEN),
-                (8, node.len() - BTREE_V1_NODE_PREFIX_LEN)
-            ],
-            "the node is read once, the prefix and then the rest"
+                (0, header_len),
+                (header_len.to_u64(), node.len() - header_len)
+            ]
         );
     }
 
     #[rstest]
     #[case::a_group_node(
-        4,
+        btree_v1::SIGNATURE.len(),
         btree_v1::NodeType::GROUP.0,
         FormatError::InvalidBTreeNodeType(btree_v1::NodeType::GROUP.0)
     )]
     #[case::a_corrupted_signature(0, b'X', FormatError::InvalidBTreeSignature)]
-    fn a_node_of_another_type_fails_to_parse(
-        #[case] offset: usize,
+    fn chunk_readers_reject_a_complete_invalid_header_without_a_body(
+        #[case] field: usize,
         #[case] byte: u8,
         #[case] expected: FormatError,
+        #[values(Widths::new(2, 8), Widths::new(4, 2), Widths::new(8, 4))] widths: Widths,
+        #[values(0, 7)] offset: usize,
     ) {
-        let keys = [
-            btree_v1::chunk_key(160, 0, &[0, 0]),
-            btree_v1::chunk_key(0, 0, &[20, 0]),
-        ];
-        let mut node = btree_v1::node(btree_v1::NodeType::CHUNK, 0, &keys, &[0x1000], WIDTHS);
-        node[offset] = byte;
-        assert_eq!(
-            BTreeV1ChunkNode::parse(&node, 0, 8, 2).unwrap_err(),
-            expected
-        );
-        assert_eq!(
-            BTreeV1ChunkNodeBytes::read_from_source(node.as_slice(), 0, 8, 2).unwrap_err(),
-            expected
-        );
-    }
-
-    #[test]
-    fn a_chunk_node_cut_short_fails_to_parse() {
-        let keys = [
-            btree_v1::chunk_key(160, 0, &[0, 0]),
-            btree_v1::chunk_key(0, 0, &[20, 0]),
-        ];
-        let mut node = btree_v1::node(btree_v1::NodeType::CHUNK, 0, &keys, &[0x1000], WIDTHS);
-        let full = node.len();
-        node.pop();
-        let expected = FormatError::UnexpectedEof {
-            expected: full,
-            available: full - 1,
+        let header_len = chunk_fixture_header_len(widths);
+        let offset_size = u8::try_from(widths.offset).unwrap();
+        let mut data = vec![0; offset];
+        let mut node = chunk_fixture(widths, 0);
+        node[field] = byte;
+        data.extend_from_slice(&node[..header_len]);
+        let source = RecordingSource {
+            bytes: &data,
+            reads: RefCell::new(Vec::new()),
         };
         assert_eq!(
-            BTreeV1ChunkNode::parse(&node, 0, 8, 2).unwrap_err(),
+            BTreeV1ChunkNode::parse(&data, offset, offset_size, 2).unwrap_err(),
             expected
         );
         assert_eq!(
-            BTreeV1ChunkNodeBytes::read_from_source(node.as_slice(), 0, 8, 2).unwrap_err(),
+            BTreeV1ChunkNodeBytes::read_from_source(&source, offset.to_u64(), offset_size, 2)
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(source.reads.into_inner(), [(offset.to_u64(), header_len)]);
+    }
+
+    #[rstest]
+    #[case::bad_signature(0, b'X')]
+    #[case::wrong_node_type(btree_v1::SIGNATURE.len(), btree_v1::NodeType::GROUP.0)]
+    fn chunk_readers_acquire_the_header_before_reading_invalid_fields(
+        #[case] field: usize,
+        #[case] byte: u8,
+        #[values(Widths::new(2, 8), Widths::new(4, 2), Widths::new(8, 4))] widths: Widths,
+        #[values(0, 7)] offset: usize,
+    ) {
+        let header_len = chunk_fixture_header_len(widths);
+        let mut node = chunk_fixture(widths, 0);
+        node[field] = byte;
+        for len in 0..header_len {
+            let mut data = vec![0; offset];
+            data.extend_from_slice(&node[..len]);
+            assert_chunk_eof(&data, offset, widths, offset + header_len);
+        }
+    }
+
+    #[rstest]
+    #[case::selected_entry(CHUNK_FIXTURE_KEY_LEN + 1)]
+    #[case::trailing_key(1)]
+    fn chunk_readers_require_the_selected_entries_and_trailing_key(
+        #[case] missing: usize,
+        #[values(Widths::new(2, 8), Widths::new(4, 2), Widths::new(8, 4))] widths: Widths,
+        #[values(0, 1)] level: u8,
+    ) {
+        let offset = 7;
+        let mut bytes = vec![0; offset];
+        let node = chunk_fixture(widths, level);
+        bytes.extend_from_slice(&node[..node.len() - missing]);
+        assert_chunk_eof(&bytes, offset, widths, offset + node.len());
+    }
+
+    fn assert_chunk_eof(data: &[u8], offset: usize, widths: Widths, expected: usize) {
+        let offset_size = u8::try_from(widths.offset).unwrap();
+        assert_eq!(
+            BTreeV1ChunkNode::parse(data, offset, offset_size, 2).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available: data.len(),
+            }
+        );
+        assert_eq!(
+            BTreeV1ChunkNodeBytes::read_from_source(data, offset.to_u64(), offset_size, 2)
+                .unwrap_err(),
             FormatError::UnexpectedSourceEof {
-                expected: full.to_u64(),
-                available: (full - 1).to_u64(),
+                expected: expected.to_u64(),
+                available: data.len().to_u64(),
             }
         );
     }
+
+    fn chunk_fixture(widths: Widths, level: u8) -> Vec<u8> {
+        btree_v1::node(
+            btree_v1::NodeType::CHUNK,
+            level,
+            &[
+                btree_v1::chunk_key(160, 0, &[0, 0]),
+                btree_v1::chunk_key(0, 0, &[20, 0]),
+            ],
+            &[0x1000],
+            widths,
+        )
+    }
+
+    fn chunk_fixture_header_len(widths: Widths) -> usize {
+        CHUNK_HEADER_PREFIX_LEN + 2 * widths.offset
+    }
+
+    // "Version 1 B-trees" in the format specification, version 4.0, places the sibling
+    // addresses after the signature, type, level, and count. Each chunk key stores a size,
+    // a filter mask, and offsets.
+    const CHUNK_HEADER_PREFIX_LEN: usize = 8;
+    const CHUNK_FIXTURE_KEY_LEN: usize = 2 * size_of::<u32>() + 2 * size_of::<u64>();
 
     struct PartialSource<'a> {
         bytes: &'a [u8],
@@ -1003,23 +1047,17 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty_prefix(0, 8)]
-    #[case::short_prefix(7, 8)]
-    #[case::missing_body(8, 80)]
-    #[case::missing_entries(24, 80)]
+    #[case::empty_header(0, 24)]
+    #[case::short_header(8, 24)]
+    #[case::missing_body(24, 80)]
+    #[case::short_entry(55, 80)]
     #[case::missing_trailing_key(56, 80)]
     #[case::short_trailing_key(79, 80)]
-    fn a_short_source_result_is_rejected(#[case] available: usize, #[case] expected: usize) {
-        let node = btree_v1::node(
-            btree_v1::NodeType::CHUNK,
-            0,
-            &[
-                btree_v1::chunk_key(160, 0, &[0, 0]),
-                btree_v1::chunk_key(0, 0, &[20, 0]),
-            ],
-            &[0x1000],
-            WIDTHS,
-        );
+    fn chunk_reader_reports_short_metadata_as_eof(
+        #[case] available: usize,
+        #[case] expected: usize,
+    ) {
+        let node = chunk_fixture(WIDTHS, 0);
         assert_eq!(node.len(), 80);
         let source = PartialSource {
             bytes: &node[..available],
@@ -1035,9 +1073,9 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_node_retains_its_shared_body_allocation() {
+    fn chunk_reader_shares_the_source_body_allocation() {
         struct SharedSource {
-            prefix: MetadataBytes<'static>,
+            header: MetadataBytes<'static>,
             body: MetadataBytes<'static>,
         }
 
@@ -1050,8 +1088,8 @@ mod tests {
                 len: usize,
             ) -> Result<Self::Bytes<'_>, FormatError> {
                 let bytes = match offset {
-                    0 => &self.prefix,
-                    8 => &self.body,
+                    0 => &self.header,
+                    offset if offset == self.body.offset() => &self.body,
                     _ => return Err(FormatError::Source("unexpected metadata offset".into())),
                 };
                 if bytes.len() != len {
@@ -1064,7 +1102,7 @@ mod tests {
             }
 
             fn len(&self) -> u64 {
-                80
+                self.body.offset() + self.body.len().to_u64()
             }
 
             fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), FormatError> {
@@ -1086,11 +1124,12 @@ mod tests {
             &[0x1000],
             WIDTHS,
         );
-        let body = node.split_off(BTREE_V1_NODE_PREFIX_LEN);
+        let header_len = chunk_fixture_header_len(WIDTHS);
+        let body = node.split_off(header_len);
         let pointer = body.as_ptr();
         let source = SharedSource {
-            prefix: MetadataBytes::from_vec(0, node).unwrap(),
-            body: MetadataBytes::from_vec(8, body).unwrap(),
+            header: MetadataBytes::from_vec(0, node).unwrap(),
+            body: MetadataBytes::from_vec(header_len.to_u64(), body).unwrap(),
         };
         let first = BTreeV1ChunkNodeBytes::read_from_source(&source, 0, 8, 2).unwrap();
         let second = BTreeV1ChunkNodeBytes::read_from_source(&source, 0, 8, 2).unwrap();
@@ -1105,12 +1144,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::body_address(u64::MAX, 2, u64::MAX)]
-    #[case::key_size(0, usize::MAX, usize::MAX.to_u64())]
-    fn a_chunk_node_rejects_overflow(
+    #[case::body_address(u64::MAX, 2, u64::MAX, 24)]
+    #[case::key_size(0, usize::MAX, usize::MAX.to_u64(), 8)]
+    #[case::entry_size(0, usize::MAX / 8 - 1, (usize::MAX - 7).to_u64(), 8)]
+    fn chunk_reader_reports_address_and_size_overflow(
         #[case] address: u64,
         #[case] ndims: usize,
         #[case] offset: u64,
+        #[case] length: u64,
     ) {
         let node = btree_v1::node(
             btree_v1::NodeType::CHUNK,
@@ -1125,7 +1166,7 @@ mod tests {
         };
         assert_eq!(
             BTreeV1ChunkNodeBytes::read_from_source(&source, address, 8, ndims).unwrap_err(),
-            FormatError::OffsetOverflow { offset, length: 8 }
+            FormatError::OffsetOverflow { offset, length }
         );
     }
 }

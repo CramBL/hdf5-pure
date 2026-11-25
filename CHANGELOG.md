@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::chunks` and related reads reporting signature or node type errors for
+  truncated version 1 chunk B-tree headers.
 - Fixed `File::commit` accepting undersized shared-message B-tree records in files with two- or
   four-byte addresses ([#1365](https://github.com/CramBL/hdf5-pure/pull/1365)).
 - Fixed `Group::datasets` and related metadata reads returning a filter pipeline error for a
