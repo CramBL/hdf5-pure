@@ -89,10 +89,31 @@ pub fn heap_record(hash: u32, reference_count: u32, heap_id: [u8; 8], widths: Wi
     record
 }
 
+/// Encodes a shared-message record with an object-header address and zeroed padding.
+///
+/// # Panics
+///
+/// Panics if `widths.offset` is outside 1 through 8 or `address` does not fit that width.
+pub fn object_header_record(
+    hash: u32,
+    message_type: u8,
+    creation_index: u16,
+    address: u64,
+    widths: Widths,
+) -> Vec<u8> {
+    let mut record = vec![OBJECT_HEADER_LOCATION];
+    record.extend_from_slice(&hash.to_le_bytes());
+    record.extend_from_slice(&[0, message_type]);
+    record.extend_from_slice(&creation_index.to_le_bytes());
+    bytes::push_uint(&mut record, address, widths.offset);
+    record.resize(record_len(widths), 0);
+    record
+}
+
 /// The width every record in an index shares: the wider of the two locations a
 /// record can hold, behind the location byte and the hash.
 fn record_len(widths: Widths) -> usize {
-    let object_header = 1 + 1 + 2 + widths.offset;
+    let object_header = OBJECT_HEADER_LOCATION_PREFIX + widths.offset;
     RECORD_PREFIX + HEAP_LOCATION_LEN.max(object_header)
 }
 
@@ -111,6 +132,33 @@ pub const LIST_SIGNATURE: &[u8; 4] = b"SMLI";
 
 /// The location byte of a record whose message lives in the fractal heap.
 const HEAP_LOCATION: u8 = 0;
+
+// "Shared Object Header Message Table" in the format specification, version 4.0, assigns
+// location 1 to object headers.
+const OBJECT_HEADER_LOCATION: u8 = 1;
+
+/// The version 2 B-tree record type for shared messages.
+///
+/// "Shared Object Header Message Table" of the [format specification, version 4.0][spec]
+/// assigns type 7.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_sohm
+pub const BTREE_TYPE: u8 = 7;
+
+/// The common record size in bytes for address widths of 2, 4, or 8 bytes.
+///
+/// `H5SM_SOHM_ENTRY_SIZE` in `H5SMpkg.h` (HDF5 1.14.6) gives this size.
+pub const RECORD_SIZE: u16 = 17;
+
+/// The byte offset of the address in a record for a message in an object header.
+///
+/// "Shared Object Header Message Table" of the [format specification, version 4.0][spec] places the
+/// address after the creation index.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_sohm
+pub const OBJECT_HEADER_ADDRESS_OFFSET: usize = RECORD_PREFIX + OBJECT_HEADER_LOCATION_PREFIX;
+/// The combined size of the reserved byte, message type, and creation index.
+const OBJECT_HEADER_LOCATION_PREFIX: usize = 1 + 1 + 2;
 
 /// A heap location is a reference count and an eight-byte heap identifier.
 const HEAP_LOCATION_LEN: usize = 4 + 8;

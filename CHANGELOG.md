@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` accepting undersized shared-message B-tree records in files with two- or
+  four-byte addresses ([#1365](https://github.com/CramBL/hdf5-pure/pull/1365)).
 - Fixed `Group::datasets` and related metadata reads returning a filter pipeline error for a
   fractal heap header with a checksum mismatch when checksum verification is enabled ([#1364](https://github.com/CramBL/hdf5-pure/pull/1364)).
 - Fixed `Group::datasets` and related metadata reads accepting unsupported fractal heap ID

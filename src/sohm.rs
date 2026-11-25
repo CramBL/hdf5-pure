@@ -42,12 +42,14 @@ const BTREE_SOHM_INDEX_TYPE: u8 = 7;
 /// Reads every record of a shared-message list or B-tree index.
 ///
 /// Returns an empty vector if `index` has no allocated address. Metadata reads use stored
-/// addresses through [`StoredRead::read_metadata`].
+/// addresses through [`StoredRead::read_metadata`]. For a B-tree, checks the client type and
+/// record size after parsing the header and before reading the nodes.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::InvalidSohmBTreeType`] if a B-tree has the wrong client type. Returns
-/// the parser error if the index or a record is malformed, and source errors if a read fails.
+/// Returns [`FormatError::InvalidSohmBTreeType`] if a B-tree has the wrong client type, or
+/// [`FormatError::DataSizeMismatch`] if its record size differs from [`SohmRecord::encoded_len`].
+/// Propagates source and parser errors while reading the index and its records.
 pub fn read_index_records_from_source(
     source: &(impl StoredRead + ?Sized),
     index: &SohmIndexHeader,
@@ -73,16 +75,7 @@ pub fn read_index_records_from_source(
                 address.get(),
                 widths,
             )?;
-            check_btree_type(&header)?;
-            let records = btree_v2::collect_btree_v2_records_from_source(
-                &BTreeV2Source::new(source),
-                &header,
-                widths.offsets,
-            )?;
-            records
-                .iter()
-                .map(|record| SohmRecord::parse_with_offset_width(&record.data, widths.offsets))
-                .collect()
+            SohmBTreeIndex::new(header, widths.offsets)?.read_records(source)
         }
     }
 }
@@ -183,17 +176,58 @@ fn read_heap_message_with(
     HeapObjectReader::new(source, &heap, heap_address, access_mode, widths).read(id)
 }
 
-/// Rejects a B-tree whose client type differs from the shared-message index type.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidSohmBTreeType`] if the client type differs from
-/// [`BTREE_SOHM_INDEX_TYPE`].
-fn check_btree_type(header: &BTreeV2Header) -> Result<(), FormatError> {
-    if header.tree_type != BTREE_SOHM_INDEX_TYPE {
-        return Err(FormatError::InvalidSohmBTreeType(header.tree_type));
+/// A shared-message B-tree header with a checked client type and record size.
+struct SohmBTreeIndex {
+    header: BTreeV2Header,
+    offset_width: OffsetWidth,
+}
+
+impl SohmBTreeIndex {
+    /// Checks the header at the address width used to read the records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidSohmBTreeType`] if the client type is not 7, or
+    /// [`FormatError::DataSizeMismatch`] if the record size differs from [`SohmRecord::encoded_len`].
+    fn new(header: BTreeV2Header, offset_width: OffsetWidth) -> Result<Self, FormatError> {
+        if header.tree_type != BTREE_SOHM_INDEX_TYPE {
+            return Err(FormatError::InvalidSohmBTreeType(header.tree_type));
+        }
+        let expected = SohmRecord::encoded_len(offset_width);
+        let actual = usize::from(header.record_size);
+        if actual != expected {
+            return Err(FormatError::DataSizeMismatch { expected, actual });
+        }
+        Ok(Self {
+            header,
+            offset_width,
+        })
     }
-    Ok(())
+
+    /// Collects the tree's records and decodes their shared-message locations.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`btree_v2::collect_btree_v2_records_from_source`] and
+    /// [`SohmRecord::parse_with_offset_width`].
+    fn read_records(
+        &self,
+        source: &(impl StoredRead + ?Sized),
+    ) -> Result<Vec<SohmRecord>, FormatError> {
+        let Self {
+            header,
+            offset_width,
+        } = self;
+        let records = btree_v2::collect_btree_v2_records_from_source(
+            &BTreeV2Source::new(source),
+            header,
+            *offset_width,
+        )?;
+        records
+            .iter()
+            .map(|record| SohmRecord::parse_with_offset_width(&record.data, *offset_width))
+            .collect()
+    }
 }
 
 /// Returns the index for `message_type` and its allocated heap address.
@@ -216,9 +250,12 @@ fn index_for_read(
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::BTREE_V2_LINK_CREATION_ORDER;
     use rstest::rstest;
     use test_util::btree::v2 as btree_v2;
+    use test_util::checksum;
     use test_util::fractal_heap;
+    use test_util::image::Image;
     use test_util::sohm;
     use test_util::widths::Widths;
 
@@ -268,7 +305,8 @@ mod tests {
             64
         };
         let mut encoded = if btree {
-            btree_v2::Header::new(6, 17, 256, 1).build(Widths::EIGHT)
+            btree_v2::Header::new(BTREE_V2_LINK_CREATION_ORDER, sohm::RECORD_SIZE - 1, 256, 1)
+                .build(Widths::EIGHT)
         } else {
             sohm::list(&[sohm::heap_record(7, 3, [0; 8], Widths::EIGHT)])
         };
@@ -297,7 +335,9 @@ mod tests {
                     available: expected - 1,
                 }
             }
-            InvalidIndex::BTreeType => FormatError::InvalidSohmBTreeType(6),
+            InvalidIndex::BTreeType => {
+                FormatError::InvalidSohmBTreeType(BTREE_V2_LINK_CREATION_ORDER)
+            }
             InvalidIndex::ListSignature => {
                 encoded[0] = 0;
                 FormatError::InvalidSohmListSignature
@@ -330,6 +370,231 @@ mod tests {
             expected,
         );
     }
+
+    #[rstest]
+    #[case::two_byte_leaf(
+        btree_with_unpadded_record(TWO_BYTE_OFFSETS, TWO_BYTE_OBJECT_HEADER_SPAN),
+        OffsetWidth::Two,
+        TWO_BYTE_OBJECT_HEADER_SPAN
+    )]
+    #[case::four_byte_leaf(
+        btree_with_unpadded_record(FOUR_BYTE_OFFSETS, FOUR_BYTE_OBJECT_HEADER_SPAN),
+        OffsetWidth::Four,
+        FOUR_BYTE_OBJECT_HEADER_SPAN
+    )]
+    #[case::two_byte_missing_leaf(
+        btree_header(TWO_BYTE_OFFSETS, TWO_BYTE_OBJECT_HEADER_SPAN, 1),
+        OffsetWidth::Two,
+        TWO_BYTE_OBJECT_HEADER_SPAN
+    )]
+    #[case::four_byte_missing_leaf(
+        btree_header(FOUR_BYTE_OFFSETS, FOUR_BYTE_OBJECT_HEADER_SPAN, 1),
+        OffsetWidth::Four,
+        FOUR_BYTE_OBJECT_HEADER_SPAN
+    )]
+    fn index_reader_rejects_an_unpadded_btree_stride_before_reading_nodes(
+        #[case] image: Vec<u8>,
+        #[case] offsets: OffsetWidth,
+        #[case] stride: u16,
+    ) {
+        assert_index_records(
+            &image,
+            SohmIndexKind::BTree,
+            1,
+            offsets,
+            Err(FormatError::DataSizeMismatch {
+                expected: usize::from(sohm::RECORD_SIZE),
+                actual: usize::from(stride),
+            }),
+        );
+    }
+
+    #[rstest]
+    #[case::two(TWO_BYTE_OFFSETS, OffsetWidth::Two)]
+    #[case::four(FOUR_BYTE_OFFSETS, OffsetWidth::Four)]
+    #[case::eight(Widths::EIGHT, OffsetWidth::Eight)]
+    fn index_reader_decodes_the_same_mixed_records_from_lists_and_btrees(
+        #[case] widths: Widths,
+        #[case] offsets: OffsetWidth,
+    ) {
+        let id = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut object_header =
+            sohm::object_header_record(3, ATTRIBUTE_MESSAGE_TYPE, 2, 0x1234, widths);
+        object_header[sohm::OBJECT_HEADER_ADDRESS_OFFSET + widths.offset..].fill(0xA5);
+        let records = [object_header, sohm::heap_record(7, 4, id, widths)];
+        let expected = vec![
+            SohmRecord {
+                hash: 3,
+                location: SohmLocation::ObjectHeader {
+                    message_type: ATTRIBUTE_MESSAGE_TYPE,
+                    creation_index: 2,
+                    address: StoredAddress::new(0x1234),
+                },
+            },
+            SohmRecord {
+                hash: 7,
+                location: SohmLocation::Heap {
+                    reference_count: 4,
+                    heap_id: id,
+                },
+            },
+        ];
+        assert_index_records(
+            &sohm::list(&records),
+            SohmIndexKind::List,
+            2,
+            offsets,
+            Ok(expected.clone()),
+        );
+        assert_index_records(
+            &single_leaf_btree(widths, sohm::RECORD_SIZE, &records),
+            SohmIndexKind::BTree,
+            2,
+            offsets,
+            Ok(expected),
+        );
+    }
+
+    #[test]
+    fn index_reader_applies_btree_header_checksum_policy_before_checking_the_stride() {
+        let stride = sohm::RECORD_SIZE + 1;
+        let mut header = btree_header(Widths::EIGHT, stride, 1);
+        let checksum_error = damage_checksum(&mut header);
+        assert_index_records(
+            &header,
+            SohmIndexKind::BTree,
+            1,
+            OffsetWidth::Eight,
+            Err(if cfg!(feature = "checksum") {
+                checksum_error
+            } else {
+                FormatError::DataSizeMismatch {
+                    expected: usize::from(sohm::RECORD_SIZE),
+                    actual: usize::from(stride),
+                }
+            }),
+        );
+    }
+
+    #[rstest]
+    #[case::list(sohm::list(&[record_with_invalid_location()]), SohmIndexKind::List, 0)]
+    #[case::btree(
+        single_leaf_btree(Widths::EIGHT, sohm::RECORD_SIZE, &[record_with_invalid_location()]),
+        SohmIndexKind::BTree,
+        ROOT_ADDRESS,
+    )]
+    fn shared_message_index_reader_applies_checksum_policy_before_decoding_locations(
+        #[case] mut image: Vec<u8>,
+        #[case] kind: SohmIndexKind,
+        #[case] container_at: usize,
+    ) {
+        let location_error = FormatError::InvalidSohmRecordLocation(INVALID_LOCATION);
+        assert_index_records(
+            &image,
+            kind,
+            1,
+            OffsetWidth::Eight,
+            Err(location_error.clone()),
+        );
+        let checksum_error = damage_checksum(&mut image[container_at..]);
+        assert_index_records(
+            &image,
+            kind,
+            1,
+            OffsetWidth::Eight,
+            Err(if cfg!(feature = "checksum") {
+                checksum_error
+            } else {
+                location_error
+            }),
+        );
+    }
+
+    fn record_with_invalid_location() -> Vec<u8> {
+        let mut record = sohm::heap_record(7, 3, [1; FHEAP_ID_LEN], Widths::EIGHT);
+        record[0] = INVALID_LOCATION;
+        record
+    }
+
+    fn btree_with_unpadded_record(widths: Widths, stride: u16) -> Vec<u8> {
+        let mut record = sohm::object_header_record(7, ATTRIBUTE_MESSAGE_TYPE, 2, 64, widths);
+        record.truncate(usize::from(stride));
+        single_leaf_btree(widths, stride, &[record])
+    }
+
+    fn single_leaf_btree(widths: Widths, stride: u16, records: &[Vec<u8>]) -> Vec<u8> {
+        let header = btree_header(widths, stride, u16::try_from(records.len()).unwrap());
+        let mut image = Image::starting_with(&header);
+        image.place(ROOT_ADDRESS, &btree_v2::leaf(sohm::BTREE_TYPE, records));
+        image.build()
+    }
+
+    fn btree_header(widths: Widths, stride: u16, count: u16) -> Vec<u8> {
+        btree_v2::Header::new(sohm::BTREE_TYPE, stride, ROOT_ADDRESS as u64, count).build(widths)
+    }
+
+    fn assert_index_records(
+        image: &[u8],
+        kind: SohmIndexKind,
+        message_count: u16,
+        offsets: OffsetWidth,
+        expected: Result<Vec<SohmRecord>, FormatError>,
+    ) {
+        let index = SohmIndexHeader {
+            message_type_flags: 1 << MessageType::ATTRIBUTE.to_u16(),
+            min_message_size: 0,
+            list_max: 50,
+            btree_min: 40,
+            message_count,
+            kind,
+            index_address: Some(StoredAddress::new(0)),
+            heap_address: None,
+        };
+        let widths = FormatWidths {
+            offsets,
+            lengths: LengthWidth::Eight,
+        };
+        assert_eq!(
+            read_index_records_from_source(&crate::source::zero_base_bytes(image), &index, widths),
+            expected,
+        );
+        let source = BytesSource::new(image);
+        assert_eq!(
+            read_index_records_from_source(
+                &crate::source::zero_base_source(&source),
+                &index,
+                widths,
+            ),
+            expected,
+        );
+    }
+
+    fn damage_checksum(bytes: &mut [u8]) -> FormatError {
+        let (body, stored) = bytes
+            .split_last_chunk_mut::<{ checksum::CHECKSUM }>()
+            .unwrap();
+        stored[0] ^= 1;
+        FormatError::ChecksumMismatch {
+            expected: u32::from_le_bytes(*stored),
+            computed: checksum::lookup3(body),
+        }
+    }
+
+    const ROOT_ADDRESS: usize = 256;
+    const ATTRIBUTE_MESSAGE_TYPE: u8 = MessageType::ATTRIBUTE.to_u16().to_le_bytes()[0];
+    const INVALID_LOCATION: u8 = 9;
+    const TWO_BYTE_OFFSETS: Widths = Widths {
+        offset: 2,
+        length: 8,
+    };
+    const FOUR_BYTE_OFFSETS: Widths = Widths {
+        offset: 4,
+        length: 8,
+    };
+    const TWO_BYTE_OBJECT_HEADER_SPAN: u16 =
+        (sohm::OBJECT_HEADER_ADDRESS_OFFSET + TWO_BYTE_OFFSETS.offset) as u16;
+    const FOUR_BYTE_OBJECT_HEADER_SPAN: u16 =
+        (sohm::OBJECT_HEADER_ADDRESS_OFFSET + FOUR_BYTE_OFFSETS.offset) as u16;
 
     #[cfg(feature = "std")]
     #[rstest]

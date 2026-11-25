@@ -216,16 +216,6 @@ fn table_len(index_count: u8, offset_width: OffsetWidth) -> usize {
     TABLE_FIXED_LEN + index_count as usize * index_header_len(offset_width)
 }
 
-/// Returns the size in bytes of one record of a shared message index using a validated address
-/// width.
-///
-/// A record has one of two shapes, and a list gives every record the size of the wider shape,
-/// `H5SM_SOHM_ENTRY_SIZE`.
-pub(crate) fn sohm_record_len(offset_width: OffsetWidth) -> usize {
-    let object_header_location = 1 + 1 + 2 + usize::from(offset_width.get());
-    RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
-}
-
 impl SohmTable {
     /// Parses the master table at the start of `image`.
     ///
@@ -427,36 +417,48 @@ pub struct SohmRecord {
 }
 
 impl SohmRecord {
+    /// Returns the common record size for shared-message lists and B-trees in bytes.
+    ///
+    /// The size includes the location byte, hash, and the larger of the two location bodies.
+    /// `H5SM_SOHM_ENTRY_SIZE` in `H5SMpkg.h` (HDF5 1.14.6) uses the same calculation. The size
+    /// is 17 bytes at all supported address widths.
+    pub fn encoded_len(offset_width: OffsetWidth) -> usize {
+        let object_header_location = 1 + 1 + 2 + usize::from(offset_width.get());
+        RECORD_PREFIX_LEN + HEAP_LOCATION_LEN.max(object_header_location)
+    }
+
     /// Parses the record at the start of `data`.
     ///
-    /// `offset_size` is the superblock's "Size of Offsets" byte. The function reads the fields in
-    /// the order of `H5SM__message_decode` in `H5SMmessage.c` (HDF5 2.2.0).
+    /// `offset_size` is the superblock's "Size of Offsets" byte. See
+    /// [`Self::parse_with_offset_width`] for the record framing.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `data` ends before the fields of the record,
-    /// [`FormatError::InvalidSohmRecordLocation`] if the location byte is not 0 or 1, and
-    /// [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8.
+    /// Returns [`FormatError::InvalidOffsetSize`] if `offset_size` is not 2, 4, or 8. Propagates
+    /// the record errors of [`Self::parse_with_offset_width`].
     pub fn parse(data: &[u8], offset_size: u8) -> Result<Self, FormatError> {
         Self::parse_with_offset_width(data, OffsetWidth::try_from(offset_size)?)
     }
 
     /// Parses a shared-message index record using a validated address width.
     ///
+    /// Acquires [`Self::encoded_len`] bytes before reading the location byte. Ignores any padding
+    /// after an object-header address and any bytes after the record.
+    ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if `data` ends before the fields of the record, or
-    /// [`FormatError::InvalidSohmRecordLocation`] if the location byte is not 0 or 1.
+    /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than a complete record, or
+    /// [`FormatError::InvalidSohmRecordLocation`] if a complete record has a location byte other
+    /// than 0 or 1.
     pub fn parse_with_offset_width(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<Self, FormatError> {
-        bytes::ensure_len(data, 0, RECORD_PREFIX_LEN)?;
+        bytes::ensure_len(data, 0, Self::encoded_len(offset_width))?;
         let hash = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+        let at = RECORD_PREFIX_LEN;
         let location = match data[0] {
             LOCATION_HEAP => {
-                bytes::ensure_len(data, RECORD_PREFIX_LEN, HEAP_LOCATION_LEN)?;
-                let at = RECORD_PREFIX_LEN;
                 let reference_count =
                     u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
                 let mut heap_id = [0u8; FHEAP_ID_LEN];
@@ -467,8 +469,6 @@ impl SohmRecord {
                 }
             }
             LOCATION_OBJECT_HEADER => {
-                let at = RECORD_PREFIX_LEN;
-                bytes::ensure_len(data, at, 4)?;
                 let message_type = data[at + 1];
                 let creation_index = u16::from_le_bytes([data[at + 2], data[at + 3]]);
                 let address =
@@ -513,17 +513,22 @@ pub(crate) fn parse_sohm_list(
 
 /// Parses a shared-message list index using a validated address width.
 ///
+/// Acquires the signature, `message_count` fixed-size records, and the checksum. When checksum
+/// verification is enabled, checks the checksum before decoding any record.
+///
 /// # Errors
 ///
-/// Returns `FormatError` for a truncated or malformed list, an invalid record, or a checksum
-/// mismatch.
+/// Returns [`FormatError::UnexpectedEof`] if `image` is shorter than the list, or
+/// [`FormatError::InvalidSohmListSignature`] if the list does not begin with `SMLI`. With the
+/// `checksum` feature, returns [`FormatError::ChecksumMismatch`] if the stored checksum differs
+/// from the computed one. Propagates the record errors of [`SohmRecord::parse_with_offset_width`].
 pub fn parse_sohm_list_with_offset_width(
     image: &[u8],
     message_count: u16,
     offset_width: OffsetWidth,
 ) -> Result<Vec<SohmRecord>, FormatError> {
-    let stride = sohm_record_len(offset_width);
-    let expected = LIST_FIXED_LEN + message_count as usize * stride;
+    let stride = SohmRecord::encoded_len(offset_width);
+    let expected = sohm_list_len(message_count, offset_width);
     bytes::ensure_len(image, 0, expected)?;
     let image = &image[..expected];
     if &image[..4] != LIST_SIGNATURE {
@@ -545,11 +550,12 @@ pub fn parse_sohm_list_with_offset_width(
 /// Returns the size in bytes of a list index of `message_count` records using a validated address
 /// width, its signature and checksum included.
 pub fn sohm_list_len(message_count: u16, offset_width: OffsetWidth) -> usize {
-    LIST_FIXED_LEN + message_count as usize * sohm_record_len(offset_width)
+    LIST_FIXED_LEN + usize::from(message_count) * SohmRecord::encoded_len(offset_width)
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     #[cfg(feature = "checksum")]
     use test_util::checksum::CHECKSUM;
     use test_util::image::Image;
@@ -771,8 +777,38 @@ mod tests {
     /// object-header record at the wrong offset, in a file with 2- or 4-byte addresses.
     #[test]
     fn both_record_shapes_share_one_stride() {
-        assert_eq!(sohm_record_len(OffsetWidth::Eight), 17);
-        assert_eq!(sohm_record_len(OffsetWidth::Four), 17);
+        let size = usize::from(sohm::RECORD_SIZE);
+        assert_eq!(SohmRecord::encoded_len(OffsetWidth::Eight), size);
+        assert_eq!(SohmRecord::encoded_len(OffsetWidth::Four), size);
+        assert_eq!(SohmRecord::encoded_len(OffsetWidth::Two), size);
+    }
+
+    #[rstest]
+    #[case::two(Widths { offset: 2, length: 8 })]
+    #[case::four(Widths { offset: 4, length: 8 })]
+    #[case::eight(Widths::EIGHT)]
+    fn record_parser_requires_the_complete_stride_before_reading_the_location(
+        #[case] widths: Widths,
+    ) {
+        let heap_record = sohm::heap_record(7, 3, [1; FHEAP_ID_LEN], widths);
+        let message_type = u8::try_from(MessageType::ATTRIBUTE.to_u16()).unwrap();
+        let object_header_record = sohm::object_header_record(8, message_type, 2, 64, widths);
+        let mut invalid_location = heap_record.clone();
+        invalid_location[0] = 9;
+        let offset_size = u8::try_from(widths.offset).unwrap();
+        let expected = usize::from(sohm::RECORD_SIZE);
+        for record in [heap_record, object_header_record, invalid_location] {
+            assert_eq!(record.len(), expected);
+            for available in 0..record.len() {
+                assert_eq!(
+                    SohmRecord::parse(&record[..available], offset_size),
+                    Err(FormatError::UnexpectedEof {
+                        expected,
+                        available
+                    })
+                );
+            }
+        }
     }
 
     #[test]
@@ -848,7 +884,7 @@ mod tests {
         let record = sohm::heap_record(0xDEAD_BEEF, 1, [1, 0, 0, 0, 0, 0, 0, 0], Widths::EIGHT);
         let mut image = sohm::list(&[record]);
         // The unused end of the block, zeroed.
-        image.extend_from_slice(&vec![0u8; 4 * sohm_record_len(OffsetWidth::Eight)]);
+        image.extend_from_slice(&vec![0u8; 4 * SohmRecord::encoded_len(OffsetWidth::Eight)]);
 
         assert_eq!(parse_sohm_list(&image, 1, 8).unwrap().len(), 1);
     }
