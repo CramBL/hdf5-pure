@@ -1526,17 +1526,17 @@ mod tests {
     #[case::zero_size(
         160,
         0,
-        "the set at byte 13 of the section list holds sections of 0 bytes"
+        FormatError::InvalidFreeSpaceSectionGroupSize { offset: 13 }
     )]
     #[case::invalid_class(
         176,
         3,
-        "the class of the section at byte 22 of the section list is 3, not one of the 3 classes of the file client"
+        FormatError::InvalidFreeSpaceSectionClass { offset: 22, class_id: 3 }
     )]
     fn framed_lists_require_file_client_records(
         #[case] at: usize,
         #[case] value: u8,
-        #[case] reason: &str,
+        #[case] error: FormatError,
     ) {
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
         let (mut bytes, info) = manager_file(widths, 0, 256, 32);
@@ -1551,7 +1551,7 @@ mod tests {
                 &info
             )
             .unwrap_err(),
-            FreeSectionsError::Format(FormatError::InvalidFreeSpaceManager(reason.into()))
+            FreeSectionsError::Format(error)
         );
     }
 

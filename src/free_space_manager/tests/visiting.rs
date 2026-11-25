@@ -52,6 +52,43 @@ fn allocation_only_recovery_retains_the_full_allocation_source_policy() {
     assert_eq!(*source.reads.borrow(), vec![(619, 82)]);
 }
 
+#[test]
+fn collecting_and_visiting_source_sections_report_incomplete_record_groups() {
+    let (header, sections) = free_space::raw_manager_two(
+        619,
+        701,
+        3,
+        302,
+        &[1, 100, 0, 16, 0, 0, 2, 101, 0, 32, 0, 3, 48, 0],
+    );
+    let source = ManagerSource {
+        base: 0,
+        file_len: 726,
+        header,
+        sections,
+        reads: RefCell::new(Vec::new()),
+    };
+    let widths = widths(2, 2);
+    let managers = [DecodedStoredAddress::Defined(StoredAddress::new(619))];
+    let expected = FormatError::UnexpectedEof {
+        expected: 22,
+        available: 21,
+    };
+
+    assert_eq!(
+        read_persisted_sections_source(&source, widths, BaseAddress::ZERO, &managers),
+        Err(expected.clone())
+    );
+    assert_eq!(
+        read_persisted_allocations_source(&source, widths, BaseAddress::ZERO, &managers),
+        Err(expected)
+    );
+    assert_eq!(
+        *source.reads.borrow(),
+        vec![(619, 34), (701, 25), (619, 34), (701, 25)]
+    );
+}
+
 #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[rstest]
 #[case::one(1)]
@@ -246,11 +283,11 @@ fn owned_records_are_allocated_after_the_prefix_and_dropped_on_late_failure(
         SectionFailure::Class => {
             let class = list.len() - 5;
             list[class] = 3;
-            let offset = class - 8;
             (
-                FormatError::InvalidFreeSpaceManager(format!(
-                    "the class of the section at byte {offset} of the section list is 3, not one of the 3 classes of the file client"
-                )),
+                FormatError::InvalidFreeSpaceSectionClass {
+                    offset: class - 8,
+                    class_id: 3,
+                },
                 usize::try_from(count - 1).unwrap(),
             )
         }

@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::collections::TryReserveError;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -917,6 +918,13 @@ pub enum FormatError {
     ///
     /// The string describes the condition.
     InvalidFreeSpaceManager(String),
+    /// A file free-space section has an unsupported class.
+    InvalidFreeSpaceSectionClass {
+        /// The start of the section record, in bytes from the start of the section list.
+        offset: usize,
+        /// The stored section class ID.
+        class_id: u8,
+    },
     /// The number of size groups is inconsistent with the number of sections.
     ///
     /// Both counts must be zero, or both must be positive with at most one group per section.
@@ -925,6 +933,27 @@ pub enum FormatError {
         sections: u64,
         /// The supplied number of distinct section lengths.
         size_groups: u64,
+    },
+    /// A file free-space section group's count is zero or exceeds the remaining section count.
+    InvalidFreeSpaceSectionGroupCount {
+        /// The start of the group, in bytes from the start of the section list.
+        offset: usize,
+        /// The stored number of sections in the group.
+        count: u64,
+        /// The header's section count minus the sections read from earlier groups.
+        remaining: u64,
+    },
+    /// A file free-space section group declares a section size of zero bytes.
+    InvalidFreeSpaceSectionGroupSize {
+        /// The start of the group, in bytes from the start of the section list.
+        offset: usize,
+    },
+    /// The file free-space section sizes do not sum to the total in the manager header.
+    InvalidFreeSpaceSectionSizeSum {
+        /// The total free space in bytes from the manager header.
+        expected: u64,
+        /// The sum of the decoded section sizes in bytes.
+        actual: Box<u128>,
     },
     /// Invalid global heap collection signature.
     InvalidGlobalHeapSignature,
@@ -2100,6 +2129,10 @@ impl fmt::Display for FormatError {
             Self::InvalidFreeSpaceManager(reason) => {
                 write!(f, "invalid free-space manager: {reason}")
             }
+            Self::InvalidFreeSpaceSectionClass { offset, class_id } => write!(
+                f,
+                "unsupported file free-space section class {class_id} at byte {offset} of the section list"
+            ),
             Self::InvalidFreeSpaceSectionCounts {
                 sections,
                 size_groups,
@@ -2109,6 +2142,25 @@ impl fmt::Display for FormatError {
                     "a section list with {sections} sections cannot have {size_groups} size groups"
                 )
             }
+            Self::InvalidFreeSpaceSectionGroupCount {
+                offset,
+                count,
+                remaining,
+            } => write!(
+                f,
+                "a free-space section group at byte {offset} has {count} records, \
+                 outside the range 1 to {remaining}"
+            ),
+            Self::InvalidFreeSpaceSectionGroupSize { offset } => {
+                write!(
+                    f,
+                    "a free-space section group at byte {offset} has zero section size"
+                )
+            }
+            Self::InvalidFreeSpaceSectionSizeSum { expected, actual } => write!(
+                f,
+                "the free-space section sizes sum to {actual} bytes, expected {expected}"
+            ),
             Self::DuplicateEnumMemberName(name) => {
                 write!(f, "duplicate enumeration member name {name:?}")
             }
