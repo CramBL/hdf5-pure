@@ -507,6 +507,14 @@ impl<'a> OpaqueTagWire<'a> {
         })
     }
 
+    fn encoded_len(&self) -> u8 {
+        self.encoded_len
+    }
+
+    fn logical(&self) -> &'a [u8] {
+        self.logical
+    }
+
     fn property_size(tag_len: usize) -> usize {
         if tag_len == 0 {
             0

@@ -158,7 +158,7 @@ impl DecodedAtomic<'_> {
             Self::BitField(datatype) => Datatype::BitField(datatype),
             Self::Opaque { size, tag } => Datatype::Opaque {
                 size: size.get(),
-                tag: tag.logical.to_vec(),
+                tag: tag.logical().to_vec(),
             },
         }
     }
@@ -181,7 +181,7 @@ impl DecodedAtomic<'_> {
             Self::BitField(datatype) => DatatypeProperties::BitField(datatype),
             Self::Opaque { size, tag } => DatatypeProperties::Opaque {
                 size: size.get(),
-                tag: tag.logical.to_vec(),
+                tag: tag.logical().to_vec(),
             },
         }
     }
@@ -347,7 +347,7 @@ impl AtomicProperties<'_> {
             }
             Self::Time(_) => TIME_PROPERTIES_SIZE,
             Self::String { .. } => 0,
-            Self::Opaque { tag, .. } => usize::from(OpaqueTagWire::encode(tag)?.encoded_len),
+            Self::Opaque { tag, .. } => usize::from(OpaqueTagWire::encode(tag)?.encoded_len()),
         };
         Ok((size.get(), property_size))
     }
