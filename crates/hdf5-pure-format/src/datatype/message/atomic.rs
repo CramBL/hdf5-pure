@@ -12,7 +12,7 @@ use hdf5_pure_core::{
     FormatError, MantissaNormalization, StringPadding, TimeType,
 };
 
-use super::codec::{NodeHeader, Output};
+use super::encode::{NodeHeader, Output};
 use super::{DatatypeProperties, DatatypeVersion, FloatingPointByteOrder};
 use crate::bytes::{ByteCursor, UnexpectedEof};
 use crate::datatype::header::{AtomicClass, Context, HeaderFields};
