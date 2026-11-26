@@ -1681,11 +1681,14 @@ impl HugeObjectRecordDecoder {
                 if layout.encoding == HugeObjectRecordEncoding::Indirect {
                     HugeObjectTrackerRecord::Indirect(HugeObjectRecord {
                         address,
-                        length,
+                        length: length.get(),
                         id: cursor.length(lengths)?,
                     })
                 } else {
-                    HugeObjectTrackerRecord::Direct(HugeObjectDirectRecord { address, length })
+                    HugeObjectTrackerRecord::Direct(HugeObjectDirectRecord {
+                        address,
+                        length: length.get(),
+                    })
                 }
             }
         })

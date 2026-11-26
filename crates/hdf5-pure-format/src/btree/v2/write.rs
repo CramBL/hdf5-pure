@@ -15,7 +15,6 @@ use crate::btree::v2::NODE_PREFIX_LEN;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::fractal_heap::FractalHeapIdLayout;
 use crate::width;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -504,29 +503,6 @@ impl BTreeV2Placement<'_> {
     }
 }
 
-/// A borrowed heap ID parsed against its owning heap's layout.
-///
-/// The complete ID length and encoding are checked by [`FractalHeapIdLayout::parse`].
-pub(crate) struct PreparedHeapId<'a> {
-    bytes: &'a [u8],
-}
-
-impl<'a> PreparedHeapId<'a> {
-    /// Checks all ID bytes against `layout` without copying them.
-    ///
-    /// # Errors
-    ///
-    /// Returns errors from [`FractalHeapIdLayout::parse`].
-    pub(crate) fn new(layout: &FractalHeapIdLayout, bytes: &'a [u8]) -> Result<Self, FormatError> {
-        layout.parse(bytes)?;
-        Ok(Self { bytes })
-    }
-
-    pub(crate) fn bytes(&self) -> &'a [u8] {
-        self.bytes
-    }
-}
-
 /// Record bytes whose length matches the plan's checked count and nonzero record width.
 struct CheckedRecords<'a> {
     bytes: &'a [u8],
@@ -840,62 +816,15 @@ fn count_fits(value: u64, width: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use test_util::fractal_heap;
-    use test_util::widths::Widths;
 
     use super::*;
     use crate::address::StoredAddressExt;
     use crate::btree::v2 as btree_v2;
     use crate::btree::v2::BTreeV2Header;
     use crate::dense_link_write::NAME_RECORD_LEN;
-    use crate::fractal_heap::FractalHeapHeader;
 
     const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
     const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
-
-    #[rstest]
-    #[case::short_link(7, 6)]
-    #[case::long_link(7, 8)]
-    #[case::short_attribute(8, 7)]
-    #[case::long_attribute(8, 9)]
-    fn heap_id_preparation_requires_the_declared_id_width(
-        #[case] heap_id_length: u16,
-        #[case] actual: usize,
-    ) {
-        let header = heap_id_header(heap_id_length);
-        let layout = FractalHeapIdLayout::new(&header, OFFSET_WIDTH, LENGTH_WIDTH);
-        let bytes = vec![0; actual];
-        let error = PreparedHeapId::new(&layout, &bytes).err().unwrap();
-        assert_eq!(
-            error,
-            FormatError::InvalidFractalHeapIdLength {
-                expected: usize::from(heap_id_length),
-                actual
-            }
-        );
-    }
-
-    #[rstest]
-    #[case::managed(false)]
-    #[case::huge(true)]
-    fn heap_id_preparation_borrows_complete_generated_ids(
-        #[case] huge: bool,
-        #[values(7, 8)] heap_id_length: u16,
-    ) {
-        let header = heap_id_header(heap_id_length);
-        let layout = FractalHeapIdLayout::new(&header, OFFSET_WIDTH, LENGTH_WIDTH);
-        let bytes = if huge {
-            header
-                .encode_huge_id(3, OFFSET_WIDTH, LENGTH_WIDTH)
-                .unwrap()
-        } else {
-            header.encode_managed_id(256, 17).unwrap()
-        };
-        assert_eq!(bytes.len(), usize::from(heap_id_length));
-        let id = PreparedHeapId::new(&layout, &bytes).unwrap();
-        assert_eq!(id.bytes(), bytes);
-        assert_eq!(id.bytes().as_ptr(), bytes.as_ptr());
-    }
 
     #[test]
     fn empty_tree_constructors_use_distinct_root_representations() {
@@ -1140,16 +1069,5 @@ mod tests {
                 length: 512
             }
         );
-    }
-    fn heap_id_header(heap_id_length: u16) -> FractalHeapHeader {
-        let mut header = FractalHeapHeader::parse_bytes(
-            &fractal_heap::Header::new(256).build(Widths::EIGHT),
-            OFFSET_WIDTH,
-            LENGTH_WIDTH,
-        )
-        .unwrap();
-        header.heap_id_length = heap_id_length;
-        header.btree_huge_objects_address = StoredAddress::new(1024);
-        header
     }
 }

@@ -4,11 +4,11 @@ use alloc::vec::Vec;
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::btree::v2::write::BTreeV2Placement;
-use crate::btree::v2::write::PreparedHeapId;
 use crate::btree::v2::{AttributeRecord, HugeObjectDirectRecord, HugeObjectRecord};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapIdLayout;
+use crate::fractal_heap::PreparedHeapId;
 use crate::fractal_heap_write::ManagedHeapPlacement;
 use crate::message_flags::MessageFlags;
 
