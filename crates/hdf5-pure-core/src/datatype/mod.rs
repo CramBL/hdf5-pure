@@ -137,7 +137,7 @@ impl EnumerationType {
         offsets: DatatypeOffsets,
         members: Vec<EnumMember>,
     ) -> Result<Self, FormatError> {
-        let base_size = stored_type_size_with_offsets(&base_type, offsets.element)?;
+        let base_size = offsets.stored_type_size(&base_type)?;
         if base_size != size.get() {
             return Err(FormatError::EnumBaseSizeMismatch {
                 size: size.get(),
@@ -226,6 +226,10 @@ impl DatatypeOffsets {
             element: None,
             used: self.used,
         }
+    }
+
+    fn stored_type_size(self, datatype: &Datatype) -> Result<u32, FormatError> {
+        stored_type_size_with_offsets(datatype, self.element)
     }
 
     /// Checks that the stored descriptors use the destination's offset width.
@@ -388,6 +392,7 @@ impl Datatype {
             Self::FloatingPoint(datatype) => Ok(datatype.size()),
             Self::Time(datatype) => Ok(datatype.size()),
             Self::BitField(datatype) => Ok(datatype.size()),
+            Self::Enumeration(datatype) => Ok(datatype.size()),
             Self::Complex(datatype) => Ok(datatype.size()),
             _ => NonZeroU32::new(self.type_size()).ok_or(FormatError::ZeroSizedDatatype {
                 class: self.class_code(),
