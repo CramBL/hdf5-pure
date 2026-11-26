@@ -9,11 +9,13 @@ use hdf5_pure_core::{
 };
 
 use super::header::{Context, Header};
+use super::message;
 use super::message::atomic::AtomicReservedFlagPolicy;
+use super::message::compound_layout::CompoundLayout;
 use super::message::decode::{self, Decoded, Layout, Member, Projection};
-use super::message::{self, CompoundLayout, MessageDepth};
-use super::references;
+use super::nesting::MessageDepth;
 use super::variable_length::VariableLengthMetadata;
+use super::{references, stored_size};
 use crate::bytes::ByteCursor;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
@@ -226,7 +228,7 @@ fn parse_datatype_at(
     };
     Ok(Decoded {
         datatype,
-        stored_size: message::positive_size(header.class.code(), size)?,
+        stored_size: stored_size::positive_size(header.class.code(), size)?,
         offsets,
     })
 }

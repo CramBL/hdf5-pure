@@ -15,14 +15,16 @@ use hdf5_pure_core::{ComplexType, DatatypeMemberName, EnumMember, FormatError};
 
 use super::atomic;
 use super::compound_layout::CompoundFields;
-use super::description::{self, NameLayout};
-use super::{DatatypeVersion, MessageDepth};
+use super::name_layout::NameLayout;
+use super::version::DatatypeVersion;
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::datatype::header::{
     ARRAY_CLASS, AtomicClass, COMPLEX_CLASS, Context, DatatypeClass, Header,
 };
 use crate::datatype::legacy_member::CompoundV1Shape;
+use crate::datatype::nesting::MessageDepth;
+use crate::datatype::stored_size;
 use crate::datatype::variable_length::{self, VariableLengthMetadata};
 use crate::width::OffsetWidth;
 
@@ -172,7 +174,7 @@ impl Enumeration {
         declared_size: u32,
         value_width: NonZeroU32,
     ) -> Result<Vec<EnumMember>, FormatError> {
-        description::check_enum_base_size(declared_size, value_width.get())?;
+        stored_size::check_enum_base_size(declared_size, value_width.get())?;
         let count = usize::from(self.0.count);
         let mut members = Vec::new();
         for _ in 0..count {
@@ -358,7 +360,7 @@ pub(in crate::datatype) fn array_size(
     base_size: NonZeroU32,
     dimensions: &[u32],
 ) -> Result<NonZeroU32, FormatError> {
-    let expected = super::positive_size(
+    let expected = stored_size::positive_size(
         ARRAY_CLASS,
         __private::array_type_size(base_size.get(), dimensions)?,
     )?;

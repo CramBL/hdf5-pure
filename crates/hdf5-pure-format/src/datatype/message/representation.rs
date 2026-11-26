@@ -1,208 +1,32 @@
-//! Datatype descriptions with checked message versions and recursive properties.
+//! Retained datatype descriptions, their construction, and conversion to semantic datatypes.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
-use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, CompoundMember, Datatype, DatatypeByteOrder,
-    DatatypeMemberName, EnumMember, FixedPointType, FloatingPointType, FormatError, StringPadding,
-    TimeType, VariableLengthStringType, VariableLengthType,
+    BitFieldType, CharacterSet, ComplexType, CompoundMember, Datatype, DatatypeMemberName,
+    EnumMember, FixedPointType, FloatingPointType, FormatError, StringPadding, TimeType,
+    VariableLengthStringType, VariableLengthType,
 };
 
-use super::codec::ParsedProperties;
 use super::compound_layout::CompoundLayout;
+use super::parse::ParsedProperties;
+use super::version::{DatatypeVersion, FloatingPointByteOrder};
 use crate::convert::Narrow;
 use crate::datatype::header::{
-    ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_VERSION_FIVE,
-    DATATYPE_VERSION_FOUR, DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO,
-    ENUMERATION_CLASS, FIXED_POINT_CLASS, FLOATING_POINT_CLASS, OPAQUE_CLASS, STRING_CLASS,
-    TIME_CLASS, VARIABLE_LENGTH_CLASS,
+    ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, ENUMERATION_CLASS,
+    FIXED_POINT_CLASS, FLOATING_POINT_CLASS, OPAQUE_CLASS, STRING_CLASS, TIME_CLASS,
+    VARIABLE_LENGTH_CLASS,
 };
 use crate::datatype::legacy_member::CompoundV1Shape;
 use crate::datatype::opaque::OPAQUE_TAG_ALIGNMENT;
+use crate::datatype::stored_size;
 use crate::width::OffsetWidth;
-
-/// A datatype message version from 1 through 5.
-///
-/// The version occupies the high four bits of the class-and-version byte, defined in "The
-/// Datatype Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[repr(u8)]
-pub enum DatatypeVersion {
-    /// Datatype message version 1.
-    One = DATATYPE_VERSION_ONE,
-    /// Datatype message version 2.
-    Two = DATATYPE_VERSION_TWO,
-    /// Datatype message version 3.
-    Three = DATATYPE_VERSION_THREE,
-    /// Datatype message version 4.
-    Four = DATATYPE_VERSION_FOUR,
-    /// Datatype message version 5.
-    Five = DATATYPE_VERSION_FIVE,
-}
-
-impl DatatypeVersion {
-    /// Returns the version number stored in the message header.
-    pub const fn get(self) -> u8 {
-        self as u8
-    }
-
-    /// Returns this version if it meets the class layout's minimum.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidDatatypeVersion`] if this version is below `minimum`.
-    pub(super) fn for_class(self, class: u8, minimum: Self) -> Result<Self, FormatError> {
-        if self < minimum {
-            return Err(FormatError::InvalidDatatypeVersion {
-                class,
-                version: self.get(),
-            });
-        }
-        Ok(self)
-    }
-
-    /// Checks the child's version against its containing message's version.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::DatatypeChildVersion`] if the child's version is higher.
-    pub(super) fn check_child(self, class: u8, child: Self) -> Result<(), FormatError> {
-        if child > self {
-            return Err(FormatError::DatatypeChildVersion {
-                class,
-                version: self.get(),
-                child_version: child.get(),
-            });
-        }
-        Ok(())
-    }
-}
-
-impl TryFrom<u8> for DatatypeVersion {
-    type Error = FormatError;
-
-    /// Converts a stored version number to a supported message version.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidDatatypeMessageVersion`] if `value` is outside `1..=5`.
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            DATATYPE_VERSION_ONE => Ok(Self::One),
-            DATATYPE_VERSION_TWO => Ok(Self::Two),
-            DATATYPE_VERSION_THREE => Ok(Self::Three),
-            DATATYPE_VERSION_FOUR => Ok(Self::Four),
-            DATATYPE_VERSION_FIVE => Ok(Self::Five),
-            value => Err(FormatError::InvalidDatatypeMessageVersion(value)),
-        }
-    }
-}
-
-/// A floating-point byte order paired with a compatible datatype message version.
-///
-/// Little-endian and big-endian order support versions 1 through 5. VAX order requires
-/// version 3 or later. The byte-order table in "The Datatype Message" of the [format
-/// specification, version 4.0][spec] defines bits 6 and 0 together. Its generic reserved-bit
-/// row also lists bit 6, which the byte-order table uses for VAX.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FloatingPointByteOrder {
-    version: DatatypeVersion,
-    order: DatatypeByteOrder,
-}
-
-impl FloatingPointByteOrder {
-    /// Pairs `order` with a compatible message version.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidDatatypeVersion`] for VAX order before version 3.
-    pub fn new(version: DatatypeVersion, order: DatatypeByteOrder) -> Result<Self, FormatError> {
-        if order == DatatypeByteOrder::Vax {
-            version.for_class(FLOATING_POINT_CLASS, DatatypeVersion::Three)?;
-        }
-        Ok(Self { version, order })
-    }
-
-    /// Parses the byte order and reserved bits from a floating-point class bit field.
-    ///
-    /// Bits 6 and 0 select little-endian (`0x00`), big-endian (`0x01`), or VAX (`0x41`) order.
-    /// The parser checks reserved bits 7 and 16 through 23. Padding, normalization, and sign
-    /// location are separate properties.
-    ///
-    /// The parser rejects bit 6 in versions 1 and 2. `H5O__dtype_decode_helper` ignores that bit
-    /// in those versions (`H5Odtype.c`, HDF5 2.0.0). `H5O__dtype_encode_helper` writes VAX as
-    /// `0x41` with a minimum version of 3 in the same release.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidDatatypeFlags`] if a reserved class bit is set,
-    /// [`FormatError::InvalidByteOrder`] for the reserved order pattern `0x40`, and
-    /// [`FormatError::InvalidDatatypeVersion`] for VAX order before version 3.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hdf5_pure_core::{DatatypeByteOrder, FormatError};
-    /// use hdf5_pure_format::__private::{DatatypeVersion, FloatingPointByteOrder};
-    ///
-    /// let order = FloatingPointByteOrder::parse(DatatypeVersion::Three, [0x41, 31, 0])?;
-    /// assert_eq!(order.order(), DatatypeByteOrder::Vax);
-    /// assert_eq!(order.bits(), 0x41);
-    /// # Ok::<(), FormatError>(())
-    /// ```
-    pub fn parse(version: DatatypeVersion, flags: [u8; 3]) -> Result<Self, FormatError> {
-        let bits = u32::from(flags[0]) | (u32::from(flags[1]) << 8) | (u32::from(flags[2]) << 16);
-        if bits & FLOAT_RESERVED_MASK != 0 {
-            return Err(FormatError::InvalidDatatypeFlags {
-                class: FLOATING_POINT_CLASS,
-                version: version.get(),
-                flags: bits,
-            });
-        }
-        let order = flags[0] & (FLOAT_BYTE_ORDER_LOW_BIT | FLOAT_BYTE_ORDER_HIGH_BIT);
-        let order = match order {
-            0 => DatatypeByteOrder::LittleEndian,
-            FLOAT_BYTE_ORDER_LOW_BIT => DatatypeByteOrder::BigEndian,
-            FLOAT_BYTE_ORDER_HIGH_BIT => return Err(FormatError::InvalidByteOrder(order)),
-            _ => DatatypeByteOrder::Vax,
-        };
-        Self::new(version, order)
-    }
-
-    /// Returns the message version associated with this byte order.
-    pub const fn version(self) -> DatatypeVersion {
-        self.version
-    }
-
-    /// Returns the decoded byte order.
-    pub const fn order(self) -> DatatypeByteOrder {
-        self.order
-    }
-
-    /// Returns bits 6 and 0 for this byte order, with all other bits clear.
-    pub const fn bits(self) -> u8 {
-        Self::bits_for(self.order)
-    }
-
-    pub(super) const fn bits_for(order: DatatypeByteOrder) -> u8 {
-        match order {
-            DatatypeByteOrder::LittleEndian => 0,
-            DatatypeByteOrder::BigEndian => FLOAT_BYTE_ORDER_LOW_BIT,
-            DatatypeByteOrder::Vax => FLOAT_BYTE_ORDER_LOW_BIT | FLOAT_BYTE_ORDER_HIGH_BIT,
-        }
-    }
-}
 
 /// A datatype description with checked properties and a retained version at each node.
 ///
@@ -309,10 +133,10 @@ impl DatatypeMessage {
                 FloatingPointByteOrder::new(version, datatype.byte_order())?;
             }
             DatatypeProperties::String { size, .. } => {
-                positive_size(class, *size)?;
+                stored_size::positive_size(class, *size)?;
             }
             DatatypeProperties::Opaque { size, tag } => {
-                positive_size(class, *size)?;
+                stored_size::positive_size(class, *size)?;
                 if tag.len() > MAX_OPAQUE_TAG_LEN {
                     return Err(FormatError::OpaqueTagTooLong { length: tag.len() });
                 }
@@ -353,7 +177,7 @@ impl DatatypeMessage {
                         target: "u8",
                     }
                 })?;
-                positive_size(
+                stored_size::positive_size(
                     class,
                     __private::array_type_size(base_type.size_with_offsets(None)?, dimensions)?,
                 )?;
@@ -376,6 +200,7 @@ impl DatatypeMessage {
         })
     }
 
+    /// Stores the checked properties and any descriptor widths recorded by the parser.
     pub(super) fn from_parsed(parsed: ParsedProperties) -> Self {
         let (version, properties, enumeration_base_offsets) = parsed.into_parts();
         Self {
@@ -413,6 +238,7 @@ impl DatatypeMessage {
         self.size_with_offsets(Some(offset_width))
     }
 
+    /// Returns the descriptor widths recorded for a parsed enumeration's base.
     pub(super) const fn enumeration_base_offsets(&self) -> DatatypeOffsets {
         self.enumeration_base_offsets
     }
@@ -503,7 +329,10 @@ impl DatatypeMessage {
                     .collect::<Result<_, FormatError>>()?,
             },
             DatatypeProperties::Enumeration { base_type, members } => {
-                let size = positive_size(ENUMERATION_CLASS, enumeration_value_width(members))?;
+                let size = stored_size::positive_size(
+                    ENUMERATION_CLASS,
+                    enumeration_value_width(members),
+                )?;
                 Datatype::Enumeration(__private::enumeration_from_stored_parts(
                     base_type.to_datatype()?,
                     size,
@@ -820,7 +649,7 @@ fn check_compound_members<'a>(
     count: usize,
     member_at: impl Fn(usize) -> (&'a DatatypeMessageMember, Option<&'a CompoundV1Shape>),
 ) -> Result<(), FormatError> {
-    positive_size(COMPOUND_CLASS, size)?;
+    stored_size::positive_size(COMPOUND_CLASS, size)?;
     compound_member_count(count)?;
     let mut names = BTreeSet::new();
     let mut layout = CompoundLayout::new(size);
@@ -828,7 +657,7 @@ fn check_compound_members<'a>(
         let (member, shape) = member_at(index);
         member.check_compound_name_and_version(version, &mut names)?;
         let datatype = &member.datatype;
-        let field_size = positive_size(
+        let field_size = stored_size::positive_size(
             datatype.properties.class(),
             datatype.size_with_offsets(None)?,
         )?;
@@ -839,28 +668,6 @@ fn check_compound_members<'a>(
         layout.insert(member.byte_offset, field_size, index, |index| {
             Some(member_at(index).0.name.clone())
         })?;
-    }
-    Ok(())
-}
-
-/// Converts a datatype element size to a positive byte count.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ZeroSizedDatatype`] if `size` is zero.
-pub(in crate::datatype) fn positive_size(class: u8, size: u32) -> Result<NonZeroU32, FormatError> {
-    NonZeroU32::new(size).ok_or(FormatError::ZeroSizedDatatype { class })
-}
-
-/// Checks a declared enumeration size against its base datatype's stored size.
-///
-/// # Errors
-///
-/// Returns [`FormatError::EnumBaseSizeMismatch`] if the sizes differ.
-pub(super) fn check_enum_base_size(size: u32, base_size: u32) -> Result<(), FormatError> {
-    // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks that the sizes agree.
-    if size != base_size {
-        return Err(FormatError::EnumBaseSizeMismatch { size, base_size });
     }
     Ok(())
 }
@@ -877,7 +684,7 @@ pub(super) fn check_enum_base_layout(
     offsets: DatatypeOffsets,
     destination: OffsetWidth,
 ) -> Result<(), FormatError> {
-    check_enum_base_size(size, base_size)?;
+    stored_size::check_enum_base_size(size, base_size)?;
     offsets.check_destination(destination)
 }
 
@@ -922,44 +729,6 @@ pub(super) fn member_count(count: usize) -> Result<u16, FormatError> {
     })
 }
 
-/// The name field layout for compound and enumeration members.
-///
-/// libhdf5 omits name padding from version 3 onward (`H5O__dtype_decode_helper` and
-/// `H5O__dtype_encode_helper` in `H5Odtype.c`, HDF5 2.2.0).
-#[derive(Clone, Copy)]
-pub(super) enum NameLayout {
-    Padded,
-    Unpadded,
-}
-
-impl NameLayout {
-    pub(super) fn for_version(version: DatatypeVersion) -> Self {
-        match version {
-            DatatypeVersion::One | DatatypeVersion::Two => Self::Padded,
-            DatatypeVersion::Three | DatatypeVersion::Four | DatatypeVersion::Five => {
-                Self::Unpadded
-            }
-        }
-    }
-
-    /// Returns the field length, including the terminator and any padding.
-    pub(super) fn field_len(self, name_len: usize) -> usize {
-        name_len + self.suffix_len(name_len)
-    }
-
-    /// Returns the number of bytes for the terminator and any padding.
-    pub(super) fn suffix_len(self, name_len: usize) -> usize {
-        match self {
-            Self::Padded => NAME_ALIGNMENT - name_len % NAME_ALIGNMENT,
-            Self::Unpadded => 1,
-        }
-    }
-}
-
-// "The Datatype Message" in format specification version 4.0 defines this alignment in
-// bytes for terminated compound and enumeration names in versions 1 and 2.
-pub(super) const NAME_ALIGNMENT: usize = 8;
-
 /// The largest aligned opaque tag property length representable in its one-byte field.
 ///
 /// The length and alignment for datatype message versions 1 through 5 are defined in "The
@@ -967,21 +736,3 @@ pub(super) const NAME_ALIGNMENT: usize = 8;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const MAX_OPAQUE_TAG_LEN: usize = (u8::MAX - u8::MAX % OPAQUE_TAG_ALIGNMENT) as usize;
-
-/// The mask for reserved bits 7 and 16 through 23 of a floating-point class bit field.
-///
-/// The bits for datatype message versions 1 through 5 are defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const FLOAT_RESERVED_MASK: u32 = 0xFF_0080;
-
-// The floating-point byte-order table in "The Datatype Message" of the format
-// specification, version 4.0, defines these bits together. See `FloatingPointByteOrder`
-// for how the table's use of bit 6 relates to the reserved-bit row.
-
-/// Bit 0 of a floating-point class bit field, the low bit of its byte order.
-pub(in crate::datatype) const FLOAT_BYTE_ORDER_LOW_BIT: u8 = 0x01;
-
-/// Bit 6 of a floating-point class bit field, the high bit of its byte order.
-pub(in crate::datatype) const FLOAT_BYTE_ORDER_HIGH_BIT: u8 = 0x40;

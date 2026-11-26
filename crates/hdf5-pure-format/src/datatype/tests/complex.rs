@@ -10,10 +10,11 @@ use hdf5_pure_core::{
 use rstest::rstest;
 
 use super::super::header::{
-    self, ARRAY_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_VERSION_FIVE,
-    DATATYPE_VERSION_THREE, FIXED_POINT_CLASS, FLOATING_POINT_CLASS, VARIABLE_LENGTH_CLASS,
+    self, ARRAY_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, FIXED_POINT_CLASS, FLOATING_POINT_CLASS,
+    VARIABLE_LENGTH_CLASS,
 };
 use super::super::message::atomic::{FLOAT_NORMALIZATION_RESERVED, FLOAT_NORMALIZATION_SHIFT};
+use super::super::message::version::{DATATYPE_VERSION_FIVE, DATATYPE_VERSION_THREE};
 use super::super::message::{FLOAT_BYTE_ORDER_HIGH_BIT, FLOAT_BYTE_ORDER_LOW_BIT};
 use super::super::references;
 use super::super::semantic;
