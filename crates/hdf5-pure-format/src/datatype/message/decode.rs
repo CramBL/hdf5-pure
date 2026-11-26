@@ -14,6 +14,7 @@ use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{ComplexType, DatatypeMemberName, EnumMember, FormatError};
 
 use super::atomic;
+use super::compound_layout::CompoundFields;
 use super::description::{self, NameLayout};
 use super::{DatatypeVersion, MessageDepth};
 use crate::bytes::ByteCursor;
@@ -78,20 +79,16 @@ impl Layout {
         Ok(match class {
             DatatypeClass::Atomic(class) => Self::Atomic(class),
             DatatypeClass::Compound => {
-                let names = MemberNames::from_header(header, projection)?;
-                let fields = match version {
-                    DatatypeVersion::One => CompoundFields::LegacyWithShape,
-                    DatatypeVersion::Two => CompoundFields::Legacy,
-                    DatatypeVersion::Three | DatatypeVersion::Four | DatatypeVersion::Five => {
-                        CompoundFields::Packed(datatype::offset_bytes_for_size(size))
-                    }
-                };
+                let fields = CompoundFields::for_version(version, size);
+                let names = MemberNames::from_header(header, projection, fields.name_layout())?;
                 Self::Compound(Compound { names, fields })
             }
             DatatypeClass::Reference => Self::Reference,
-            DatatypeClass::Enumeration => {
-                Self::Enumeration(Enumeration(MemberNames::from_header(header, projection)?))
-            }
+            DatatypeClass::Enumeration => Self::Enumeration(Enumeration(MemberNames::from_header(
+                header,
+                projection,
+                NameLayout::for_version(version),
+            )?)),
             DatatypeClass::VariableLength => {
                 let metadata = datatype::parse_variable_length_metadata(flags)?;
                 Self::VariableLength(metadata, descriptor_width(size)?)
@@ -143,14 +140,6 @@ impl Compound {
             shape,
         })
     }
-}
-
-// "The Datatype Message" in format specification version 4.0 defines compound offsets
-// and the version 1 dimension block.
-enum CompoundFields {
-    Legacy,
-    LegacyWithShape,
-    Packed(usize),
 }
 
 /// A compound member's fields before its nested datatype.
@@ -238,18 +227,21 @@ struct MemberNames {
 }
 
 impl MemberNames {
-    /// Selects the terminated name layout for the message version and parser.
+    /// Reads the member count and records the supplied layout for the name fields.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidDatatypeFlags`] if a retained description has reserved
     /// class bits set.
-    fn from_header(header: &Header, projection: Projection) -> Result<Self, FormatError> {
+    fn from_header(
+        header: &Header,
+        projection: Projection,
+        layout: NameLayout,
+    ) -> Result<Self, FormatError> {
         let &Header {
             class,
-            version,
             flags: [low, high, _],
-            size: _,
+            ..
         } = header;
         if projection == Projection::Retained {
             header
@@ -258,7 +250,7 @@ impl MemberNames {
         }
         Ok(Self {
             count: u16::from_le_bytes([low, high]),
-            layout: NameLayout::for_version(version),
+            layout,
             projection,
         })
     }

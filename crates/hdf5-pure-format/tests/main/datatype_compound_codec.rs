@@ -881,7 +881,7 @@ fn datatype_compound_codecs_bound_recursion() {
 }
 
 #[test]
-fn datatype_parsers_accept_a_v1_compound_in_a_v3_compound() {
+fn datatype_compound_codecs_preserve_a_version_one_compound_in_a_version_three_compound() {
     let child = legacy_compound::array_member();
     let bytes = containers::compound(
         Version::Three.get(),
@@ -923,13 +923,7 @@ fn datatype_parsers_accept_a_v1_compound_in_a_v3_compound() {
     };
     assert_eq!(members[0].datatype().version(), DatatypeVersion::One);
     assert_eq!(retained.to_datatype().unwrap(), expected);
-    assert_eq!(
-        retained.prepare(OffsetWidth::Eight).unwrap_err(),
-        FormatError::InvalidDatatypeVersion {
-            class: datatype::Class::COMPOUND.0,
-            version: Version::One.get(),
-        }
-    );
+    assert_eq!(retained.serialize(OffsetWidth::Eight).unwrap(), bytes,);
 }
 
 fn assert_encoding(bytes: &[u8], expected: DatatypeMessage, width: OffsetWidth) {

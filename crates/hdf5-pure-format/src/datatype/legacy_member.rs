@@ -77,6 +77,14 @@ impl CompoundV1Shape {
         extents
     }
 
+    /// Writes the rank and extents with a zero permutation and zero reserved bytes.
+    pub(super) fn to_bytes(self) -> [u8; DIMENSION_BLOCK_SIZE] {
+        let mut block = [0; DIMENSION_BLOCK_SIZE];
+        block[0] = self.rank();
+        LittleEndian::write_u32_into(&self.extents(), &mut block[DIMENSION_SIZES_OFFSET..]);
+        block
+    }
+
     /// Reads the complete 28-byte version 1 dimension block before checking its fields.
     ///
     /// # Errors
@@ -184,7 +192,7 @@ const RESERVED_AFTER_PERMUTATION: core::ops::Range<usize> = 8..12;
 /// version 4.0][spec] for a version 1 compound member.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const DIMENSION_BLOCK_SIZE: usize = 28;
+pub(super) const DIMENSION_BLOCK_SIZE: usize = 28;
 /// The dimension sizes' byte offset within the dimension block.
 const DIMENSION_SIZES_OFFSET: usize = 12;
 /// The four dimension slots available to a version 1 compound member.

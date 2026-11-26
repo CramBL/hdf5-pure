@@ -3,6 +3,49 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_core::{DatatypeMemberName, FormatError};
 
+use super::DatatypeVersion;
+use super::description::NameLayout;
+use crate::datatype;
+
+/// The layout of a compound member's name, offset, and optional dimension block.
+///
+/// The layouts are defined in "The Datatype Message" of format specification version 4.0.
+#[derive(Clone, Copy)]
+pub(super) enum CompoundFields {
+    /// A padded name and a four-byte offset in version 2.
+    Legacy,
+    /// A padded name, a four-byte offset, and a dimension block in version 1.
+    LegacyWithShape,
+    /// An unpadded name and a size-dependent offset width in versions 3 through 5.
+    Packed(usize),
+}
+
+impl CompoundFields {
+    pub(super) fn for_version(version: DatatypeVersion, size: u32) -> Self {
+        match version {
+            DatatypeVersion::One => Self::LegacyWithShape,
+            DatatypeVersion::Two => Self::Legacy,
+            DatatypeVersion::Three | DatatypeVersion::Four | DatatypeVersion::Five => {
+                Self::Packed(datatype::offset_bytes_for_size(size))
+            }
+        }
+    }
+
+    pub(super) fn offset_width(self) -> usize {
+        match self {
+            Self::Legacy | Self::LegacyWithShape => size_of::<u32>(),
+            Self::Packed(width) => width,
+        }
+    }
+
+    pub(super) fn name_layout(self) -> NameLayout {
+        match self {
+            Self::Legacy | Self::LegacyWithShape => NameLayout::Padded,
+            Self::Packed(_) => NameLayout::Unpadded,
+        }
+    }
+}
+
 /// Disjoint member byte ranges within one compound element.
 ///
 /// Member indices refer to declaration order. Ranges are indexed by their starting byte
