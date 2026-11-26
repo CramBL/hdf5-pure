@@ -19,6 +19,7 @@ use super::super::message::{FLOAT_BYTE_ORDER_HIGH_BIT, FLOAT_BYTE_ORDER_LOW_BIT}
 use super::super::references;
 use super::super::semantic;
 use super::super::slots;
+use super::fixtures;
 
 #[rstest]
 #[case::binary32_le(4, false)]
@@ -41,7 +42,7 @@ fn native_complex_preserves_component_layout_and_message_extent(
     );
     encoded.extend_from_slice(&parent);
     let consumed = encoded.len();
-    let following = super::build_fixed_point(1, false, false, 0, 8);
+    let following = fixtures::build_fixed_point(1, false, false, 0, 8);
     encoded.extend_from_slice(&following);
 
     let (datatype, actual_consumed) = semantic::parse_datatype(&encoded).unwrap();
@@ -261,8 +262,8 @@ fn native_complex_contains_no_file_addresses() {
 
 fn ieee_parent(size: u32, big_endian: bool) -> Vec<u8> {
     let mut parent = match size {
-        4 => super::build_float(4, 23, 8, 0, 23, 127),
-        8 => super::build_float(8, 52, 11, 0, 52, 1023),
+        4 => fixtures::build_float(4, 23, 8, 0, 23, 127),
+        8 => fixtures::build_float(8, 52, 11, 0, 52, 1023),
         _ => panic!("unsupported test component size {size}"),
     };
     if big_endian {
@@ -367,7 +368,7 @@ impl ComplexContainer {
                             CompoundMember::new(
                                 DatatypeMemberName::from(c"tag"),
                                 u64::from(child_size),
-                                super::byte_member_type(),
+                                fixtures::byte_member_type(),
                             ),
                         ],
                     },
@@ -388,7 +389,7 @@ impl ComplexContainer {
         if matches!(self, Self::Compound) {
             expected.extend_from_slice(b"tag\0");
             expected.push(u8::try_from(child_size).unwrap());
-            expected.extend_from_slice(&super::build_fixed_point(1, false, false, 0, 8));
+            expected.extend_from_slice(&fixtures::build_fixed_point(1, false, false, 0, 8));
         }
         (datatype, expected)
     }
