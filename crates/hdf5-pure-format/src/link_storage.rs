@@ -16,13 +16,15 @@ use crate::address::StoredAddress;
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
-use crate::link_message::LinkMessage;
-use crate::link_message_read::{LinkMessageView, LinkTargetView};
-use crate::link_message_v1::{
+use crate::link::LinkMessage;
+use crate::link::PreparedLink;
+use crate::link::StoredLink;
+use crate::link::encode;
+use crate::link::{
     LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError, UserLinkKind,
 };
-use crate::link_message_write::{self, PreparedLink, StoredLink};
+use crate::link::{LinkMessageView, LinkTargetView};
+use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
 use crate::width::{self, OffsetWidth, UintWidth};
 
 /// A group link set with distinct names and consistent creation-order and storage metadata.
@@ -461,8 +463,7 @@ impl OwnedLink {
     ) -> Result<Self, LinkStorageError> {
         let name = LinkName::new(name).map_err(LinkStorageError::from)?;
         let explicit_type = !matches!(target, OwnedLinkTarget::Hard { .. });
-        let target_value_len =
-            link_message_write::initial_value_len(target.as_view(explicit_type))?;
+        let target_value_len = encode::initial_value_len(target.as_view(explicit_type))?;
         let explicit_charset = charset != CharacterSet::Ascii;
         Ok(Self {
             creation_order,
@@ -1001,7 +1002,7 @@ mod tests {
     use rstest::rstest;
 
     use crate::address::StoredAddressExt;
-    use crate::link_message::{LinkMessage, LinkTarget};
+    use crate::link::{LinkMessage, LinkTarget};
 
     use super::*;
 

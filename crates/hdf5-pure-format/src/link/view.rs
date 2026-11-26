@@ -1,17 +1,17 @@
 //! Borrowed fields and target framing for version 1 Link messages.
 
-use alloc::string::String;
 use core::ops::Range;
 
+use super::encode::PreparedLink;
+use super::error::LinkWireError;
+use super::name::{self, LinkName, USER_LINK_MIN, UserLinkKind};
+use super::wire::{EXTERNAL_LINK, HARD_LINK, SOFT_LINK};
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes::{ByteCursor, UnexpectedEof};
 use crate::codec::Decode;
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_message::{EXTERNAL_LINK, HARD_LINK, LinkMessage, LinkTarget, SOFT_LINK};
-use crate::link_message_v1::{self, LinkName, LinkProjectionError, LinkWireError, UserLinkKind};
-use crate::link_message_write::PreparedLink;
 use crate::width::{OffsetWidth, UintWidth};
 
 /// The checked fields of a version 1 Link message, borrowed from the message body.
@@ -38,9 +38,8 @@ impl<'a> LinkMessageView<'a> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Self::parse_prefix`] converted to [`LinkWireError`], or
-    /// [`LinkWireError::TrailingBytes`] if bytes
-    /// follow the target.
+    /// Returns the errors of [`Self::parse_prefix`] wrapped in [`LinkWireError::Format`], or
+    /// [`LinkWireError::TrailingBytes`] if bytes follow the target.
     pub fn parse(data: &'a [u8], offset_width: OffsetWidth) -> Result<Self, LinkWireError> {
         let link = Self::decode(data, offset_width)?;
         if link.consumed() != data.len() {
@@ -98,9 +97,8 @@ impl<'a> LinkMessageView<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::DefinedAddressIsUndefined`] for the new width's undefined address,
-    /// [`LinkWireError::Format`] if the hard address exceeds that width, or
-    /// [`FormatError::LinkMessageLengthOverflow`] if the body length exceeds [`usize::MAX`].
+    /// Returns [`LinkWireError::Format`] if the hard address is undefined at `offset_width`,
+    /// exceeds that width, or the body length exceeds [`usize::MAX`].
     pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'a>, LinkWireError> {
         PreparedLink::for_view(self, offset_width)
     }
@@ -146,26 +144,6 @@ impl<'a> LinkMessageView<'a> {
     pub fn hard_link_address_range(&self) -> Option<Range<usize>> {
         matches!(self.target, LinkTargetView::Hard { .. })
             .then_some(self.target_start..self.consumed)
-    }
-
-    /// Converts a supported target and the name to an owned text-oriented link.
-    ///
-    /// Uses ASCII when the message omits its character-set field. Replaces invalid UTF-8 in
-    /// the name and external paths, and requires valid UTF-8 in soft paths.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LinkProjectionError::UnsupportedKind`] for a user-defined target or
-    /// [`LinkProjectionError::Format`] with [`FormatError::InvalidSoftLinkEncoding`] for a
-    /// soft path with invalid UTF-8.
-    pub fn to_text(&self) -> Result<LinkMessage, LinkProjectionError> {
-        let link_target = self.target().to_text()?;
-        Ok(LinkMessage {
-            name: String::from_utf8_lossy(self.name_bytes()).into_owned(),
-            link_target,
-            creation_order: self.creation_order(),
-            charset: self.charset().unwrap_or(CharacterSet::Ascii),
-        })
     }
 }
 
@@ -255,7 +233,7 @@ impl<'a> LinkTargetView<'a> {
             .get(1..)
             .and_then(|path| path.strip_suffix(&[0]))
             .ok_or(FormatError::InvalidExternalLinkValue)?;
-        if filename.is_empty() || !link_message_v1::is_symbolic_path(object_path) {
+        if filename.is_empty() || !name::is_symbolic_path(object_path) {
             return Err(FormatError::InvalidLinkTarget);
         }
         Ok(Self::External {
@@ -263,38 +241,11 @@ impl<'a> LinkTargetView<'a> {
             object_path,
         })
     }
-
-    pub(crate) fn to_text(self) -> Result<LinkTarget, LinkProjectionError> {
-        Ok(match self {
-            Self::Hard {
-                object_header_address,
-                explicit_type: _,
-            } => LinkTarget::Hard {
-                object_header_address,
-            },
-            Self::Soft { target_path } => {
-                let path = core::str::from_utf8(target_path).map_err(|source| {
-                    LinkProjectionError::Format(FormatError::InvalidSoftLinkEncoding { source })
-                })?;
-                LinkTarget::soft(String::from(path))
-            }
-            Self::External {
-                filename,
-                object_path,
-            } => LinkTarget::external(
-                String::from_utf8_lossy(filename).into_owned(),
-                String::from_utf8_lossy(object_path).into_owned(),
-            ),
-            Self::UserDefined { kind, .. } => {
-                return Err(LinkProjectionError::UnsupportedKind(kind));
-            }
-        })
-    }
 }
 
 /// Fields through the borrowed name, with the cursor positioned at the start of the target.
-pub(crate) struct LinkPrefix<'a> {
-    pub(crate) name: &'a [u8],
+pub(super) struct LinkPrefix<'a> {
+    pub(super) name: &'a [u8],
     name_width: UintWidth,
     link_type: Option<u8>,
     creation_order: Option<u64>,
@@ -312,7 +263,7 @@ impl<'a> LinkPrefix<'a> {
     /// [`FormatError::InvalidLinkFlags`] for reserved flag bits,
     /// [`FormatError::InvalidCharacterSet`] for an unsupported character set, or
     /// [`FormatError::ValueTooLargeForPlatform`] for a name length above [`usize::MAX`].
-    pub(crate) fn parse(data: &'a [u8]) -> Result<Self, FormatError> {
+    pub(super) fn parse(data: &'a [u8]) -> Result<Self, FormatError> {
         let mut cursor = ByteCursor::new(data);
         let [version, flags] = cursor.array::<PREFIX_LEN>()?;
         if version != VERSION {
@@ -370,18 +321,18 @@ impl<'a> LinkPrefix<'a> {
         })
     }
 
-    pub(crate) fn target_start(&self) -> usize {
+    pub(super) fn target_start(&self) -> usize {
         self.target.position()
     }
 
-    pub(crate) fn target_view(
+    pub(super) fn target_view(
         &self,
         width: OffsetWidth,
     ) -> Result<LinkTargetView<'a>, FormatError> {
         Ok(self.read_target(width)?.0)
     }
 
-    pub(crate) fn discover_hard_link(
+    pub(super) fn discover_hard_link(
         &self,
         width: OffsetWidth,
     ) -> Result<Option<(&'a [u8], StoredAddress)>, FormatError> {
@@ -421,7 +372,7 @@ impl<'a> LinkPrefix<'a> {
                 let value = cursor.take(usize::from(len))?;
                 self.check_name(LinkNamePolicy::Component)?;
                 let target = match kind {
-                    SOFT_LINK if link_message_v1::is_symbolic_path(value) => {
+                    SOFT_LINK if name::is_symbolic_path(value) => {
                         LinkTargetView::Soft { target_path: value }
                     }
                     SOFT_LINK => return Err(FormatError::InvalidLinkTarget),
@@ -438,7 +389,7 @@ impl<'a> LinkPrefix<'a> {
         Ok((target, cursor.position(), value_len))
     }
 
-    pub(crate) fn read_hard_target(
+    pub(super) fn read_hard_target(
         &self,
         width: OffsetWidth,
     ) -> Result<Option<(StoredAddress, Range<usize>)>, FormatError> {
@@ -497,14 +448,14 @@ enum LinkNamePolicy {
 }
 
 // "The Link Message" of the format specification, version 4.0, defines these fields.
-pub(crate) const VERSION: u8 = 1;
-pub(crate) const PREFIX_LEN: usize = 2;
-pub(crate) const CREATION_ORDER_PRESENT: u8 = 0x04;
-pub(crate) const TYPE_PRESENT: u8 = 0x08;
-pub(crate) const CHARSET_PRESENT: u8 = 0x10;
+pub(super) const VERSION: u8 = 1;
+pub(super) const PREFIX_LEN: usize = 2;
+pub(super) const CREATION_ORDER_PRESENT: u8 = 0x04;
+pub(super) const TYPE_PRESENT: u8 = 0x08;
+pub(super) const CHARSET_PRESENT: u8 = 0x10;
 const RESERVED_FLAGS: u8 = 0xe0;
-pub(crate) const CREATION_ORDER_LEN: usize = 8;
-pub(crate) const EXTERNAL_VERSION_FLAGS: u8 = 0;
-pub(crate) const USER_LINK_MIN: u8 = 65;
-pub(crate) const ASCII: u8 = 0;
-pub(crate) const UTF8: u8 = 1;
+pub(super) const CREATION_ORDER_LEN: usize = 8;
+pub(super) const EXTERNAL_VERSION_FLAGS: u8 = 0;
+
+pub(super) const ASCII: u8 = 0;
+pub(super) const UTF8: u8 = 1;

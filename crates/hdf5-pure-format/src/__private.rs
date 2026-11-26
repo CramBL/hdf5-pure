@@ -306,17 +306,17 @@ pub use crate::group_info::GroupInfo;
 pub use crate::group_info::GroupInfoOutputTooSmall;
 pub use crate::group_info::GroupPhaseChange;
 pub use crate::group_info::GroupThresholds;
-pub use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
-pub use crate::link_message::LinkMessage;
-pub use crate::link_message::LinkTarget;
-pub use crate::link_message::SymbolicLinkTarget;
-pub use crate::link_message::link_is_named;
-pub use crate::link_message_read::{LinkMessageView, LinkTargetView};
-pub use crate::link_message_v1::{
+pub use crate::link::LinkMessage;
+pub use crate::link::LinkTarget;
+pub use crate::link::SymbolicLinkTarget;
+pub use crate::link::link_is_named;
+pub use crate::link::{
     LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError, UserLinkKind,
     UserLinkValue,
 };
-pub use crate::link_message_write::{LinkOutputTooSmall, PreparedLink};
+pub use crate::link::{LinkMessageView, LinkTargetView};
+pub use crate::link::{LinkOutputTooSmall, PreparedLink};
+pub use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
 pub use crate::link_storage::{
     GroupLinkStorage, LinkCreationCounter, LinkCreationPolicy, LinkStorageError, OwnedLink,
     OwnedLinkTarget, OwnedSymbolicLinkTarget,
