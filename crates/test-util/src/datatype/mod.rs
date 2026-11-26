@@ -332,6 +332,38 @@ pub fn float_enum_dataset(size: u32) -> Vec<u8> {
     image.build()
 }
 
+/// Encodes an enumeration whose base has one sequence descriptor and four padding bytes.
+///
+/// The descriptor uses four-byte offsets. `sequence_version` selects the version of the
+/// sequence's datatype description.
+pub fn enum_with_padded_sequence_parent(sequence_version: leaf::Version) -> Vec<u8> {
+    let leaf = leaf::unsigned_byte(leaf::Version::One);
+    let version = leaf::Version::Three.get();
+    let size = 16;
+    let sequence = VariableLengthSequence::new(sequence_version, 4, &leaf).build();
+    let compound = containers::compound(
+        version,
+        [1, 0, 0],
+        size,
+        containers::MemberOffset::One,
+        &[containers::CompoundField {
+            name: b"field",
+            offset: 0,
+            datatype: &sequence,
+        }],
+    );
+    containers::enumeration(
+        version,
+        [1, 0, 0],
+        size,
+        &compound,
+        &[containers::EnumValue {
+            name: b"value",
+            value: &[1, 0, 0, 0, 0, 0x10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+        }],
+    )
+}
+
 // "Format Signature and Superblock", "The Link Info Message", and "The Group Info
 // Message" in the format specification, version 4.0, define these structures.
 const ENUM_FIXTURE_SUPERBLOCK_SIZE: usize = 48;

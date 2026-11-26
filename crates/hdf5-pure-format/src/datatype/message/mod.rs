@@ -9,6 +9,7 @@ use core::num::NonZeroU16;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private;
+use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{
     BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, EnumMember,
     FixedPointType, FloatingPointType, FormatError, StringPadding, TimeType,
@@ -208,9 +209,10 @@ impl FloatingPointByteOrder {
 pub struct DatatypeMessage {
     version: DatatypeVersion,
     properties: DatatypeProperties,
-    /// The offset width inferred from an enumeration's decoded base. [`Self::to_datatype`]
-    /// uses this width to compute the base's stored size.
-    enumeration_base_offsets: Option<OffsetWidth>,
+    /// The offset widths inferred from an enumeration's decoded base. [`Self::to_datatype`]
+    /// records them in the semantic enumeration, and [`Self::stored_size`] checks
+    /// them against the destination width.
+    enumeration_base_offsets: DatatypeOffsets,
 }
 
 impl DatatypeMessage {
@@ -363,7 +365,7 @@ impl DatatypeMessage {
         Self {
             version,
             properties,
-            enumeration_base_offsets: None,
+            enumeration_base_offsets: DatatypeOffsets::default(),
         }
     }
 
@@ -388,7 +390,8 @@ impl DatatypeMessage {
     /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte size
     /// field. Propagates errors from nested stored-size calculations and [`ComplexType::new`].
     /// Returns [`FormatError::EnumBaseSizeMismatch`] if the selected width changes the stored
-    /// size of an enumeration's base type.
+    /// size of an enumeration's base type, or [`FormatError::EnumBaseOffsetWidthMismatch`] if
+    /// a stored descriptor in the base uses a different offset width.
     /// Returns [`FormatError::Internal`] if a complex component is not floating point.
     pub fn stored_size(&self, offset_width: OffsetWidth) -> Result<u32, FormatError> {
         self.size_with_offsets(Some(offset_width))
@@ -414,8 +417,13 @@ impl DatatypeMessage {
             | DatatypeProperties::Compound { size, .. } => Ok(*size),
             DatatypeProperties::Enumeration { base_type, members } => {
                 let size = enumeration_value_width(members);
-                if destination.is_some() {
-                    check_enum_base_size(size, base_type.size_with_offsets(destination)?)?;
+                if let Some(width) = destination {
+                    check_enum_base_layout(
+                        size,
+                        base_type.stored_size(width)?,
+                        self.enumeration_base_offsets,
+                        width,
+                    )?;
                 }
                 Ok(size)
             }
@@ -474,7 +482,7 @@ impl DatatypeMessage {
                 Datatype::Enumeration(__private::enumeration_from_stored_parts(
                     base_type.to_datatype()?,
                     size,
-                    self.enumeration_base_offsets.unwrap_or(OffsetWidth::Eight),
+                    self.enumeration_base_offsets,
                     members.clone(),
                 )?)
             }
@@ -745,6 +753,22 @@ fn check_enum_base_size(size: u32, base_size: u32) -> Result<(), FormatError> {
         return Err(FormatError::EnumBaseSizeMismatch { size, base_size });
     }
     Ok(())
+}
+
+/// Checks the base's size at the destination and its stored descriptor widths.
+///
+/// # Errors
+///
+/// Returns [`FormatError::EnumBaseSizeMismatch`] if the sizes differ, then checks the
+/// descriptor widths with [`DatatypeOffsets::check_destination`].
+fn check_enum_base_layout(
+    size: u32,
+    base_size: u32,
+    offsets: DatatypeOffsets,
+    destination: OffsetWidth,
+) -> Result<(), FormatError> {
+    check_enum_base_size(size, base_size)?;
+    offsets.check_destination(destination)
 }
 
 /// Converts a compound member count to a positive two-byte count.

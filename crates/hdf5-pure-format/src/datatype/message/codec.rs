@@ -13,6 +13,7 @@ use core::num::NonZeroU32;
 use core::slice;
 
 use hdf5_pure_core::__private;
+use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{
     CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, EnumMember, FloatingPointType,
     FormatError, ReferenceType, StringPadding, VariableLengthType,
@@ -139,7 +140,7 @@ impl DatatypeMessage {
         depth: MessageDepth,
     ) -> Result<Decoded<Self>, FormatError> {
         let header = Header::parse(cursor, Context::Description)?;
-        let mut size_offsets = None;
+        let mut offsets = DatatypeOffsets::default();
         let properties = match Layout::from_header(&header, Projection::Retained)? {
             Layout::Atomic(class) => {
                 let properties = class
@@ -153,7 +154,7 @@ impl DatatypeMessage {
                 return Ok(Decoded {
                     datatype: Self::with_properties(header.version, properties),
                     stored_size: super::positive_size(header.class.code(), header.size)?,
-                    size_offsets: None,
+                    offsets,
                 });
             }
             Layout::Compound(compound) => {
@@ -171,7 +172,7 @@ impl DatatypeMessage {
                     let Decoded {
                         datatype,
                         stored_size: field_size,
-                        ..
+                        offsets: field_offsets,
                     } = Self::parse_at(cursor, depth.child()?)?;
                     let index = members.len();
                     layout.insert(offset, field_size, index, |member_index| {
@@ -186,6 +187,7 @@ impl DatatypeMessage {
                         count,
                         DatatypeMessageMember::new(name.into_owned(), offset, datatype)?,
                     )?;
+                    offsets.include_field(field_offsets);
                 }
                 drop(layout);
                 let mut names = BTreeSet::new();
@@ -201,7 +203,7 @@ impl DatatypeMessage {
                         },
                     ),
                     stored_size,
-                    size_offsets: None,
+                    offsets,
                 });
             }
             Layout::Reference => return Err(FormatError::InvalidDatatypeClass(REFERENCE_CLASS)),
@@ -209,7 +211,7 @@ impl DatatypeMessage {
                 let Decoded {
                     datatype: base_type,
                     stored_size: base_size,
-                    size_offsets: base_offsets,
+                    offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
                 let members = enumeration.members(cursor, header.size, base_size)?;
                 super::compatible_child(header.version, ENUMERATION_CLASS, &base_type)?;
@@ -224,13 +226,13 @@ impl DatatypeMessage {
                         enumeration_base_offsets: base_offsets,
                     },
                     stored_size: base_size,
-                    size_offsets: None,
+                    offsets: base_offsets.in_enumeration(),
                 });
             }
-            Layout::VariableLength(metadata, offsets) => {
-                size_offsets = Some(offsets);
-                let base_type = Self::parse_at(cursor, depth.child()?)?.datatype;
-                let base_type = Box::new(base_type);
+            Layout::VariableLength(metadata, width) => {
+                let base = Self::parse_at(cursor, depth.child()?)?;
+                offsets = DatatypeOffsets::descriptor(width, base.offsets);
+                let base_type = Box::new(base.datatype);
                 match metadata {
                     VariableLengthMetadata::Sequence => {
                         DatatypeProperties::VariableLengthSequence { base_type }
@@ -249,7 +251,7 @@ impl DatatypeMessage {
                 let Decoded {
                     datatype: base_type,
                     stored_size: base_size,
-                    size_offsets: base_offsets,
+                    offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
                 let stored_size = decode::array_size(header.size, base_size, &dimensions)?;
                 super::compatible_child(header.version, ARRAY_CLASS, &base_type)?;
@@ -262,7 +264,7 @@ impl DatatypeMessage {
                         },
                     ),
                     stored_size,
-                    size_offsets: base_offsets,
+                    offsets: base_offsets,
                 });
             }
             Layout::Complex(complex) => {
@@ -278,7 +280,7 @@ impl DatatypeMessage {
         Ok(Decoded {
             datatype: Self::new(header.version, properties)?,
             stored_size: super::positive_size(header.class.code(), header.size)?,
-            size_offsets,
+            offsets,
         })
     }
 
@@ -289,8 +291,9 @@ impl DatatypeMessage {
     /// The writer computes each array size from the dimensions and the base datatype's stored
     /// element size at that width.
     /// Atomic element sizes are independent of it. An enumeration's stored size must match
-    /// the base type's size at that width. The writer appends unpadded, NUL-terminated names,
-    /// followed by the raw values in the same member order.
+    /// the base type's size at that width. Descriptors in a decoded enumeration's base must
+    /// use that width. The writer appends unpadded, NUL-terminated names, followed by the raw
+    /// values in the same member order.
     /// Compound sizes and member offsets are retained. The writer checks member bounds and
     /// overlaps using the stored member sizes at that width and writes each UTF-8 name with a
     /// NUL terminator.
@@ -309,7 +312,8 @@ impl DatatypeMessage {
     /// field at `offset_width`. Propagates errors from checking floating-point version/order
     /// compatibility and calculating the stored element size. Returns
     /// [`FormatError::EnumBaseSizeMismatch`] if the enumeration's value width differs from its
-    /// parent's size at `offset_width`. Returns
+    /// parent's size at `offset_width`, or [`FormatError::EnumBaseOffsetWidthMismatch`] if a
+    /// descriptor in its decoded base uses another offset width. Returns
     /// [`FormatError::CompoundFieldOutOfBounds`] if a member exceeds its compound element
     /// at `offset_width`, and [`FormatError::CompoundFieldOverlap`] if members overlap at that
     /// width. Returns [`FormatError::AllocationFailed`] if allocation for computed array or
@@ -474,6 +478,7 @@ impl<'a> PreparedDatatype<'a> {
     /// Counts the encoded bytes without allocating an output buffer. Uses `offset_width` to size
     /// variable-length descriptors at every level. Checks compound member ranges at that width.
     /// Checks each enumeration's value width against its base type's size at `offset_width`.
+    /// Checks that any descriptors in the decoded base use that width.
     ///
     /// The writer uses at least version 3 for compounds, enumerations, and arrays, and at least
     /// version 1 for variable-length descriptions. The writer raises each container's version
@@ -496,7 +501,9 @@ impl<'a> PreparedDatatype<'a> {
     /// overlap.
     ///
     /// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's value width differs
-    /// from its base datatype's stored size at `offset_width`.
+    /// from its base datatype's stored size at `offset_width`, or
+    /// [`FormatError::EnumBaseOffsetWidthMismatch`] if a descriptor in its decoded base
+    /// uses another offset width.
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the message body would exceed [`isize::MAX`]
     /// bytes, or [`FormatError::Internal`] for a datatype or reference kind without a canonical
@@ -710,7 +717,7 @@ impl Description<'_> {
             Self::FloatingPoint(datatype) => {
                 Body::Atomic(AtomicProperties::FloatingPoint(datatype))
             }
-            Self::Preserved(message) => Body::preserved(&message.properties),
+            Self::Preserved(message) => Body::preserved(message),
         }
     }
 }
@@ -769,6 +776,7 @@ impl<'a> Body<'a> {
                 size: datatype.size().get(),
                 base_type: Description::Canonical(datatype.base_type()),
                 members: datatype.members(),
+                offsets: __private::enumeration_base_offsets(datatype),
             },
             Datatype::VariableLength(kind) => ContainerProperties::VariableLength {
                 base_type: Description::Canonical(kind.base_type()),
@@ -795,8 +803,8 @@ impl<'a> Body<'a> {
         Self::Container(properties)
     }
 
-    fn preserved(properties: &'a DatatypeProperties) -> Self {
-        let properties = match properties {
+    fn preserved(message: &'a DatatypeMessage) -> Self {
+        let properties = match &message.properties {
             DatatypeProperties::FixedPoint(datatype) => {
                 return Self::Atomic(AtomicProperties::FixedPoint(datatype));
             }
@@ -832,6 +840,7 @@ impl<'a> Body<'a> {
                     size: super::enumeration_value_width(members),
                     base_type: Description::Preserved(base_type),
                     members,
+                    offsets: message.enumeration_base_offsets,
                 }
             }
             DatatypeProperties::VariableLengthSequence { base_type } => {
@@ -873,6 +882,7 @@ enum ContainerProperties<'a> {
         size: u32,
         base_type: Description<'a>,
         members: &'a [EnumMember],
+        offsets: DatatypeOffsets,
     },
     VariableLength {
         base_type: Description<'a>,
@@ -904,10 +914,16 @@ impl ContainerProperties<'_> {
                 size,
                 base_type,
                 members,
+                offsets,
             } => {
                 check_member_count(members.len(), child_depth.is_some())?;
                 let parent_size = base_type.prepare(preparation, child_depth)?;
-                super::check_enum_base_size(*size, parent_size)?;
+                super::check_enum_base_layout(
+                    *size,
+                    parent_size,
+                    *offsets,
+                    preparation.offset_width,
+                )?;
                 for member in *members {
                     preparation.add(1)?;
                     preparation.add(member.name.len())?;
@@ -983,6 +999,7 @@ impl ContainerProperties<'_> {
                 size,
                 base_type,
                 members,
+                offsets: _,
             } => {
                 let child = base_type.write(output);
                 debug_assert_eq!(*size, child.size);

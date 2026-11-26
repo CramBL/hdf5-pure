@@ -12,6 +12,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use core::str;
 
 use hdf5_pure_core::__private;
+use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{ComplexType, EnumMember, FormatError};
 
 use super::atomic;
@@ -32,9 +33,8 @@ pub(in crate::datatype) struct Decoded<T> {
     pub(in crate::datatype) datatype: T,
     /// The size in bytes of one stored element.
     pub(in crate::datatype) stored_size: NonZeroU32,
-    /// The offset width inferred from a variable-length descriptor's size, including
-    /// through array bases.
-    pub(in crate::datatype) size_offsets: Option<OffsetWidth>,
+    /// The offset widths inferred from variable-length descriptors in the description.
+    pub(in crate::datatype) offsets: DatatypeOffsets,
 }
 
 /// Whether to decode a semantic datatype or retain its message versions.

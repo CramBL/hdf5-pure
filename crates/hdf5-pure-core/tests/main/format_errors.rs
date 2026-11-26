@@ -64,6 +64,19 @@ fn storage_range(start: u64, length: u64) -> AddressRange<PhysicalAddress> {
     AddressRange::new(PhysicalAddress::new(start), length).unwrap()
 }
 
+#[test]
+fn enumeration_offset_width_diagnostic_includes_both_widths() {
+    let error = FormatError::EnumBaseOffsetWidthMismatch {
+        source_offset_size: 4,
+        destination_offset_size: 8,
+    };
+    assert_eq!(
+        error.to_string(),
+        "cannot write enumeration values with 4-byte base datatype offsets to a destination \
+         that uses 8-byte offsets"
+    );
+}
+
 #[rstest::rstest]
 #[case::decoded_size_limit(
     FormatError::DecodedSizeLimitExceeded {
