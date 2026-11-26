@@ -20,7 +20,7 @@ use hdf5_pure_core::{
 };
 
 use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
-use super::compound_layout::CompoundLayout;
+use super::compound_layout::{CompoundFields, CompoundLayout};
 use super::decode::{self, Decoded, Layout, Member, Projection};
 use super::description::{self, NAME_ALIGNMENT, NameLayout};
 use super::{
@@ -30,7 +30,7 @@ use crate::bytes::{self, ByteCursor};
 use crate::codec::{Decode, Encode};
 use crate::convert::Narrow;
 use crate::datatype::header::{Context, Header};
-use crate::datatype::legacy_member::CompoundV1Shape;
+use crate::datatype::legacy_member::{CompoundV1Shape, DIMENSION_BLOCK_SIZE};
 use crate::datatype::{
     self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_HOMOGENEOUS_BIT, COMPOUND_CLASS,
     DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, REFERENCE_CLASS,
@@ -303,13 +303,16 @@ impl DatatypeMessage {
     /// element size at that width.
     /// Atomic element sizes are independent of it. An enumeration's stored size must match
     /// the base type's size at that width. Descriptors in a decoded enumeration's base must
-    /// use that width. The writer appends each name and a NUL terminator. In versions 1 and 2,
-    /// it pads each terminated name to a multiple of eight bytes with zeros. In versions 3
-    /// through 5, it omits the padding. The raw values follow in the same member order.
-    /// Compound sizes and member offsets are retained. The writer checks member bounds and
-    /// overlaps using the stored member sizes at that width and appends a NUL terminator to
-    /// each compound name.
-    /// Member offsets occupy the minimum number of bytes needed for the compound size.
+    /// use that width. The writer terminates each compound or enumeration member name with a
+    /// NUL byte. It pads each terminated name to a multiple of eight bytes with zeros in
+    /// versions 1 and 2. Raw enumeration values follow the names in member order.
+    ///
+    /// The writer preserves compound sizes and member offsets. It writes four-byte member
+    /// offsets in versions 1 and 2 and uses the minimum width that fits the compound size in
+    /// versions 3 through 5. The version 1 dimension block contains the rank, all four extent
+    /// slots, and zeros for the permutation and reserved fields.
+    /// To check compound member ranges, the writer sizes each nested datatype at
+    /// `offset_width` and multiplies by the active extents for a version 1 inline array.
     /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
     ///
     /// The writer appends a NUL terminator to each nonempty opaque tag and pads its property
@@ -319,7 +322,6 @@ impl DatatypeMessage {
     ///
     /// Returns [`FormatError::OpaqueTagTooLong`] for a tag longer than 247 bytes, and
     /// [`FormatError::InvalidOpaqueTagByte`] for a tag containing a NUL byte.
-    /// Returns [`FormatError::InvalidDatatypeVersion`] for a version 1 or 2 compound.
     /// Returns [`FormatError::NestingDepthExceeded`] if the parent chain exceeds the nesting
     /// limit, and [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte size
     /// field at `offset_width`. Propagates errors from checking floating-point version/order
@@ -328,8 +330,9 @@ impl DatatypeMessage {
     /// parent's size at `offset_width`, or [`FormatError::EnumBaseOffsetWidthMismatch`] if a
     /// descriptor in its decoded base uses another offset width. Returns
     /// [`FormatError::CompoundFieldOutOfBounds`] if a member exceeds its compound element
-    /// at `offset_width`, and [`FormatError::CompoundFieldOverlap`] if members overlap at that
-    /// width. Returns [`FormatError::AllocationFailed`] if allocation for computed array or
+    /// at `offset_width`, [`FormatError::CompoundFieldOverlap`] if members overlap, or
+    /// [`FormatError::CompoundArraySizeOverflow`] if an inline array exceeds [`u32::MAX`] bytes.
+    /// Returns [`FormatError::AllocationFailed`] if allocation for computed array or
     /// complex sizes fails, or [`FormatError::OffsetOverflow`] if the message body would
     /// exceed [`isize::MAX`] bytes.
     ///
@@ -438,6 +441,38 @@ impl DatatypeMessage {
     /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
     /// assert_eq!(parsed, compound);
     /// assert_eq!(consumed, bytes.len());
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    ///
+    /// A version 1 compound stores inline array dimensions before the base datatype.
+    ///
+    /// ```
+    /// use hdf5_pure_core::{FixedPointType, FormatError};
+    /// use hdf5_pure_format::__private::{
+    ///     CompoundV1Member, CompoundV1Shape, DatatypeMessage, DatatypeMessageMember,
+    ///     DatatypeProperties, DatatypeVersion, OffsetWidth,
+    /// };
+    ///
+    /// let byte = DatatypeMessage::new(
+    ///     DatatypeVersion::One,
+    ///     DatatypeProperties::FixedPoint(FixedPointType::u8()),
+    /// )?;
+    /// let member = CompoundV1Member::new(
+    ///     DatatypeMessageMember::new(c"arr".into(), 0, byte),
+    ///     CompoundV1Shape::new(1, [2, 0, 0, 0])?,
+    /// );
+    /// let compound = DatatypeMessage::new(
+    ///     DatatypeVersion::One,
+    ///     DatatypeProperties::CompoundV1 { size: 2, members: vec![member] },
+    /// )?;
+    /// assert_eq!(compound.serialize(OffsetWidth::Eight)?, [
+    ///     0x16, 1, 0, 0, 2, 0, 0, 0,
+    ///     b'a', b'r', b'r', 0, 0, 0, 0, 0,
+    ///     0, 0, 0, 0,
+    ///     1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ///     2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ///     0x10, 0, 0, 0, 1, 0, 0, 0, 0, 0, 8, 0,
+    /// ]);
     /// # Ok::<(), FormatError>(())
     /// ```
     ///
@@ -814,10 +849,6 @@ impl Description<'_> {
             Body::Container(properties) => {
                 properties.prepare(preparation, depth.map(MessageDepth::child).transpose()?)
             }
-            Body::UnsupportedCompound(version) => Err(FormatError::InvalidDatatypeVersion {
-                class: COMPOUND_CLASS,
-                version: version.get(),
-            }),
             Body::Unsupported(reason) => Err(FormatError::Internal(reason.into())),
         }
     }
@@ -838,7 +869,7 @@ impl Description<'_> {
                 clippy::unreachable,
                 reason = "the immutable source has a supported encoding"
             )]
-            Body::Unsupported(_) | Body::UnsupportedCompound(_) => {
+            Body::Unsupported(_) => {
                 // Preparation rejects unsupported descriptions before retaining the source.
                 unreachable!("a prepared datatype has a supported description")
             }
@@ -870,7 +901,6 @@ enum Body<'a> {
     Container(ContainerProperties<'a>),
     Reference { size: u32, kind: u8 },
     Unsupported(&'static str),
-    UnsupportedCompound(DatatypeVersion),
 }
 
 impl<'a> Body<'a> {
@@ -915,6 +945,7 @@ impl<'a> Body<'a> {
             Datatype::Compound { size, members } => ContainerProperties::Compound {
                 size: *size,
                 members: CompoundMembers::Canonical(members),
+                fields: CompoundFields::for_version(DatatypeVersion::Three, *size),
             },
             Datatype::Enumeration(datatype) => ContainerProperties::Enumeration {
                 size: datatype.size().get(),
@@ -976,15 +1007,15 @@ impl<'a> Body<'a> {
             DatatypeProperties::Opaque { size, tag } => {
                 return Self::Atomic(AtomicProperties::Opaque { size: *size, tag });
             }
-            DatatypeProperties::CompoundV1 { .. } => {
-                return Self::UnsupportedCompound(message.version);
-            }
-            DatatypeProperties::Compound { .. } if message.version == DatatypeVersion::Two => {
-                return Self::UnsupportedCompound(message.version);
-            }
             DatatypeProperties::Compound { size, members } => ContainerProperties::Compound {
                 size: *size,
                 members: CompoundMembers::Preserved(members),
+                fields: CompoundFields::for_version(message.version, *size),
+            },
+            DatatypeProperties::CompoundV1 { size, members } => ContainerProperties::Compound {
+                size: *size,
+                members: CompoundMembers::PreservedV1(members),
+                fields: CompoundFields::LegacyWithShape,
             },
             DatatypeProperties::Enumeration { base_type, members } => {
                 ContainerProperties::Enumeration {
@@ -1029,6 +1060,7 @@ enum ContainerProperties<'a> {
     Compound {
         size: u32,
         members: CompoundMembers<'a>,
+        fields: CompoundFields,
     },
     Enumeration {
         size: u32,
@@ -1058,9 +1090,13 @@ impl ContainerProperties<'_> {
         child_depth: Option<MessageDepth>,
     ) -> Result<u32, FormatError> {
         match self {
-            Self::Compound { size, members } => {
+            Self::Compound {
+                size,
+                members,
+                fields,
+            } => {
                 check_member_count(members.len(), child_depth.is_some())?;
-                members.prepare(preparation, *size, child_depth)?;
+                members.prepare(preparation, *size, *fields, child_depth)?;
                 Ok(*size)
             }
             Self::Enumeration {
@@ -1130,14 +1166,28 @@ impl ContainerProperties<'_> {
         preserved: Option<DatatypeVersion>,
     ) -> NodeHeader {
         let (class, canonical_minimum, child_version, flags, size) = match self {
-            Self::Compound { size, members } => {
-                let width = datatype::offset_bytes_for_size(*size);
+            Self::Compound {
+                size,
+                members,
+                fields,
+            } => {
+                let width = fields.offset_width();
+                let name_layout = fields.name_layout();
                 let mut version = DatatypeVersion::Three;
                 for index in 0..members.len() {
-                    let (name, offset, child) = members.member(index);
-                    output.write(name.as_bytes());
-                    output.write(&[0]);
+                    let CompoundMemberSource {
+                        name,
+                        offset,
+                        child,
+                        shape,
+                    } = members.member(index);
+                    let name = name.as_bytes();
+                    output.write(name);
+                    output.write(&[0; NAME_ALIGNMENT][..name_layout.suffix_len(name.len())]);
                     output.write(&offset.to_le_bytes()[..width]);
+                    if let Some(shape) = shape {
+                        output.write(&shape.to_bytes());
+                    }
                     version = version.max(child.write(output).version);
                 }
                 (
@@ -1251,6 +1301,7 @@ fn check_member_count(count: usize, preserved: bool) -> Result<(), FormatError> 
 enum CompoundMembers<'a> {
     Canonical(&'a [CompoundMember]),
     Preserved(&'a [DatatypeMessageMember]),
+    PreservedV1(&'a [CompoundV1Member]),
 }
 
 impl CompoundMembers<'_> {
@@ -1258,13 +1309,24 @@ impl CompoundMembers<'_> {
         &self,
         preparation: &mut Preparation,
         size: u32,
+        fields: CompoundFields,
         child_depth: Option<MessageDepth>,
     ) -> Result<(), FormatError> {
-        let width = datatype::offset_bytes_for_size(size);
+        let width = fields.offset_width();
+        let name_layout = fields.name_layout();
         let mut layout = CompoundLayout::new(size);
         for index in 0..self.len() {
-            let (name, offset, child) = self.member(index);
-            preparation.add_member_prefix(name, width)?;
+            let CompoundMemberSource {
+                name,
+                offset,
+                child,
+                shape,
+            } = self.member(index);
+            preparation.add(name_layout.field_len(name.as_bytes().len()))?;
+            preparation.add(width)?;
+            if shape.is_some() {
+                preparation.add(DIMENSION_BLOCK_SIZE)?;
+            }
             let field_size = match child.prepare(preparation, child_depth) {
                 Ok(size) => size,
                 Err(error) => {
@@ -1277,6 +1339,10 @@ impl CompoundMembers<'_> {
                 }
             };
             if let Some(field_size) = NonZeroU32::new(field_size) {
+                let field_size = match shape {
+                    Some(shape) => shape.stored_size(field_size)?,
+                    None => field_size,
+                };
                 layout.insert(offset, field_size, index, |index| {
                     self.member_name(index).cloned()
                 })?;
@@ -1291,22 +1357,25 @@ impl CompoundMembers<'_> {
         match self {
             Self::Canonical(members) => members.len(),
             Self::Preserved(members) => members.len(),
+            Self::PreservedV1(members) => members.len(),
         }
     }
 
-    fn member(&self, index: usize) -> (&DatatypeMemberName, u64, Description<'_>) {
+    fn member(&self, index: usize) -> CompoundMemberSource<'_> {
         match self {
             Self::Canonical(members) => {
                 let (name, offset, datatype) = __private::compound_member_parts(&members[index]);
-                (name, offset, Description::Canonical(datatype))
-            }
-            Self::Preserved(members) => {
-                let DatatypeMessageMember {
+                CompoundMemberSource {
                     name,
-                    byte_offset,
-                    datatype,
-                } = &members[index];
-                (name, *byte_offset, Description::Preserved(datatype))
+                    offset,
+                    child: Description::Canonical(datatype),
+                    shape: None,
+                }
+            }
+            Self::Preserved(members) => CompoundMemberSource::preserved(&members[index], None),
+            Self::PreservedV1(members) => {
+                let member = &members[index];
+                CompoundMemberSource::preserved(member.member(), Some(member.shape()))
             }
         }
     }
@@ -1314,7 +1383,27 @@ impl CompoundMembers<'_> {
     fn member_name(&self, index: usize) -> Option<&DatatypeMemberName> {
         match self {
             Self::Canonical(members) => members.get(index).map(|member| &member.name),
-            Self::Preserved(members) => members.get(index).map(|member| &member.name),
+            Self::Preserved(members) => members.get(index).map(DatatypeMessageMember::name),
+            Self::PreservedV1(members) => members.get(index).map(|member| member.member().name()),
+        }
+    }
+}
+
+struct CompoundMemberSource<'a> {
+    name: &'a DatatypeMemberName,
+    offset: u64,
+    child: Description<'a>,
+    /// The version 1 dimension block, including the rank-zero block for a scalar.
+    shape: Option<CompoundV1Shape>,
+}
+
+impl<'a> CompoundMemberSource<'a> {
+    fn preserved(member: &'a DatatypeMessageMember, shape: Option<CompoundV1Shape>) -> Self {
+        Self {
+            name: member.name(),
+            offset: member.byte_offset(),
+            child: Description::Preserved(member.datatype()),
+            shape,
         }
     }
 }
@@ -1374,15 +1463,6 @@ impl Preparation {
             })?;
         self.computed_sizes.push(size);
         Ok(())
-    }
-
-    fn add_member_prefix(
-        &mut self,
-        name: &DatatypeMemberName,
-        offset_bytes: usize,
-    ) -> Result<(), FormatError> {
-        self.add(name.as_bytes().len())?;
-        self.add(1 + offset_bytes)
     }
 
     fn add(&mut self, len: usize) -> Result<(), FormatError> {

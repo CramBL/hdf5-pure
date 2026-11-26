@@ -151,6 +151,17 @@ pub fn narrow_sequence_file(shape: SequenceMemberShape) -> Vec<u8> {
 
 /// Builds `data` with one compound element whose `arr` member contains `[11, 22, 33, 44]`.
 pub fn file() -> Vec<u8> {
+    file_with_datatype(array_member())
+}
+
+/// Builds a file with the supplied datatype message and one 16-byte element in `data`.
+///
+/// Writes four consecutive little-endian `i32` values, `[11, 22, 33, 44]`, as the element.
+///
+/// # Panics
+///
+/// Panics if the padded datatype message exceeds [`u16::MAX`] bytes.
+pub fn file_with_datatype(datatype: Vec<u8>) -> Vec<u8> {
     let mut image = Image::starting_with(&[0; 96]);
     let payload: Vec<_> = [11i32, 22, 33, 44]
         .into_iter()
@@ -164,7 +175,7 @@ pub fn file() -> Vec<u8> {
                     MessageType::DATASPACE,
                     dataspace::v1(1, Flags::NONE, &[1], None),
                 ),
-                padded(MessageType::DATATYPE, array_member()),
+                padded(MessageType::DATATYPE, datatype),
                 padded(
                     MessageType::DATA_LAYOUT,
                     data_layout::contiguous(address, 16),

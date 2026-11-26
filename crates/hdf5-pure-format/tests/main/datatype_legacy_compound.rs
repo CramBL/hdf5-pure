@@ -433,7 +433,7 @@ fn version_one_compound_construction_checks_inline_array_footprints(
 }
 
 #[test]
-fn retained_version_two_compound_accepts_the_largest_member_count() {
+fn retained_version_two_compound_preserves_the_largest_member_count() {
     let byte = leaf::unsigned_byte(Version::One);
     let names: Vec<_> = (0..u16::MAX).map(|index| format!("m{index}")).collect();
     let fields: Vec<_> = (0..u16::MAX)
@@ -462,6 +462,7 @@ fn retained_version_two_compound_accepts_the_largest_member_count() {
     let last = members.last().unwrap();
     assert_eq!(last.byte_offset(), u64::from(u16::MAX - 1));
     assert_eq!(last.name().as_bytes(), names.last().unwrap().as_bytes());
+    assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
 }
 
 #[test]
@@ -482,19 +483,196 @@ fn version_one_compound_construction_rejects_an_unrepresentable_member_count() {
 }
 
 #[rstest]
-#[case::v1(legacy_compound::array_member(), Version::One)]
-#[case::v2(containers::legacy_compound_v2(), Version::Two)]
-fn retained_legacy_compound_preparation_rejects_unsupported_output(
-    #[case] bytes: Vec<u8>,
-    #[case] version: Version,
+#[case::scalar(0, [3, 0, u32::MAX, 7])]
+#[case::rank_one(1, [2, 0, u32::MAX, 3])]
+#[case::rank_two(2, [2, 3, u32::MAX, 0])]
+#[case::rank_three(3, [2, 3, 4, u32::MAX])]
+#[case::rank_four(4, [2, 3, 4, 5])]
+fn retained_version_one_compound_encodes_all_extent_slots(
+    #[case] rank: u8,
+    #[case] extents: [u32; 4],
 ) {
+    let size = MEMBER_OFFSET + extents[..usize::from(rank)].iter().product::<u32>();
+    let message = DatatypeMessage::new(
+        DatatypeVersion::One,
+        DatatypeProperties::CompoundV1 {
+            size,
+            members: vec![version_one_member(
+                c"arr".into(),
+                MEMBER_OFFSET,
+                rank,
+                extents,
+            )],
+        },
+    )
+    .unwrap();
+    let child = leaf::unsigned_byte(Version::One);
+    let expected = legacy_compound::raw_member(size, MEMBER_OFFSET, rank, 0, extents, &child);
+    assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), expected,);
+}
+
+#[test]
+fn retained_version_two_compound_encodes_padded_names_and_nested_versions() {
+    let child = leaf::unsigned_byte(Version::Two);
+    let nested = legacy_compound::array_member();
+    let size = MEMBER_OFFSET + 1;
+    let message = DatatypeMessage::new(
+        DatatypeVersion::Two,
+        DatatypeProperties::Compound {
+            size,
+            members: vec![
+                DatatypeMessageMember::new(
+                    c"abcdef\xff".into(),
+                    u64::from(MEMBER_OFFSET),
+                    byte_description(DatatypeVersion::Two),
+                ),
+                DatatypeMessageMember::new(
+                    c"abcdefgh".into(),
+                    0,
+                    DatatypeMessage::parse(&nested).unwrap().0,
+                ),
+            ],
+        },
+    )
+    .unwrap();
+    let expected = containers::compound(
+        Version::Two.get(),
+        [2, 0, 0],
+        size,
+        MemberOffset::Four,
+        &[
+            CompoundField {
+                name: b"abcdef\xff",
+                offset: u64::from(MEMBER_OFFSET),
+                datatype: &child,
+            },
+            CompoundField {
+                name: b"abcdefgh",
+                offset: 0,
+                datatype: &nested,
+            },
+        ],
+    );
+    assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), expected);
+}
+
+#[rstest]
+#[case::v1(legacy_compound::array_member())]
+#[case::v2(containers::legacy_compound_v2())]
+fn retained_legacy_compound_encoding_preserves_the_output_suffix(#[case] bytes: Vec<u8>) {
+    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    let prepared = message.prepare(OffsetWidth::Eight).unwrap();
+    assert_eq!(prepared.encoded_size(), bytes.len());
+    let suffix = [0xff, 0xfe];
+    let mut output = vec![0xa5; bytes.len()];
+    output.extend_from_slice(&suffix);
+    let written = prepared.write_into(&mut output).unwrap();
+    assert_eq!(written, bytes.len());
+    assert_eq!(&output[..written], bytes);
+    assert_eq!(&output[written..], suffix);
+}
+
+#[rstest]
+#[case::v1(legacy_compound::array_member())]
+#[case::v2(containers::legacy_compound_v2())]
+fn retained_legacy_compound_encoding_leaves_short_output_unchanged(#[case] bytes: Vec<u8>) {
     let (message, _) = DatatypeMessage::parse(&bytes).unwrap();
+    let prepared = message.prepare(OffsetWidth::Eight).unwrap();
+    let mut output = vec![0xa5; bytes.len() - 1];
+    assert_eq!(
+        prepared.write_into(&mut output).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: bytes.len(),
+            available: output.len(),
+        },
+    );
+    assert_eq!(output, vec![0xa5; bytes.len() - 1]);
+}
+
+#[rstest]
+#[case::two_byte_offsets(OffsetWidth::Two, 2)]
+#[case::four_byte_offsets(OffsetWidth::Four, 4)]
+#[case::eight_byte_offsets(OffsetWidth::Eight, 8)]
+fn retained_inline_array_encoding_uses_the_destination_descriptor_size(
+    #[case] width: OffsetWidth,
+    #[case] fixture_width: usize,
+) {
+    let offset = 4;
+    let size = 36;
+    let shape = [2, 0, u32::MAX, 1];
+    let base = leaf::unsigned_byte(Version::One);
+    let source_child = VariableLengthSequence::new(Version::One, 8, &base).build();
+    let source = legacy_compound::raw_member(size, offset, 1, 0, shape, &source_child);
+    let (message, _) = DatatypeMessage::parse(&source).unwrap();
+    let child = VariableLengthSequence::new(Version::One, fixture_width, &base).build();
+    let expected = legacy_compound::raw_member(size, offset, 1, 0, shape, &child);
+    assert_eq!(message.serialize(width).unwrap(), expected);
+}
+
+#[rstest]
+#[case::four_byte_offsets(OffsetWidth::Four, 24)]
+#[case::eight_byte_offsets(OffsetWidth::Eight, 32)]
+fn retained_inline_array_encoding_checks_bounds_at_selected_width(
+    #[case] width: OffsetWidth,
+    #[case] field_size: u32,
+) {
+    let offset = 4;
+    let source = legacy_compound::sequence_member(2, offset, SequenceMemberShape::ImplicitArray);
+    let (message, _) = DatatypeMessage::parse(&source).unwrap();
+    assert_eq!(
+        message.prepare(width).unwrap_err(),
+        FormatError::CompoundFieldOutOfBounds {
+            name: c"arr".into(),
+            offset: u64::from(offset),
+            field_size,
+            compound_size: 24,
+        },
+    );
+}
+
+#[test]
+fn retained_inline_array_encoding_checks_overlap_at_selected_width() {
+    let base = leaf::unsigned_byte(Version::One);
+    let sequence = VariableLengthSequence::new(Version::One, 2, &base).build();
+    let description = DatatypeMessage::new(
+        DatatypeVersion::One,
+        DatatypeProperties::CompoundV1 {
+            size: 40,
+            members: vec![
+                CompoundV1Member::new(
+                    DatatypeMessageMember::new(
+                        c"arr".into(),
+                        0,
+                        DatatypeMessage::parse(&sequence).unwrap().0,
+                    ),
+                    CompoundV1Shape::new(1, [2, 0, 0, 0]).unwrap(),
+                ),
+                version_one_member(c"next".into(), 20, 0, [0; 4]),
+            ],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        description.prepare(OffsetWidth::Four).unwrap_err(),
+        FormatError::CompoundFieldOverlap {
+            first: c"arr".into(),
+            second: c"next".into(),
+        },
+    );
+}
+
+#[test]
+fn retained_inline_array_encoding_rejects_footprint_overflow_at_selected_width() {
+    let base = leaf::unsigned_byte(Version::One);
+    let child = VariableLengthSequence::new(Version::One, 2, &base);
+    let extent = u32::MAX / child.descriptor_size();
+    let child = child.build();
+    let source = legacy_compound::raw_member(u32::MAX, 0, 1, 0, [extent, 0, 0, 0], &child);
+    let (message, _) = DatatypeMessage::parse(&source).unwrap();
     assert_eq!(
         message.prepare(OffsetWidth::Eight).unwrap_err(),
-        FormatError::InvalidDatatypeVersion {
-            class: Class::COMPOUND.0,
-            version: version.get(),
-        }
+        FormatError::CompoundArraySizeOverflow { size: 16, extent },
     );
 }
 
