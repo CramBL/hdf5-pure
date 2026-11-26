@@ -549,51 +549,36 @@ impl ManagedHeapPlan {
         owner: StoredAddress,
         address: impl Fn(usize) -> Result<StoredAddress, FormatError>,
     ) -> Result<Vec<u8>, FormatError> {
-        let mut data = Vec::with_capacity(self.block_length(index).to_usize()?);
         if let Some(block) = self.indirects.get(index) {
-            data.extend_from_slice(&INDIRECT_SIGNATURE);
-            data.push(VERSION);
-            self.write_address(&mut data, owner)?;
-            self.write_heap_offset(&mut data, block.heap_offset)?;
-            for entry in &block.entries {
-                let child = match entry {
-                    Some(Child::Direct(index)) => Some(address(self.indirects.len() + index)?),
-                    Some(Child::Indirect(index)) => Some(address(*index)?),
-                    None => None,
-                };
-                bytes::try_write_decoded_address(
-                    &mut data,
-                    child.map_or(
-                        DecodedStoredAddress::Undefined,
-                        DecodedStoredAddress::Defined,
-                    ),
-                    self.offset_width,
-                )?;
-            }
-            let checksum = crate::checksum::jenkins_lookup3(&data);
-            data.extend_from_slice(&checksum.to_le_bytes());
-            debug_assert_eq!(data.len() as u64, block.size);
+            let prefix = self.block_prefix(owner, block.heap_offset);
+            prefix.encode_indirect(
+                block.size,
+                block.entries.iter().map(|entry| match entry {
+                    Some(Child::Direct(index)) => address(self.indirects.len() + index).map(Some),
+                    Some(Child::Indirect(index)) => address(*index).map(Some),
+                    None => Ok(None),
+                }),
+            )
         } else {
             let block = &self.directs[index - self.indirects.len()];
-            data.extend_from_slice(&DIRECT_SIGNATURE);
-            data.push(VERSION);
-            self.write_address(&mut data, owner)?;
-            self.write_heap_offset(&mut data, block.heap_offset)?;
-            let checksum_at = data.len();
-            data.extend_from_slice(&[0; CHECKSUM_LEN]);
-            debug_assert_eq!(data.len() as u64, self.direct_header_size);
-            for &index in &block.objects {
-                debug_assert_eq!(
-                    block.heap_offset.checked_add(data.len() as u64),
-                    Some(self.offsets[index])
-                );
-                data.extend_from_slice(objects[index]);
-            }
-            data.resize(block.size.to_usize()?, 0);
-            let checksum = crate::checksum::jenkins_lookup3(&data);
-            data[checksum_at..checksum_at + CHECKSUM_LEN].copy_from_slice(&checksum.to_le_bytes());
+            self.block_prefix(owner, block.heap_offset).encode_direct(
+                block.size,
+                self.direct_header_size,
+                block
+                    .objects
+                    .iter()
+                    .map(|&index| (self.offsets[index], objects[index])),
+            )
         }
-        Ok(data)
+    }
+
+    fn block_prefix(&self, owner: StoredAddress, heap_offset: u64) -> BlockPrefix {
+        BlockPrefix {
+            owner,
+            offset_width: self.offset_width,
+            heap_offset,
+            block_offset_bytes: self.block_offset_bytes,
+        }
     }
 
     /// Places objects in managed heap order and computes the heap statistics.
@@ -941,23 +926,77 @@ impl ManagedHeapPlan {
         }
         Ok(StoredAddress::new(address))
     }
+}
 
-    fn write_address(&self, data: &mut Vec<u8>, address: StoredAddress) -> Result<(), FormatError> {
-        bytes::try_write_decoded_address(
-            data,
-            DecodedStoredAddress::Defined(address),
-            self.offset_width,
-        )
+struct BlockPrefix {
+    owner: StoredAddress,
+    offset_width: OffsetWidth,
+    heap_offset: u64,
+    block_offset_bytes: usize,
+}
+
+impl BlockPrefix {
+    fn encode_indirect(
+        &self,
+        size: u64,
+        children: impl Iterator<Item = Result<Option<StoredAddress>, FormatError>>,
+    ) -> Result<Vec<u8>, FormatError> {
+        let mut data = self.encode(size, &INDIRECT_SIGNATURE)?;
+        for child in children {
+            bytes::try_write_decoded_address(
+                &mut data,
+                child?.map_or(
+                    DecodedStoredAddress::Undefined,
+                    DecodedStoredAddress::Defined,
+                ),
+                self.offset_width,
+            )?;
+        }
+        let checksum = crate::checksum::jenkins_lookup3(&data);
+        data.extend_from_slice(&checksum.to_le_bytes());
+        debug_assert_eq!(data.len() as u64, size);
+        Ok(data)
     }
 
-    fn write_heap_offset(&self, data: &mut Vec<u8>, offset: u64) -> Result<(), FormatError> {
-        let encoded = offset.to_le_bytes();
+    fn encode_direct<'a>(
+        &self,
+        size: u64,
+        header_size: u64,
+        objects: impl Iterator<Item = (u64, &'a [u8])>,
+    ) -> Result<Vec<u8>, FormatError> {
+        let mut data = self.encode(size, &DIRECT_SIGNATURE)?;
+        let checksum_at = data.len();
+        data.extend_from_slice(&[0; CHECKSUM_LEN]);
+        debug_assert_eq!(data.len() as u64, header_size);
+        for (offset, object) in objects {
+            debug_assert_eq!(
+                self.heap_offset.checked_add(data.len() as u64),
+                Some(offset)
+            );
+            data.extend_from_slice(object);
+        }
+        data.resize(size.to_usize()?, 0);
+        let checksum = crate::checksum::jenkins_lookup3(&data);
+        data[checksum_at..checksum_at + CHECKSUM_LEN].copy_from_slice(&checksum.to_le_bytes());
+        Ok(data)
+    }
+
+    fn encode(&self, size: u64, signature: &[u8; 4]) -> Result<Vec<u8>, FormatError> {
+        let mut data = Vec::with_capacity(size.to_usize()?);
+        data.extend_from_slice(signature);
+        data.push(VERSION);
+        bytes::try_write_decoded_address(
+            &mut data,
+            DecodedStoredAddress::Defined(self.owner),
+            self.offset_width,
+        )?;
+        let encoded = self.heap_offset.to_le_bytes();
         data.extend_from_slice(
             encoded
                 .get(..self.block_offset_bytes)
                 .ok_or(FormatError::InvalidFractalHeapGeometry)?,
         );
-        Ok(())
+        Ok(data)
     }
 }
 
