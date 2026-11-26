@@ -232,7 +232,7 @@ fn parse_datatype_at(
 ) -> Result<Decoded<Datatype>, FormatError> {
     let header = Header::parse(cursor, Context::Description)?;
     let size = header.size;
-    let mut size_offsets = None;
+    let mut offsets = __private::DatatypeOffsets::default();
     let datatype = match Layout::from_header(&header, Projection::Semantic)? {
         Layout::Atomic(class) => class
             .decode(
@@ -255,7 +255,7 @@ fn parse_datatype_at(
                 let Decoded {
                     datatype,
                     stored_size,
-                    ..
+                    offsets: field_offsets,
                 } = parse_nested_datatype(cursor, depth)?;
                 let stored_size = match &shape {
                     Some(shape) => shape.stored_size(stored_size)?,
@@ -278,6 +278,7 @@ fn parse_datatype_at(
                     count,
                     __private::compound_member(name.into_owned(), offset, datatype),
                 )?;
+                offsets.include_field(field_offsets);
             }
             Datatype::Compound { size, members }
         }
@@ -286,23 +287,24 @@ fn parse_datatype_at(
             let Decoded {
                 datatype: base_type,
                 stored_size: base_size,
-                size_offsets: base_offsets,
+                offsets: base_offsets,
             } = parse_nested_datatype(cursor, depth)?;
             let members = enumeration.members(cursor, size, base_size)?;
+            offsets = base_offsets.in_enumeration();
             Datatype::Enumeration(__private::enumeration_from_stored_parts(
                 base_type,
                 base_size,
-                base_offsets.unwrap_or(OffsetWidth::Eight),
+                base_offsets,
                 members,
             )?)
         }
-        Layout::VariableLength(metadata, offsets) => {
-            size_offsets = Some(offsets);
-            let base_type = parse_nested_datatype(cursor, depth)?.datatype;
+        Layout::VariableLength(metadata, width) => {
+            let base = parse_nested_datatype(cursor, depth)?;
+            offsets = __private::DatatypeOffsets::descriptor(width, base.offsets);
             let kind = match metadata {
-                VariableLengthMetadata::Sequence => VariableLengthType::sequence(base_type),
+                VariableLengthMetadata::Sequence => VariableLengthType::sequence(base.datatype),
                 VariableLengthMetadata::String { padding, charset } => VariableLengthType::String(
-                    VariableLengthStringType::with_base_type(padding, charset, base_type)?,
+                    VariableLengthStringType::with_base_type(padding, charset, base.datatype)?,
                 ),
             };
             Datatype::VariableLength(kind)
@@ -317,7 +319,7 @@ fn parse_datatype_at(
                     dimensions,
                 },
                 stored_size,
-                size_offsets: base.size_offsets,
+                offsets: base.offsets,
             });
         }
         Layout::Complex(complex) => {
@@ -328,7 +330,7 @@ fn parse_datatype_at(
     Ok(Decoded {
         datatype,
         stored_size: message::positive_size(header.class.code(), size)?,
-        size_offsets,
+        offsets,
     })
 }
 
@@ -369,7 +371,8 @@ fn parse_nested_datatype(
 ///
 /// Canonical serialization accepts empty compound or enumeration member sets and zero
 /// array extents. An enumeration's value width must match its base type's size at the
-/// eight-byte offset width. Writes each enumeration value as supplied.
+/// eight-byte offset width. Descriptors in a decoded enumeration's base must use eight-byte
+/// offsets. Writes each enumeration value as supplied.
 ///
 /// # Errors
 ///

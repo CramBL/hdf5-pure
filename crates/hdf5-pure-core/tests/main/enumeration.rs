@@ -72,7 +72,10 @@ fn decoded_enumeration_uses_the_supplied_base_offset_width() {
         __private::enumeration_from_stored_parts(
             base,
             NonZeroU32::new(12).unwrap(),
-            OffsetWidth::Two,
+            __private::DatatypeOffsets::descriptor(
+                OffsetWidth::Two,
+                __private::DatatypeOffsets::default(),
+            ),
             vec![EnumMember::new("value".into(), vec![0; 12])],
         )
         .unwrap_err(),

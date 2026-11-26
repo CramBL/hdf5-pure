@@ -316,6 +316,13 @@ pub enum FormatError {
     EmptyTinyHeapIdPayload,
     /// The supplied base datatype for enumeration construction is not fixed point.
     EnumBaseNotInteger,
+    /// A descriptor in an enumeration's base uses a different offset width than the destination.
+    EnumBaseOffsetWidthMismatch {
+        /// The descriptor's offset width in bytes.
+        source_offset_size: u8,
+        /// The destination file's offset width in bytes.
+        destination_offset_size: u8,
+    },
     /// An enumeration's element size differs from its base type's element size.
     EnumBaseSizeMismatch {
         /// The enumeration's element size in bytes.
@@ -2215,6 +2222,14 @@ impl fmt::Display for FormatError {
                     "an enumeration's base type must be an integer (fixed-point) type"
                 )
             }
+            Self::EnumBaseOffsetWidthMismatch {
+                source_offset_size,
+                destination_offset_size,
+            } => write!(
+                f,
+                "cannot write enumeration values with {source_offset_size}-byte base datatype \
+                 offsets to a destination that uses {destination_offset_size}-byte offsets"
+            ),
             Self::EnumBaseSizeMismatch { size, base_size } => write!(
                 f,
                 "enumeration element size {size} differs from its {base_size}-byte base type"

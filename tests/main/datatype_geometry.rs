@@ -1,7 +1,10 @@
-use hdf5_pure::{CompoundTypeBuilder, Datatype, Error, FileBuilder, FormatError, OffsetWidth};
+use hdf5_pure::{
+    CompoundTypeBuilder, Datatype, Error, File, FileBuilder, FormatError, OffsetWidth,
+};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::PreparedDatatype;
 use rstest::rstest;
+use test_util::datatype;
 use test_util::datatype::VariableLengthSequence;
 use test_util::datatype::containers::{self, EnumValue};
 use test_util::datatype::leaf::{Leaf, Version};
@@ -14,6 +17,10 @@ use test_util::datatype::leaf::{Leaf, Version};
 #[case::enumeration(decoded_narrow_enumeration(), FormatError::EnumBaseSizeMismatch {
     size: 12,
     base_size: 16,
+})]
+#[case::padded_enumeration(decoded_enumeration_with_padded_compound_base(), FormatError::EnumBaseOffsetWidthMismatch {
+    source_offset_size: 4,
+    destination_offset_size: 8,
 })]
 fn writer_rejects_invalid_datatype_geometry_before_output(
     #[case] datatype: Datatype,
@@ -40,6 +47,26 @@ fn writer_rejects_invalid_datatype_geometry_before_output(
     };
     assert_eq!(error, expected);
     assert_eq!(destination, b"previous bytes");
+}
+
+#[test]
+fn writer_preserves_padded_compound_enumeration_at_the_source_width() {
+    let datatype = decoded_enumeration_with_padded_compound_base();
+    let mut builder = FileBuilder::new();
+    builder.with_offset_width(OffsetWidth::Four);
+    builder
+        .create_dataset("value")
+        .with_unallocated_storage(datatype.clone(), &[1]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let dataset = file.dataset("value").unwrap();
+    assert_eq!(dataset.datatype().unwrap(), datatype);
+    assert_eq!(dataset.shape().unwrap(), [1]);
+}
+
+fn decoded_enumeration_with_padded_compound_base() -> Datatype {
+    format::parse_datatype(&datatype::enum_with_padded_sequence_parent(Version::Three))
+        .unwrap()
+        .0
 }
 
 fn decoded_narrow_enumeration() -> Datatype {

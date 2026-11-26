@@ -93,6 +93,9 @@ impl EnumMember {
 /// enumeration size and accepts other parent classes (`H5O__dtype_decode_helper` in `H5Odtype.c`,
 /// HDF5 2.2.0).
 ///
+/// The writer preserves the member bytes. The offset width of each variable-length
+/// descriptor in a decoded base must match the destination's offset width.
+///
 /// Class 8 of the datatype message is defined in "The Datatype Message" of the [format
 /// specification, version 4.0][spec].
 ///
@@ -102,6 +105,7 @@ pub struct EnumerationType {
     base_type: Box<Datatype>,
     size: NonZeroU32,
     members: Vec<EnumMember>,
+    offsets: DatatypeOffsets,
 }
 
 impl EnumerationType {
@@ -130,29 +134,35 @@ impl EnumerationType {
     /// # Ok::<(), hdf5_pure_core::FormatError>(())
     /// ```
     pub fn new(base_type: FixedPointType, members: Vec<EnumMember>) -> Result<Self, FormatError> {
-        Self::from_parts(Datatype::FixedPoint(base_type), base_type.size(), members)
+        Self::from_parts(
+            Datatype::FixedPoint(base_type),
+            base_type.size(),
+            members,
+            DatatypeOffsets::default(),
+        )
     }
 
     pub(crate) fn from_stored_parts(
         base_type: Datatype,
         size: NonZeroU32,
-        offsets: OffsetWidth,
+        offsets: DatatypeOffsets,
         members: Vec<EnumMember>,
     ) -> Result<Self, FormatError> {
-        let base_size = stored_type_size(&base_type, offsets)?;
+        let base_size = stored_type_size_with_offsets(&base_type, offsets.element)?;
         if base_size != size.get() {
             return Err(FormatError::EnumBaseSizeMismatch {
                 size: size.get(),
                 base_size,
             });
         }
-        Self::from_parts(base_type, size, members)
+        Self::from_parts(base_type, size, members, offsets)
     }
 
     fn from_parts(
         base_type: Datatype,
         size: NonZeroU32,
         mut members: Vec<EnumMember>,
+        offsets: DatatypeOffsets,
     ) -> Result<Self, FormatError> {
         if let Some(index) = members
             .iter()
@@ -169,6 +179,7 @@ impl EnumerationType {
             base_type: Box::new(base_type),
             size,
             members,
+            offsets,
         })
     }
 
@@ -185,6 +196,65 @@ impl EnumerationType {
     /// Borrows the members in the order supplied at construction.
     pub fn members(&self) -> &[EnumMember] {
         &self.members
+    }
+
+    /// Returns the descriptor widths of the base as stored in the message.
+    pub(crate) const fn offsets(&self) -> DatatypeOffsets {
+        self.offsets
+    }
+}
+
+/// The offset widths of variable-length descriptors in a datatype description.
+///
+/// The element size depends on the outermost descriptor's width for a variable-length datatype
+/// or an array with a variable-length element. The writer also checks widths deeper in a
+/// decoded enumeration's base to preserve the layout of its stored values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DatatypeOffsets {
+    /// The descriptor width used to compute the stored element size, if one applies.
+    element: Option<OffsetWidth>,
+    /// The set of descriptor widths used anywhere in the description.
+    used: u8,
+}
+
+impl DatatypeOffsets {
+    /// Adds a descriptor width to the widths from its base and uses it for element sizing.
+    pub const fn descriptor(width: OffsetWidth, base: Self) -> Self {
+        Self {
+            element: Some(width),
+            used: base.used | width.get(),
+        }
+    }
+
+    /// Includes the widths from a compound member. The compound has a declared element size.
+    pub fn include_field(&mut self, field: Self) {
+        self.used |= field.used;
+    }
+
+    /// Keeps the widths from the base. The enumeration has a declared element size.
+    pub const fn in_enumeration(self) -> Self {
+        Self {
+            element: None,
+            used: self.used,
+        }
+    }
+
+    /// Checks that the stored descriptors use the destination's offset width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::EnumBaseOffsetWidthMismatch`] with the smallest stored width
+    /// that differs from `destination`, if any.
+    pub fn check_destination(self, destination: OffsetWidth) -> Result<(), FormatError> {
+        for source in [OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight] {
+            if source != destination && self.used & source.get() != 0 {
+                return Err(FormatError::EnumBaseOffsetWidthMismatch {
+                    source_offset_size: source.get(),
+                    destination_offset_size: destination.get(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -506,12 +576,36 @@ pub fn stored_type_size(
     datatype: &Datatype,
     offset_width: OffsetWidth,
 ) -> Result<u32, FormatError> {
+    stored_type_size_with_offsets(datatype, Some(offset_width))
+}
+
+/// Returns the stored element size in bytes.
+///
+/// Supply `offset_width` for a variable-length datatype or an array whose innermost element
+/// is variable-length. Uses the declared element size for compounds and enumerations.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if a required offset width is absent, or
+/// [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte datatype size field.
+fn stored_type_size_with_offsets(
+    datatype: &Datatype,
+    offset_width: Option<OffsetWidth>,
+) -> Result<u32, FormatError> {
     match datatype {
-        Datatype::VariableLength(_) => Ok(variable_length_descriptor_size(offset_width)),
+        Datatype::VariableLength(_) => {
+            let offset_width = offset_width.ok_or_else(|| {
+                FormatError::Internal("missing the stored variable-length descriptor width".into())
+            })?;
+            Ok(variable_length_descriptor_size(offset_width))
+        }
         Datatype::Array {
             base_type,
             dimensions,
-        } => array_type_size(stored_type_size(base_type, offset_width)?, dimensions),
+        } => array_type_size(
+            stored_type_size_with_offsets(base_type, offset_width)?,
+            dimensions,
+        ),
         _ => Ok(datatype.type_size()),
     }
 }

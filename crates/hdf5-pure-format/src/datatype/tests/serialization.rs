@@ -184,7 +184,7 @@ fn nested_opaque_tags_keep_their_encoding_boundaries(
                                 tag: tag.clone(),
                             },
                             NonZeroU32::new(4).unwrap(),
-                            OffsetWidth::Eight,
+                            __private::DatatypeOffsets::default(),
                             Vec::new(),
                         )
                         .unwrap(),

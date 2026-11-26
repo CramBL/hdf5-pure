@@ -445,6 +445,203 @@ fn constructed_containers_keep_a_retained_enumeration_width(
     );
 }
 
+#[test]
+fn enumeration_preserves_padded_compound_values_at_the_source_width() {
+    let source = datatype::enum_with_padded_sequence_parent(Version::Three);
+    let canonical = datatype::enum_with_padded_sequence_parent(Version::One);
+    assert_eq!(source.len(), 65);
+    let (datatype, retained) = parse_enumeration(&source);
+    let Datatype::Enumeration(enumeration) = &datatype else {
+        panic!("expected an enumeration, got {datatype:?}");
+    };
+    assert_eq!(enumeration.size().get(), 16);
+    assert_eq!(
+        enumeration.members(),
+        [EnumMember::new("value".into(), source[49..].to_vec())]
+    );
+    let (descriptor, consumed) =
+        format::VariableLengthDescriptor::parse(OffsetWidth::Four, &enumeration.members()[0].value)
+            .unwrap();
+    assert_eq!(consumed, 12);
+    assert_eq!(descriptor.element_count(), 1);
+    assert_eq!(descriptor.collection_address().get(), 0x1000);
+    assert_eq!(descriptor.object_index(), 1);
+    assert_eq!(retained.stored_size(OffsetWidth::Four).unwrap(), 16);
+    assert_eq!(retained.serialize(OffsetWidth::Four).unwrap(), source);
+    assert_prepared_capacity(&datatype, OffsetWidth::Four, &canonical);
+}
+
+#[rstest]
+#[case::smaller(OffsetWidth::Two)]
+#[case::larger(OffsetWidth::Eight)]
+fn enumeration_rejects_descriptor_width_mismatch_with_equal_parent_size(
+    #[case] destination: OffsetWidth,
+) {
+    let source = datatype::enum_with_padded_sequence_parent(Version::Three);
+    let (datatype, retained) = parse_enumeration(&source);
+    assert_enum_destination_error(
+        &datatype,
+        &retained,
+        destination,
+        FormatError::EnumBaseOffsetWidthMismatch {
+            source_offset_size: 4,
+            destination_offset_size: destination.get(),
+        },
+    );
+}
+
+#[rstest]
+#[case::two(OffsetWidth::Two, 4)]
+#[case::four(OffsetWidth::Four, 8)]
+#[case::eight(OffsetWidth::Eight, 4)]
+fn nested_enumeration_base_rejects_every_destination_for_mixed_offsets(
+    #[case] destination: OffsetWidth,
+    #[case] source_offset_size: u8,
+) {
+    let parent = array_of_sequence_compounds(4, 8);
+    let bytes = containers::enumeration(
+        Version::Three.get(),
+        [1, 0, 0],
+        64,
+        &parent,
+        &[EnumValue {
+            name: b"value",
+            value: &[0; 64],
+        }],
+    );
+    let (datatype, retained) = parse_enumeration(&bytes);
+    assert_enum_destination_error(
+        &datatype,
+        &retained,
+        destination,
+        FormatError::EnumBaseOffsetWidthMismatch {
+            source_offset_size,
+            destination_offset_size: destination.get(),
+        },
+    );
+}
+
+#[test]
+fn enumeration_rejects_inner_sequence_descriptor_width_mismatch() {
+    let leaf = leaf::unsigned_byte(Version::One);
+    let inner = datatype::VariableLengthSequence::new(Version::One, 4, &leaf).build();
+    let outer = datatype::VariableLengthSequence::new(Version::One, 8, &inner);
+    let bytes = containers::enumeration(
+        Version::Three.get(),
+        [1, 0, 0],
+        outer.descriptor_size(),
+        &outer.build(),
+        &[EnumValue {
+            name: b"value",
+            value: &[0; 16],
+        }],
+    );
+    let (datatype, retained) = parse_enumeration(&bytes);
+    assert_enum_destination_error(
+        &datatype,
+        &retained,
+        OffsetWidth::Eight,
+        FormatError::EnumBaseOffsetWidthMismatch {
+            source_offset_size: 4,
+            destination_offset_size: 8,
+        },
+    );
+}
+
+#[rstest]
+fn a_compound_enumeration_without_descriptors_accepts_every_offset_width(
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+) {
+    let leaf = leaf::unsigned_byte(Version::One);
+    let parent = containers::compound(
+        Version::Three.get(),
+        [1, 0, 0],
+        4,
+        MemberOffset::One,
+        &[CompoundField {
+            name: b"field",
+            offset: 2,
+            datatype: &leaf,
+        }],
+    );
+    let bytes = containers::enumeration(
+        Version::Three.get(),
+        [1, 0, 0],
+        4,
+        &parent,
+        &[EnumValue {
+            name: b"value",
+            value: &[0xa1, 0x22, 0x45, 0xee],
+        }],
+    );
+    let (datatype, retained) = parse_enumeration(&bytes);
+    assert_eq!(retained.stored_size(width).unwrap(), 4);
+    assert_eq!(retained.serialize(width).unwrap(), bytes);
+    assert_prepared_capacity(&datatype, width, &bytes);
+}
+
+#[test]
+fn an_array_of_compounds_can_change_descriptor_width_outside_an_enumeration() {
+    let source = array_of_sequence_compounds(4, 8);
+    let expected = array_of_sequence_compounds(8, 8);
+    let (datatype, consumed) = format::parse_datatype(&source).unwrap();
+    assert_eq!(consumed, source.len());
+    let (retained, consumed) = DatatypeMessage::parse(&source).unwrap();
+    assert_eq!(consumed, source.len());
+    assert_eq!(retained.stored_size(OffsetWidth::Eight).unwrap(), 64);
+    assert_eq!(retained.serialize(OffsetWidth::Eight).unwrap(), expected);
+    assert_prepared_capacity(&datatype, OffsetWidth::Eight, &expected);
+}
+
+fn array_of_sequence_compounds(first_offsets: usize, second_offsets: usize) -> Vec<u8> {
+    let version = Version::Three.get();
+    let leaf = leaf::unsigned_byte(Version::One);
+    let first = datatype::VariableLengthSequence::new(Version::One, first_offsets, &leaf).build();
+    let second = datatype::VariableLengthSequence::new(Version::One, second_offsets, &leaf).build();
+    let compound = containers::compound(
+        version,
+        [2, 0, 0],
+        32,
+        MemberOffset::One,
+        &[
+            CompoundField {
+                name: b"first",
+                offset: 0,
+                datatype: &first,
+            },
+            CompoundField {
+                name: b"second",
+                offset: 16,
+                datatype: &second,
+            },
+        ],
+    );
+    datatype::array(version, [0; 3], 64, 1, &[2], &compound)
+}
+
+fn parse_enumeration(bytes: &[u8]) -> (Datatype, DatatypeMessage) {
+    let (datatype, consumed) = format::parse_datatype(bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    let (retained, consumed) = DatatypeMessage::parse(bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(retained.to_datatype().unwrap(), datatype);
+    (datatype, retained)
+}
+
+fn assert_enum_destination_error(
+    datatype: &Datatype,
+    retained: &DatatypeMessage,
+    destination: OffsetWidth,
+    expected: FormatError,
+) {
+    assert_eq!(
+        format::PreparedDatatype::new(datatype, destination).unwrap_err(),
+        expected
+    );
+    assert_eq!(retained.stored_size(destination).unwrap_err(), expected);
+    assert_eq!(retained.serialize(destination).unwrap_err(), expected);
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Wrapper {
     Array,

@@ -33,7 +33,9 @@ pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
 pub use crate::address::StoredAddressExt;
 pub use crate::address_range::NonEmptyRange;
-pub use crate::datatype::{array_type_size, stored_type_size, variable_length_descriptor_size};
+pub use crate::datatype::{
+    DatatypeOffsets, array_type_size, stored_type_size, variable_length_descriptor_size,
+};
 pub use crate::display::DISPLAY_MAX_MEMBERS;
 pub use crate::display::Dims;
 pub use crate::display::EscapedName;
@@ -149,20 +151,25 @@ pub fn enum_member_parts(member: &EnumMember) -> (&str, &[u8]) {
 
 /// Constructs an enumeration from a decoded base and member values.
 ///
-/// Pass the stored element size and the offset width from the base description.
+/// Pass the stored element size and the descriptor widths from the base description.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::EnumBaseSizeMismatch`] if `size` differs from the base's stored
-/// size at `offsets`, or [`FormatError::EnumMemberValueSize`] if a member's width differs
-/// from `size`. Propagates base size calculation errors.
+/// size, or [`FormatError::EnumMemberValueSize`] if a member's width differs from `size`.
+/// Propagates base size calculation errors.
 pub fn enumeration_from_stored_parts(
     base_type: Datatype,
     size: NonZeroU32,
-    offsets: OffsetWidth,
+    offsets: DatatypeOffsets,
     members: Vec<EnumMember>,
 ) -> Result<EnumerationType, FormatError> {
     EnumerationType::from_stored_parts(base_type, size, offsets, members)
+}
+
+/// Returns the variable-length descriptor widths of a decoded enumeration's base.
+pub const fn enumeration_base_offsets(datatype: &EnumerationType) -> DatatypeOffsets {
+    datatype.offsets()
 }
 
 /// The fields of a [`Superblock`], for the other workspace crates to build one.
