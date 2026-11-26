@@ -1,4 +1,4 @@
-use hdf5_pure_core::__private;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::{
     Datatype, DatatypeMemberName, EnumMember, EnumerationType, FormatError, ReferenceType,
     VariableLengthType,
@@ -142,7 +142,7 @@ fn assert_prepared_capacity(datatype: &Datatype, width: OffsetWidth, expected: &
 #[rstest]
 #[case::invalid_child(0, FormatError::InvalidOpaqueTagByte { offset: 0, byte: 0 })]
 #[case::invalid_range_and_child(4, FormatError::CompoundFieldOutOfBounds {
-    name: "tagged".into(),
+    name: DatatypeMemberName::from(c"tagged"),
     offset: 4,
     field_size: 1,
     compound_size: 4,
@@ -153,8 +153,8 @@ fn compound_member_bounds_error_precedes_an_invalid_opaque_tag(
 ) {
     let datatype = Datatype::Compound {
         size: 4,
-        members: vec![__private::compound_member(
-            "tagged".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"tagged"),
             offset,
             Datatype::Opaque {
                 size: 1,
@@ -176,8 +176,8 @@ fn sequence_member_bounds_error_precedes_an_invalid_base() {
     };
     let datatype = Datatype::Compound {
         size: 4,
-        members: vec![__private::compound_member(
-            "sequence".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"sequence"),
             0,
             Datatype::VariableLength(VariableLengthType::sequence(base)),
         )],
@@ -185,7 +185,7 @@ fn sequence_member_bounds_error_precedes_an_invalid_base() {
     assert_eq!(
         format::PreparedDatatype::new(&datatype, OffsetWidth::Two).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
-            name: "sequence".into(),
+            name: DatatypeMemberName::from(c"sequence"),
             offset: 0,
             field_size: 10,
             compound_size: 4,
@@ -195,7 +195,7 @@ fn sequence_member_bounds_error_precedes_an_invalid_base() {
 
 #[rstest]
 #[case::out_of_bounds_member(3, FormatError::CompoundFieldOutOfBounds {
-    name: "array".into(),
+    name: DatatypeMemberName::from(c"array"),
     offset: 0,
     field_size: 6,
     compound_size: 4,
@@ -210,8 +210,8 @@ fn array_member_size_and_bounds_errors_precede_an_invalid_base(
 ) {
     let datatype = Datatype::Compound {
         size: 4,
-        members: vec![__private::compound_member(
-            "array".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"array"),
             0,
             Datatype::Array {
                 base_type: Box::new(Datatype::Opaque {
@@ -428,7 +428,11 @@ fn constructed_containers_keep_a_retained_enumeration_width(
         DatatypeVersion::Three,
         DatatypeProperties::Compound {
             size,
-            members: vec![DatatypeMessageMember::new("member".into(), 0, retained).unwrap()],
+            members: vec![DatatypeMessageMember::new(
+                DatatypeMemberName::from(c"member"),
+                0,
+                retained,
+            )],
         },
     )
     .unwrap();
@@ -665,7 +669,11 @@ impl Wrapper {
             },
             Self::Compound => Datatype::Compound {
                 size: 32,
-                members: vec![__private::compound_member("field".into(), 8, parent)],
+                members: vec![CompoundMember::new(
+                    DatatypeMemberName::from(c"field"),
+                    8,
+                    parent,
+                )],
             },
             Self::Sequence => Datatype::VariableLength(VariableLengthType::sequence(parent)),
         }

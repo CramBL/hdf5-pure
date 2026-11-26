@@ -1,5 +1,6 @@
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
+use hdf5_pure::DatatypeMemberName;
 use hdf5_pure::File;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::Layout;
@@ -37,7 +38,7 @@ fn canonical_datatype_encoding_has_bounded_allocations(#[case] shape: Shape) {
     let names = match &datatype {
         Datatype::Compound { members, .. } => members
             .iter()
-            .map(|member| member.name.as_str())
+            .map(|member| member.name.as_str().unwrap())
             .collect::<Vec<_>>(),
         _ => Vec::new(),
     };
@@ -126,7 +127,7 @@ fn retained_compound_encoding_matches_fixture_and_retains_only_output() {
     };
     let names = members
         .iter()
-        .map(|member| member.name.as_str())
+        .map(|member| member.name.as_str().unwrap())
         .collect::<Vec<_>>();
     let (expected, _) = encode_with_child_buffers(shape, &names);
     let (datatype, consumed) = format::DatatypeMessage::parse(&expected).unwrap();
@@ -228,6 +229,59 @@ fn parsers_reject_compound_headers_and_nested_prefixes_without_allocating(
     }
 }
 
+#[rstest]
+#[case::semantic(|bytes: &[u8]| format::parse_datatype(bytes).map(|_| ()))]
+#[case::retained(|bytes: &[u8]| DatatypeMessage::parse(bytes).map(|_| ()))]
+fn compound_bounds_errors_copy_the_rejected_name_once(
+    #[case] parse: fn(&[u8]) -> Result<(), FormatError>,
+) {
+    let name = [b'x'; 4096];
+    let child = Leaf::Integer.bytes(Version::One);
+    let bytes = containers::compound(
+        Version::Three.get(),
+        [1, 0, 0],
+        4,
+        MemberOffset::One,
+        &[CompoundField {
+            name: &name,
+            offset: 1,
+            datatype: &child,
+        }],
+    );
+    let (result, measured) = allocation::measure("compound_bounds_error", || parse(&bytes));
+    assert_eq!(
+        result.unwrap_err(),
+        FormatError::CompoundFieldOutOfBounds {
+            name: DatatypeMemberName::new(name).unwrap(),
+            offset: 1,
+            field_size: 4,
+            compound_size: 4,
+        }
+    );
+    assert_eq!(measured.blocks, 1, "{measured}");
+    assert_eq!(
+        measured.peak_bytes,
+        u64::try_from(name.len()).unwrap(),
+        "{measured}"
+    );
+}
+
+#[test]
+fn explicit_compound_build_reuses_the_member_storage() {
+    let count = 256;
+    let mut builder = CompoundTypeBuilder::with_size(count);
+    for offset in 0..count {
+        builder = builder.u8_field(format!("m{offset}"), u64::from(offset));
+    }
+    let (datatype, measured) = allocation::measure("explicit_compound_build", || builder.build());
+    let Datatype::Compound { size, members } = datatype.unwrap() else {
+        panic!("expected a compound datatype");
+    };
+    assert_eq!(size, count);
+    assert_eq!(members.len(), usize::try_from(count).unwrap());
+    assert_eq!(measured.live_bytes, 0, "{measured}");
+}
+
 fn compound_header_without_members() -> Vec<u8> {
     let [low, high] = u16::MAX.to_le_bytes();
     containers::compound(
@@ -266,7 +320,7 @@ fn wide_compound_decoding_has_bounded_allocations(#[case] count: usize) {
     };
     let names = members
         .iter()
-        .map(|member| member.name.as_str())
+        .map(|member| member.name.as_str().unwrap())
         .collect::<Vec<_>>();
     let (bytes, _) = encode_with_child_buffers(shape, &names);
     let child = DatatypeMessage::new(
@@ -286,7 +340,6 @@ fn wide_compound_decoding_has_bounded_allocations(#[case] count: usize) {
                         member.byte_offset,
                         child.clone(),
                     )
-                    .unwrap()
                 })
                 .collect(),
         },
@@ -346,7 +399,7 @@ impl Shape {
                 let mut builder = CompoundTypeBuilder::with_size(u32::try_from(width * 4).unwrap());
                 for index in 0..width {
                     builder = builder.field(
-                        &format!("field{index:04}"),
+                        format!("field{index:04}"),
                         u64::try_from(index * 4).unwrap(),
                         hdf5_pure::make_i32_type(),
                     );

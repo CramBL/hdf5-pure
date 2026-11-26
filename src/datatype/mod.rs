@@ -4,7 +4,6 @@ pub use hdf5_pure_core::Datatype;
 pub use hdf5_pure_core::ReferenceType;
 pub use hdf5_pure_core::StringPadding;
 
-pub(crate) use hdf5_pure_core::__private;
 #[cfg(feature = "std")]
 pub(crate) use hdf5_pure_format::__private::element_size_usize;
 #[cfg(feature = "std")]

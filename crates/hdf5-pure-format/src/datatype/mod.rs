@@ -16,6 +16,7 @@ pub(crate) use hdf5_pure_core::CharacterSet;
 use hdf5_pure_core::ComplexType;
 use hdf5_pure_core::CompoundMember;
 pub(crate) use hdf5_pure_core::Datatype;
+use hdf5_pure_core::DatatypeMemberName;
 pub(crate) use hdf5_pure_core::ReferenceType;
 pub(crate) use hdf5_pure_core::StringPadding;
 use hdf5_pure_core::VariableLengthStringType;
@@ -131,9 +132,9 @@ pub fn stored_element_size_usize(
 /// Accepts legacy object and dataset-region reference kinds at every supported message
 /// version and preserves their declared element sizes.
 ///
-/// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Decodes compound
-/// names with lossy UTF-8 conversion and preserves enumeration name bytes. Acquires the full
-/// array dimension list and any version 2 permutation indices before reading the base datatype.
+/// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Preserves compound
+/// and enumeration member name bytes. Acquires the full array dimension list and any version 2
+/// permutation indices before reading the base datatype.
 /// Checks the enumeration size against its base size before reading the member names, then
 /// acquires the complete value list.
 ///
@@ -264,9 +265,9 @@ fn parse_datatype_at(
                 let index = members.len();
                 layout.insert(offset, stored_size, index, |member_index| {
                     if member_index == index {
-                        Some(name.as_ref())
+                        Some(DatatypeMemberName::from(name))
                     } else {
-                        members.get(member_index).map(|member| member.name.as_str())
+                        members.get(member_index).map(|member| member.name.clone())
                     }
                 })?;
                 let datatype = match shape {
@@ -276,7 +277,7 @@ fn parse_datatype_at(
                 decode::push_member(
                     &mut members,
                     count,
-                    __private::compound_member(name.into_owned(), offset, datatype),
+                    CompoundMember::new(DatatypeMemberName::from(name), offset, datatype),
                 )?;
                 offsets.include_field(field_offsets);
             }

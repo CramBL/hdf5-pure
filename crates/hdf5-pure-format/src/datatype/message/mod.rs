@@ -3,7 +3,6 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
 use core::num::NonZeroU32;
@@ -11,9 +10,9 @@ use core::num::NonZeroU32;
 use hdf5_pure_core::__private;
 use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, EnumMember,
-    FixedPointType, FloatingPointType, FormatError, StringPadding, TimeType,
-    VariableLengthStringType, VariableLengthType,
+    BitFieldType, CharacterSet, ComplexType, CompoundMember, Datatype, DatatypeByteOrder,
+    DatatypeMemberName, EnumMember, FixedPointType, FloatingPointType, FormatError, StringPadding,
+    TimeType, VariableLengthStringType, VariableLengthType,
 };
 
 use super::{
@@ -316,7 +315,7 @@ impl DatatypeMessage {
                         datatype.size_with_offsets(None)?,
                     )?;
                     layout.insert(member.byte_offset, field_size, index, |index| {
-                        members.get(index).map(|member| member.name.as_str())
+                        members.get(index).map(|member| member.name.clone())
                     })?;
                 }
             }
@@ -469,7 +468,7 @@ impl DatatypeMessage {
                 members: members
                     .iter()
                     .map(|member| {
-                        Ok(__private::compound_member(
+                        Ok(CompoundMember::new(
                             member.name.clone(),
                             member.byte_offset,
                             member.datatype.to_datatype()?,
@@ -652,7 +651,7 @@ impl DatatypeProperties {
 /// A compound member's name, byte offset, and versioned datatype description.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DatatypeMessageMember {
-    name: String,
+    name: DatatypeMemberName,
     byte_offset: u64,
     datatype: DatatypeMessage,
 }
@@ -662,25 +661,20 @@ impl DatatypeMessageMember {
     ///
     /// The member's range and message version are checked when constructing a containing
     /// description with [`DatatypeMessage::new`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidDatatypeMemberName`] if `name` contains a NUL byte.
-    pub fn new(
-        name: String,
+    pub const fn new(
+        name: DatatypeMemberName,
         byte_offset: u64,
         datatype: DatatypeMessage,
-    ) -> Result<Self, FormatError> {
-        member_name(COMPOUND_CLASS, &name)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             name,
             byte_offset,
             datatype,
-        })
+        }
     }
 
     /// Returns the member name without its wire terminator.
-    pub fn name(&self) -> &str {
+    pub const fn name(&self) -> &DatatypeMemberName {
         &self.name
     }
 
@@ -703,9 +697,9 @@ impl DatatypeMessageMember {
     fn check_compound_name_and_version<'a>(
         &'a self,
         version: DatatypeVersion,
-        names: &mut BTreeSet<&'a str>,
+        names: &mut BTreeSet<&'a DatatypeMemberName>,
     ) -> Result<(), FormatError> {
-        if !names.insert(self.name.as_str()) {
+        if !names.insert(&self.name) {
             return Err(FormatError::DuplicateCompoundField(self.name.clone()));
         }
         compatible_child(version, COMPOUND_CLASS, &self.datatype)
@@ -809,21 +803,6 @@ fn member_count(count: usize) -> Result<u16, FormatError> {
         value: count.to_u64(),
         target: "u16",
     })
-}
-
-/// Checks a member name for NUL bytes.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidDatatypeMemberName`] if `name` contains a NUL byte.
-fn member_name(class: u8, name: &str) -> Result<(), FormatError> {
-    if name.as_bytes().contains(&0) {
-        return Err(FormatError::InvalidDatatypeMemberName {
-            class,
-            name: name.into(),
-        });
-    }
-    Ok(())
 }
 
 /// The name field layout for compound and enumeration members.

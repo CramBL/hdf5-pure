@@ -2691,7 +2691,7 @@ fn writing_a_large_referenced_datatype_has_bounded_allocations() {
     const BYTE_BUDGET: u64 = 325 * 1024;
     let datatype = (0..MEMBER_COUNT)
         .fold(CompoundTypeBuilder::new(), |builder, index| {
-            builder.u32_field(&format!("record_member_with_a_long_name_{index:03}"))
+            builder.u32_field(format!("record_member_with_a_long_name_{index:03}"))
         })
         .build()
         .unwrap();

@@ -5,8 +5,6 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
-use alloc::borrow::Cow;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::CStr;
 use core::num::{NonZeroU32, NonZeroUsize};
@@ -123,23 +121,12 @@ impl Compound {
     /// # Errors
     ///
     /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. Propagates
-    /// member name and version 1 shape errors.
+    /// version 1 shape errors.
     pub(in crate::datatype) fn member<'a>(
         &self,
         cursor: &mut ByteCursor<'a>,
     ) -> Result<Member<'a>, FormatError> {
-        let offset = cursor.position();
         let name = self.names.read(cursor)?;
-        let name = match self.names.projection {
-            Projection::Semantic => String::from_utf8_lossy(name.to_bytes()),
-            Projection::Retained => name.to_str().map(Cow::Borrowed).map_err(|source| {
-                FormatError::UnsupportedDatatypeMemberEncoding {
-                    class: COMPOUND_CLASS,
-                    offset,
-                    source,
-                }
-            })?,
-        };
         let (offset, shape) = match self.fields {
             CompoundFields::LegacyWithShape => {
                 let offset = u64::from(cursor.u32()?);
@@ -166,7 +153,8 @@ enum CompoundFields {
 
 /// A compound member's fields before its nested datatype.
 pub(in crate::datatype) struct Member<'a> {
-    pub(in crate::datatype) name: Cow<'a, str>,
+    /// The borrowed member name with its NUL terminator and without padding.
+    pub(in crate::datatype) name: &'a CStr,
     /// The byte offset within the containing element.
     pub(in crate::datatype) offset: u64,
     /// The version 1 scalar or array shape when present.

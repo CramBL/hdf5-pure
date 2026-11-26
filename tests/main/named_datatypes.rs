@@ -2,12 +2,13 @@
 
 use std::collections::HashMap;
 
+use hdf5_pure::CompoundMember;
+use hdf5_pure::DatatypeMemberName;
 use hdf5_pure::{
     AttrValue, CharacterSet, DatasetBuilder, Datatype, DatatypeByteOrder, Error, File, FileBuilder,
     FixedPointType, FormatError, Layout, MessageType, OffsetWidth, StringPadding,
     VariableLengthType,
 };
-use hdf5_pure_core::__private;
 use hdf5_pure_format::__private::{AccessMode, MessageFlags, ObjectHeader};
 use rstest::rstest;
 use test_util::datatype;
@@ -95,8 +96,8 @@ fn file_builder_writes_committed_compounds_at_the_file_offset_width(
     user: "dataset \"value\"".into(),
 })]
 #[case::invalid_layout(OffsetWidth::Four, 10, FormatError::CompoundFieldOverlap {
-    first: "v".into(),
-    second: "tag".into(),
+    first: DatatypeMemberName::from(c"v"),
+    second: DatatypeMemberName::from(c"tag"),
 })]
 fn file_builder_rejects_incompatible_committed_compound_uses_before_output(
     #[case] width: OffsetWidth,
@@ -224,16 +225,16 @@ fn string_and_tag(tag_offset: u64) -> Datatype {
     Datatype::Compound {
         size: 17,
         members: vec![
-            __private::compound_member(
-                "v".into(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"v"),
                 0,
                 Datatype::VariableLength(VariableLengthType::string(
                     StringPadding::NullTerminate,
                     CharacterSet::Ascii,
                 )),
             ),
-            __private::compound_member(
-                "tag".into(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"tag"),
                 tag_offset,
                 Datatype::FixedPoint(FixedPointType::u8()),
             ),

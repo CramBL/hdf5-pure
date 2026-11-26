@@ -1,5 +1,7 @@
 use hdf5_pure_core::CharacterSet;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::Datatype;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::StringPadding;
 use hdf5_pure_core::VariableLengthType;
@@ -168,7 +170,7 @@ fn opaque_members_leave_adjacent_compound_members_at_their_declared_offsets(
     };
     assert_eq!(*actual_size, size);
     assert_eq!(members.len(), 2);
-    assert_eq!(members[0].name, "blob");
+    assert_eq!(members[0].name.as_bytes(), b"blob");
     assert_eq!(members[0].byte_offset, 0);
     let opaque = Datatype::Opaque {
         size: 4,
@@ -183,7 +185,7 @@ fn opaque_members_leave_adjacent_compound_members_at_their_declared_offsets(
         opaque
     };
     assert_eq!(members[0].datatype, expected_first);
-    assert_eq!(members[1].name, "next");
+    assert_eq!(members[1].name.as_bytes(), b"next");
     assert_eq!(members[1].byte_offset, u64::from(size - 1));
     assert_eq!(
         members[1].datatype,
@@ -229,7 +231,7 @@ fn opaque_array_parsing_stops_before_the_next_field(#[case] version: ArrayVersio
 
 #[rstest]
 #[case::array(|base| Datatype::Array { base_type: Box::new(base), dimensions: vec![2] })]
-#[case::compound(|base| Datatype::Compound { size: 4, members: vec![hdf5_pure_core::__private::compound_member("blob".into(), 0, base)] })]
+#[case::compound(|base| Datatype::Compound { size: 4, members: vec![CompoundMember::new(DatatypeMemberName::from(c"blob"), 0, base)] })]
 #[case::sequence(|base| Datatype::VariableLength(VariableLengthType::sequence(base)))]
 fn nested_opaque_encoding_propagates_the_original_error(#[case] nest: fn(Datatype) -> Datatype) {
     let datatype = nest(Datatype::Opaque {

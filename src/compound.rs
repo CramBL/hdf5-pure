@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::ToString, vec::Vec};
 
+use crate::DatatypeMemberName;
 use crate::convert::Narrow;
 use crate::datatype::byte_order::DatatypeByteOrder;
 use crate::datatype::layout::FloatingPointLayout;
@@ -201,10 +202,10 @@ fn decode_named<T: CompoundField>(
 ) -> Result<T, FormatError> {
     let member = members
         .iter()
-        .find(|member| member.name == name)
+        .find(|member| member.name.as_bytes() == name.as_bytes())
         .ok_or_else(|| FormatError::CompoundFieldMissing(name.to_string()))?;
     let out_of_bounds = || FormatError::CompoundFieldOutOfBounds {
-        name: name.to_string(),
+        name: member.name.clone(),
         offset: member.byte_offset,
         field_size: member.datatype.type_size(),
         compound_size: reported_compound_size(bytes),
@@ -235,7 +236,7 @@ macro_rules! impl_compound_tuple {
                 let mut members = Vec::new();
                 $(
                     let datatype = $type::datatype()?;
-                    members.push(crate::datatype::__private::compound_member(stringify!($index).to_string(), offset, datatype.clone()));
+                    members.push(CompoundMember::new(DatatypeMemberName::new(stringify!($index))?, offset, datatype.clone()));
                     offset += u64::from(datatype.type_size());
                 )+
                 Ok(Datatype::Compound {

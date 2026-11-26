@@ -1,3 +1,5 @@
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
 use rstest::rstest;
 
 use super::*;
@@ -36,8 +38,8 @@ fn an_unclassified_type_reaches_the_caller_whole_through_either_recursion() {
 
     let compound = Datatype::Compound {
         size: 3,
-        members: vec![crate::datatype::__private::compound_member(
-            "pixel".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"pixel"),
             0,
             opaque.clone(),
         )],
@@ -45,7 +47,10 @@ fn an_unclassified_type_reaches_the_caller_whole_through_either_recursion() {
     let DType::Compound(fields) = classify_datatype(&compound) else {
         panic!("a compound classifies as one");
     };
-    assert_eq!(fields, vec![("pixel".to_string(), carried.clone())]);
+    assert_eq!(
+        fields,
+        vec![(DatatypeMemberName::from(c"pixel"), carried.clone())]
+    );
 
     let array = Datatype::Array {
         base_type: Box::new(opaque),

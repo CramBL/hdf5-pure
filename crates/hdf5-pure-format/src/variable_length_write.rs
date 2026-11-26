@@ -386,10 +386,10 @@ const DATATYPE_SIZE_BYTES: u8 = 4;
 mod tests {
     use alloc::vec;
 
-    use hdf5_pure_core::__private;
     use hdf5_pure_core::CharacterSet;
     use hdf5_pure_core::StringPadding;
     use hdf5_pure_core::VariableLengthType;
+    use hdf5_pure_core::{CompoundMember, DatatypeMemberName};
     use rstest::rstest;
     use test_util::global_heap;
     use test_util::widths::Widths;
@@ -413,8 +413,8 @@ mod tests {
     ) {
         let datatype = Datatype::Compound {
             size: 64,
-            members: vec![__private::compound_member(
-                "strings".into(),
+            members: vec![CompoundMember::new(
+                DatatypeMemberName::from(c"strings"),
                 8,
                 Datatype::Array {
                     base_type: Box::new(string_type()),

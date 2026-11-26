@@ -1,5 +1,6 @@
 use core::ops::Range;
 
+use hdf5_pure_core::DatatypeMemberName;
 use rstest::rstest;
 
 use super::super::*;
@@ -37,7 +38,11 @@ fn i32_type() -> Datatype {
 }
 
 fn member(name: &str, byte_offset: u64, datatype: Datatype) -> CompoundMember {
-    crate::datatype::__private::compound_member(name.to_string(), byte_offset, datatype)
+    CompoundMember::new(
+        DatatypeMemberName::new(name).unwrap(),
+        byte_offset,
+        datatype,
+    )
 }
 
 #[test]

@@ -2,6 +2,7 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::ComplexType;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
 use hdf5_pure_core::DatatypeMemberName;
@@ -98,13 +99,13 @@ fn ordinary_float_parser_applies_order_rules_in_every_context(
         Context::CompoundOne | Context::CompoundTwo | Context::CompoundThree => {
             Datatype::Compound {
                 size: 8,
-                members: vec![__private::compound_member(
-                    if matches!(context, Context::CompoundOne) {
+                members: vec![CompoundMember::new(
+                    DatatypeMemberName::new(if matches!(context, Context::CompoundOne) {
                         "arr"
                     } else {
                         "x"
-                    }
-                    .into(),
+                    })
+                    .unwrap(),
                     0,
                     datatype,
                 )],

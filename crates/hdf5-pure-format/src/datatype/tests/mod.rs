@@ -1,3 +1,4 @@
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::{DatatypeMemberName, EnumMember, EnumerationType, FloatingPointField};
 use rstest::rstest;
 use test_util::datatype as fixture;
@@ -43,8 +44,8 @@ fn the_class_gate_admits_every_reference_holding_datatype() {
             Datatype::Compound {
                 size: 12,
                 members: vec![
-                    __private::compound_member("r".into(), 0, object_ref()),
-                    __private::compound_member("i".into(), 8, i32_le()),
+                    CompoundMember::new(DatatypeMemberName::from(c"r"), 0, object_ref()),
+                    CompoundMember::new(DatatypeMemberName::from(c"i"), 8, i32_le()),
                 ],
             },
         ),
@@ -64,7 +65,11 @@ fn the_class_gate_admits_every_reference_holding_datatype() {
             Datatype::Array {
                 base_type: Box::new(Datatype::Compound {
                     size: 8,
-                    members: vec![__private::compound_member("r".into(), 0, object_ref())],
+                    members: vec![CompoundMember::new(
+                        DatatypeMemberName::from(c"r"),
+                        0,
+                        object_ref(),
+                    )],
                 }),
                 dimensions: vec![3],
             },
@@ -131,8 +136,8 @@ fn object_address_checks_recognize_enumerations_with_reference_bases() {
 fn the_class_gate_is_necessary_and_not_sufficient() {
     let ints = Datatype::Compound {
         size: 8,
-        members: vec![__private::compound_member(
-            "a".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"a"),
             0,
             Datatype::FixedPoint(
                 FixedPointType::new(8, DatatypeByteOrder::LittleEndian, true, 0, 64).unwrap(),
@@ -438,8 +443,8 @@ fn test_opaque() {
 fn compound_offsets_use_the_minimum_byte_width(#[case] size: u32, #[case] width: usize) {
     let datatype = Datatype::Compound {
         size,
-        members: vec![__private::compound_member(
-            "last".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"last"),
             u64::from(size - 1),
             byte_member_type(),
         )],
@@ -474,8 +479,8 @@ fn three_byte_member_offsets_preserve_the_next_datatype(#[case] class: u8, #[cas
             Datatype::Compound {
                 size: 70_000,
                 members: vec![
-                    __private::compound_member("first".into(), 0, member.clone()),
-                    __private::compound_member("last".into(), 69_999, member),
+                    CompoundMember::new(DatatypeMemberName::from(c"first"), 0, member.clone()),
+                    CompoundMember::new(DatatypeMemberName::from(c"last"), 69_999, member),
                 ],
             },
             encoded.len(),
@@ -502,9 +507,9 @@ fn test_compound_v3_two_members() {
         Datatype::Compound { size, members } => {
             assert_eq!(size, 12);
             assert_eq!(members.len(), 2);
-            assert_eq!(members[0].name, "x");
+            assert_eq!(members[0].name.as_bytes(), b"x");
             assert_eq!(members[0].byte_offset, 0);
-            assert_eq!(members[1].name, "y");
+            assert_eq!(members[1].name.as_bytes(), b"y");
             assert_eq!(members[1].byte_offset, 4);
             match &members[0].datatype {
                 Datatype::FixedPoint(numeric)
@@ -547,9 +552,9 @@ fn test_compound_v1_complex_matlab_layout() {
         Datatype::Compound { size, members } => {
             assert_eq!(size, 16);
             assert_eq!(members.len(), 2);
-            assert_eq!(members[0].name, "real");
+            assert_eq!(members[0].name.as_bytes(), b"real");
             assert_eq!(members[0].byte_offset, 0);
-            assert_eq!(members[1].name, "imag");
+            assert_eq!(members[1].name.as_bytes(), b"imag");
             assert_eq!(members[1].byte_offset, 8);
             for m in &members {
                 assert!(
@@ -592,7 +597,7 @@ fn compound_v1_array_dimensions(
     };
     assert_eq!(*size, footprint + offset);
     assert_eq!(members.len(), 1);
-    assert_eq!(members[0].name, "arr");
+    assert_eq!(members[0].name.as_bytes(), b"arr");
     assert_eq!(members[0].byte_offset, u64::from(offset));
     assert_eq!(members[0].datatype.type_size(), footprint);
     let Datatype::Array {
@@ -625,8 +630,8 @@ fn compound_v1_scalar_ignores_dimension_slots() {
         datatype,
         Datatype::Compound {
             size: 8,
-            members: vec![__private::compound_member(
-                "arr".into(),
+            members: vec![CompoundMember::new(
+                DatatypeMemberName::from(c"arr"),
                 4,
                 parse_datatype(&base).unwrap().0
             )],
@@ -680,7 +685,7 @@ fn compound_v1_rejects_member_outside_declared_size(
     assert_eq!(
         parse_datatype(&buf).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
-            name: "arr".into(),
+            name: DatatypeMemberName::from(c"arr"),
             offset: u64::from(offset),
             field_size: footprint,
             compound_size: size,
@@ -714,8 +719,8 @@ fn compound_v1_retains_nested_array_shape() {
     assert_eq!(consumed, buf.len());
     let expected = Datatype::Compound {
         size: 32,
-        members: vec![__private::compound_member(
-            "arr".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"arr"),
             0,
             Datatype::Array {
                 base_type: Box::new(parse_datatype(&inner).unwrap().0),
@@ -775,7 +780,11 @@ fn modern_compound_array_members_keep_their_layout(#[case] version: u8) {
         (
             Datatype::Compound {
                 size: 28,
-                members: vec![__private::compound_member("arr".into(), 4, array)],
+                members: vec![CompoundMember::new(
+                    DatatypeMemberName::from(c"arr"),
+                    4,
+                    array
+                )],
             },
             buf.len()
         )
@@ -1311,7 +1320,7 @@ fn test_nested_compound_array_enum() {
     match dt {
         Datatype::Compound { members, .. } => {
             assert_eq!(members.len(), 1);
-            assert_eq!(members[0].name, "data");
+            assert_eq!(members[0].name.as_bytes(), b"data");
             match &members[0].datatype {
                 Datatype::Array {
                     dimensions,
@@ -1381,8 +1390,8 @@ fn serialize_parse_compound_roundtrip() {
     let dt = Datatype::Compound {
         size: 20,
         members: vec![
-            __private::compound_member(
-                "x".to_string(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"x"),
                 0,
                 Datatype::FloatingPoint(
                     FloatingPointType::from_layout(
@@ -1393,8 +1402,8 @@ fn serialize_parse_compound_roundtrip() {
                     .unwrap(),
                 ),
             ),
-            __private::compound_member(
-                "y".to_string(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"y"),
                 8,
                 Datatype::FloatingPoint(
                     FloatingPointType::from_layout(
@@ -1405,8 +1414,8 @@ fn serialize_parse_compound_roundtrip() {
                     .unwrap(),
                 ),
             ),
-            __private::compound_member(
-                "id".to_string(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"id"),
                 16,
                 Datatype::FixedPoint(
                     FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),

@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use std::thread;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_format::__private::AttributePhaseChange;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
@@ -1789,8 +1791,8 @@ impl UnreadableReference {
             Self::Compound => (
                 Datatype::Compound {
                     size: 8,
-                    members: vec![crate::datatype::__private::compound_member(
-                        "r".to_string(),
+                    members: vec![CompoundMember::new(
+                        DatatypeMemberName::from(c"r"),
                         4,
                         Datatype::Reference {
                             size: 8,

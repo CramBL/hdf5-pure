@@ -897,7 +897,7 @@ fn pure_reader_decodes_c_written_padded_compound(
             assert_eq!(
                 members
                     .iter()
-                    .map(|member| (member.name.as_str(), member.byte_offset))
+                    .map(|member| (member.name.as_str().unwrap(), member.byte_offset))
                     .collect::<Vec<_>>(),
                 vec![("0", 0), ("1", 8), ("2", 16), ("3", 24)]
             );

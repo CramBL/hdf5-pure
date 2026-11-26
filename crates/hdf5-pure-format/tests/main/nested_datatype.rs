@@ -1,6 +1,7 @@
-use hdf5_pure_core::__private;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::FixedPointType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::ReferenceType;
@@ -15,8 +16,8 @@ use test_util::datatype::containers::{self, CompoundField, MemberOffset};
 fn object_reference_slots_scan_complete_elements_in_order() {
     let datatype = Datatype::Compound {
         size: 10,
-        members: vec![__private::compound_member(
-            "target".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"target"),
             1,
             Datatype::Reference {
                 size: 8,
@@ -99,13 +100,13 @@ fn nested_reference_slots_preserve_member_and_array_order() {
 fn reference_slot_must_fit_its_own_record(#[case] offset: u64) {
     let datatype = Datatype::Compound {
         size: 32,
-        members: vec![__private::compound_member(
-            "inner".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"inner"),
             0,
             Datatype::Compound {
                 size: 8,
-                members: vec![__private::compound_member(
-                    "r".into(),
+                members: vec![CompoundMember::new(
+                    DatatypeMemberName::from(c"r"),
                     offset,
                     Datatype::Reference {
                         size: 8,
@@ -189,8 +190,8 @@ fn nested_datatype_retains_attribute_field_length_checks(#[case] count: usize) {
         size: 16_000,
         members: (0..count)
             .map(|index| {
-                __private::compound_member(
-                    format!("f{index:04}"),
+                CompoundMember::new(
+                    DatatypeMemberName::new(format!("f{index:04}")).unwrap(),
                     u64::try_from(index * 4).unwrap(),
                     Datatype::Array {
                         base_type: Box::new(

@@ -10,7 +10,6 @@ pub use self::member_name::DatatypeMemberName;
 use crate::display;
 use crate::display::DISPLAY_MAX_MEMBERS;
 use crate::display::Dims;
-use crate::display::EscapedName;
 use crate::display::QuotedBytes;
 use crate::{FormatError, OffsetWidth};
 
@@ -518,7 +517,7 @@ impl fmt::Display for Datatype {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{}: {}", EscapedName(&member.name), member.datatype)?;
+                    write!(f, "{}: {}", member.name, member.datatype)?;
                 }
                 display::write_elided(f, members.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
                 f.write_str("}")

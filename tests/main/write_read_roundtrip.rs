@@ -1,5 +1,6 @@
 use hdf5_pure::CompoundField;
 use hdf5_pure::CompoundType;
+use hdf5_pure::DatatypeMemberName;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
@@ -209,6 +210,58 @@ fn roundtrip_u64_dataset() {
 }
 
 #[test]
+fn compound_dataset_preserves_byte_names_in_dtype() {
+    let datatype = CompoundTypeBuilder::new()
+        .u8_field(b"\xff")
+        .u8_field(b"\xfe")
+        .u16_field("\u{fffd}")
+        .build()
+        .unwrap();
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("values")
+        .with_compound_data(datatype.clone(), vec![1, 2, 3, 4], 1);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.datatype().unwrap(), datatype);
+    let dtype = dataset.dtype().unwrap();
+    assert_eq!(
+        dtype,
+        DType::Compound(vec![
+            (DatatypeMemberName::from(c"\xff"), DType::U8),
+            (DatatypeMemberName::from(c"\xfe"), DType::U8),
+            (DatatypeMemberName::from(c"\u{fffd}"), DType::U16),
+        ])
+    );
+    assert_eq!(
+        dtype.to_string(),
+        "compound{\\xff: u8, \\xfe: u8, \u{fffd}: u16}"
+    );
+}
+
+#[test]
+fn packed_compound_builder_rejects_nul_in_a_field_name() {
+    assert_eq!(
+        CompoundTypeBuilder::new()
+            .u8_field(b"\xff\0")
+            .build()
+            .unwrap_err(),
+        FormatError::DatatypeMemberNameContainsNul { index: 1 }
+    );
+}
+
+#[test]
+fn explicit_compound_builder_rejects_nul_in_a_field_name() {
+    assert_eq!(
+        CompoundTypeBuilder::with_size(1)
+            .u8_field(b"\xff\0", 0)
+            .build()
+            .unwrap_err(),
+        FormatError::DatatypeMemberNameContainsNul { index: 1 }
+    );
+}
+
+#[test]
 fn roundtrip_compound_complex64() {
     let complex_type = CompoundTypeBuilder::new()
         .f64_field("real")
@@ -234,8 +287,8 @@ fn roundtrip_compound_complex64() {
     match ds.dtype().unwrap() {
         DType::Compound(fields) => {
             assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0].0, "real");
-            assert_eq!(fields[1].0, "imag");
+            assert_eq!(fields[0].0.as_bytes(), b"real");
+            assert_eq!(fields[1].0.as_bytes(), b"imag");
         }
         other => panic!("expected compound, got {other}"),
     }
@@ -263,7 +316,7 @@ fn roundtrip_compound_tuple_field_wise() {
             assert_eq!(
                 members
                     .iter()
-                    .map(|member| (member.name.as_str(), member.byte_offset))
+                    .map(|member| (member.name.as_str().unwrap(), member.byte_offset))
                     .collect::<Vec<_>>(),
                 vec![("0", 0), ("1", 1), ("2", 9)]
             );
@@ -487,10 +540,15 @@ fn explicit_compound_builder_rejects_invalid_layouts() {
         .u32_field("b", 6)
         .build()
         .unwrap_err();
-    assert!(matches!(
+    assert_eq!(
         err,
-        FormatError::CompoundFieldOutOfBounds { ref name, .. } if name == "b"
-    ));
+        FormatError::CompoundFieldOutOfBounds {
+            name: DatatypeMemberName::from(c"b"),
+            offset: 6,
+            field_size: 4,
+            compound_size: 8,
+        }
+    );
 
     let err = CompoundTypeBuilder::with_size(16)
         .u64_field("a", 0)
@@ -502,7 +560,7 @@ fn explicit_compound_builder_rejects_invalid_layouts() {
         FormatError::CompoundFieldOverlap {
             ref first,
             ref second
-        } if first == "a" && second == "b"
+        } if first.as_bytes() == b"a" && second.as_bytes() == b"b"
     ));
 
     let err = CompoundTypeBuilder::with_size(16)
@@ -510,7 +568,10 @@ fn explicit_compound_builder_rejects_invalid_layouts() {
         .u64_field("a", 8)
         .build()
         .unwrap_err();
-    assert_eq!(err, FormatError::DuplicateCompoundField("a".into()));
+    assert_eq!(
+        err,
+        FormatError::DuplicateCompoundField(DatatypeMemberName::from(c"a"))
+    );
 }
 
 #[test]
@@ -662,8 +723,8 @@ fn roundtrip_complex32_convenience() {
     match ds.dtype().unwrap() {
         DType::Compound(fields) => {
             assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0], ("real".to_string(), DType::F32));
-            assert_eq!(fields[1], ("imag".to_string(), DType::F32));
+            assert_eq!(fields[0], (DatatypeMemberName::from(c"real"), DType::F32));
+            assert_eq!(fields[1], (DatatypeMemberName::from(c"imag"), DType::F32));
         }
         other => panic!("expected compound, got {other}"),
     }
@@ -683,8 +744,8 @@ fn roundtrip_complex64_convenience() {
     match ds.dtype().unwrap() {
         DType::Compound(fields) => {
             assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0], ("real".to_string(), DType::F64));
-            assert_eq!(fields[1], ("imag".to_string(), DType::F64));
+            assert_eq!(fields[0], (DatatypeMemberName::from(c"real"), DType::F64));
+            assert_eq!(fields[1], (DatatypeMemberName::from(c"imag"), DType::F64));
         }
         other => panic!("expected compound, got {other}"),
     }

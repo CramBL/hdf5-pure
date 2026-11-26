@@ -1,3 +1,6 @@
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
+
 use super::*;
 
 #[rstest]
@@ -49,8 +52,8 @@ fn canonical_messages_preserve_bytes_and_extent(#[case] expected: Vec<u8>) {
 fn canonical_compound_array_offsets(#[case] size: u32, #[case] width: usize) {
     let datatype = Datatype::Compound {
         size,
-        members: vec![__private::compound_member(
-            "last".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"last"),
             u64::from(size - 2),
             Datatype::Array {
                 base_type: Box::new(byte_member_type()),
@@ -172,9 +175,9 @@ fn nested_opaque_tags_keep_their_encoding_boundaries(
     let datatype = Datatype::Compound {
         size: 32,
         members: vec![
-            __private::compound_member("first".into(), 0, byte_member_type()),
-            __private::compound_member(
-                "nested".into(),
+            CompoundMember::new(DatatypeMemberName::from(c"first"), 0, byte_member_type()),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"nested"),
                 8,
                 Datatype::VariableLength(VariableLengthType::sequence(Datatype::Array {
                     base_type: Box::new(Datatype::Enumeration(
@@ -342,8 +345,8 @@ fn variable_length_datatype_sizes_follow_offset_width(
     assert_eq!(datatype.type_size(), 16);
     let compound = Datatype::Compound {
         size: 32,
-        members: vec![__private::compound_member(
-            "value".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"value"),
             8,
             datatype.clone(),
         )],
@@ -457,7 +460,11 @@ fn datatype_member_counts_check_their_fixed_width_fields(
             size: u32::try_from(count).unwrap(),
             members: (0..count)
                 .map(|index| {
-                    __private::compound_member(index.to_string(), index as u64, byte_member_type())
+                    CompoundMember::new(
+                        DatatypeMemberName::new(index.to_string()).unwrap(),
+                        index as u64,
+                        byte_member_type(),
+                    )
                 })
                 .collect(),
         }
@@ -471,17 +478,17 @@ fn datatype_member_counts_check_their_fixed_width_fields(
 
 #[rstest]
 #[case::exact(15, Ok(15))]
-#[case::beyond(16, Err(FormatError::CompoundFieldOutOfBounds { name: "value".into(), offset: 16, field_size: 1, compound_size: 16 }))]
-#[case::wrapped(256, Err(FormatError::CompoundFieldOutOfBounds { name: "value".into(), offset: 256, field_size: 1, compound_size: 16 }))]
-#[case::overflow(u64::MAX, Err(FormatError::CompoundFieldOutOfBounds { name: "value".into(), offset: u64::MAX, field_size: 1, compound_size: 16 }))]
+#[case::beyond(16, Err(FormatError::CompoundFieldOutOfBounds { name: DatatypeMemberName::from(c"value"), offset: 16, field_size: 1, compound_size: 16 }))]
+#[case::wrapped(256, Err(FormatError::CompoundFieldOutOfBounds { name: DatatypeMemberName::from(c"value"), offset: 256, field_size: 1, compound_size: 16 }))]
+#[case::overflow(u64::MAX, Err(FormatError::CompoundFieldOutOfBounds { name: DatatypeMemberName::from(c"value"), offset: u64::MAX, field_size: 1, compound_size: 16 }))]
 fn compound_member_offsets_fit_the_declared_storage(
     #[case] offset: u64,
     #[case] expected: Result<u8, FormatError>,
 ) {
     let datatype = Datatype::Compound {
         size: 16,
-        members: vec![__private::compound_member(
-            "value".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"value"),
             offset,
             byte_member_type(),
         )],

@@ -1,7 +1,7 @@
 use alloc::collections::BTreeMap;
 use core::num::NonZeroU32;
 
-use hdf5_pure_core::FormatError;
+use hdf5_pure_core::{DatatypeMemberName, FormatError};
 
 /// Disjoint member byte ranges within one compound element.
 ///
@@ -38,12 +38,12 @@ impl CompoundLayout {
     /// Reports conflicting names in byte-offset order, with encounter order for equal offsets.
     /// Returns [`FormatError::Internal`] if `member_name` returns `None` for an index needed
     /// in an error.
-    pub(in crate::datatype) fn insert<'a>(
+    pub(in crate::datatype) fn insert(
         &mut self,
         offset: u64,
         field_size: NonZeroU32,
         index: usize,
-        member_name: impl Fn(usize) -> Option<&'a str>,
+        member_name: impl Fn(usize) -> Option<DatatypeMemberName>,
     ) -> Result<(), FormatError> {
         let name = |index| {
             member_name(index).ok_or_else(|| {
@@ -65,8 +65,8 @@ impl CompoundLayout {
         };
         if let Some((first, second)) = conflict {
             return Err(FormatError::CompoundFieldOverlap {
-                first: name(first)?.into(),
-                second: name(second)?.into(),
+                first: name(first)?,
+                second: name(second)?,
             });
         }
         extents.insert(offset, MemberExtent { end, index });
@@ -81,11 +81,11 @@ impl CompoundLayout {
     ///
     /// Returns [`FormatError::CompoundFieldOutOfBounds`] if the member exceeds the element.
     /// Calls `name` only to report this error and propagates any error from that call.
-    pub(super) fn member_end<'a>(
+    pub(super) fn member_end(
         &self,
         offset: u64,
         field_size: u32,
-        name: impl FnOnce() -> Result<&'a str, FormatError>,
+        name: impl FnOnce() -> Result<DatatypeMemberName, FormatError>,
     ) -> Result<u64, FormatError> {
         // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks the member bounds.
         let Some(end) = offset
@@ -93,7 +93,7 @@ impl CompoundLayout {
             .filter(|&end| end <= u64::from(self.size))
         else {
             return Err(FormatError::CompoundFieldOutOfBounds {
-                name: name()?.into(),
+                name: name()?,
                 offset,
                 field_size,
                 compound_size: self.size,

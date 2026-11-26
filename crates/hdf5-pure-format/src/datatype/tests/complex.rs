@@ -1,3 +1,6 @@
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
+
 use super::*;
 
 #[rstest]
@@ -320,9 +323,9 @@ impl ComplexContainer {
                     Datatype::Compound {
                         size: child_size + 1,
                         members: vec![
-                            __private::compound_member("value".into(), 0, child),
-                            __private::compound_member(
-                                "tag".into(),
+                            CompoundMember::new(DatatypeMemberName::from(c"value"), 0, child),
+                            CompoundMember::new(
+                                DatatypeMemberName::from(c"tag"),
                                 u64::from(child_size),
                                 byte_member_type(),
                             ),
