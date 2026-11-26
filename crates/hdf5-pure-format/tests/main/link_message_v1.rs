@@ -89,7 +89,7 @@ fn hard_link_decoders_report_a_truncated_address_at_each_width(
     );
     assert_eq!(
         LinkMessageV1::parse(&bytes, width).unwrap_err(),
-        LinkWireError::Storage(LinkStorageError::Format(error))
+        LinkWireError::Format(error)
     );
 }
 
@@ -211,6 +211,10 @@ fn full_link_decoders_reject_the_same_malformed_fields(
     #[case] storage_error: LinkStorageError,
 ) {
     assert_eq!(
+        LinkStorageError::from(LinkWireError::Format(format_error.clone())),
+        storage_error
+    );
+    assert_eq!(
         LinkMessageView::parse_prefix(bytes, OffsetWidth::Two).unwrap_err(),
         format_error
     );
@@ -220,7 +224,7 @@ fn full_link_decoders_reject_the_same_malformed_fields(
     );
     assert_eq!(
         LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap_err(),
-        LinkWireError::Storage(storage_error)
+        LinkWireError::Format(format_error.clone())
     );
 }
 
@@ -241,7 +245,7 @@ fn link_decoder_acquisition_and_interpretation_follow_the_selected_fields(
     );
     assert_eq!(
         LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap_err(),
-        LinkWireError::Storage(LinkStorageError::Format(error))
+        LinkWireError::Format(error)
     );
 }
 
@@ -397,7 +401,7 @@ fn wire_links_preserve_raw_names_and_optional_fields(
 fn user_link_parsing_rejects_invalid_name_components(#[case] bytes: &[u8], #[case] name: &[u8]) {
     assert_eq!(
         LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap_err(),
-        LinkWireError::Storage(LinkStorageError::InvalidName(name.to_vec()))
+        LinkWireError::Format(FormatError::InvalidLinkNameBytes(name.to_vec()))
     );
 }
 
@@ -412,28 +416,31 @@ fn user_link_parsing_rejects_invalid_name_components(#[case] bytes: &[u8], #[cas
 fn wire_links_report_decoding_errors(#[case] bytes: &[u8], #[case] error: FormatError) {
     assert_eq!(
         LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap_err(),
-        LinkWireError::Storage(LinkStorageError::Format(error))
+        LinkWireError::Format(error)
     );
 }
 
 #[rstest]
-#[case::reserved_flags(b"\x01\x20\x01x\x34\x12", LinkStorageError::Flags(0x20))]
-#[case::undefined_address(b"\x01\x00\x01x\xff\xff", LinkStorageError::UndefinedAddress)]
-#[case::empty_soft(b"\x01\x08\x01\x01x\x00\x00", LinkStorageError::InvalidTarget)]
-#[case::nul_soft(b"\x01\x08\x01\x01x\x01\x00\x00", LinkStorageError::InvalidTarget)]
+#[case::reserved_flags(b"\x01\x20\x01x\x34\x12", FormatError::InvalidLinkFlags(0x20))]
+#[case::undefined_address(b"\x01\x00\x01x\xff\xff", FormatError::DefinedAddressIsUndefined { address: 0xffff, offset_size: 2 })]
+#[case::empty_soft(b"\x01\x08\x01\x01x\x00\x00", FormatError::InvalidLinkTarget)]
+#[case::nul_soft(b"\x01\x08\x01\x01x\x01\x00\x00", FormatError::InvalidLinkTarget)]
 #[case::external_flags(
     b"\x01\x08\x40\x01x\x01\x00\x01",
-    LinkStorageError::ExternalVersionFlags(1)
+    FormatError::InvalidExternalLinkVersionFlags(1)
 )]
-#[case::external_framing(b"\x01\x08\x40\x01x\x03\x00\x00ab", LinkStorageError::ExternalValue)]
+#[case::external_framing(
+    b"\x01\x08\x40\x01x\x03\x00\x00ab",
+    FormatError::InvalidExternalLinkValue
+)]
 #[case::external_empty_path(
     b"\x01\x08\x40\x01x\x04\x00\x00a\x00\x00",
-    LinkStorageError::InvalidTarget
+    FormatError::InvalidLinkTarget
 )]
-fn wire_links_reject_malformed_fields(#[case] bytes: &[u8], #[case] error: LinkStorageError) {
+fn wire_links_reject_malformed_fields(#[case] bytes: &[u8], #[case] error: FormatError) {
     assert_eq!(
         LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap_err(),
-        LinkWireError::Storage(error)
+        LinkWireError::Format(error)
     );
 }
 
@@ -451,11 +458,11 @@ fn prefix_parsing_reports_extent_without_object_header_padding(
     assert_eq!(borrowed.consumed(), len);
     assert_eq!(
         LinkMessageView::parse(bytes, OffsetWidth::Two).unwrap_err(),
-        LinkWireError::Storage(LinkStorageError::TrailingBytes)
+        LinkWireError::TrailingBytes
     );
     assert_eq!(
         LinkMessageV1::parse(bytes, OffsetWidth::Two).unwrap_err(),
-        LinkWireError::Storage(LinkStorageError::TrailingBytes)
+        LinkWireError::TrailingBytes
     );
 }
 
@@ -501,7 +508,7 @@ fn user_values_fit_their_own_length_field(#[case] len: usize) {
 fn user_values_reject_lengths_above_the_field_limit() {
     assert_eq!(
         UserLinkValue::new(vec![0; 65_536]).unwrap_err(),
-        LinkStorageError::TargetLength(65_536)
+        LinkWireError::TargetLength(65_536)
     );
 }
 
@@ -548,26 +555,18 @@ fn hard_target_width_errors_are_preserved_by_length_and_encoding() {
         address: 65_536,
         offset_size: 2,
     };
-    let storage = LinkStorageError::Format(format.clone());
-    let expected = LinkWireError::Storage(storage.clone());
+    let expected = LinkWireError::Format(format.clone());
     assert_eq!(link.encoded_len(OffsetWidth::Two).unwrap_err(), expected);
     let error = link.serialize(OffsetWidth::Two).unwrap_err();
     assert_eq!(error, expected);
-    let storage_source = error
-        .source()
-        .unwrap()
-        .downcast_ref::<LinkStorageError>()
-        .unwrap();
-    assert_eq!(storage_source, &storage);
-    let format_source = storage_source
+    let format_source = error
         .source()
         .unwrap()
         .downcast_ref::<FormatError>()
         .unwrap();
     assert_eq!(format_source, &format);
     assert!(format_source.source().is_none());
-    assert_eq!(storage_source.to_string(), format.to_string());
-    assert_eq!(error.to_string(), storage.to_string());
+    assert_eq!(error.to_string(), format.to_string());
 }
 
 #[rstest]

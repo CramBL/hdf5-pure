@@ -20,9 +20,9 @@ use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
 use crate::link_message::LinkMessage;
 use crate::link_message_read::{LinkMessageView, LinkTargetView};
 use crate::link_message_v1::{
-    self, LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError, UserLinkKind,
+    LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError, UserLinkKind,
 };
-use crate::link_message_write::{self, PreparedLink};
+use crate::link_message_write::{self, PreparedLink, StoredLink};
 use crate::width::{self, OffsetWidth, UintWidth};
 
 /// A group link set with distinct names and consistent creation-order and storage metadata.
@@ -433,8 +433,8 @@ impl OwnedLink {
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<(Self, usize), LinkStorageError> {
-        let link = LinkMessageView::parse_prefix(data, offset_width)
-            .map_err(link_message_v1::decoded_link_error)?;
+        let link =
+            LinkMessageView::parse_prefix(data, offset_width).map_err(LinkWireError::from)?;
         Ok((
             Self::try_from(&link).map_err(LinkStorageError::from)?,
             link.consumed(),
@@ -571,23 +571,7 @@ impl OwnedLink {
     ///
     /// Returns the address and body length errors of [`Self::encoded_len`].
     pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'_>, LinkStorageError> {
-        PreparedLink::for_owned(self, offset_width)
-    }
-
-    pub(crate) fn name_width(&self) -> UintWidth {
-        self.name.width()
-    }
-
-    pub(crate) fn stored_charset(&self) -> Option<CharacterSet> {
-        self.explicit_charset.then(|| self.charset.clone())
-    }
-
-    pub(crate) fn target_view(&self) -> LinkTargetView<'_> {
-        self.target.as_view(self.explicit_type)
-    }
-
-    pub(crate) fn target_value_len(&self) -> u16 {
-        self.target_value_len
+        Ok(PreparedLink::for_stored(self, offset_width)?)
     }
 
     fn from_fields(
@@ -607,6 +591,24 @@ impl OwnedLink {
             target_value_len,
             target,
         }
+    }
+}
+
+impl StoredLink for OwnedLink {
+    fn name_field(&self) -> (&[u8], UintWidth) {
+        (self.name.as_bytes(), self.name.width())
+    }
+    fn target_field(&self) -> (LinkTargetView<'_>, u16) {
+        (
+            self.target.as_view(self.explicit_type),
+            self.target_value_len,
+        )
+    }
+    fn creation_index(&self) -> Option<u64> {
+        self.creation_order
+    }
+    fn charset_field(&self) -> Option<CharacterSet> {
+        self.explicit_charset.then(|| self.charset.clone())
     }
 }
 
@@ -937,7 +939,20 @@ impl From<LinkWireError> for LinkStorageError {
                     length_size: width.get(),
                 })
             }
-            LinkWireError::Storage(error) => error,
+            LinkWireError::TrailingBytes => Self::TrailingBytes,
+            LinkWireError::TargetLength(length) => Self::TargetLength(length),
+            LinkWireError::Format(error) => match error {
+                FormatError::InvalidLinkFlags(flags) => Self::Flags(flags),
+                FormatError::InvalidLinkNameBytes(name) => Self::InvalidName(name),
+                FormatError::DefinedAddressIsUndefined { .. } => Self::UndefinedAddress,
+                FormatError::InvalidLinkTarget => Self::InvalidTarget,
+                FormatError::InvalidExternalLinkValue => Self::ExternalValue,
+                FormatError::InvalidExternalLinkVersionFlags(flags) => {
+                    Self::ExternalVersionFlags(flags)
+                }
+                FormatError::LinkMessageLengthOverflow => Self::LengthOverflow,
+                error => Self::Format(error),
+            },
         }
     }
 }
