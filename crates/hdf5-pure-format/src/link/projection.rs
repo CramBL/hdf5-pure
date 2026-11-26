@@ -3,15 +3,17 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 use core::ops::Range;
 
+use super::encode::PreparedLink;
+use super::name::{LinkTargetV1, UserLinkKind};
+use super::view::{LinkMessageView, LinkPrefix, LinkTargetView};
+use super::wire::LinkMessageV1;
 use crate::address::StoredAddress;
-
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_message_read::{LinkMessageView, LinkPrefix, LinkTargetView};
-use crate::link_message_v1::LinkProjectionError;
-use crate::link_message_write::PreparedLink;
 use crate::width::OffsetWidth;
 
 /// The type of a link in an HDF5 v2 group.
@@ -38,7 +40,7 @@ impl LinkTarget {
             object_path,
         }))
     }
-    pub(crate) fn as_view(&self) -> LinkTargetView<'_> {
+    fn as_view(&self) -> LinkTargetView<'_> {
         match self {
             Self::Hard {
                 object_header_address,
@@ -309,304 +311,160 @@ impl LinkMessage {
     }
 }
 
-/// The link type of a hard link, from the Link type table of "The Link Message" of the [format
-/// specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
-pub(crate) const HARD_LINK: u8 = 0;
+impl TryFrom<LinkMessageV1> for LinkMessage {
+    type Error = LinkProjectionError;
 
-/// The link type of a soft link, from the same table as [`HARD_LINK`].
-pub(crate) const SOFT_LINK: u8 = 1;
-
-/// The link type of an external link, from the same table as [`HARD_LINK`].
-pub(crate) const EXTERNAL_LINK: u8 = 64;
-
-#[cfg(test)]
-mod tests {
-    use rstest::rstest;
-    use test_util::link_message;
-    use test_util::widths::Widths;
-
-    use super::*;
-    use crate::address::StoredAddressExt;
-
-    #[rstest]
-    #[case::hard(LinkTarget::Hard { object_header_address: StoredAddress::new(42) })]
-    #[case::soft(LinkTarget::soft("target".into()))]
-    #[case::external(LinkTarget::external("file.h5".into(), "/target".into()))]
-    fn link_names_borrow_prefix_bytes_before_the_target(#[case] link_target: LinkTarget) {
-        let data = LinkMessage {
-            name: "link".into(),
-            link_target,
-            creation_order: Some(7),
-            charset: CharacterSet::Utf8,
-        }
-        .serialize(OffsetWidth::Eight)
-        .unwrap();
-        let prefix = LinkPrefix::parse(&data).unwrap();
-        let name = LinkMessage::name_bytes(&data[..prefix.target_start()]).unwrap();
-        assert_eq!(name, b"link");
-        assert_eq!(name.as_ptr(), prefix.name.as_ptr());
-    }
-
-    #[rstest]
-    #[case::version(vec![2, 0], FormatError::InvalidLinkVersion(2))]
-    #[case::truncated(vec![1, 0, 3, b'x'], FormatError::UnexpectedEof { expected: 6, available: 4 })]
-    #[case::charset(vec![1, 0x10, 2, 1], FormatError::InvalidCharacterSet(2))]
-    fn borrowed_link_names_reject_malformed_prefixes(
-        #[case] data: Vec<u8>,
-        #[case] expected: FormatError,
-    ) {
-        assert_eq!(LinkMessage::name_bytes(&data).unwrap_err(), expected);
-    }
-
-    #[test]
-    fn borrowed_link_names_preserve_invalid_utf8() {
-        let mut data = build_hard_link("a", 42, 8, None, None, 1);
-        data[3] = 0xff;
-        assert_eq!(LinkMessage::name_bytes(&data).unwrap(), &[0xff]);
-    }
-
-    fn build_hard_link(
-        name: &str,
-        addr: u64,
-        offset_size: usize,
-        creation_order: Option<u64>,
-        charset: Option<u8>,
-        name_size_width: usize,
-    ) -> Vec<u8> {
-        let mut link = link_message::HardLink::new(name, addr).name_size_width(name_size_width);
-        if let Some(creation_order) = creation_order {
-            link = link.creation_order(creation_order);
-        }
-        if let Some(charset) = charset {
-            link = link.character_set(link_message::CharacterSet(charset));
-        }
-        link.build(Widths::new(offset_size, offset_size))
-    }
-
-    #[test]
-    fn hard_link_ascii_no_creation_order() {
-        let data = build_hard_link("mydata", 0x1000, 8, None, None, 1);
-        let msg = LinkMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.name, "mydata");
-        assert_eq!(
-            msg.link_target,
-            LinkTarget::Hard {
-                object_header_address: StoredAddress::new(0x1000)
+    /// Converts a checked message to a supported link with text names and paths.
+    ///
+    /// Replaces invalid UTF-8 in names and external paths with the replacement character.
+    /// Soft-link paths must be valid UTF-8. The character-set declaration is retained
+    /// independently of text conversion.
+    ///
+    /// The converter discards the stored name-length width and explicit default-field presence.
+    /// [`LinkMessage::serialize`] writes the smallest name-length width and omits default fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkProjectionError::UnsupportedKind`] for a user-defined link, or
+    /// [`LinkProjectionError::Format`] containing [`FormatError::InvalidSoftLinkEncoding`]
+    /// if the soft-link target is not UTF-8.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::__private::{LinkMessage, LinkMessageV1, OffsetWidth};
+    ///
+    /// let wire = LinkMessageV1::parse(b"\x01\x00\x01\xff\x34\x12", OffsetWidth::Two).unwrap();
+    /// let text = LinkMessage::try_from(wire).unwrap();
+    /// assert_eq!(text.name, "\u{fffd}");
+    /// ```
+    fn try_from(link: LinkMessageV1) -> Result<Self, Self::Error> {
+        let (target, creation_order, charset, name, _) = link.into_parts();
+        let link_target = match target {
+            LinkTargetV1::Hard {
+                object_header_address,
+                explicit_type: _,
+            } => LinkTarget::Hard {
+                object_header_address,
+            },
+            LinkTargetV1::Soft { target_path } => {
+                LinkTarget::soft(String::from_utf8(target_path).map_err(|error| {
+                    LinkProjectionError::Format(FormatError::InvalidSoftLinkEncoding {
+                        source: error.utf8_error(),
+                    })
+                })?)
             }
-        );
-        assert_eq!(msg.creation_order, None);
-        assert_eq!(msg.charset, CharacterSet::Ascii);
-    }
-
-    #[test]
-    fn hard_link_utf8_with_creation_order() {
-        let data = build_hard_link("données", 0x2000, 8, Some(42), Some(1), 1);
-        let msg = LinkMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.name, "données");
-        assert_eq!(
-            msg.link_target,
-            LinkTarget::Hard {
-                object_header_address: StoredAddress::new(0x2000)
+            LinkTargetV1::External {
+                filename,
+                object_path,
+            } => LinkTarget::external(into_lossy_string(filename), into_lossy_string(object_path)),
+            LinkTargetV1::UserDefined { kind, value: _ } => {
+                return Err(LinkProjectionError::UnsupportedKind(kind));
             }
-        );
-        assert_eq!(msg.creation_order, Some(42));
-        assert_eq!(msg.charset, CharacterSet::Utf8);
-    }
-
-    #[test]
-    fn soft_link() {
-        let target = "/group1/dataset";
-        let mut data = Vec::new();
-        data.push(1); // version
-        data.push(0x08); // flags: bit 3 = link type present, name size = 1 byte (bits 0-1 = 0)
-        data.push(1); // link type = soft
-        data.push(4); // name length = 4
-        data.extend_from_slice(b"link");
-        data.extend_from_slice(&(target.len() as u16).to_le_bytes());
-        data.extend_from_slice(target.as_bytes());
-
-        let msg = LinkMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.name, "link");
-        assert_eq!(msg.link_target, LinkTarget::soft(target.to_string()));
-    }
-
-    #[test]
-    fn a_soft_link_target_with_invalid_utf8_is_rejected() {
-        let mut data = LinkMessage {
-            name: String::from("link"),
-            link_target: LinkTarget::soft(String::from("x")),
-            creation_order: None,
-            charset: CharacterSet::Ascii,
-        }
-        .serialize(OffsetWidth::Eight)
-        .unwrap();
-        *data.last_mut().unwrap() = 0xff;
-        let error = LinkMessage::target_if_named(&data, OffsetWidth::Eight, "link").unwrap_err();
-        let FormatError::InvalidSoftLinkEncoding { source } = error else {
-            panic!("expected InvalidSoftLinkEncoding, got {error:?}");
         };
-        assert_eq!(source.valid_up_to(), 0);
-        assert_eq!(source.error_len(), Some(1));
-        assert_eq!(
-            LinkMessage::target_if_named(&data, OffsetWidth::Eight, "other").unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn name_length_2bytes() {
-        let data = build_hard_link("test", 0x500, 8, None, None, 2);
-        let msg = LinkMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.name, "test");
-    }
-
-    #[test]
-    fn name_length_4bytes() {
-        let data = build_hard_link("abcd", 0x600, 8, None, None, 4);
-        let msg = LinkMessage::parse(&data, 8).unwrap();
-        assert_eq!(msg.name, "abcd");
-    }
-
-    #[test]
-    fn a_named_hard_link_answers_with_its_address() {
-        let data = build_hard_link("mydata", 0x1000, 8, None, None, 1);
-        assert_eq!(
-            LinkMessage::hard_link_address_if_named(&data, 8, "mydata").unwrap(),
-            Some(StoredAddress::new(0x1000))
-        );
-        assert_eq!(
-            LinkMessage::hard_link_address_if_named(&data, 8, "other").unwrap(),
-            None
-        );
-    }
-
-    /// A soft link refers to a path, not an object header, so a lookup passes over it
-    /// however it is named.
-    #[test]
-    fn a_soft_link_of_the_wanted_name_is_not_an_address() {
-        let target = "/group1/dataset";
-        let mut data = Vec::new();
-        data.push(1); // version
-        data.push(0x08); // flags: link type present, 1-byte name length
-        data.push(1); // link type = soft
-        data.push(4); // name length
-        data.extend_from_slice(b"link");
-        data.extend_from_slice(&(target.len() as u16).to_le_bytes());
-        data.extend_from_slice(target.as_bytes());
-
-        assert_eq!(
-            LinkMessage::hard_link_address_if_named(&data, 8, "link").unwrap(),
-            None
-        );
-    }
-
-    /// A name that is not valid UTF-8 reaches a caller as the replacement
-    /// characters [`LinkMessage::parse`] decodes it to, and that spelling is the
-    /// only one such a link can be requested by, so it is the one that matches.
-    #[test]
-    fn a_name_that_is_not_utf8_matches_the_spelling_a_reader_gets() {
-        let mut data = Vec::new();
-        data.push(1); // version
-        data.push(0x00); // flags: hard link, 1-byte name length
-        data.push(2); // name length
-        data.extend_from_slice(&[0xFF, 0xFE]); // not UTF-8
-        data.extend_from_slice(&0x2000u64.to_le_bytes());
-
-        let decoded = LinkMessage::parse(&data, 8).unwrap().name;
-        assert_eq!(
-            LinkMessage::hard_link_address_if_named(&data, 8, &decoded).unwrap(),
-            Some(StoredAddress::new(0x2000)),
-            "a link found by listing must be findable by the name the listing gave"
-        );
-        assert!(link_is_named(&data, &decoded));
-    }
-
-    /// A message this cannot read is kept, not filtered away, so the parse
-    /// that follows reports it. Returning "not this one" would hide it.
-    /// A link type this crate does not know is a corrupt group, not a missing
-    /// name, and [`LinkMessage::parse`] says so. A lookup must not soften that
-    /// into "no such link".
-    #[test]
-    fn a_lookup_of_a_link_type_this_crate_does_not_know_returns_invalid_link_type() {
-        let mut data = Vec::new();
-        data.push(1); // version
-        data.push(0x08); // flags: link type present, 1-byte name length
-        data.push(99); // not a link type this crate defines
-        data.push(1); // name length
-        data.push(b'x');
-
-        assert_eq!(
-            LinkMessage::hard_link_address_if_named(&data, 8, "x").unwrap_err(),
-            FormatError::InvalidLinkType(99)
-        );
-        // ...but only for the link that was requested: another name's lookup is
-        // not this message's business, and the filter drops it before the scan.
-        assert_eq!(
-            LinkMessage::hard_link_address_if_named(&data, 8, "y").unwrap(),
-            None
-        );
-        assert!(!link_is_named(&data, "y"));
-    }
-
-    #[test]
-    fn an_unreadable_link_is_kept_by_the_filter() {
-        assert!(link_is_named(&[2, 0, 0, 0], "anything"), "bad version");
-        assert!(link_is_named(&[], "anything"), "empty body");
-    }
-
-    #[test]
-    fn invalid_version() {
-        let data = vec![2, 0, 0, 0]; // version 2
-        let err = LinkMessage::parse(&data, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidLinkVersion(2));
-    }
-
-    #[test]
-    fn a_soft_link_target_longer_than_its_length_field_is_rejected() {
-        let error = LinkMessage {
-            name: "link".into(),
-            link_target: LinkTarget::soft("a".repeat(usize::from(u16::MAX) + 1)),
-            creation_order: None,
-            charset: CharacterSet::Ascii,
-        }
-        .serialize(OffsetWidth::Eight)
-        .unwrap_err();
-        assert_eq!(
-            error,
-            FormatError::LengthTooLarge {
-                length: 65_536,
-                length_size: 2
-            }
-        );
-    }
-
-    #[rstest]
-    #[case::a_hard_link(build_hard_link("a", 0x1234, 8, None, None, 1), Ok(Some(4..12)))]
-    #[case::a_soft_link(soft_link_body(), Ok(None))]
-    #[case::a_hard_link_cut_short(
-        build_hard_link("a", 0x1234, 8, None, None, 1)[..10].to_vec(),
-        Err(FormatError::UnexpectedEof { expected: 12, available: 10 })
-    )]
-    fn a_hard_link_address_is_located_past_the_name(
-        #[case] data: Vec<u8>,
-        #[case] expected: Result<Option<Range<usize>>, FormatError>,
-    ) {
-        assert_eq!(
-            LinkMessage::hard_link_address_range(&data, OffsetWidth::Eight),
-            expected
-        );
-    }
-
-    fn soft_link_body() -> Vec<u8> {
-        LinkMessage {
-            name: "link".into(),
-            link_target: LinkTarget::soft("/group1".into()),
-            creation_order: None,
-            charset: CharacterSet::Ascii,
-        }
-        .serialize(OffsetWidth::Eight)
-        .unwrap()
+        Ok(Self {
+            name: into_lossy_string(name.into_bytes()),
+            link_target,
+            creation_order,
+            charset: charset.unwrap_or(CharacterSet::Ascii),
+        })
     }
 }
+
+fn into_lossy_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
+impl LinkMessageView<'_> {
+    /// Converts a supported target and the name to an owned text-oriented link.
+    ///
+    /// Uses ASCII when the message omits its character-set field. Replaces invalid UTF-8 in
+    /// the name and external paths, and requires valid UTF-8 in soft paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkProjectionError::UnsupportedKind`] for a user-defined target or
+    /// [`LinkProjectionError::Format`] with [`FormatError::InvalidSoftLinkEncoding`] for a
+    /// soft path with invalid UTF-8.
+    pub fn to_text(&self) -> Result<LinkMessage, LinkProjectionError> {
+        let link_target = self.target().to_text()?;
+        Ok(LinkMessage {
+            name: String::from_utf8_lossy(self.name_bytes()).into_owned(),
+            link_target,
+            creation_order: self.creation_order(),
+            charset: self.charset().unwrap_or(CharacterSet::Ascii),
+        })
+    }
+}
+
+impl LinkTargetView<'_> {
+    fn to_text(self) -> Result<LinkTarget, LinkProjectionError> {
+        Ok(match self {
+            Self::Hard {
+                object_header_address,
+                explicit_type: _,
+            } => LinkTarget::Hard {
+                object_header_address,
+            },
+            Self::Soft { target_path } => {
+                let path = core::str::from_utf8(target_path).map_err(|source| {
+                    LinkProjectionError::Format(FormatError::InvalidSoftLinkEncoding { source })
+                })?;
+                LinkTarget::soft(String::from(path))
+            }
+            Self::External {
+                filename,
+                object_path,
+            } => LinkTarget::external(
+                String::from_utf8_lossy(filename).into_owned(),
+                String::from_utf8_lossy(object_path).into_owned(),
+            ),
+            Self::UserDefined { kind, .. } => {
+                return Err(LinkProjectionError::UnsupportedKind(kind));
+            }
+        })
+    }
+}
+/// An error converting a checked wire message to a supported link model.
+///
+/// [`Error::source`] returns the wrapped [`FormatError`] for [`Self::Format`].
+/// [`Self::UnsupportedKind`] reports the stored kind code and has no source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkProjectionError {
+    /// Text conversion failed for a supported target.
+    Format(FormatError),
+    /// The checked message contains a user-defined link kind.
+    UnsupportedKind(UserLinkKind),
+}
+
+impl LinkProjectionError {
+    fn into_format(self) -> FormatError {
+        match self {
+            Self::Format(error) => error,
+            Self::UnsupportedKind(kind) => FormatError::InvalidLinkType(kind.get()),
+        }
+    }
+}
+
+impl fmt::Display for LinkProjectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Format(error) => fmt::Display::fmt(error, f),
+            Self::UnsupportedKind(kind) => write!(f, "unsupported link kind: {}", kind.get()),
+        }
+    }
+}
+
+impl Error for LinkProjectionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Format(error) => Some(error),
+            Self::UnsupportedKind(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/projection.rs"]
+mod tests;

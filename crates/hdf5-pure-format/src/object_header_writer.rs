@@ -7,8 +7,8 @@ use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::group_info::GroupInfo;
+use crate::link::PreparedLink;
 use crate::link_info::LinkInfoMessage;
-use crate::link_message_write::PreparedLink;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::{

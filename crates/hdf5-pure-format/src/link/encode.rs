@@ -6,17 +6,19 @@ use core::error::Error;
 use core::fmt;
 use core::ops::Range;
 
+use super::error::LinkWireError;
+use super::name::{self, LinkName};
+use super::source::StoredLink;
+use super::view::{
+    ASCII, CHARSET_PRESENT, CREATION_ORDER_LEN, CREATION_ORDER_PRESENT, EXTERNAL_VERSION_FLAGS,
+    LinkMessageView, LinkTargetView, PREFIX_LEN, TYPE_PRESENT, UTF8, VERSION,
+};
+use super::wire::{EXTERNAL_LINK, HARD_LINK, SOFT_LINK};
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_message::{EXTERNAL_LINK, HARD_LINK, SOFT_LINK};
-use crate::link_message_read::{
-    ASCII, CHARSET_PRESENT, CREATION_ORDER_LEN, CREATION_ORDER_PRESENT, EXTERNAL_VERSION_FLAGS,
-    LinkMessageView, LinkTargetView, PREFIX_LEN, TYPE_PRESENT, UTF8, VERSION,
-};
-use crate::link_message_v1::{self, LinkName, LinkWireError};
 use crate::width::{OffsetWidth, UintWidth};
 
 /// A version 1 Link body ready to write at a checked offset width.
@@ -54,7 +56,7 @@ impl<'a> PreparedLink<'a> {
         .map_err(LinkWireError::from)
     }
 
-    pub(crate) fn for_view(
+    pub(super) fn for_view(
         link: &LinkMessageView<'a>,
         offset_width: OffsetWidth,
     ) -> Result<Self, LinkWireError> {
@@ -72,7 +74,7 @@ impl<'a> PreparedLink<'a> {
         .map_err(LinkWireError::from)
     }
 
-    pub(crate) fn from_text_fields(
+    pub(super) fn from_text_fields(
         offset_width: OffsetWidth,
         name: &'a str,
         creation_order: Option<u64>,
@@ -194,7 +196,7 @@ impl<'a> PreparedLink<'a> {
         matches!(self.fields.target, LinkTargetView::Hard { .. }).then_some(self.offset_width)
     }
 
-    pub(crate) fn name_bytes(&self) -> &'a [u8] {
+    pub(super) fn name_bytes(&self) -> &'a [u8] {
         self.fields.name
     }
 
@@ -210,7 +212,7 @@ impl<'a> PreparedLink<'a> {
         self.fields.target
     }
 
-    pub(crate) fn name_width(&self) -> UintWidth {
+    pub(super) fn name_width(&self) -> UintWidth {
         self.fields.name_width
     }
 
@@ -379,13 +381,6 @@ impl From<LinkOutputTooSmall> for FormatError {
     }
 }
 
-pub(crate) trait StoredLink {
-    fn name_field(&self) -> (&[u8], UintWidth);
-    fn target_field(&self) -> (LinkTargetView<'_>, u16);
-    fn creation_index(&self) -> Option<u64>;
-    fn charset_field(&self) -> Option<CharacterSet>;
-}
-
 #[derive(Debug)]
 struct LinkFields<'a> {
     target: LinkTargetView<'a>,
@@ -443,7 +438,7 @@ fn checked_value_len(target: LinkTargetView<'_>) -> Result<u16, ValueLengthError
     let len = match target {
         LinkTargetView::Hard { .. } => return Ok(0),
         LinkTargetView::Soft { target_path } => {
-            if !link_message_v1::is_symbolic_path(target_path) {
+            if !name::is_symbolic_path(target_path) {
                 return Err(ValueLengthError::InvalidPath);
             }
             target_path.len()
@@ -452,9 +447,7 @@ fn checked_value_len(target: LinkTargetView<'_>) -> Result<u16, ValueLengthError
             filename,
             object_path,
         } => {
-            if !link_message_v1::is_symbolic_path(filename)
-                || !link_message_v1::is_symbolic_path(object_path)
-            {
+            if !name::is_symbolic_path(filename) || !name::is_symbolic_path(object_path) {
                 return Err(ValueLengthError::InvalidPath);
             }
             filename
