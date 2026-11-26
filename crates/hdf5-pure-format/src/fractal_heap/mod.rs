@@ -1,5 +1,6 @@
 //! Fractal heap headers, object IDs, managed-block layouts, and free-space records.
 
+pub(crate) mod block;
 mod free_space;
 mod geometry;
 mod header;
