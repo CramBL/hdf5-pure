@@ -4,7 +4,6 @@ use hdf5_pure_core::__private::DecodedStoredAddress;
 
 use crate::address::StoredAddress;
 use crate::error::FormatError;
-use crate::width;
 use crate::width::{FormatWidths, LengthWidth};
 
 use super::SectionFields;
@@ -186,34 +185,12 @@ impl FreeSpaceManagerHeader {
     /// Returns the widths of the fields of the section list this header describes, in a file with
     /// lengths of `lengths`.
     pub(super) fn section_fields(&self, lengths: LengthWidth) -> SectionFields {
-        let offset = self.addr_space_bits.offset_width();
-        SectionFields {
-            count: super::enc_size(self.total_sections),
-            size: self.section_size_width(lengths, offset),
-            offset,
-        }
-    }
-
-    /// Returns the width in bytes of a section size in the section list this header describes, in
-    /// a file with lengths of `lengths`, where a section offset takes `offset` bytes.
-    ///
-    /// The width is the fewest bytes that hold the maximum section size, as "Free-space Index" of
-    /// the [format specification, version 4.0][spec] defines it, and `offset` below 8-byte lengths
-    /// where the maximum section size is all ones or all ones less one. libhdf5 sizes the section
-    /// size fields from the maximum address of its file driver (`H5FS__sinfo_new` in
-    /// `H5FSsection.c`), sets the "Size of Address Space" to the number of bits of that address
-    /// (`H5MF__create_fstype` in `H5MF.c`), and writes that address into the header truncated to
-    /// the length width (`H5FS__cache_hdr_serialize` in `H5FScache.c`), HDF5 1.10.11 to 2.2.0.
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
-    fn section_size_width(&self, lengths: LengthWidth, offset: usize) -> usize {
-        if lengths != LengthWidth::Eight
-            && self.max_section_size >= width::length_width_max(lengths) - 1
-        {
-            offset
-        } else {
-            super::enc_size(self.max_section_size)
-        }
+        SectionFields::from_header(
+            self.total_sections,
+            self.max_section_size,
+            self.addr_space_bits,
+            lengths,
+        )
     }
 }
 

@@ -270,6 +270,10 @@ impl SectionInfoCounts {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the encoded length exceeds [`u64::MAX`].
     pub fn encoded_len(self, widths: FormatWidths) -> Result<u64, FormatError> {
+        Ok(self.layout(widths)?.1)
+    }
+
+    fn layout(self, widths: FormatWidths) -> Result<(SectionFields, u64), FormatError> {
         let Self {
             sections,
             size_groups,
@@ -284,6 +288,7 @@ impl SectionInfoCounts {
                     .and_then(|records| sets.checked_add(records))
             })
             .and_then(|payload| fixed.checked_add(payload))
+            .map(|len| (fields, len))
             .ok_or(FormatError::OffsetOverflow {
                 offset: fixed,
                 length: sections,
@@ -468,6 +473,41 @@ struct SectionFields {
 }
 
 impl SectionFields {
+    fn from_header(
+        sections: u64,
+        max_section_size: u64,
+        address_space: AddressSpaceBits,
+        lengths: LengthWidth,
+    ) -> Self {
+        let offset = address_space.offset_width();
+        Self {
+            count: enc_size(sections),
+            size: Self::section_size_width(max_section_size, lengths, offset),
+            offset,
+        }
+    }
+
+    /// Returns the width in bytes of a section size in the section list this header describes, in
+    /// a file with lengths of `lengths`, where a section offset takes `offset` bytes.
+    ///
+    /// The width is the fewest bytes that hold the maximum section size, as "Free-space Index" of
+    /// the [format specification, version 4.0][spec] defines it, and `offset` below 8-byte lengths
+    /// where the maximum section size is all ones or all ones less one. libhdf5 sizes the section
+    /// size fields from the maximum address of its file driver (`H5FS__sinfo_new` in
+    /// `H5FSsection.c`), sets the "Size of Address Space" to the number of bits of that address
+    /// (`H5MF__create_fstype` in `H5MF.c`), and writes that address into the header truncated to
+    /// the length width (`H5FS__cache_hdr_serialize` in `H5FScache.c`), HDF5 1.10.11 to 2.2.0.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
+    fn section_size_width(max_section_size: u64, lengths: LengthWidth, offset: usize) -> usize {
+        if lengths != LengthWidth::Eight && max_section_size >= width::length_width_max(lengths) - 1
+        {
+            offset
+        } else {
+            enc_size(max_section_size)
+        }
+    }
+
     /// Returns the widths of the fields of the section list [`serialize_free_space_manager`]
     /// writes at `widths` for a manager of `sections` sections.
     fn written(widths: FormatWidths, sections: u64) -> Self {
@@ -476,6 +516,18 @@ impl SectionFields {
             size: enc_size(written_max_section_size(widths.lengths).get()),
             offset: AddressSpaceBits::written(widths.offsets).offset_width(),
         }
+    }
+
+    fn count(self) -> usize {
+        self.count
+    }
+
+    fn size(self) -> usize {
+        self.size
+    }
+
+    fn offset(self) -> usize {
+        self.offset
     }
 
     /// Returns the combined count and section-size field width of one size group, in bytes.
@@ -563,7 +615,7 @@ impl SectionFields {
 /// (`H5FS__sect_link_size` in `H5FSsection.c`, HDF5 1.10.11 to 2.2.0). Below 8-byte lengths the
 /// maximum is all ones less two, which has the top bit of the field set, so libhdf5 allocates as
 /// many bins for it as for the largest value of the field (`H5FS__sinfo_new`). It is below the
-/// truncated addresses [`FreeSpaceManagerHeader::section_size_width`] reads as libhdf5's.
+/// truncated addresses [`SectionFields::section_size_width`] reads as libhdf5's.
 fn written_max_section_size(lengths: LengthWidth) -> NonZeroU64 {
     match lengths {
         LengthWidth::Two => {
