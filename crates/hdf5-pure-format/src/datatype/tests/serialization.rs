@@ -9,7 +9,6 @@ use hdf5_pure_core::{
 };
 use rstest::rstest;
 
-use super as datatype_tests;
 use super::super::header::{
     self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_HEADER_SIZE,
     ENUMERATION_CLASS, FLOATING_POINT_CLASS, OPAQUE_CLASS, REFERENCE_CLASS, STRING_CLASS,
@@ -24,12 +23,13 @@ use super::super::message::{
 };
 use super::super::semantic;
 use super::super::stored_size;
+use super::fixtures;
 use crate::width::OffsetWidth;
 
 #[rstest]
-#[case::fixed_unsigned(datatype_tests::build_fixed_point(1, false, false, 0, 8))]
-#[case::fixed_signed_big_endian(datatype_tests::build_fixed_point(4, true, true, 3, 25))]
-#[case::float_binary32(datatype_tests::build_float(4, 23, 8, 0, 23, 127))]
+#[case::fixed_unsigned(fixtures::build_fixed_point(1, false, false, 0, 8))]
+#[case::fixed_signed_big_endian(fixtures::build_fixed_point(4, true, true, 3, 25))]
+#[case::float_binary32(fixtures::build_float(4, 23, 8, 0, 23, 127))]
 #[case::float_binary64_big_endian(big_endian_float())]
 #[case::float_vax(vax_float())]
 #[case::time_little_endian(time_bytes(0))]
@@ -46,11 +46,11 @@ use crate::width::OffsetWidth;
 #[case::enumeration_empty(enum_bytes(0))]
 #[case::enumeration_three_hundred(enum_bytes(300))]
 #[case::variable_sequence(sequence_bytes(
-    datatype_tests::build_fixed_point(1, false, false, 0, 8),
+    fixtures::build_fixed_point(1, false, false, 0, 8),
     DATATYPE_VERSION_ONE
 ))]
 #[case::variable_string(variable_string_bytes())]
-#[case::array(array_bytes(datatype_tests::build_fixed_point(1, false, false, 0, 8), &[2, 3], 6, DATATYPE_VERSION_THREE))]
+#[case::array(array_bytes(fixtures::build_fixed_point(1, false, false, 0, 8), &[2, 3], 6, DATATYPE_VERSION_THREE))]
 #[case::complex(complex_bytes())]
 #[case::mixed_containers(mixed_bytes())]
 #[case::vax_sequence(sequence_bytes(vax_float(), DATATYPE_VERSION_THREE))]
@@ -79,7 +79,7 @@ fn canonical_compound_array_offsets(#[case] size: u32, #[case] width: usize) {
             DatatypeMemberName::from(c"last"),
             u64::from(size - 2),
             Datatype::Array {
-                base_type: Box::new(datatype_tests::byte_member_type()),
+                base_type: Box::new(fixtures::byte_member_type()),
                 dimensions: vec![2],
             },
         )],
@@ -89,7 +89,7 @@ fn canonical_compound_array_offsets(#[case] size: u32, #[case] width: usize) {
     expected.extend_from_slice(b"last\0");
     expected.extend_from_slice(&(size - 2).to_le_bytes()[..width]);
     expected.extend_from_slice(&array_bytes(
-        datatype_tests::build_fixed_point(1, false, false, 0, 8),
+        fixtures::build_fixed_point(1, false, false, 0, 8),
         &[2],
         2,
         DATATYPE_VERSION_THREE,
@@ -112,7 +112,7 @@ fn canonical_array_sizes_preserve_constructed_models(
 ) {
     let datatype = Datatype::Array {
         base_type: Box::new(Datatype::Array {
-            base_type: Box::new(datatype_tests::byte_member_type()),
+            base_type: Box::new(fixtures::byte_member_type()),
             dimensions: dimensions.clone(),
         }),
         dimensions: vec![3],
@@ -120,7 +120,7 @@ fn canonical_array_sizes_preserve_constructed_models(
     let expected_size = size.saturating_mul(3);
     let expected = array_bytes(
         array_bytes(
-            datatype_tests::build_fixed_point(1, false, false, 0, 8),
+            fixtures::build_fixed_point(1, false, false, 0, 8),
             &dimensions,
             size,
             DATATYPE_VERSION_THREE,
@@ -165,8 +165,8 @@ fn bounded_datatype_writes_preserve_earlier_headers(#[case] nested: Vec<u8>) {
         (first, first_bytes),
         (semantic::parse_datatype(&nested).unwrap().0, nested),
         (
-            datatype_tests::byte_member_type(),
-            datatype_tests::build_fixed_point(1, false, false, 0, 8),
+            fixtures::byte_member_type(),
+            fixtures::build_fixed_point(1, false, false, 0, 8),
         ),
     ];
     let prefix = [0xa5, 0x5a, 0xff];
@@ -206,7 +206,7 @@ fn nested_opaque_tags_keep_their_encoding_boundaries(
             CompoundMember::new(
                 DatatypeMemberName::from(c"first"),
                 0,
-                datatype_tests::byte_member_type(),
+                fixtures::byte_member_type(),
             ),
             CompoundMember::new(
                 DatatypeMemberName::from(c"nested"),
@@ -239,7 +239,7 @@ fn nested_opaque_tags_keep_their_encoding_boundaries(
                 32,
             );
             expected.extend_from_slice(b"first\0\0");
-            expected.extend_from_slice(&datatype_tests::build_fixed_point(1, false, false, 0, 8));
+            expected.extend_from_slice(&fixtures::build_fixed_point(1, false, false, 0, 8));
             expected.extend_from_slice(b"nested\0\x08");
             let mut opaque = header::build_datatype_header(
                 OPAQUE_CLASS,
@@ -271,13 +271,13 @@ fn nested_opaque_tags_keep_their_encoding_boundaries(
 }
 
 fn big_endian_float() -> Vec<u8> {
-    let mut bytes = datatype_tests::build_float(8, 52, 11, 0, 52, 1023);
+    let mut bytes = fixtures::build_float(8, 52, 11, 0, 52, 1023);
     bytes[1] |= FLOAT_BYTE_ORDER_LOW_BIT;
     bytes
 }
 
 fn vax_float() -> Vec<u8> {
-    let mut bytes = datatype_tests::build_float(4, 23, 8, 0, 23, 127);
+    let mut bytes = fixtures::build_float(4, 23, 8, 0, 23, 127);
     bytes[0] = (DATATYPE_VERSION_THREE << 4) | FLOATING_POINT_CLASS;
     bytes[1] |= FLOAT_BYTE_ORDER_LOW_BIT | FLOAT_BYTE_ORDER_HIGH_BIT;
     bytes
@@ -291,7 +291,7 @@ fn time_bytes(order: u8) -> Vec<u8> {
 }
 
 fn bitfield_bytes() -> Vec<u8> {
-    let mut bytes = datatype_tests::build_fixed_point(4, true, false, 3, 25);
+    let mut bytes = fixtures::build_fixed_point(4, true, false, 3, 25);
     bytes[0] = (DATATYPE_VERSION_ONE << 4) | BIT_FIELD_CLASS;
     bytes[1] |= LOW_PADDING_BIT | HIGH_PADDING_BIT;
     bytes
@@ -307,7 +307,7 @@ fn enum_bytes(count: u16) -> Vec<u8> {
     let [low, high] = count.to_le_bytes();
     let mut bytes =
         header::build_datatype_header(ENUMERATION_CLASS, DATATYPE_VERSION_THREE, [low, high, 0], 2);
-    bytes.extend_from_slice(&datatype_tests::build_fixed_point(2, false, false, 0, 16));
+    bytes.extend_from_slice(&fixtures::build_fixed_point(2, false, false, 0, 16));
     for value in 0..count {
         bytes.extend_from_slice(format!("M{value}\0").as_bytes());
     }
@@ -324,7 +324,7 @@ fn variable_string_bytes() -> Vec<u8> {
         [0x21, 1, 0],
         16,
     );
-    bytes.extend_from_slice(&datatype_tests::build_fixed_point(1, true, false, 0, 8));
+    bytes.extend_from_slice(&fixtures::build_fixed_point(1, true, false, 0, 8));
     bytes
 }
 
@@ -347,7 +347,7 @@ fn array_bytes(child: Vec<u8>, dimensions: &[u32], size: u32, version: u8) -> Ve
 fn complex_bytes() -> Vec<u8> {
     let mut bytes =
         header::build_datatype_header(COMPLEX_CLASS, DATATYPE_VERSION_FIVE, [1, 0, 0], 8);
-    bytes.extend_from_slice(&datatype_tests::build_float(4, 23, 8, 0, 23, 127));
+    bytes.extend_from_slice(&fixtures::build_float(4, 23, 8, 0, 23, 127));
     bytes
 }
 
@@ -376,11 +376,10 @@ fn variable_length_datatype_sizes_follow_offset_width(
     #[case] offset_width: OffsetWidth,
     #[case] size: u32,
 ) {
-    let datatype = Datatype::VariableLength(VariableLengthType::sequence(
-        datatype_tests::byte_member_type(),
-    ));
+    let datatype =
+        Datatype::VariableLength(VariableLengthType::sequence(fixtures::byte_member_type()));
     let mut expected = sequence_bytes(
-        datatype_tests::build_fixed_point(1, false, false, 0, 8),
+        fixtures::build_fixed_point(1, false, false, 0, 8),
         DATATYPE_VERSION_ONE,
     );
     expected[4..8].copy_from_slice(&size.to_le_bytes());
@@ -440,7 +439,7 @@ fn variable_length_datatype_sizes_follow_offset_width(
 #[case::beyond(array_of_opaque(2_147_483_648, 2), Err(FormatError::LengthTooLarge { length: 4_294_967_296, length_size: 4 }))]
 #[case::nested_overflow(Datatype::Array {
     base_type: Box::new(Datatype::Array {
-        base_type: Box::new(datatype_tests::byte_member_type()),
+        base_type: Box::new(fixtures::byte_member_type()),
         dimensions: vec![u32::MAX, 2],
     }),
     dimensions: vec![3],
@@ -478,14 +477,14 @@ fn array_datatype_rank_checks_its_fixed_width_field(
     #[case] expected: Result<u8, FormatError>,
 ) {
     let datatype = Datatype::Array {
-        base_type: Box::new(datatype_tests::byte_member_type()),
+        base_type: Box::new(fixtures::byte_member_type()),
         dimensions: vec![1; rank],
     };
     assert_eq!(
         semantic::serialize_datatype_with_offset_width(&datatype, OffsetWidth::Two).map(|bytes| {
             assert_eq!(
                 bytes.len(),
-                9 + 4 * rank + datatype_tests::build_fixed_point(1, false, false, 0, 8).len()
+                9 + 4 * rank + fixtures::build_fixed_point(1, false, false, 0, 8).len()
             );
             assert_eq!(
                 &bytes[9..9 + 4 * rank],
@@ -520,7 +519,7 @@ fn datatype_member_counts_check_their_fixed_width_fields(
                     CompoundMember::new(
                         DatatypeMemberName::new(index.to_string()).unwrap(),
                         index as u64,
-                        datatype_tests::byte_member_type(),
+                        fixtures::byte_member_type(),
                     )
                 })
                 .collect(),
@@ -547,7 +546,7 @@ fn compound_member_offsets_fit_the_declared_storage(
         members: vec![CompoundMember::new(
             DatatypeMemberName::from(c"value"),
             offset,
-            datatype_tests::byte_member_type(),
+            fixtures::byte_member_type(),
         )],
     };
     assert_eq!(
