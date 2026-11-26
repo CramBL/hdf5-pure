@@ -394,7 +394,7 @@ impl FloatingPointType {
     /// Constructs a four-byte IEEE 754 binary32 datatype.
     pub const fn ieee754_binary32(byte_order: DatatypeByteOrder) -> Self {
         Self {
-            size: SIZE_32,
+            size: BINARY32_SIZE,
             byte_order,
             layout: FloatingPointLayout::IEEE754_BINARY32,
         }
@@ -403,7 +403,7 @@ impl FloatingPointType {
     /// Constructs an eight-byte IEEE 754 binary64 datatype.
     pub const fn ieee754_binary64(byte_order: DatatypeByteOrder) -> Self {
         Self {
-            size: SIZE_64,
+            size: BINARY64_SIZE,
             byte_order,
             layout: FloatingPointLayout::IEEE754_BINARY64,
         }
@@ -931,6 +931,9 @@ const SIZE_16: NonZeroU32 = NonZeroU32::new(2).unwrap();
 const SIZE_32: NonZeroU32 = NonZeroU32::new(4).unwrap();
 const SIZE_64: NonZeroU32 = NonZeroU32::new(8).unwrap();
 
+const BINARY32_SIZE: NonZeroU32 = NonZeroU32::new(4).unwrap();
+const BINARY64_SIZE: NonZeroU32 = NonZeroU32::new(8).unwrap();
+
 const PRECISION_8: NonZeroU16 = NonZeroU16::new(8).unwrap();
 const PRECISION_16: NonZeroU16 = NonZeroU16::new(16).unwrap();
 const PRECISION_32: NonZeroU16 = NonZeroU16::new(32).unwrap();
@@ -1168,19 +1171,39 @@ mod tests {
             expected
         );
     }
-    #[rstest]
-    #[case::fixed_point_vax(FixedPointType::new(1, DatatypeByteOrder::Vax, false, 0, 8).unwrap_err(), FIXED_POINT_CLASS)]
-    #[case::time_vax(TimeType::new(1, DatatypeByteOrder::Vax, 8).unwrap_err(), TIME_CLASS)]
-    #[case::bit_field_vax(BitFieldType::new(1, DatatypeByteOrder::Vax, 0, 8).unwrap_err(), BIT_FIELD_CLASS)]
-    fn rejects_invalid_numeric_byte_order(#[case] error: FormatError, #[case] class: u8) {
+    #[test]
+    fn rejects_vax_fixed_point_byte_order() {
         assert_eq!(
-            error,
+            FixedPointType::new(1, DatatypeByteOrder::Vax, false, 0, 8).unwrap_err(),
             FormatError::InvalidNumericByteOrder {
-                class,
-                byte_order: DatatypeByteOrder::Vax
+                class: FIXED_POINT_CLASS,
+                byte_order: DatatypeByteOrder::Vax,
             }
         );
     }
+
+    #[test]
+    fn rejects_vax_time_byte_order() {
+        assert_eq!(
+            TimeType::new(1, DatatypeByteOrder::Vax, 8).unwrap_err(),
+            FormatError::InvalidNumericByteOrder {
+                class: TIME_CLASS,
+                byte_order: DatatypeByteOrder::Vax,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_vax_bit_field_byte_order() {
+        assert_eq!(
+            BitFieldType::new(1, DatatypeByteOrder::Vax, 0, 8).unwrap_err(),
+            FormatError::InvalidNumericByteOrder {
+                class: BIT_FIELD_CLASS,
+                byte_order: DatatypeByteOrder::Vax,
+            }
+        );
+    }
+
     #[test]
     fn rejects_floating_point_layout_with_a_smaller_size() {
         assert_eq!(
