@@ -13,7 +13,7 @@ use crate::bytes;
 use crate::convert::{self, Narrow};
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapGeometry;
-use crate::fractal_heap_block::{CHECKSUM_LEN, DIRECT_SIGNATURE, INDIRECT_SIGNATURE, VERSION};
+use crate::fractal_heap::block::{CHECKSUM_LEN, DIRECT_SIGNATURE, INDIRECT_SIGNATURE, VERSION};
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// The attribute-heap row width, `H5O_FHEAP_MAN_WIDTH` in `H5Oprivate.h` (HDF5 2.2.0).
@@ -1075,11 +1075,11 @@ mod tests {
     use test_util::fractal_heap;
     use test_util::widths::Widths;
 
+    use crate::fractal_heap::block::{FractalHeapBlock, FractalHeapBlockLayout};
     use crate::fractal_heap::{
         FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED, FractalHeapHeader, FractalHeapIdKind,
         FractalHeapIdLayout,
     };
-    use crate::fractal_heap_block::{FractalHeapBlock, FractalHeapBlockLayout};
     use crate::width::LengthWidth;
 
     use super::*;
