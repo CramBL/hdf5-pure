@@ -5,9 +5,8 @@ use core::num::NonZeroU64;
 
 use super::header::FractalHeapFiltering;
 use super::header::FractalHeapHeader;
+use super::location::{self, HugeObjectLocationEncoding};
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
-use crate::btree::v2::HugeObjectDirectRecord;
 use crate::bytes;
 use crate::codec::Encode;
 use crate::error::FormatError;
@@ -267,7 +266,7 @@ impl FractalHeapHeader {
     ///
     /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a filtered heap, or
     /// [`FormatError::Internal`] if the ID cannot hold a direct address and length. Propagates
-    /// defined-address and length errors from [`HugeObjectDirectRecord::encode`].
+    /// defined-address and length errors from [`HugeObjectLocationEncoding::new`].
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
     pub(crate) fn encode_huge_direct_id(
@@ -286,11 +285,7 @@ impl FractalHeapHeader {
         }
         let mut id = Vec::with_capacity(usize::from(self.heap_id_length));
         id.push(FractalHeapIdType::Huge.first_byte());
-        HugeObjectDirectRecord { address, length }.encode(
-            &mut id,
-            widths.offsets,
-            widths.lengths,
-        )?;
+        HugeObjectLocationEncoding::new(widths, address, length)?.append(&mut id);
         id.resize(usize::from(self.heap_id_length), 0);
         Ok(id)
     }
@@ -544,17 +539,10 @@ impl FractalHeapIdLayout {
                     filter_count,
                 )?)
             } else {
-                let addr = StoredAddress::new(bytes::read_offset_width(payload, 0, offsets)?);
-                let len = bytes::read_length_width(payload, usize::from(offsets.get()), lengths)?;
-                if addr.get() >= StoredAddress::undefined(offsets).get() || len == 0 {
-                    return Err(FormatError::InvalidFractalHeapGeometry);
-                }
-                addr.get()
-                    .checked_add(len)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: addr.get(),
-                        length: len,
-                    })?;
+                let (addr, len) = location::read_unfiltered(
+                    &mut bytes::ByteCursor::new(payload),
+                    FormatWidths { offsets, lengths },
+                )?;
                 HugeObjectReference::Inline { addr, len }
             }
         } else {

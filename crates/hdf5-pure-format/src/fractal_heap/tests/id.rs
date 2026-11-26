@@ -3,6 +3,7 @@ use test_util::fractal_heap;
 use test_util::widths::Widths;
 
 use super::*;
+use crate::address::StoredAddressExt;
 use crate::fractal_heap::test_support;
 
 #[test]

@@ -10,7 +10,6 @@ use core::num::NonZeroU16;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::btree::v2::BTreeV2NodeInfo;
-use crate::btree::v2::HugeObjectRecord;
 use crate::btree::v2::NODE_CHECKSUM_LEN;
 use crate::btree::v2::NODE_PREFIX_LEN;
 use crate::bytes;
@@ -18,7 +17,6 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapIdLayout;
 use crate::width;
-use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
@@ -503,67 +501,6 @@ impl BTreeV2Placement<'_> {
                 emission.encode_node(&mut data, index)?;
                 Ok((address, data))
             }))
-    }
-}
-
-/// A type-1 huge-object record whose fields fit the selected file widths.
-///
-/// The address is defined, and the length and numeric ID fit the length width. The writer checks
-/// every field before appending the record.
-///
-/// The record layout is defined in "Version 2 B-trees" of the [format specification,
-/// version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
-pub(super) struct HugeObjectRecordEncoding {
-    record: HugeObjectRecord,
-    widths: FormatWidths,
-}
-
-impl HugeObjectRecordEncoding {
-    pub(super) fn new(record: HugeObjectRecord, widths: FormatWidths) -> Result<Self, FormatError> {
-        let HugeObjectRecord {
-            address,
-            length,
-            id,
-        } = record;
-        let FormatWidths { offsets, lengths } = widths;
-        if address.get() > width::offset_width_max(offsets) {
-            return Err(FormatError::AddressTooLarge {
-                address: address.get(),
-                offset_size: offsets.get(),
-            });
-        }
-        if address.is_undefined(offsets) {
-            return Err(FormatError::DefinedAddressIsUndefined {
-                address: address.get(),
-                offset_size: offsets.get(),
-            });
-        }
-        for value in [length, id] {
-            if !width::length_width_holds(lengths, value) {
-                return Err(FormatError::LengthTooLarge {
-                    length: value,
-                    length_size: lengths.get(),
-                });
-            }
-        }
-        Ok(Self { record, widths })
-    }
-
-    pub(super) fn append(self, buf: &mut Vec<u8>) -> Result<(), FormatError> {
-        let Self {
-            record:
-                HugeObjectRecord {
-                    address,
-                    length,
-                    id,
-                },
-            widths: FormatWidths { offsets, lengths },
-        } = self;
-        bytes::try_write_decoded_address(buf, DecodedStoredAddress::Defined(address), offsets)?;
-        bytes::try_write_length(buf, length, lengths)?;
-        bytes::try_write_length(buf, id, lengths)
     }
 }
 
