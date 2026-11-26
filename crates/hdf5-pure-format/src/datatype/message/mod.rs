@@ -197,12 +197,13 @@ impl FloatingPointByteOrder {
 
 /// A datatype description with checked properties and a retained version at each node.
 ///
-/// A containing description's version is at least its children's versions. Compound,
-/// enumeration, and array descriptions use the property layouts of versions 3 through 5.
+/// A containing description's version is at least its children's versions. Compound and array
+/// descriptions use the property layouts of versions 3 through 5. Enumeration descriptions
+/// use the property layouts of versions 1 through 5.
 /// Complex descriptions use version 5 and retain the floating-point component's version.
 /// These layouts are defined in "The Datatype Message" of the [format specification,
-/// version 4.0][spec]. Reference descriptions and legacy container layouts are outside this
-/// representation.
+/// version 4.0][spec]. Reference descriptions, version 1 and 2 compounds, and version 2 arrays
+/// are outside this representation.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 #[derive(Clone, Debug, PartialEq)]
@@ -279,9 +280,9 @@ impl DatatypeMessage {
     ) -> Result<Self, FormatError> {
         let class = properties.class();
         let minimum = match &properties {
-            DatatypeProperties::Compound { .. }
-            | DatatypeProperties::Enumeration { .. }
-            | DatatypeProperties::Array { .. } => DatatypeVersion::Three,
+            DatatypeProperties::Compound { .. } | DatatypeProperties::Array { .. } => {
+                DatatypeVersion::Three
+            }
             DatatypeProperties::Complex { .. } => DatatypeVersion::Five,
             _ => DatatypeVersion::One,
         };
@@ -555,7 +556,7 @@ pub enum DatatypeProperties {
         /// The named members in declaration order.
         members: Vec<DatatypeMessageMember>,
     },
-    /// Enumeration members using the property layout of version 3 or later.
+    /// Enumeration members in stored order.
     Enumeration {
         /// The base description, including its message version.
         base_type: Box<DatatypeMessage>,
@@ -824,6 +825,44 @@ fn member_name(class: u8, name: &str) -> Result<(), FormatError> {
     }
     Ok(())
 }
+
+/// The name field layout for compound and enumeration members.
+///
+/// libhdf5 omits name padding from version 3 onward (`H5O__dtype_decode_helper` and
+/// `H5O__dtype_encode_helper` in `H5Odtype.c`, HDF5 2.2.0).
+#[derive(Clone, Copy)]
+enum NameLayout {
+    Padded,
+    Unpadded,
+}
+
+impl NameLayout {
+    fn for_version(version: DatatypeVersion) -> Self {
+        match version {
+            DatatypeVersion::One | DatatypeVersion::Two => Self::Padded,
+            DatatypeVersion::Three | DatatypeVersion::Four | DatatypeVersion::Five => {
+                Self::Unpadded
+            }
+        }
+    }
+
+    /// Returns the field length, including the terminator and any padding.
+    fn field_len(self, name_len: usize) -> usize {
+        name_len + self.suffix_len(name_len)
+    }
+
+    /// Returns the number of bytes for the terminator and any padding.
+    fn suffix_len(self, name_len: usize) -> usize {
+        match self {
+            Self::Padded => NAME_ALIGNMENT - name_len % NAME_ALIGNMENT,
+            Self::Unpadded => 1,
+        }
+    }
+}
+
+// "The Datatype Message" in format specification version 4.0 defines this alignment in
+// bytes for terminated compound and enumeration names in versions 1 and 2.
+const NAME_ALIGNMENT: usize = 8;
 
 /// The largest aligned opaque tag property length representable in its one-byte field.
 ///

@@ -22,9 +22,12 @@ use hdf5_pure_core::{
 use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
 use super::compound_layout::CompoundLayout;
 use super::decode::{self, Decoded, Layout, Member, Projection};
-use super::{DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion};
+use super::{
+    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, NAME_ALIGNMENT,
+    NameLayout,
+};
 use crate::bytes::{self, ByteCursor};
-use crate::codec::Encode;
+use crate::codec::{Decode, Encode};
 use crate::convert::Narrow;
 use crate::datatype::header::{Context, Header};
 use crate::datatype::{
@@ -42,11 +45,11 @@ impl DatatypeMessage {
     /// before class, except in a complex datatype's parent, where it checks class first.
     /// Reads fixed-size atomic property blocks in full before checking class flags.
     /// Acquires all array dimensions before reading the base datatype. Checks the enumeration
-    /// size against its base size before reading the member names, then acquires the complete
-    /// value list.
+    /// size against its base size, reads each complete name field including any padding, and
+    /// then acquires the complete value list.
     ///
-    /// Supports fixed-point, floating-point, time, string, bitfield, opaque, and variable-length
-    /// descriptions at versions 1 through 5, compounds, enumerations, and arrays at versions
+    /// Supports fixed-point, floating-point, time, string, bitfield, opaque, variable-length,
+    /// and enumeration descriptions at versions 1 through 5, compounds and arrays at versions
     /// 3 through 5, and homogeneous rectangular complex descriptions at version 5. Each nested
     /// description retains its own version, at most the containing description's version.
     /// Complex parents are floating-point descriptions. VAX order requires version 3 or later.
@@ -78,7 +81,7 @@ impl DatatypeMessage {
     /// class, including references.
     /// Returns [`FormatError::InvalidDatatypeFlags`] or [`FormatError::InvalidOpaqueReservedBits`]
     /// if reserved atomic, compound, enumeration, or array class bits are set. Returns
-    /// [`FormatError::InvalidDatatypeVersion`] for compound, enumeration, or array versions 1 or 2,
+    /// [`FormatError::InvalidDatatypeVersion`] for compound or array versions 1 or 2,
     /// complex versions 1 through 4, or a complex parent version outside `1..=5`.
     ///
     /// Returns [`FormatError::InvalidVariableLengthSize`] for an unsupported descriptor size,
@@ -292,8 +295,9 @@ impl DatatypeMessage {
     /// element size at that width.
     /// Atomic element sizes are independent of it. An enumeration's stored size must match
     /// the base type's size at that width. Descriptors in a decoded enumeration's base must
-    /// use that width. The writer appends unpadded, NUL-terminated names, followed by the raw
-    /// values in the same member order.
+    /// use that width. The writer appends each name and a NUL terminator. In versions 1 and 2,
+    /// it pads each terminated name to a multiple of eight bytes with zeros. In versions 3
+    /// through 5, it omits the padding. The raw values follow in the same member order.
     /// Compound sizes and member offsets are retained. The writer checks member bounds and
     /// overlaps using the stored member sizes at that width and writes each UTF-8 name with a
     /// NUL terminator.
@@ -456,14 +460,65 @@ impl DatatypeMessage {
     /// # Ok::<(), FormatError>(())
     /// ```
     pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
-        Ok(PreparedDatatype::prepare(Description::Preserved(self), offset_width)?.to_bytes())
+        Ok(self.prepare(offset_width)?.to_bytes())
+    }
+
+    /// Prepares a bounded encoding with the retained message versions.
+    ///
+    /// Uses `offset_width` to size variable-length descriptors at every level when checking
+    /// compound member ranges and enumeration bases. Use [`PreparedDatatype::write_into`]
+    /// to write the encoding into a byte slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::serialize`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::FormatError;
+    /// use hdf5_pure_format::__private::{DatatypeMessage, OffsetWidth};
+    ///
+    /// let bytes = [
+    ///     0x18, 1, 0, 0, 1, 0, 0, 0,
+    ///     0x10, 0, 0, 0, 1, 0, 0, 0, 0, 0, 8, 0,
+    ///     b'x', 0xff, 0, 0, 0, 0, 0, 0,
+    ///     7,
+    /// ];
+    /// let (message, _) = DatatypeMessage::parse(&bytes)?;
+    /// let prepared = message.prepare(OffsetWidth::Eight)?;
+    /// let mut output = [0xff; 30];
+    ///
+    /// assert_eq!(prepared.encoded_size(), bytes.len());
+    /// assert_eq!(prepared.write_into(&mut output)?, bytes.len());
+    /// assert_eq!(output[..bytes.len()], bytes);
+    /// assert_eq!(output[bytes.len()], 0xff);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedDatatype<'_>, FormatError> {
+        PreparedDatatype::prepare(Description::Preserved(self), offset_width)
+    }
+}
+
+impl<'input> Decode<'input> for DatatypeMessage {
+    type Context = ();
+    type Error = FormatError;
+
+    /// Parses the description at the start of `input`, allowing trailing bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::parse`].
+    fn decode(input: &'input [u8], (): ()) -> Result<Self, Self::Error> {
+        Self::parse(input).map(|(message, _)| message)
     }
 }
 
 /// A datatype description checked for encoding at one file offset width.
 ///
-/// [`Self::new`] borrows a semantic [`Datatype`] and determines its exact encoded size before
-/// writing any bytes. Call [`Self::write_into`] for each destination slice.
+/// Use [`Self::new`] for a semantic [`Datatype`] or [`DatatypeMessage::prepare`] for a retained
+/// description. Preparation determines the exact encoded size before writing any bytes. Call
+/// [`Self::write_into`] for each destination slice.
 #[derive(Debug)]
 pub struct PreparedDatatype<'a> {
     description: Description<'a>,
@@ -776,6 +831,7 @@ impl<'a> Body<'a> {
                 size: datatype.size().get(),
                 base_type: Description::Canonical(datatype.base_type()),
                 members: datatype.members(),
+                name_layout: NameLayout::Unpadded,
                 offsets: __private::enumeration_base_offsets(datatype),
             },
             Datatype::VariableLength(kind) => ContainerProperties::VariableLength {
@@ -840,6 +896,7 @@ impl<'a> Body<'a> {
                     size: super::enumeration_value_width(members),
                     base_type: Description::Preserved(base_type),
                     members,
+                    name_layout: NameLayout::for_version(message.version),
                     offsets: message.enumeration_base_offsets,
                 }
             }
@@ -882,6 +939,7 @@ enum ContainerProperties<'a> {
         size: u32,
         base_type: Description<'a>,
         members: &'a [EnumMember],
+        name_layout: NameLayout,
         offsets: DatatypeOffsets,
     },
     VariableLength {
@@ -914,6 +972,7 @@ impl ContainerProperties<'_> {
                 size,
                 base_type,
                 members,
+                name_layout,
                 offsets,
             } => {
                 check_member_count(members.len(), child_depth.is_some())?;
@@ -925,8 +984,7 @@ impl ContainerProperties<'_> {
                     preparation.offset_width,
                 )?;
                 for member in *members {
-                    preparation.add(1)?;
-                    preparation.add(member.name.as_bytes().len())?;
+                    preparation.add(name_layout.field_len(member.name.as_bytes().len()))?;
                     preparation.add(member.value.len())?;
                 }
                 Ok(parent_size)
@@ -976,7 +1034,7 @@ impl ContainerProperties<'_> {
         output: &mut Output<'_, impl FnMut(usize, &[u8])>,
         preserved: Option<DatatypeVersion>,
     ) -> NodeHeader {
-        let (class, minimum, child_version, flags, size) = match self {
+        let (class, canonical_minimum, child_version, flags, size) = match self {
             Self::Compound { size, members } => {
                 let width = datatype::offset_bytes_for_size(*size);
                 let mut version = DatatypeVersion::Three;
@@ -999,13 +1057,15 @@ impl ContainerProperties<'_> {
                 size,
                 base_type,
                 members,
+                name_layout,
                 offsets: _,
             } => {
                 let child = base_type.write(output);
                 debug_assert_eq!(*size, child.size);
                 for member in *members {
-                    output.write(member.name.as_bytes());
-                    output.write(&[0]);
+                    let name = member.name.as_bytes();
+                    output.write(name);
+                    output.write(&[0; NAME_ALIGNMENT][..name_layout.suffix_len(name.len())]);
                 }
                 for member in *members {
                     output.write(&member.value);
@@ -1074,7 +1134,7 @@ impl ContainerProperties<'_> {
         // child's version (H5Odtype.c, HDF5 2.2.0).
         NodeHeader {
             class,
-            version: preserved.unwrap_or(minimum.max(child_version)),
+            version: preserved.unwrap_or(canonical_minimum.max(child_version)),
             flags,
             size,
         }
