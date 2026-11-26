@@ -58,3 +58,15 @@ pub(super) fn filtered_heap() -> FractalHeapFiltering {
 pub(super) const PIPELINE_VERSION_ONE: u8 = 1;
 pub(super) const PIPELINE_VERSION_TWO: u8 = 2;
 pub(super) const FILTER_DEFLATE: u16 = 1;
+
+/// Returns a header with the heap ID layout of the attribute heaps `hdf5-pure` writes: 8-byte
+/// IDs over a 40-bit heap, with a huge-object B-tree.
+pub(super) fn attribute_heap_header() -> FractalHeapHeader {
+    FractalHeapHeader {
+        heap_id_length: 8,
+        max_heap_size: 40,
+        max_managed_object_size: 65_535,
+        btree_huge_objects_address: StoredAddress::new(0x800),
+        ..dtable_header(1024, 65536, 4)
+    }
+}

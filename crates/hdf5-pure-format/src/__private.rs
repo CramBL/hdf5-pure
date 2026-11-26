@@ -227,14 +227,14 @@ pub use crate::fractal_heap_block::FractalHeapIndirectBlockRef;
 pub use crate::fractal_heap_block::FractalHeapIndirectBlockView;
 pub use crate::fractal_heap_block::FractalHeapObjectRef;
 
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectFilters;
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectId;
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectLayout;
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectLookup;
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectRecord;
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectRef;
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectTracker;
-pub use crate::fractal_heap_huge::FractalHeapHugeObjectView;
+pub use crate::fractal_heap::FractalHeapHugeObjectFilters;
+pub use crate::fractal_heap::FractalHeapHugeObjectId;
+pub use crate::fractal_heap::FractalHeapHugeObjectLayout;
+pub use crate::fractal_heap::FractalHeapHugeObjectLookup;
+pub use crate::fractal_heap::FractalHeapHugeObjectRecord;
+pub use crate::fractal_heap::FractalHeapHugeObjectRef;
+pub use crate::fractal_heap::FractalHeapHugeObjectTracker;
+pub use crate::fractal_heap::FractalHeapHugeObjectView;
 
 pub use crate::fractal_heap::FractalHeapFreeSection;
 pub use crate::fractal_heap::FractalHeapFreeSpace;
