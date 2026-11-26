@@ -360,7 +360,7 @@ impl<S: PersistedManagerSource> PersistedManagerReader<'_, S> {
             DecodedStoredAddress::Defined(address) => Some(address),
             DecodedStoredAddress::Undefined => None,
         };
-        let header = frame.file_header()?;
+        let header = format::FreeSpaceManagerHeader::from_frame(&frame)?;
         let mut metadata_bytes = header_ref.range().length();
         let sections = if let Some(list_address) = context.section_list_address {
             let list_ref = frame.section_list_ref(address, addresses.resolve(list_address)?)?;
