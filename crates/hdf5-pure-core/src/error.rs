@@ -659,6 +659,13 @@ pub enum FormatError {
     ///
     /// Contains the declared dimensionality.
     InvalidCompoundV1Rank(u8),
+    /// A version 1 compound member has a nonzero reserved byte in its dimension block.
+    InvalidCompoundV1ReservedByte {
+        /// The byte offset from the start of the parser input, including for nested descriptions.
+        offset: usize,
+        /// The value of the reserved byte.
+        byte: u8,
+    },
     /// A custom filter identifier has a named filter variant.
     InvalidCustomFilterId {
         /// The identifier of the named filter.
@@ -2238,6 +2245,10 @@ impl fmt::Display for FormatError {
             Self::InvalidCompoundV1Rank(rank) => {
                 write!(f, "version 1 compound member rank {rank} exceeds four")
             }
+            Self::InvalidCompoundV1ReservedByte { offset, byte } => write!(
+                f,
+                "version 1 compound member has reserved byte {byte:#04x} at byte {offset}"
+            ),
             Self::UnsupportedCompoundV1Permutation(permutation) => write!(
                 f,
                 "version 1 compound member has unsupported permutation {permutation:#x}"

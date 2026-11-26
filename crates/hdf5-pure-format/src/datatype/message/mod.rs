@@ -3,7 +3,7 @@ pub use self::codec::PreparedDatatype;
 pub(super) use self::compound_layout::CompoundLayout;
 pub(super) use self::description::positive_size;
 pub use self::description::{
-    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
+    CompoundV1Member, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     FloatingPointByteOrder,
 };
 

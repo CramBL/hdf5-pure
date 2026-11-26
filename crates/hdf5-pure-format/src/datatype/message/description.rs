@@ -17,6 +17,7 @@ use hdf5_pure_core::{
 
 use super::compound_layout::CompoundLayout;
 use crate::convert::Narrow;
+use crate::datatype::legacy_member::CompoundV1Shape;
 use crate::datatype::{
     ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_VERSION_FIVE,
     DATATYPE_VERSION_FOUR, DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO,
@@ -188,13 +189,13 @@ impl FloatingPointByteOrder {
 
 /// A datatype description with checked properties and a retained version at each node.
 ///
-/// A containing description's version is at least its children's versions. Compound and array
-/// descriptions use the property layouts of versions 3 through 5. Enumeration descriptions
-/// use the property layouts of versions 1 through 5.
+/// A containing description's version is at least its children's versions. Compound and
+/// enumeration descriptions use the property layouts of versions 1 through 5. Array
+/// descriptions use the layouts of versions 3 through 5.
 /// Complex descriptions use version 5 and retain the floating-point component's version.
 /// These layouts are defined in "The Datatype Message" of the [format specification,
-/// version 4.0][spec]. Reference descriptions, version 1 and 2 compounds, and version 2 arrays
-/// are outside this representation.
+/// version 4.0][spec]. Reference descriptions and version 2 arrays are outside this
+/// representation.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 #[derive(Clone, Debug, PartialEq)]
@@ -211,9 +212,9 @@ impl DatatypeMessage {
     /// Constructs a description with compatible versions and class properties.
     ///
     /// A compound must have at least one member, with unique names. Member ranges must be
-    /// disjoint and fit within the declared size. Construction measures variable-length
-    /// descriptors at two-byte offsets and uses the retained value width for decoded
-    /// enumerations.
+    /// disjoint and fit within the declared size. For a version 1 inline array, the range
+    /// covers all array elements. Construction measures variable-length descriptors at
+    /// two-byte offsets and uses the retained value width for decoded enumerations.
     /// An enumeration must have at least one member, with nonempty, NUL-free, unique names
     /// and distinct raw values of the integer parent's width. Array dimensions and element
     /// sizes must fit their stored fields. Opaque tags may contain
@@ -222,7 +223,8 @@ impl DatatypeMessage {
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidDatatypeVersion`] if the class or floating-point order
-    /// requires a higher version, and [`FormatError::DatatypeChildVersion`] if a child has a
+    /// requires a higher version or if [`DatatypeProperties::CompoundV1`] is used with a
+    /// version other than 1. Returns [`FormatError::DatatypeChildVersion`] if a child has a
     /// higher version than its container.
     ///
     /// Returns [`FormatError::ZeroSizedDatatype`] for a zero element size and
@@ -233,8 +235,10 @@ impl DatatypeMessage {
     /// Returns [`FormatError::InvalidCompoundMemberCount`] for a compound without members,
     /// [`FormatError::DuplicateCompoundField`] for duplicate compound names, and
     /// [`FormatError::CompoundFieldOutOfBounds`] for a compound member outside its
-    /// element. Returns [`FormatError::CompoundFieldOverlap`] for overlapping compound members,
-    /// [`FormatError::EnumBaseNotInteger`] for a non-integer enumeration base, and
+    /// element. Returns [`FormatError::CompoundFieldOverlap`] for overlapping compound members
+    /// and [`FormatError::CompoundArraySizeOverflow`] if an inline array's size exceeds
+    /// [`u32::MAX`].
+    /// Returns [`FormatError::EnumBaseNotInteger`] for a non-integer enumeration base and
     /// [`FormatError::EnumMemberValueSize`] for a value whose width differs from its base type.
     /// Returns [`FormatError::InvalidEnumerationMemberCount`] for an enumeration without members,
     /// [`FormatError::EmptyEnumMemberName`] for an empty name,
@@ -271,9 +275,14 @@ impl DatatypeMessage {
     ) -> Result<Self, FormatError> {
         let class = properties.class();
         let minimum = match &properties {
-            DatatypeProperties::Compound { .. } | DatatypeProperties::Array { .. } => {
-                DatatypeVersion::Three
+            DatatypeProperties::CompoundV1 { .. } if version != DatatypeVersion::One => {
+                return Err(FormatError::InvalidDatatypeVersion {
+                    class,
+                    version: version.get(),
+                });
             }
+            DatatypeProperties::Compound { .. } => DatatypeVersion::Two,
+            DatatypeProperties::Array { .. } => DatatypeVersion::Three,
             DatatypeProperties::Complex { .. } => DatatypeVersion::Five,
             _ => DatatypeVersion::One,
         };
@@ -295,21 +304,15 @@ impl DatatypeMessage {
                 }
             }
             DatatypeProperties::Compound { size, members } => {
-                positive_size(class, *size)?;
-                compound_member_count(members.len())?;
-                let mut names = BTreeSet::new();
-                let mut layout = CompoundLayout::new(*size);
-                for (index, member) in members.iter().enumerate() {
-                    member.check_compound_name_and_version(version, &mut names)?;
-                    let datatype = &member.datatype;
-                    let field_size = positive_size(
-                        datatype.properties.class(),
-                        datatype.size_with_offsets(None)?,
-                    )?;
-                    layout.insert(member.byte_offset, field_size, index, |index| {
-                        members.get(index).map(|member| member.name.clone())
-                    })?;
-                }
+                check_compound_members(version, *size, members.len(), |index| {
+                    (&members[index], None)
+                })?;
+            }
+            DatatypeProperties::CompoundV1 { size, members } => {
+                check_compound_members(version, *size, members.len(), |index| {
+                    let member = &members[index];
+                    (&member.member, Some(&member.shape))
+                })?;
             }
             DatatypeProperties::Enumeration { base_type, members } => {
                 compatible_child(version, class, base_type)?;
@@ -408,7 +411,8 @@ impl DatatypeMessage {
             DatatypeProperties::BitField(datatype) => Ok(datatype.size().get()),
             DatatypeProperties::String { size, .. }
             | DatatypeProperties::Opaque { size, .. }
-            | DatatypeProperties::Compound { size, .. } => Ok(*size),
+            | DatatypeProperties::Compound { size, .. }
+            | DatatypeProperties::CompoundV1 { size, .. } => Ok(*size),
             DatatypeProperties::Enumeration { base_type, members } => {
                 let size = enumeration_value_width(members);
                 if let Some(width) = destination {
@@ -433,6 +437,9 @@ impl DatatypeMessage {
     }
 
     /// Converts this description to semantic metadata without message versions.
+    ///
+    /// Represents each version 1 inline array member as a [`Datatype::Array`] with the
+    /// active dimensions and the projected member type as its base.
     ///
     /// # Errors
     ///
@@ -462,13 +469,14 @@ impl DatatypeMessage {
                 size: *size,
                 members: members
                     .iter()
-                    .map(|member| {
-                        Ok(CompoundMember::new(
-                            member.name.clone(),
-                            member.byte_offset,
-                            member.datatype.to_datatype()?,
-                        ))
-                    })
+                    .map(|member| member.to_datatype(None))
+                    .collect::<Result<_, FormatError>>()?,
+            },
+            DatatypeProperties::CompoundV1 { size, members } => Datatype::Compound {
+                size: *size,
+                members: members
+                    .iter()
+                    .map(|member| member.member.to_datatype(Some(member.shape)))
                     .collect::<Result<_, FormatError>>()?,
             },
             DatatypeProperties::Enumeration { base_type, members } => {
@@ -543,12 +551,19 @@ pub enum DatatypeProperties {
         /// The logical tag bytes, excluding terminator and padding.
         tag: Vec<u8>,
     },
-    /// Compound members using the property layout of version 3 or later.
+    /// Compound members in versions 2 through 5.
     Compound {
         /// The width of one compound element in bytes.
         size: u32,
         /// The named members in declaration order.
         members: Vec<DatatypeMessageMember>,
+    },
+    /// Compound members with the version 1 dimension block.
+    CompoundV1 {
+        /// The width of one compound element in bytes.
+        size: u32,
+        /// The members in declaration order, with their stored dimension fields.
+        members: Vec<CompoundV1Member>,
     },
     /// Enumeration members in stored order.
     Enumeration {
@@ -635,7 +650,7 @@ impl DatatypeProperties {
             Self::String { .. } => STRING_CLASS,
             Self::BitField(_) => BIT_FIELD_CLASS,
             Self::Opaque { .. } => OPAQUE_CLASS,
-            Self::Compound { .. } => COMPOUND_CLASS,
+            Self::Compound { .. } | Self::CompoundV1 { .. } => COMPOUND_CLASS,
             Self::Enumeration { .. } => ENUMERATION_CLASS,
             Self::VariableLengthSequence { .. } | Self::VariableLengthString { .. } => {
                 VARIABLE_LENGTH_CLASS
@@ -686,6 +701,19 @@ impl DatatypeMessageMember {
         &self.datatype
     }
 
+    fn to_datatype(&self, shape: Option<CompoundV1Shape>) -> Result<CompoundMember, FormatError> {
+        let datatype = self.datatype.to_datatype()?;
+        let datatype = match shape {
+            Some(shape) => shape.into_datatype(datatype),
+            None => datatype,
+        };
+        Ok(CompoundMember::new(
+            self.name.clone(),
+            self.byte_offset,
+            datatype,
+        ))
+    }
+
     /// Records the member name among the names in this compound and checks the member version.
     ///
     /// # Errors
@@ -702,6 +730,94 @@ impl DatatypeMessageMember {
         }
         compatible_child(version, COMPOUND_CLASS, &self.datatype)
     }
+}
+
+/// A version 1 compound member with its stored dimension fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompoundV1Member {
+    member: DatatypeMessageMember,
+    shape: CompoundV1Shape,
+}
+
+impl CompoundV1Member {
+    /// Pairs a member description with the dimensions stored before it.
+    ///
+    /// For an inline array, pass the array's base datatype as the member description.
+    /// [`DatatypeMessage::new`] checks the full member range when constructing the compound.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{Datatype, FixedPointType, FormatError};
+    /// use hdf5_pure_format::__private::{
+    ///     CompoundV1Member, CompoundV1Shape, DatatypeMessage, DatatypeMessageMember,
+    ///     DatatypeProperties, DatatypeVersion,
+    /// };
+    ///
+    /// let byte = DatatypeMessage::new(
+    ///     DatatypeVersion::One,
+    ///     DatatypeProperties::FixedPoint(FixedPointType::u8()),
+    /// )?;
+    /// let shape = CompoundV1Shape::new(1, [3, 0, 0, 0])?;
+    /// let member = CompoundV1Member::new(DatatypeMessageMember::new(c"x".into(), 0, byte), shape);
+    /// let compound = DatatypeMessage::new(
+    ///     DatatypeVersion::One,
+    ///     DatatypeProperties::CompoundV1 { size: 3, members: vec![member] },
+    /// )?;
+    /// let Datatype::Compound { members, .. } = compound.to_datatype()? else {
+    ///     unreachable!();
+    /// };
+    /// assert_eq!(
+    ///     members[0].datatype,
+    ///     Datatype::Array {
+    ///         base_type: Box::new(Datatype::FixedPoint(FixedPointType::u8())),
+    ///         dimensions: vec![3],
+    ///     },
+    /// );
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub const fn new(member: DatatypeMessageMember, shape: CompoundV1Shape) -> Self {
+        Self { member, shape }
+    }
+
+    /// Borrows the member name, byte offset, and stored datatype description.
+    pub const fn member(&self) -> &DatatypeMessageMember {
+        &self.member
+    }
+
+    /// Returns the rank and all four extent slots from the dimension block.
+    pub const fn shape(&self) -> CompoundV1Shape {
+        self.shape
+    }
+}
+
+fn check_compound_members<'a>(
+    version: DatatypeVersion,
+    size: u32,
+    count: usize,
+    member_at: impl Fn(usize) -> (&'a DatatypeMessageMember, Option<&'a CompoundV1Shape>),
+) -> Result<(), FormatError> {
+    positive_size(COMPOUND_CLASS, size)?;
+    compound_member_count(count)?;
+    let mut names = BTreeSet::new();
+    let mut layout = CompoundLayout::new(size);
+    for index in 0..count {
+        let (member, shape) = member_at(index);
+        member.check_compound_name_and_version(version, &mut names)?;
+        let datatype = &member.datatype;
+        let field_size = positive_size(
+            datatype.properties.class(),
+            datatype.size_with_offsets(None)?,
+        )?;
+        let field_size = match shape {
+            Some(shape) => shape.stored_size(field_size)?,
+            None => field_size,
+        };
+        layout.insert(member.byte_offset, field_size, index, |index| {
+            Some(member_at(index).0.name.clone())
+        })?;
+    }
+    Ok(())
 }
 
 /// Checks the child's version against its containing message's version.

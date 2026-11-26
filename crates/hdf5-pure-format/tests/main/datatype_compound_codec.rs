@@ -213,13 +213,12 @@ fn compound_v1_implicit_array_rejects_an_overlapping_member(
     bytes[1..3].copy_from_slice(&2_u16.to_le_bytes());
     bytes.extend_from_slice(scalar);
 
-    assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
-        FormatError::CompoundFieldOverlap {
-            first: DatatypeMemberName::from(c"arr"),
-            second: DatatypeMemberName::from(c"tag"),
-        }
-    );
+    let expected = FormatError::CompoundFieldOverlap {
+        first: DatatypeMemberName::from(c"arr"),
+        second: DatatypeMemberName::from(c"tag"),
+    };
+    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
 }
 
 const SEQUENCE_MEMBER_OFFSET: u32 = 4;
@@ -474,18 +473,18 @@ fn datatype_compound_codecs_reject_duplicate_member_names() {
 }
 
 #[rstest]
-#[case::one(1)]
-#[case::two(2)]
-fn datatype_compound_parser_rejects_legacy_layouts(#[case] version: u8) {
+#[case::one(Version::One)]
+#[case::two(Version::Two)]
+fn datatype_compound_parser_rejects_empty_legacy_layouts(#[case] version: Version) {
     assert_eq!(
         DatatypeMessage::parse(&datatype::header(
             datatype::Class::COMPOUND,
-            version,
+            version.get(),
             [0; 3],
             4
         ))
         .unwrap_err(),
-        FormatError::InvalidDatatypeVersion { class: 6, version }
+        FormatError::InvalidCompoundMemberCount { count: 0 }
     );
 }
 
@@ -882,7 +881,7 @@ fn datatype_compound_codecs_bound_recursion() {
 }
 
 #[test]
-fn semantic_parser_accepts_v1_compound_in_v3_and_retained_parser_rejects_it() {
+fn datatype_parsers_accept_a_v1_compound_in_a_v3_compound() {
     let child = legacy_compound::array_member();
     let bytes = containers::compound(
         Version::Three.get(),
@@ -915,14 +914,21 @@ fn semantic_parser_accepts_v1_compound_in_v3_and_retained_parser_rejects_it() {
     };
     assert_eq!(
         format::parse_datatype(&bytes).unwrap(),
-        (expected, bytes.len())
+        (expected.clone(), bytes.len())
     );
+    let (retained, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    let DatatypeProperties::Compound { members, .. } = retained.properties() else {
+        panic!("expected a compound datatype");
+    };
+    assert_eq!(members[0].datatype().version(), DatatypeVersion::One);
+    assert_eq!(retained.to_datatype().unwrap(), expected);
     assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap_err(),
+        retained.prepare(OffsetWidth::Eight).unwrap_err(),
         FormatError::InvalidDatatypeVersion {
             class: datatype::Class::COMPOUND.0,
             version: Version::One.get(),
-        },
+        }
     );
 }
 

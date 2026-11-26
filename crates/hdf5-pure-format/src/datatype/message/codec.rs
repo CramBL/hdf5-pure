@@ -23,11 +23,14 @@ use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
 use super::compound_layout::CompoundLayout;
 use super::decode::{self, Decoded, Layout, Member, Projection};
 use super::description::{self, NAME_ALIGNMENT, NameLayout};
-use super::{DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion};
+use super::{
+    CompoundV1Member, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
+};
 use crate::bytes::{self, ByteCursor};
 use crate::codec::{Decode, Encode};
 use crate::convert::Narrow;
 use crate::datatype::header::{Context, Header};
+use crate::datatype::legacy_member::CompoundV1Shape;
 use crate::datatype::{
     self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_HOMOGENEOUS_BIT, COMPOUND_CLASS,
     DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, REFERENCE_CLASS,
@@ -47,7 +50,7 @@ impl DatatypeMessage {
     /// then acquires the complete value list.
     ///
     /// Supports fixed-point, floating-point, time, string, bitfield, opaque, variable-length,
-    /// and enumeration descriptions at versions 1 through 5, compounds and arrays at versions
+    /// enumeration, and compound descriptions at versions 1 through 5, arrays at versions
     /// 3 through 5, and homogeneous rectangular complex descriptions at version 5. Each nested
     /// description retains its own version, at most the containing description's version.
     /// Complex parents are floating-point descriptions. VAX order requires version 3 or later.
@@ -58,10 +61,12 @@ impl DatatypeMessage {
     /// address widths of 2, 4, or 8 bytes. The parser checks each array size against the stored
     /// base size multiplied by the dimension extents, and each complex size against twice the
     /// component size.
-    /// Checks compound member bounds and overlaps using the sizes stored in the member
-    /// descriptions. Reserves member capacity after reading a member's nested datatype and
-    /// checking its byte range. A compound must have at least one member. Compound member
-    /// names must be unique by byte sequence.
+    /// Checks compound member bounds and overlaps using each nested datatype's stored size.
+    /// For a version 1 inline array, multiplies that size by its active extents. Reads the
+    /// complete dimension block before checking its fields and preserves all four extent slots.
+    /// Reserves member capacity after reading a member's nested datatype and checking its
+    /// byte range. A compound must have at least one member. Compound member names must
+    /// be unique by byte sequence.
     /// Retains the enumeration's parent and reads at least one member. Each member has a
     /// nonempty name, unique by its bytes, and a distinct raw value of the parent's width.
     /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
@@ -80,7 +85,7 @@ impl DatatypeMessage {
     /// class, including references.
     /// Returns [`FormatError::InvalidDatatypeFlags`] or [`FormatError::InvalidOpaqueReservedBits`]
     /// if reserved atomic, compound, enumeration, or array class bits are set. Returns
-    /// [`FormatError::InvalidDatatypeVersion`] for compound or array versions 1 or 2,
+    /// [`FormatError::InvalidDatatypeVersion`] for array versions 1 or 2,
     /// complex versions 1 through 4, or a complex parent version outside `1..=5`.
     ///
     /// Returns [`FormatError::InvalidVariableLengthSize`] for an unsupported descriptor size,
@@ -94,6 +99,11 @@ impl DatatypeMessage {
     /// [`FormatError::DuplicateCompoundField`] for duplicate names, and
     /// [`FormatError::CompoundFieldOutOfBounds`] for a member outside its compound element.
     /// Returns [`FormatError::CompoundFieldOverlap`] for overlapping member ranges.
+    /// For a version 1 compound, returns [`FormatError::InvalidCompoundV1Rank`] if the rank
+    /// exceeds four, [`FormatError::InvalidCompoundV1ReservedByte`] if a reserved byte in the
+    /// dimension block is nonzero, [`FormatError::UnsupportedCompoundV1Permutation`] if the
+    /// permutation is nonzero, [`FormatError::InvalidCompoundV1Extent`] if an active extent is
+    /// zero, or [`FormatError::CompoundArraySizeOverflow`] if the member size exceeds [`u32::MAX`].
     ///
     /// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration size differs from its
     /// parent's size.
@@ -161,19 +171,23 @@ impl DatatypeMessage {
                 let stored_size = super::positive_size(COMPOUND_CLASS, header.size)?;
                 let count = compound.member_count();
                 description::compound_member_count(count)?;
-                let mut members: Vec<DatatypeMessageMember> = Vec::new();
+                let mut members = ParsedCompoundMembers::new(header.version);
                 let mut layout = CompoundLayout::new(header.size);
                 for _ in 0..count {
                     let Member {
                         name,
                         offset,
-                        shape: _,
+                        shape,
                     } = compound.member(cursor)?;
                     let Decoded {
                         datatype,
                         stored_size: field_size,
                         offsets: field_offsets,
                     } = Self::parse_at(cursor, depth.child()?)?;
+                    let field_size = match &shape {
+                        Some(shape) => shape.stored_size(field_size)?,
+                        None => field_size,
+                    };
                     let index = members.len();
                     layout.insert(offset, field_size, index, |member_index| {
                         if member_index == index {
@@ -182,29 +196,22 @@ impl DatatypeMessage {
                             members.get(member_index).map(|member| member.name.clone())
                         }
                     })?;
-                    decode::push_member(
-                        &mut members,
-                        count,
+                    members.push(
                         DatatypeMessageMember::new(
                             DatatypeMemberName::from(name),
                             offset,
                             datatype,
                         ),
+                        shape,
+                        count,
                     )?;
                     offsets.include_field(field_offsets);
                 }
                 drop(layout);
-                let mut names = BTreeSet::new();
-                for member in &members {
-                    member.check_compound_name_and_version(header.version, &mut names)?;
-                }
                 return Ok(Decoded {
                     datatype: Self::with_properties(
                         header.version,
-                        DatatypeProperties::Compound {
-                            size: header.size,
-                            members,
-                        },
+                        members.into_properties(header.version, header.size)?,
                     ),
                     stored_size,
                     offsets,
@@ -290,8 +297,8 @@ impl DatatypeMessage {
 
     /// Serializes a datatype description with its retained message versions.
     ///
-    /// Serializes the classes accepted by [`parse`](Self::parse). The writer derives each
-    /// variable-length descriptor size from `offset_width`, including nested descriptions.
+    /// The writer derives each variable-length descriptor size from `offset_width`,
+    /// including nested descriptions.
     /// The writer computes each array size from the dimensions and the base datatype's stored
     /// element size at that width.
     /// Atomic element sizes are independent of it. An enumeration's stored size must match
@@ -312,6 +319,7 @@ impl DatatypeMessage {
     ///
     /// Returns [`FormatError::OpaqueTagTooLong`] for a tag longer than 247 bytes, and
     /// [`FormatError::InvalidOpaqueTagByte`] for a tag containing a NUL byte.
+    /// Returns [`FormatError::InvalidDatatypeVersion`] for a version 1 or 2 compound.
     /// Returns [`FormatError::NestingDepthExceeded`] if the parent chain exceeds the nesting
     /// limit, and [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte size
     /// field at `offset_width`. Propagates errors from checking floating-point version/order
@@ -502,6 +510,77 @@ impl DatatypeMessage {
     /// ```
     pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedDatatype<'_>, FormatError> {
         PreparedDatatype::prepare(Description::Preserved(self), offset_width)
+    }
+}
+
+/// The members of the compound being parsed, with dimension fields for version 1.
+enum ParsedCompoundMembers {
+    WithoutShape(Vec<DatatypeMessageMember>),
+    WithShape(Vec<CompoundV1Member>),
+}
+
+impl ParsedCompoundMembers {
+    fn new(version: DatatypeVersion) -> Self {
+        if version == DatatypeVersion::One {
+            Self::WithShape(Vec::new())
+        } else {
+            Self::WithoutShape(Vec::new())
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::WithoutShape(members) => members.len(),
+            Self::WithShape(members) => members.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<&DatatypeMessageMember> {
+        match self {
+            Self::WithoutShape(members) => members.get(index),
+            Self::WithShape(members) => members.get(index).map(CompoundV1Member::member),
+        }
+    }
+
+    fn push(
+        &mut self,
+        member: DatatypeMessageMember,
+        shape: Option<CompoundV1Shape>,
+        count: usize,
+    ) -> Result<(), FormatError> {
+        match (self, shape) {
+            (Self::WithoutShape(members), None) => decode::push_member(members, count, member),
+            (Self::WithShape(members), Some(shape)) => {
+                decode::push_member(members, count, CompoundV1Member::new(member, shape))
+            }
+            _ => Err(FormatError::Internal(
+                "compound member shape differs from the selected layout".into(),
+            )),
+        }
+    }
+
+    fn into_properties(
+        self,
+        version: DatatypeVersion,
+        size: u32,
+    ) -> Result<DatatypeProperties, FormatError> {
+        let mut names = BTreeSet::new();
+        match self {
+            Self::WithoutShape(members) => {
+                for member in &members {
+                    member.check_compound_name_and_version(version, &mut names)?;
+                }
+                Ok(DatatypeProperties::Compound { size, members })
+            }
+            Self::WithShape(members) => {
+                for member in &members {
+                    member
+                        .member()
+                        .check_compound_name_and_version(version, &mut names)?;
+                }
+                Ok(DatatypeProperties::CompoundV1 { size, members })
+            }
+        }
     }
 }
 
@@ -735,6 +814,10 @@ impl Description<'_> {
             Body::Container(properties) => {
                 properties.prepare(preparation, depth.map(MessageDepth::child).transpose()?)
             }
+            Body::UnsupportedCompound(version) => Err(FormatError::InvalidDatatypeVersion {
+                class: COMPOUND_CLASS,
+                version: version.get(),
+            }),
             Body::Unsupported(reason) => Err(FormatError::Internal(reason.into())),
         }
     }
@@ -755,7 +838,7 @@ impl Description<'_> {
                 clippy::unreachable,
                 reason = "the immutable source has a supported encoding"
             )]
-            Body::Unsupported(_) => {
+            Body::Unsupported(_) | Body::UnsupportedCompound(_) => {
                 // Preparation rejects unsupported descriptions before retaining the source.
                 unreachable!("a prepared datatype has a supported description")
             }
@@ -784,9 +867,10 @@ impl Description<'_> {
 
 enum Body<'a> {
     Atomic(AtomicProperties<'a>),
-    Reference { size: u32, kind: u8 },
     Container(ContainerProperties<'a>),
+    Reference { size: u32, kind: u8 },
     Unsupported(&'static str),
+    UnsupportedCompound(DatatypeVersion),
 }
 
 impl<'a> Body<'a> {
@@ -891,6 +975,12 @@ impl<'a> Body<'a> {
             }
             DatatypeProperties::Opaque { size, tag } => {
                 return Self::Atomic(AtomicProperties::Opaque { size: *size, tag });
+            }
+            DatatypeProperties::CompoundV1 { .. } => {
+                return Self::UnsupportedCompound(message.version);
+            }
+            DatatypeProperties::Compound { .. } if message.version == DatatypeVersion::Two => {
+                return Self::UnsupportedCompound(message.version);
             }
             DatatypeProperties::Compound { size, members } => ContainerProperties::Compound {
                 size: *size,

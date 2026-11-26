@@ -90,6 +90,7 @@ pub use crate::dataspace::Extent;
 pub use crate::dataspace::PreparedDataspace;
 pub use crate::dataspace::stored_max_dimensions;
 pub use crate::dataspace::stored_max_extent;
+pub use crate::datatype::CompoundV1Shape;
 pub use crate::datatype::EmbeddedReferenceSlots;
 pub use crate::datatype::byte_order::FixedWidthByteOrder;
 pub use crate::datatype::class_may_hold_object_address;
@@ -101,7 +102,7 @@ pub use crate::datatype::embedded_reference_slots;
 pub use crate::datatype::layout::StandardNumericLayout;
 pub use crate::datatype::layout::StandardWidth;
 pub use crate::datatype::message::{
-    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
+    CompoundV1Member, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     FloatingPointByteOrder, PreparedDatatype,
 };
 pub use crate::datatype::parse_datatype;

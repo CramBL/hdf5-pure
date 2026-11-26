@@ -10,6 +10,7 @@ mod datatype_compound_layout;
 mod datatype_enum_codec;
 mod datatype_float_order;
 mod datatype_leaf_codec;
+mod datatype_legacy_compound;
 mod datatype_message;
 mod datatype_variable_length_codec;
 mod dense_attribute_placement;
