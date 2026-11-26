@@ -160,3 +160,48 @@ impl EnumerationType {
         self.offsets
     }
 }
+
+/// Borrows an enumeration member's name and encoded value bytes.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::{__private, DatatypeMemberName, EnumMember};
+///
+/// let member = EnumMember::new(DatatypeMemberName::from(c"active"), vec![1, 0]);
+/// let (name, value) = __private::enum_member_parts(&member);
+/// assert_eq!(name.as_bytes(), b"active");
+/// assert_eq!(value, &[1, 0]);
+/// ```
+pub fn enum_member_parts(member: &EnumMember) -> (&DatatypeMemberName, &[u8]) {
+    let EnumMember { name, value } = member;
+    (name, value)
+}
+
+/// Constructs an enumeration whose value width matches the base's stored size.
+///
+/// Pass the expected width of each value in bytes and the offset widths of variable-length
+/// descriptors in the base.
+///
+/// # Errors
+///
+/// Returns [`FormatError::EnumBaseSizeMismatch`] if `size` differs from the base's stored
+/// size, or [`FormatError::EnumMemberValueSize`] for the first value whose width differs from `size`.
+///
+/// Returns [`FormatError::Internal`] if a descriptor width needed to compute the base size is
+/// missing, or [`FormatError::LengthTooLarge`] if an array size exceeds the datatype size field.
+pub fn enumeration_from_stored_parts(
+    base_type: Datatype,
+    size: NonZeroU32,
+    offsets: DatatypeOffsets,
+    members: Vec<EnumMember>,
+) -> Result<EnumerationType, FormatError> {
+    EnumerationType::from_stored_parts(base_type, size, offsets, members)
+}
+
+/// Returns the descriptor offset widths recorded when reading the enumeration's base.
+///
+/// The result is empty for an enumeration created with [`EnumerationType::new`].
+pub const fn enumeration_base_offsets(datatype: &EnumerationType) -> DatatypeOffsets {
+    datatype.offsets()
+}

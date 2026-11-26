@@ -9,18 +9,11 @@
 //! guarantee and may change in any release.
 
 use alloc::vec::Vec;
-use core::num::NonZeroU32;
 
 use crate::BaseAddress;
-use crate::CompoundMember;
-use crate::Datatype;
-use crate::DatatypeMemberName;
-use crate::EnumMember;
-use crate::EnumerationType;
 use crate::FileSpaceInfo;
 use crate::FileSpacePageSize;
 use crate::FileSpaceStrategy;
-use crate::FormatError;
 use crate::LengthWidth;
 use crate::OffsetWidth;
 use crate::StoredAddress;
@@ -33,6 +26,10 @@ pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
 pub use crate::address::StoredAddressExt;
 pub use crate::address_range::NonEmptyRange;
+pub use crate::datatype::compound_member::compound_member_parts;
+pub use crate::datatype::enumeration::{
+    enum_member_parts, enumeration_base_offsets, enumeration_from_stored_parts,
+};
 pub use crate::datatype::stored_size::{
     DatatypeOffsets, array_type_size, stored_type_size, variable_length_descriptor_size,
 };
@@ -92,70 +89,6 @@ impl FileSpaceInfoFields {
             manager_addrs,
         }
     }
-}
-
-/// Borrows a compound member's name and datatype and copies its byte offset.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_core::{__private, CompoundMember, Datatype, DatatypeMemberName, FixedPointType};
-///
-/// let member = CompoundMember::new(
-///     DatatypeMemberName::from(c"field"), 4, Datatype::FixedPoint(FixedPointType::u16()),
-/// );
-/// let (name, offset, datatype) = __private::compound_member_parts(&member);
-/// assert_eq!(name.as_bytes(), b"field");
-/// assert_eq!(offset, 4);
-/// assert_eq!(datatype, &Datatype::FixedPoint(FixedPointType::u16()));
-/// ```
-pub fn compound_member_parts(member: &CompoundMember) -> (&DatatypeMemberName, u64, &Datatype) {
-    let CompoundMember {
-        name,
-        byte_offset,
-        datatype,
-    } = member;
-    (name, *byte_offset, datatype)
-}
-
-/// Borrows an enumeration member's name and stored value bytes without copying.
-///
-/// # Examples
-///
-/// ```
-/// use hdf5_pure_core::{__private, DatatypeMemberName, EnumMember};
-///
-/// let member = EnumMember::new(DatatypeMemberName::from(c"active"), vec![1, 0]);
-/// let (name, value) = __private::enum_member_parts(&member);
-/// assert_eq!(name.as_bytes(), b"active");
-/// assert_eq!(value, &[1, 0]);
-/// ```
-pub fn enum_member_parts(member: &EnumMember) -> (&DatatypeMemberName, &[u8]) {
-    let EnumMember { name, value } = member;
-    (name, value)
-}
-
-/// Constructs an enumeration from a decoded base and member values.
-///
-/// Pass the stored element size and the descriptor widths from the base description.
-///
-/// # Errors
-///
-/// Returns [`FormatError::EnumBaseSizeMismatch`] if `size` differs from the base's stored
-/// size, or [`FormatError::EnumMemberValueSize`] if a member's width differs from `size`.
-/// Propagates base size calculation errors.
-pub fn enumeration_from_stored_parts(
-    base_type: Datatype,
-    size: NonZeroU32,
-    offsets: DatatypeOffsets,
-    members: Vec<EnumMember>,
-) -> Result<EnumerationType, FormatError> {
-    EnumerationType::from_stored_parts(base_type, size, offsets, members)
-}
-
-/// Returns the variable-length descriptor widths of a decoded enumeration's base.
-pub const fn enumeration_base_offsets(datatype: &EnumerationType) -> DatatypeOffsets {
-    datatype.offsets()
 }
 
 /// The fields of a [`Superblock`], for the other workspace crates to build one.
