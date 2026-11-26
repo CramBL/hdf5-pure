@@ -105,16 +105,15 @@ impl PreparedFreeSpaceManager {
                 addresses.sort_unstable();
             }
         }
-        let section_list_len =
-            SectionInfoCounts::new(section_count, groups.len().to_u64())?.encoded_len(widths)?;
-        require_length(section_list_len, widths.lengths)?;
-        let section_list_len = slice_len(section_list_len)?;
+        let (fields, section_list_len) =
+            SectionInfoCounts::new(section_count, groups.len().to_u64())?.layout(widths)?;
+        let section_list_len = slice_len(section_list_len, widths.lengths)?;
         Ok(Self {
             widths,
             class_id,
             groups,
             section_count,
-            fields: SectionFields::written(widths, section_count),
+            fields,
             total_space,
             max_section_size,
             section_list_len,
@@ -156,6 +155,34 @@ impl PreparedFreeSpaceManager {
         self.section_list_len
     }
 
+    fn widths(&self) -> FormatWidths {
+        self.widths
+    }
+
+    fn total_space(&self) -> u64 {
+        self.total_space
+    }
+
+    fn max_section_size(&self) -> NonZeroU64 {
+        self.max_section_size
+    }
+
+    fn fields(&self) -> SectionFields {
+        self.fields
+    }
+
+    fn class_id(&self) -> u8 {
+        self.class_id
+    }
+
+    fn groups(&self) -> impl Iterator<Item = (NonZeroU64, &[StoredAddress])> {
+        self.groups
+            .iter()
+            .map(|(&size, addresses)| (size, addresses.as_slice()))
+    }
+}
+
+impl PreparedFreeSpaceManager {
     /// Prepares each block to store the other block's address.
     ///
     /// Pass the two addresses relative to the file's base address. A nonempty manager requires
@@ -217,10 +244,10 @@ impl PreparedFreeSpaceManager {
         section_list_address: StoredAddress,
         allocation: Option<u64>,
     ) -> Result<FreeSpaceManagerEncoding<'_>, FormatError> {
-        let FormatWidths { offsets, lengths } = self.widths;
+        let FormatWidths { offsets, lengths } = self.widths();
         let header_address = self.block_address(header_address, offsets)?;
         let section_list_address = self.block_address(section_list_address, offsets)?;
-        let required = self.section_list_len.to_u64();
+        let required = self.section_list_len().to_u64();
         let allocated = allocation.unwrap_or(required);
         if allocated < required {
             return Err(FormatError::FreeSpaceSectionListAllocationTooSmall {
@@ -228,24 +255,13 @@ impl PreparedFreeSpaceManager {
                 allocated,
             });
         }
-        require_length(allocated, lengths)?;
-        let allocation_len = slice_len(allocated)?;
-        Ok(FreeSpaceManagerEncoding {
-            header: FreeSpaceManagerHeaderEncoding {
-                widths: self.widths,
-                total_space: self.total_space,
-                total_sections: self.section_count,
-                address_space: AddressSpaceBits::written(offsets),
-                max_section_size: self.max_section_size,
-                section_list_address,
-                section_list_len: allocated,
-            },
-            section_list: FreeSpaceManagerSectionListEncoding {
-                plan: self,
-                header_address,
-                allocation_len,
-            },
-        })
+        let allocation_len = slice_len(allocated, lengths)?;
+        Ok(FreeSpaceManagerEncoding::new(Placement {
+            plan: self,
+            header_address,
+            section_list_address,
+            allocation_len,
+        }))
     }
 
     fn block_address(
@@ -253,11 +269,37 @@ impl PreparedFreeSpaceManager {
         address: StoredAddress,
         offsets: OffsetWidth,
     ) -> Result<StoredAddress, FormatError> {
-        if self.groups.is_empty() && (address.is_undefined(offsets) || address.get() == u64::MAX) {
+        if self.section_count() == 0 && (address.is_undefined(offsets) || address.get() == u64::MAX)
+        {
             return Ok(StoredAddress::undefined(offsets));
         }
         bytes::require_defined_offset(address.get(), offsets)?;
         Ok(address)
+    }
+}
+
+struct Placement<'a> {
+    plan: &'a PreparedFreeSpaceManager,
+    header_address: StoredAddress,
+    section_list_address: StoredAddress,
+    allocation_len: usize,
+}
+
+impl<'a> Placement<'a> {
+    fn plan(&self) -> &'a PreparedFreeSpaceManager {
+        self.plan
+    }
+
+    fn header_address(&self) -> StoredAddress {
+        self.header_address
+    }
+
+    fn section_list_address(&self) -> StoredAddress {
+        self.section_list_address
+    }
+
+    fn allocation_len(&self) -> usize {
+        self.allocation_len
     }
 }
 
@@ -274,6 +316,26 @@ pub struct FreeSpaceManagerEncoding<'a> {
 }
 
 impl<'a> FreeSpaceManagerEncoding<'a> {
+    fn new(placement: Placement<'a>) -> Self {
+        let plan = placement.plan();
+        Self {
+            header: FreeSpaceManagerHeaderEncoding {
+                widths: plan.widths(),
+                total_space: plan.total_space(),
+                total_sections: plan.section_count(),
+                address_space: AddressSpaceBits::written(plan.widths().offsets),
+                max_section_size: plan.max_section_size(),
+                section_list_address: placement.section_list_address(),
+                section_list_len: placement.allocation_len().to_u64(),
+            },
+            section_list: FreeSpaceManagerSectionListEncoding {
+                plan,
+                header_address: placement.header_address(),
+                allocation_len: placement.allocation_len(),
+            },
+        }
+    }
+
     /// Returns the header with the stored address and length of the section list.
     pub fn header(&self) -> FreeSpaceManagerHeaderEncoding {
         self.header
@@ -400,22 +462,20 @@ impl FreeSpaceManagerSectionListEncoding<'_> {
             header_address,
             allocation_len: _,
         } = *self;
-        let SectionFields {
-            count,
-            size,
-            offset,
-        } = plan.fields;
+        let fields = plan.fields();
         let mut output = BlockOutput { remaining: body };
         output.write_bytes(FSSE_SIGNATURE);
         output.write_bytes(&[FSSE_VERSION]);
-        output.write_uint_le(header_address.get(), usize::from(plan.widths.offsets.get()));
-        for (&section_size, addresses) in &plan.groups {
-            let addresses = addresses.as_slice();
-            output.write_uint_le(addresses.len().to_u64(), count);
-            output.write_uint_le(section_size.get(), size);
+        output.write_uint_le(
+            header_address.get(),
+            usize::from(plan.widths().offsets.get()),
+        );
+        for (section_size, addresses) in plan.groups() {
+            output.write_uint_le(addresses.len().to_u64(), fields.count());
+            output.write_uint_le(section_size.get(), fields.size());
             for address in addresses {
-                output.write_uint_le(address.get(), offset);
-                output.write_bytes(&[plan.class_id]);
+                output.write_uint_le(address.get(), fields.offset());
+                output.write_bytes(&[plan.class_id()]);
             }
         }
         // `H5FS__cache_sinfo_serialize` writes zero padding before the checksum (`H5FScache.c`,
@@ -496,7 +556,8 @@ fn require_length(value: u64, width: LengthWidth) -> Result<(), FormatError> {
 /// # Errors
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if `value` exceeds [`isize::MAX`].
-fn slice_len(value: u64) -> Result<usize, FormatError> {
+fn slice_len(value: u64, width: LengthWidth) -> Result<usize, FormatError> {
+    require_length(value, width)?;
     let len = value.to_usize()?;
     if len > isize::MAX.cast_unsigned() {
         return Err(FormatError::ValueTooLargeForPlatform {

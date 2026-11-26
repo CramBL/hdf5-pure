@@ -8,6 +8,7 @@ use crate::free_space_manager::{
     self, CHECKSUM_LEN, FILE_FSM_MAX_SECTION_SIZE, FreeSection, SECTION_CLASS_SIMPLE, section_list,
     test_support,
 };
+use crate::width;
 
 #[rstest]
 #[case::two(
