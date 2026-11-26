@@ -273,21 +273,18 @@ fn container_versions_below_child_versions_are_rejected(#[case] class: Container
 }
 
 #[rstest]
-#[case::compound(Container::Compound)]
-#[case::array(Container::Array)]
-fn legacy_container_versions_are_outside_the_message_representation(
-    #[values(1, 2)] raw: u8,
+#[case::compound_without_dimension_block(DatatypeVersion::One, Container::Compound)]
+#[case::array_v1(DatatypeVersion::One, Container::Array)]
+#[case::array_v2(DatatypeVersion::Two, Container::Array)]
+fn retained_container_construction_rejects_incompatible_property_layouts(
+    #[case] version: DatatypeVersion,
     #[case] class: Container,
 ) {
     assert_eq!(
-        DatatypeMessage::new(
-            DatatypeVersion::try_from(raw).unwrap(),
-            container(class, integer(DatatypeVersion::One))
-        )
-        .unwrap_err(),
+        DatatypeMessage::new(version, container(class, integer(DatatypeVersion::One))).unwrap_err(),
         FormatError::InvalidDatatypeVersion {
             class: class.class(),
-            version: raw
+            version: version.get()
         },
     );
 }
@@ -731,46 +728,26 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
 }
 
-#[rstest]
-#[case::compound_v1(test_util::legacy_compound::array_member(), Class::COMPOUND, Version::One,
-    Datatype::Compound {
-        size: 16,
-        members: vec![CompoundMember::new(
-            DatatypeMemberName::from(c"arr"),
-            0,
-            Datatype::Array {
-                base_type: Box::new(Datatype::FixedPoint(FixedPointType::i32())),
-                dimensions: vec![4],
-            },
-        )],
-    })]
-#[case::compound_v2(containers::legacy_compound_v2(), Class::COMPOUND, Version::Two,
-    Datatype::Compound {
-        size: 8,
-        members: vec![CompoundMember::new(DatatypeMemberName::from(c"offset"), 4, integer_datatype())],
-    })]
-#[case::array_v2(containers::legacy_array(), Class::ARRAY, Version::Two,
-    Datatype::Array {
-        base_type: Box::new(integer_datatype()),
-        dimensions: vec![2, 3],
-    })]
-fn semantic_parser_accepts_and_retained_parser_rejects_legacy_containers(
-    #[case] mut bytes: Vec<u8>,
-    #[case] class: Class,
-    #[case] version: Version,
-    #[case] expected: Datatype,
-) {
+#[test]
+fn semantic_parser_accepts_and_retained_parser_rejects_version_two_arrays() {
+    let mut bytes = containers::legacy_array();
     let consumed = bytes.len();
     bytes.extend_from_slice(&[0xff; 4]);
     assert_eq!(
         format::parse_datatype(&bytes).unwrap(),
-        (expected, consumed)
+        (
+            Datatype::Array {
+                base_type: Box::new(integer_datatype()),
+                dimensions: vec![2, 3],
+            },
+            consumed
+        )
     );
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap_err(),
         FormatError::InvalidDatatypeVersion {
-            class: class.0,
-            version: version.get()
+            class: Class::ARRAY.0,
+            version: Version::Two.get(),
         },
     );
 }
@@ -883,19 +860,9 @@ fn datatype_parsers_report_nested_eof_from_the_supplied_subslice(
     );
 }
 
-#[rstest]
-#[case::compound_v1(
-    test_util::legacy_compound::array_member(),
-    Class::COMPOUND,
-    Version::One
-)]
-#[case::compound_v2(containers::legacy_compound_v2(), Class::COMPOUND, Version::Two)]
-#[case::array_v2(containers::legacy_array(), Class::ARRAY, Version::Two)]
-fn semantic_parser_reports_nested_legacy_eof_from_the_outer_description(
-    #[case] mut child: Vec<u8>,
-    #[case] class: Class,
-    #[case] version: Version,
-) {
+#[test]
+fn semantic_parser_reports_nested_version_two_array_eof_from_the_outer_description() {
+    let mut child = containers::legacy_array();
     child.truncate(child.len() - 1);
     let body = VariableLengthSequence::new(Version::Five, 8, &child).build();
     assert_eq!(
@@ -908,8 +875,8 @@ fn semantic_parser_reports_nested_legacy_eof_from_the_outer_description(
     assert_eq!(
         DatatypeMessage::parse(&body).unwrap_err(),
         FormatError::InvalidDatatypeVersion {
-            class: class.0,
-            version: version.get(),
+            class: Class::ARRAY.0,
+            version: Version::Two.get(),
         },
     );
 }

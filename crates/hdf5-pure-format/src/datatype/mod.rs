@@ -28,6 +28,7 @@ use hdf5_pure_core::{
 };
 
 use self::header::{Context, Header};
+pub use self::legacy_member::CompoundV1Shape;
 use self::message::atomic::{self, AtomicReservedFlagPolicy};
 use self::message::decode::{self, Decoded, Layout, Member, Projection};
 use self::message::{CompoundLayout, MessageDepth};

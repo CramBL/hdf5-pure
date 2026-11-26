@@ -19,10 +19,10 @@ use super::{DatatypeVersion, MessageDepth};
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::datatype::header::{AtomicClass, Context, DatatypeClass, Header};
-use crate::datatype::legacy_member::MemberShape;
+use crate::datatype::legacy_member::CompoundV1Shape;
 use crate::datatype::{
     self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
-    COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
+    COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK,
     VariableLengthMetadata,
 };
 use crate::width::OffsetWidth;
@@ -78,9 +78,6 @@ impl Layout {
         Ok(match class {
             DatatypeClass::Atomic(class) => Self::Atomic(class),
             DatatypeClass::Compound => {
-                if projection == Projection::Retained {
-                    version.for_class(COMPOUND_CLASS, DatatypeVersion::Three)?;
-                }
                 let names = MemberNames::from_header(header, projection)?;
                 let fields = match version {
                     DatatypeVersion::One => CompoundFields::LegacyWithShape,
@@ -131,7 +128,11 @@ impl Compound {
         let (offset, shape) = match self.fields {
             CompoundFields::LegacyWithShape => {
                 let offset = u64::from(cursor.u32()?);
-                (offset, Some(MemberShape::parse(cursor)?))
+                let reject_reserved = self.names.projection == Projection::Retained;
+                (
+                    offset,
+                    Some(CompoundV1Shape::parse(cursor, reject_reserved)?),
+                )
             }
             CompoundFields::Legacy => (u64::from(cursor.u32()?), None),
             CompoundFields::Packed(width) => (cursor.uint(width)?, None),
@@ -159,7 +160,7 @@ pub(in crate::datatype) struct Member<'a> {
     /// The byte offset within the containing element.
     pub(in crate::datatype) offset: u64,
     /// The version 1 scalar or array shape when present.
-    pub(in crate::datatype) shape: Option<MemberShape>,
+    pub(in crate::datatype) shape: Option<CompoundV1Shape>,
 }
 
 /// The member count and name encoding of an enumeration.
