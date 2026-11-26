@@ -109,13 +109,11 @@ impl BTreeV1Node {
             });
         }
 
-        if &file_data[offset..offset + 4] != BTREE_V1_SIGNATURE {
-            return Err(FormatError::InvalidBTreeSignature);
-        }
-
-        let node_type = file_data[offset + 4];
-        let node_level = file_data[offset + 5];
-        let entries_used = u16::from_le_bytes([file_data[offset + 6], file_data[offset + 7]]);
+        let NodePrefix {
+            node_type,
+            node_level,
+            entries_used,
+        } = NodePrefix::parse(&file_data[offset..offset + header_size])?;
 
         let mut pos = offset + BTREE_V1_NODE_PREFIX_LEN;
         let left_sibling = bytes::read_optional_offset_width(file_data, pos, widths.offsets)?
@@ -206,10 +204,7 @@ impl BTreeV1Node {
     ) -> Result<BTreeV1Node, FormatError> {
         let header_size = btree_v1_node_header_size(widths.offsets.get());
         let header = source.read_metadata(address, header_size)?;
-        if &header[0..4] != BTREE_V1_SIGNATURE {
-            return Err(FormatError::InvalidBTreeSignature);
-        }
-        let entries_used = u16::from_le_bytes([header[6], header[7]]) as usize;
+        let entries_used = usize::from(NodePrefix::parse(&header)?.entries_used);
 
         // For type 0: header + entries_used*(key + child) + a trailing key,
         // with child `offset_size` bytes wide and key `length_size` bytes wide.
@@ -460,15 +455,14 @@ impl ChunkNodeLayout {
     ) -> Result<Self, FormatError> {
         let header_len = btree_v1_node_header_size(offset_width.get());
         let header = cursor.take(header_len)?;
-        let [s0, s1, s2, s3, node_type, node_level, used0, used1] =
-            *bytes::array_at::<BTREE_V1_NODE_PREFIX_LEN>(header, 0)?;
-        if [s0, s1, s2, s3] != *BTREE_V1_SIGNATURE {
-            return Err(FormatError::InvalidBTreeSignature);
-        }
+        let NodePrefix {
+            node_type,
+            node_level,
+            entries_used,
+        } = NodePrefix::parse(header)?;
         if node_type != BTREE_V1_CHUNK_NODE_TYPE {
             return Err(FormatError::InvalidBTreeNodeType(node_type));
         }
-        let entries_used = u16::from_le_bytes([used0, used1]);
         let key_size = chunk_key_size(ndims)?;
         let child_len = usize::from(offset_width.get());
         let entry_len = key_size
@@ -572,6 +566,27 @@ fn chunk_key_size(ndims: usize) -> Result<usize, FormatError> {
             offset: ndims.to_u64(),
             length: 8,
         })
+}
+
+struct NodePrefix {
+    node_type: u8,
+    node_level: u8,
+    entries_used: u16,
+}
+
+impl NodePrefix {
+    fn parse(header: &[u8]) -> Result<Self, FormatError> {
+        let [s0, s1, s2, s3, node_type, node_level, used0, used1] =
+            *bytes::array_at::<BTREE_V1_NODE_PREFIX_LEN>(header, 0)?;
+        if [s0, s1, s2, s3] != *BTREE_V1_SIGNATURE {
+            return Err(FormatError::InvalidBTreeSignature);
+        }
+        Ok(Self {
+            node_type,
+            node_level,
+            entries_used: u16::from_le_bytes([used0, used1]),
+        })
+    }
 }
 
 /// The signature of a version 1 B-tree node, defined in "Version 1 B-trees" of the [format
