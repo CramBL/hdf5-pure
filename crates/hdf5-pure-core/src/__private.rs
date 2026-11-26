@@ -33,7 +33,7 @@ pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
 pub use crate::address::StoredAddressExt;
 pub use crate::address_range::NonEmptyRange;
-pub use crate::datatype::{
+pub use crate::datatype::stored_size::{
     DatatypeOffsets, array_type_size, stored_type_size, variable_length_descriptor_size,
 };
 pub use crate::display::DISPLAY_MAX_MEMBERS;

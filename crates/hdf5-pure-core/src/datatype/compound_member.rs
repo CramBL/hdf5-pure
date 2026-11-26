@@ -1,4 +1,5 @@
-use super::{Datatype, DatatypeMemberName};
+use super::definition::Datatype;
+use super::member_name::DatatypeMemberName;
 
 /// A member of a compound datatype.
 ///
