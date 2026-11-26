@@ -1,5 +1,6 @@
-use hdf5_pure_core::__private;
-use hdf5_pure_core::{Datatype, DatatypeByteOrder, EnumMember, FloatingPointType, FormatError};
+use hdf5_pure_core::{
+    Datatype, DatatypeByteOrder, DatatypeMemberName, EnumMember, FloatingPointType, FormatError,
+};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
@@ -152,26 +153,26 @@ fn datatype_enum_codecs_preserve_nested_mixtures(
     assert_eq!(base_type.version(), DatatypeVersion::Two);
     assert_eq!(
         members,
-        &[__private::enum_member("x".into(), vec![1, 2, 3, 4])]
+        &[EnumMember::new(
+            DatatypeMemberName::new("x").unwrap(),
+            vec![1, 2, 3, 4]
+        )]
     );
 }
 
 #[rstest]
 #[case::empty(vec![], FormatError::InvalidEnumerationMemberCount { count: 0 })]
-#[case::empty_name(vec![("", vec![0; 4])], FormatError::EmptyEnumMemberName { index: 0 })]
-#[case::duplicate_name(vec![("x", vec![0; 4]), ("x", vec![1; 4])], FormatError::DuplicateEnumMemberName("x".into()))]
-#[case::duplicate_value(vec![("x", vec![0; 4]), ("y", vec![0; 4])], FormatError::DuplicateEnumMemberValue { first: "x".into(), second: "y".into() })]
+#[case::empty_name(vec![(b"".as_slice(), vec![0; 4])], FormatError::EmptyEnumMemberName { index: 0 })]
+#[case::duplicate_name(vec![(b"\xff".as_slice(), vec![0; 4]), (b"\xff".as_slice(), vec![1; 4])], FormatError::DuplicateEnumMemberName(DatatypeMemberName::new(b"\xff").unwrap()))]
+#[case::duplicate_value(vec![(b"\xff".as_slice(), vec![0; 4]), (b"\xfe".as_slice(), vec![0; 4])], FormatError::DuplicateEnumMemberValue { first: DatatypeMemberName::new(b"\xff").unwrap(), second: DatatypeMemberName::new(b"\xfe").unwrap() })]
 fn datatype_enum_codecs_reject_invalid_members(
-    #[case] members: Vec<(&str, Vec<u8>)>,
+    #[case] members: Vec<(&[u8], Vec<u8>)>,
     #[case] expected: FormatError,
 ) {
     let child = Leaf::Integer.bytes(Version::One);
     let fields = members
         .iter()
-        .map(|(name, value)| EnumValue {
-            name: name.as_bytes(),
-            value,
-        })
+        .map(|(name, value)| EnumValue { name, value })
         .collect::<Vec<_>>();
     assert_eq!(
         checked(DatatypeVersion::Three, &child, &fields).unwrap_err(),
@@ -278,8 +279,8 @@ fn datatype_enum_codecs_preserve_the_decoded_floating_point_base() {
     assert_eq!(enumeration.size().get(), 4);
     assert_eq!(
         enumeration.members(),
-        &[__private::enum_member(
-            "one".into(),
+        &[EnumMember::new(
+            DatatypeMemberName::new("one").unwrap(),
             1.0f32.to_le_bytes().to_vec()
         )]
     );
@@ -315,32 +316,80 @@ fn datatype_enum_parser_preserves_float_base_errors(
     );
 }
 
-#[test]
-fn datatype_enum_parser_reports_non_utf8_names() {
+#[rstest]
+#[case::three(DatatypeVersion::Three)]
+#[case::four(DatatypeVersion::Four)]
+#[case::five(DatatypeVersion::Five)]
+fn datatype_enum_codecs_preserve_name_bytes(#[case] version: DatatypeVersion) {
     let child = Leaf::Integer.bytes(Version::One);
-    let bytes = containers::enumeration(
-        3,
-        [1, 0, 0],
-        4,
-        &child,
-        &[EnumValue {
-            name: &[0xff],
-            value: &[0; 4],
-        }],
+    let all_nonzero = (1..=u8::MAX).collect::<Vec<_>>();
+    let members = [
+        EnumValue {
+            name: b"ascii",
+            value: &[1; 4],
+        },
+        EnumValue {
+            name: "第二".as_bytes(),
+            value: &[2; 4],
+        },
+        EnumValue {
+            name: b"\xff",
+            value: &[3; 4],
+        },
+        EnumValue {
+            name: b"\xfe",
+            value: &[4; 4],
+        },
+        EnumValue {
+            name: "�".as_bytes(),
+            value: &[5; 4],
+        },
+        EnumValue {
+            name: &all_nonzero,
+            value: &[6; 4],
+        },
+    ];
+    let bytes = containers::enumeration(version.get(), [6, 0, 0], 4, &child, &members);
+    let expected = checked(version, &child, &members).unwrap();
+    assert_encoding(&bytes, expected);
+    let (semantic, _) = format::parse_datatype(&bytes).unwrap();
+    let canonical = containers::enumeration(3, [6, 0, 0], 4, &child, &members);
+    assert_eq!(format::serialize_datatype(&semantic).unwrap(), canonical);
+}
+
+#[rstest]
+#[case::one(Version::One)]
+#[case::two(Version::Two)]
+fn datatype_enum_semantic_decoder_preserves_legacy_name_bytes(#[case] version: Version) {
+    let child = Leaf::Integer.bytes(Version::One);
+    let mut bytes = datatype::header(datatype::Class::ENUMERATED, version.get(), [2, 0, 0], 4);
+    bytes.extend_from_slice(&child);
+    bytes.extend_from_slice(b"\xff\0\0\0\0\0\0\0\xfe\0\0\0\0\0\0\0");
+    bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+    let (semantic, consumed) = format::parse_datatype(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    let members = [
+        EnumValue {
+            name: b"\xff",
+            value: &[1, 2, 3, 4],
+        },
+        EnumValue {
+            name: b"\xfe",
+            value: &[5, 6, 7, 8],
+        },
+    ];
+    assert_eq!(
+        semantic,
+        checked(DatatypeVersion::Three, &child, &members)
+            .unwrap()
+            .to_datatype()
+            .unwrap()
     );
-    let error = DatatypeMessage::parse(&bytes).unwrap_err();
-    let FormatError::UnsupportedDatatypeMemberEncoding {
-        class,
-        offset,
-        source,
-    } = &error
-    else {
-        panic!("{error:?}")
-    };
-    assert_eq!(*class, 8);
-    assert_eq!(*offset, 20);
-    assert_eq!(source.valid_up_to(), 0);
-    assert_eq!(source.error_len(), Some(1));
+    assert_eq!(
+        format::serialize_datatype(&semantic).unwrap(),
+        containers::enumeration(3, [2, 0, 0], 4, &child, &members)
+    );
 }
 
 #[rstest]
@@ -410,7 +459,7 @@ fn checked(
         .iter()
         .map(|member| {
             let EnumValue { name, value } = member;
-            __private::enum_member(core::str::from_utf8(name).unwrap().into(), value.to_vec())
+            EnumMember::new(DatatypeMemberName::new(name).unwrap(), value.to_vec())
         })
         .collect();
     DatatypeMessage::new(
@@ -446,7 +495,10 @@ fn datatype_enum_construction_rejects_unencodable_member_counts() {
             DatatypeVersion::Three,
             DatatypeProperties::Enumeration {
                 base_type: Box::new(child),
-                members: vec![__private::enum_member("x".into(), vec![0; 4]); count],
+                members: vec![
+                    EnumMember::new(DatatypeMemberName::new("x").unwrap(), vec![0; 4]);
+                    count
+                ],
             }
         )
         .unwrap_err(),

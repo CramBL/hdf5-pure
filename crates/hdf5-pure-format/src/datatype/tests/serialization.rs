@@ -447,7 +447,9 @@ fn datatype_member_counts_check_their_fixed_width_fields(
 ) {
     let datatype = if enumeration {
         let members = (0..count)
-            .map(|index| EnumMember::new(index.to_string(), vec![0]))
+            .map(|index| {
+                EnumMember::new(DatatypeMemberName::new(index.to_string()).unwrap(), vec![0])
+            })
             .collect();
         Datatype::Enumeration(EnumerationType::new(FixedPointType::u8(), members).unwrap())
     } else {

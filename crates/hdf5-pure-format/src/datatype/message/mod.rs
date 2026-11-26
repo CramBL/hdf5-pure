@@ -233,11 +233,10 @@ impl DatatypeMessage {
     /// requires a higher version, and [`FormatError::DatatypeChildVersion`] if a child has a
     /// higher version than its container.
     ///
-    /// Returns [`FormatError::ZeroSizedDatatype`] for a zero element size,
+    /// Returns [`FormatError::ZeroSizedDatatype`] for a zero element size and
     /// [`FormatError::OpaqueTagTooLong`] or [`FormatError::InvalidOpaqueTagByte`] for an invalid
-    /// opaque tag, and [`FormatError::InvalidDatatypeMemberName`] for an enumeration name with
-    /// a NUL byte. Returns [`FormatError::ValueTooLargeForRepresentation`] if a member count
-    /// or array rank exceeds its field.
+    /// opaque tag. Returns [`FormatError::ValueTooLargeForRepresentation`] if a member count or
+    /// array rank exceeds its field.
     ///
     /// Returns [`FormatError::InvalidCompoundMemberCount`] for a compound without members,
     /// [`FormatError::DuplicateCompoundField`] for duplicate compound names, and
@@ -597,24 +596,23 @@ fn check_enumeration_members(members: &[EnumMember], size: u32) -> Result<(), Fo
     let mut values = BTreeMap::new();
     for (index, member) in members.iter().enumerate() {
         let (name, value) = __private::enum_member_parts(member);
-        if name.is_empty() {
+        if name.as_bytes().is_empty() {
             return Err(FormatError::EmptyEnumMemberName { index });
         }
-        member_name(ENUMERATION_CLASS, name)?;
         if value.len().to_u64() != u64::from(size) {
             return Err(FormatError::EnumMemberValueSize(
-                name.into(),
+                name.clone(),
                 size,
                 value.len(),
             ));
         }
         if !names.insert(name) {
-            return Err(FormatError::DuplicateEnumMemberName(name.into()));
+            return Err(FormatError::DuplicateEnumMemberName(name.clone()));
         }
         if let Some(first) = values.insert(value, name) {
             return Err(FormatError::DuplicateEnumMemberValue {
-                first: first.into(),
-                second: name.into(),
+                first: first.clone(),
+                second: name.clone(),
             });
         }
     }

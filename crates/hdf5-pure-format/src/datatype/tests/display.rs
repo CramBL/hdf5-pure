@@ -1,7 +1,7 @@
 use rstest::rstest;
 
 use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
-use hdf5_pure_core::{EnumMember, EnumerationType};
+use hdf5_pure_core::{DatatypeMemberName, EnumMember, EnumerationType};
 
 use super::super::*;
 
@@ -165,13 +165,16 @@ fn a_member_name_cannot_carry_a_control_character_into_a_message() {
     let enumeration = Datatype::Enumeration(
         EnumerationType::new(
             FixedPointType::u32(),
-            vec![EnumMember::new("red\u{0}".into(), vec![0, 0, 0, 0])],
+            vec![EnumMember::new(
+                DatatypeMemberName::new("red\n").unwrap(),
+                vec![0, 0, 0, 0],
+            )],
         )
         .unwrap(),
     );
     let shown = enumeration.to_string();
     assert!(!shown.chars().any(char::is_control), "{shown}");
-    assert_eq!(shown, "enum<u32>[red\\0]");
+    assert_eq!(shown, "enum<u32>[red\\n]");
 }
 
 /// A compound or enumeration with more members than `DISPLAY_MAX_MEMBERS`
@@ -191,7 +194,12 @@ fn a_long_member_list_is_elided_and_reports_the_remainder() {
             .collect(),
     };
     let members = (0..over_cap)
-        .map(|i| EnumMember::new(format!("m{i}"), vec![0, 0, 0, 0]))
+        .map(|i| {
+            EnumMember::new(
+                DatatypeMemberName::new(format!("m{i}")).unwrap(),
+                vec![0, 0, 0, 0],
+            )
+        })
         .collect();
     let enumeration =
         Datatype::Enumeration(EnumerationType::new(FixedPointType::u32(), members).unwrap());
@@ -211,7 +219,12 @@ fn a_long_member_list_is_elided_and_reports_the_remainder() {
 #[test]
 fn a_member_list_at_exactly_the_cap_is_not_elided() {
     let members: Vec<_> = (0..DISPLAY_MAX_MEMBERS)
-        .map(|i| __private::enum_member(format!("m{i}"), vec![0, 0, 0, 0]))
+        .map(|i| {
+            EnumMember::new(
+                DatatypeMemberName::new(format!("m{i}")).unwrap(),
+                vec![0, 0, 0, 0],
+            )
+        })
         .collect();
     let shown =
         Datatype::Enumeration(EnumerationType::new(FixedPointType::u32(), members).unwrap())

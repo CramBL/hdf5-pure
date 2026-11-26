@@ -1,6 +1,7 @@
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    Datatype, EnumMember, EnumerationType, FormatError, ReferenceType, VariableLengthType,
+    Datatype, DatatypeMemberName, EnumMember, EnumerationType, FormatError, ReferenceType,
+    VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -289,8 +290,8 @@ fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
         EnumerationType::new(
             base,
             vec![
-                EnumMember::new("first".into(), vec![0x11; 4]),
-                EnumMember::new("第二".into(), vec![0x22; 4]),
+                EnumMember::new(DatatypeMemberName::new("first").unwrap(), vec![0x11; 4]),
+                EnumMember::new(DatatypeMemberName::new("第二").unwrap(), vec![0x22; 4]),
             ],
         )
         .unwrap(),
@@ -363,7 +364,10 @@ fn enumeration_values_keep_the_width_of_the_decoded_parent(
     assert_eq!(enumeration.size().get(), size);
     assert_eq!(
         enumeration.members(),
-        [EnumMember::new("value".into(), value)]
+        [EnumMember::new(
+            DatatypeMemberName::new("value").unwrap(),
+            value
+        )]
     );
 
     if source == destination {
@@ -457,7 +461,10 @@ fn enumeration_preserves_padded_compound_values_at_the_source_width() {
     assert_eq!(enumeration.size().get(), 16);
     assert_eq!(
         enumeration.members(),
-        [EnumMember::new("value".into(), source[49..].to_vec())]
+        [EnumMember::new(
+            DatatypeMemberName::new("value").unwrap(),
+            source[49..].to_vec()
+        )]
     );
     let (descriptor, consumed) =
         format::VariableLengthDescriptor::parse(OffsetWidth::Four, &enumeration.members()[0].value)

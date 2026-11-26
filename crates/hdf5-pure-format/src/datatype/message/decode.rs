@@ -8,12 +8,12 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ffi::CStr;
 use core::num::{NonZeroU32, NonZeroUsize};
-use core::str;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::__private::DatatypeOffsets;
-use hdf5_pure_core::{ComplexType, EnumMember, FormatError};
+use hdf5_pure_core::{ComplexType, DatatypeMemberName, EnumMember, FormatError};
 
 use super::atomic;
 use super::{DatatypeVersion, MessageDepth};
@@ -24,7 +24,7 @@ use crate::datatype::legacy_member::MemberShape;
 use crate::datatype::{
     self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
     COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK, COMPOUND_CLASS,
-    ENUMERATION_CLASS, VariableLengthMetadata,
+    VariableLengthMetadata,
 };
 use crate::width::OffsetWidth;
 
@@ -125,7 +125,18 @@ impl Compound {
         &self,
         cursor: &mut ByteCursor<'a>,
     ) -> Result<Member<'a>, FormatError> {
-        let name = self.names.read(cursor, COMPOUND_CLASS)?;
+        let offset = cursor.position();
+        let name = self.names.read(cursor)?;
+        let name = match self.names.projection {
+            Projection::Semantic => String::from_utf8_lossy(name.to_bytes()),
+            Projection::Retained => name.to_str().map(Cow::Borrowed).map_err(|source| {
+                FormatError::UnsupportedDatatypeMemberEncoding {
+                    class: COMPOUND_CLASS,
+                    offset,
+                    source,
+                }
+            })?,
+        };
         let (offset, shape) = match self.fields {
             CompoundFields::LegacyWithShape => {
                 let offset = u64::from(cursor.u32()?);
@@ -173,7 +184,6 @@ impl Enumeration {
     ///
     /// Returns [`FormatError::EnumBaseSizeMismatch`] if `declared_size` differs from `value_width`,
     /// [`FormatError::UnexpectedEof`] if a name or the value list is incomplete,
-    /// [`FormatError::UnsupportedDatatypeMemberEncoding`] if a retained name is not UTF-8,
     /// or [`FormatError::AllocationFailed`] if a member list reservation fails. Propagates
     /// platform-conversion errors for the value width or list length.
     pub(in crate::datatype) fn members(
@@ -186,12 +196,8 @@ impl Enumeration {
         let count = usize::from(self.0.count);
         let mut members = Vec::new();
         for _ in 0..count {
-            let name = self.0.read(cursor, ENUMERATION_CLASS)?;
-            push_member(
-                &mut members,
-                count,
-                __private::enum_member(name.into_owned(), Vec::new()),
-            )?;
+            let name = DatatypeMemberName::from(self.0.read(cursor)?);
+            push_member(&mut members, count, EnumMember::new(name, Vec::new()))?;
         }
         let length = u64::from(self.0.count) * u64::from(value_width.get());
         let values = cursor.slice(length.to_usize()?)?;
@@ -234,11 +240,12 @@ pub(in crate::datatype) fn push_member<T>(
 
 struct MemberNames {
     count: u16,
-    encoding: NameEncoding,
+    layout: NameLayout,
+    projection: Projection,
 }
 
 impl MemberNames {
-    /// Selects the member name encoding for the message version and parser.
+    /// Selects the terminated name layout for the message version and parser.
     ///
     /// # Errors
     ///
@@ -253,81 +260,58 @@ impl MemberNames {
             size: _,
         } = header;
         let class = class.code();
-        let encoding = match projection {
-            Projection::Retained => {
-                version.for_class(class, DatatypeVersion::Three)?;
-                header
-                    .fields()
-                    .reject_reserved_flags(class, MEMBER_COUNT_RESERVED)?;
-                NameEncoding::StrictUtf8
-            }
-            Projection::Semantic if version < DatatypeVersion::Three => NameEncoding::Padded,
-            Projection::Semantic => NameEncoding::Unpadded,
+        if projection == Projection::Retained {
+            version.for_class(class, DatatypeVersion::Three)?;
+            header
+                .fields()
+                .reject_reserved_flags(class, MEMBER_COUNT_RESERVED)?;
+        }
+        let layout = if version < DatatypeVersion::Three {
+            NameLayout::Padded
+        } else {
+            NameLayout::Unpadded
         };
         Ok(Self {
             count: u16::from_le_bytes([low, high]),
-            encoding,
+            layout,
+            projection,
         })
     }
 
-    /// Reads one NUL-terminated name and any padding in its name slot.
-    ///
-    /// Borrows each valid UTF-8 name. For semantic names, replaces invalid UTF-8 sequences in
-    /// an owned string.
+    /// Borrows a NUL-terminated name after acquiring its complete field, including any padding.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the terminator or required padding is
-    /// missing, or [`FormatError::UnsupportedDatatypeMemberEncoding`] if a retained
-    /// name is not UTF-8.
-    fn read<'a>(
-        &self,
-        cursor: &mut ByteCursor<'a>,
-        class: u8,
-    ) -> Result<Cow<'a, str>, FormatError> {
+    /// Returns [`FormatError::UnexpectedEof`] if the terminator or required padding is missing.
+    fn read<'a>(&self, cursor: &mut ByteCursor<'a>) -> Result<&'a CStr, FormatError> {
         let remaining = cursor.remaining();
         let offset = cursor.position();
-        let length = remaining
-            .iter()
-            .position(|&byte| byte == 0)
-            .ok_or_else(|| {
-                let available = offset + remaining.len();
-                let expected = match self.encoding {
-                    NameEncoding::StrictUtf8 => available,
-                    NameEncoding::Padded | NameEncoding::Unpadded => offset,
-                }
-                .saturating_add(1);
-                FormatError::UnexpectedEof {
-                    expected,
-                    available,
-                }
-            })?;
-        let name = cursor.take(length)?;
-        cursor.take_array::<1>()?;
-        match self.encoding {
-            NameEncoding::Padded => {
-                let padding = (NAME_ALIGNMENT - (length + 1) % NAME_ALIGNMENT) % NAME_ALIGNMENT;
-                cursor.take(padding)?;
-                Ok(String::from_utf8_lossy(name))
+        let Ok(name) = CStr::from_bytes_until_nul(remaining) else {
+            let available = offset + remaining.len();
+            let expected = match self.projection {
+                Projection::Retained => available,
+                Projection::Semantic => offset,
             }
-            NameEncoding::Unpadded => Ok(String::from_utf8_lossy(name)),
-            NameEncoding::StrictUtf8 => str::from_utf8(name).map(Cow::Borrowed).map_err(|source| {
-                FormatError::UnsupportedDatatypeMemberEncoding {
-                    class,
-                    offset,
-                    source,
-                }
-            }),
-        }
+            .saturating_add(1);
+            return Err(FormatError::UnexpectedEof {
+                expected,
+                available,
+            });
+        };
+        let length = name.to_bytes_with_nul().len();
+        let extent = match self.layout {
+            NameLayout::Padded => length.next_multiple_of(NAME_ALIGNMENT),
+            NameLayout::Unpadded => length,
+        };
+        cursor.take(extent)?;
+        Ok(name)
     }
 }
 
-enum NameEncoding {
-    /// Semantic names padded to a multiple of eight bytes after their terminator.
+// "The Datatype Message" in format specification version 4.0 defines padded names for
+// versions 1 and 2 and unpadded names for version 3.
+enum NameLayout {
     Padded,
-    /// Retained names with a terminator and strict UTF-8 decoding.
-    StrictUtf8,
-    /// Semantic names with a terminator and no padding.
     Unpadded,
 }
 

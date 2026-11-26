@@ -15,6 +15,7 @@ use core::num::NonZeroU32;
 use crate::BaseAddress;
 use crate::CompoundMember;
 use crate::Datatype;
+use crate::DatatypeMemberName;
 use crate::EnumMember;
 use crate::EnumerationType;
 use crate::FileSpaceInfo;
@@ -127,24 +128,19 @@ pub fn compound_member_parts(member: &CompoundMember) -> (&str, u64, &Datatype) 
     (name, *byte_offset, datatype)
 }
 
-/// Constructs an enumeration member from fields read from a datatype message.
-pub fn enum_member(name: String, value: Vec<u8>) -> EnumMember {
-    EnumMember::new(name, value)
-}
-
 /// Borrows an enumeration member's name and stored value bytes without copying.
 ///
 /// # Examples
 ///
 /// ```
-/// use hdf5_pure_core::__private;
+/// use hdf5_pure_core::{__private, DatatypeMemberName, EnumMember};
 ///
-/// let member = __private::enum_member("active".into(), vec![1, 0]);
+/// let member = EnumMember::new(DatatypeMemberName::from(c"active"), vec![1, 0]);
 /// let (name, value) = __private::enum_member_parts(&member);
-/// assert_eq!(name, "active");
+/// assert_eq!(name.as_bytes(), b"active");
 /// assert_eq!(value, &[1, 0]);
 /// ```
-pub fn enum_member_parts(member: &EnumMember) -> (&str, &[u8]) {
+pub fn enum_member_parts(member: &EnumMember) -> (&DatatypeMemberName, &[u8]) {
     let EnumMember { name, value } = member;
     (name, value)
 }

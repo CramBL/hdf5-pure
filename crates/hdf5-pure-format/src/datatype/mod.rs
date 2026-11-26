@@ -131,11 +131,11 @@ pub fn stored_element_size_usize(
 /// Accepts legacy object and dataset-region reference kinds at every supported message
 /// version and preserves their declared element sizes.
 ///
-/// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Decodes
-/// compound and enumeration names with lossy UTF-8 conversion. Acquires the full
-/// array dimension list and any version 2 permutation indices before reading the
-/// base datatype. Checks the enumeration size against its base size before reading the
-/// member names, then acquires the complete value list.
+/// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Decodes compound
+/// names with lossy UTF-8 conversion and preserves enumeration name bytes. Acquires the full
+/// array dimension list and any version 2 permutation indices before reading the base datatype.
+/// Checks the enumeration size against its base size before reading the member names, then
+/// acquires the complete value list.
 ///
 /// Checks compound member bounds and overlaps using the sizes stored in the member
 /// descriptions. For a version 1 implicit array member, multiplies the base size by its extents.

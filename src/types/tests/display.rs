@@ -51,7 +51,8 @@ fn a_curated_member_name_is_escaped_in_either_variant() {
     assert!(!compound.chars().any(char::is_control), "{compound}");
     assert_eq!(compound, "compound{a\\nb: i32}");
 
-    let enumeration = DType::Enum(vec!["a\u{1b}[31mb".into()]).to_string();
+    let enumeration =
+        DType::Enum(vec![DatatypeMemberName::new("a\u{1b}[31mb").unwrap()]).to_string();
     assert!(!enumeration.chars().any(char::is_control), "{enumeration}");
     assert_eq!(enumeration, "enum[a\\u{1b}[31mb]");
 }
@@ -69,7 +70,12 @@ fn a_curated_member_list_is_elided_in_either_variant() {
             .map(|name| (name.clone(), DType::I32))
             .collect(),
     );
-    let enumeration = DType::Enum(names);
+    let enumeration = DType::Enum(
+        names
+            .into_iter()
+            .map(|name| DatatypeMemberName::new(name).unwrap())
+            .collect(),
+    );
 
     for (dtype, close) in [(compound, "}"), (enumeration, "]")] {
         let shown = dtype.to_string();

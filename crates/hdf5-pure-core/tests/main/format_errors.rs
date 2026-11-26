@@ -7,7 +7,9 @@ use core::str::Utf8Error;
 use hdf5_pure_core::__private;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_core::Datatype;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::EditStorageConflict;
+use hdf5_pure_core::EnumMember;
 use hdf5_pure_core::FixedPointType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::PhysicalAddress;
@@ -163,18 +165,22 @@ fn object_header_allocation_diagnostics_preserve_their_fields(
 
 #[test]
 fn enum_member_parts_borrow_the_complete_member() {
-    let member = hdf5_pure_core::__private::enum_member("value".into(), vec![1, 2, 3, 4]);
+    let member = EnumMember::new(DatatypeMemberName::new("value").unwrap(), vec![1, 2, 3, 4]);
     let (name, value) = hdf5_pure_core::__private::enum_member_parts(&member);
-    assert_eq!((name, value), ("value", &[1, 2, 3, 4][..]));
-    assert_eq!(name.as_ptr(), member.name.as_ptr());
+    assert_eq!(
+        (name.as_bytes(), value),
+        (b"value".as_slice(), &[1, 2, 3, 4][..])
+    );
+    assert!(core::ptr::eq(name, &member.name));
     assert_eq!(value.as_ptr(), member.value.as_ptr());
 }
 
 #[rstest::rstest]
 #[case::empty(FormatError::InvalidEnumerationMemberCount { count: 0 }, "invalid enumeration member count 0")]
 #[case::empty_name(FormatError::EmptyEnumMemberName { index: 2 }, "enumeration member 2 has an empty name")]
-#[case::duplicate_name(FormatError::DuplicateEnumMemberName("x\ny".into()), "duplicate enumeration member name \"x\\ny\"")]
-#[case::duplicate_value(FormatError::DuplicateEnumMemberValue { first: "x\ny".into(), second: "z".into() }, "enumeration members \"x\\ny\" and \"z\" have the same stored value")]
+#[case::duplicate_name(FormatError::DuplicateEnumMemberName(DatatypeMemberName::new("x\ny").unwrap()), "duplicate enumeration member name \"x\\ny\"")]
+#[case::duplicate_non_utf8_name(FormatError::DuplicateEnumMemberName(DatatypeMemberName::new(b"\xff").unwrap()), "duplicate enumeration member name b\"\\xff\"")]
+#[case::duplicate_value(FormatError::DuplicateEnumMemberValue { first: DatatypeMemberName::new("x\ny").unwrap(), second: DatatypeMemberName::new("z").unwrap() }, "enumeration members \"x\\ny\" and \"z\" have the same stored value")]
 fn enumeration_diagnostics_preserve_their_fields(
     #[case] error: FormatError,
     #[case] expected: &str,

@@ -9,8 +9,8 @@ use core::num::NonZeroUsize;
 use core::str::Utf8Error;
 
 use crate::{
-    DatatypeByteOrder, FileSpacePageSize, FloatingPointField, FloatingPointLayout,
-    NumericDatatypeProperty,
+    DatatypeByteOrder, DatatypeMemberName, FileSpacePageSize, FloatingPointField,
+    FloatingPointLayout, NumericDatatypeProperty,
 };
 
 /// Reports format, filter, and runtime failures through the `hdf5-pure` API.
@@ -198,6 +198,11 @@ pub enum FormatError {
         /// The child message's version.
         child_version: u8,
     },
+    /// The supplied datatype member name contains a NUL byte.
+    DatatypeMemberNameContainsNul {
+        /// The zero-based index of the first NUL byte.
+        index: usize,
+    },
     /// A decoder's output exceeds the bound derived from the declared decoded payload size.
     ///
     /// The minimum describes this filter's output stream, which can include bytes removed by
@@ -281,13 +286,13 @@ pub enum FormatError {
     /// A compound datatype contains the same field name more than once.
     DuplicateCompoundField(String),
     /// An enumeration datatype contains the same member name more than once.
-    DuplicateEnumMemberName(String),
+    DuplicateEnumMemberName(DatatypeMemberName),
     /// Two enumeration members have identical stored value bytes.
     DuplicateEnumMemberValue {
         /// The earlier member's name in declaration order.
-        first: String,
+        first: DatatypeMemberName,
         /// The later member's name in declaration order.
-        second: String,
+        second: DatatypeMemberName,
     },
     /// Supplied members of an unplaced global heap collection share an index.
     DuplicateGlobalHeapMemberIndex {
@@ -332,10 +337,10 @@ pub enum FormatError {
     },
     /// An enumeration member's integer value does not fit in the base type:
     /// `(member name, value, base size in bytes)`.
-    EnumMemberValueRange(String, i64, u32),
+    EnumMemberValueRange(DatatypeMemberName, i64, u32),
     /// An enumeration member's value does not occupy exactly the base type's
     /// size: `(member name, expected bytes, actual bytes)`.
-    EnumMemberValueSize(String, u32, usize),
+    EnumMemberValueSize(DatatypeMemberName, u32, usize),
     /// Relocating the encoded end-of-file address would place it below zero.
     EofRelocationUnderflow {
         /// The end-of-file address encoded in the superblock.
@@ -690,7 +695,7 @@ pub enum FormatError {
         /// The complete 24-bit class bit field.
         flags: u32,
     },
-    /// A compound or enumeration member name contains a NUL byte.
+    /// A compound member name contains a NUL byte.
     InvalidDatatypeMemberName {
         /// The datatype class code.
         class: u8,
@@ -1635,7 +1640,7 @@ pub enum FormatError {
     ///
     /// Contains the raw permutation field.
     UnsupportedCompoundV1Permutation(u32),
-    /// A datatype member name cannot be represented as UTF-8 text.
+    /// A retained compound member name is invalid UTF-8.
     UnsupportedDatatypeMemberEncoding {
         /// The containing datatype's class code.
         class: u8,
@@ -2043,6 +2048,12 @@ impl fmt::Display for FormatError {
                     "datatype class {class} member name {name:?} contains a NUL byte"
                 )
             }
+            Self::DatatypeMemberNameContainsNul { index } => {
+                write!(
+                    f,
+                    "datatype member name contains a NUL byte at index {index}"
+                )
+            }
             Self::InvalidDatatypeMessageVersion(version) => {
                 write!(f, "invalid datatype message version {version}")
             }
@@ -2237,14 +2248,14 @@ impl fmt::Display for FormatError {
             Self::EnumMemberValueSize(name, expected, actual) => {
                 write!(
                     f,
-                    "enumeration member '{name}' has a {actual}-byte value, but its base type is \
+                    "enumeration member {name:?} has a {actual}-byte value, but its base type is \
                      {expected} bytes"
                 )
             }
             Self::EnumMemberValueRange(name, value, size) => {
                 write!(
                     f,
-                    "enumeration member '{name}' value {value} does not fit in its \
+                    "enumeration member {name:?} value {value} does not fit in its \
                      {size}-byte base type"
                 )
             }

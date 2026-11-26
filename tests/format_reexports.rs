@@ -208,11 +208,11 @@ fn public_member_fields_remain_nameable() {
     fn compound(member: &CompoundMember) -> (&str, u64, &Datatype) {
         (&member.name, member.byte_offset, &member.datatype)
     }
-    fn enumeration(member: &hdf5_pure::EnumMember) -> (&str, &[u8]) {
+    fn enumeration(member: &hdf5_pure::EnumMember) -> (&hdf5_pure::DatatypeMemberName, &[u8]) {
         (&member.name, &member.value)
     }
     let _: fn(&CompoundMember) -> (&str, u64, &Datatype) = compound;
-    let _: fn(&hdf5_pure::EnumMember) -> (&str, &[u8]) = enumeration;
+    let _: fn(&hdf5_pure::EnumMember) -> (&hdf5_pure::DatatypeMemberName, &[u8]) = enumeration;
 }
 
 #[test]

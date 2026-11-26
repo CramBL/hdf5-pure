@@ -60,9 +60,9 @@ impl DatatypeMessage {
     /// Checks compound member bounds and overlaps using the sizes stored in the member
     /// descriptions. Reserves member capacity after reading a member's nested datatype and
     /// checking its byte range. A compound must have at least one member, with unique UTF-8 names.
-    /// Retains the enumeration's parent and reads at least one member, each with a nonempty,
-    /// unique UTF-8 name and a distinct raw value of the parent's width. The nesting limit is 64
-    /// descriptions on one parent chain, including the outer description.
+    /// Retains the enumeration's parent and reads at least one member. Each member has a
+    /// nonempty name, unique by its bytes, and a distinct raw value of the parent's width.
+    /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
     ///
     /// The parser accepts an opaque property filled with tag bytes without a NUL terminator.
     /// The writer uses terminated tags, as described in [`serialize`](Self::serialize).
@@ -92,8 +92,8 @@ impl DatatypeMessage {
     /// [`FormatError::DuplicateCompoundField`] for duplicate names, and
     /// [`FormatError::CompoundFieldOutOfBounds`] for a member outside its compound element.
     /// Returns [`FormatError::CompoundFieldOverlap`] for overlapping member ranges.
-    /// Returns [`FormatError::UnsupportedDatatypeMemberEncoding`] if a member name is not
-    /// UTF-8, retaining the name's byte offset and the original [`core::str::Utf8Error`].
+    /// Returns [`FormatError::UnsupportedDatatypeMemberEncoding`] for an invalid UTF-8 compound
+    /// name, with its byte offset and the original [`core::str::Utf8Error`].
     ///
     /// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration size differs from its
     /// parent's size.
@@ -424,10 +424,10 @@ impl DatatypeMessage {
     /// # Ok::<(), FormatError>(())
     /// ```
     ///
-    /// Enumeration parents retain their versions, and all names precede the values:
+    /// All enumeration names precede the values. The writer preserves non-UTF-8 name bytes:
     ///
     /// ```
-    /// use hdf5_pure_core::{__private, FixedPointType, FormatError};
+    /// use hdf5_pure_core::{DatatypeMemberName, EnumMember, FixedPointType, FormatError};
     /// use hdf5_pure_format::__private::{
     ///     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
     /// };
@@ -441,15 +441,15 @@ impl DatatypeMessage {
     ///     DatatypeProperties::Enumeration {
     ///         base_type: Box::new(integer),
     ///         members: vec![
-    ///             __private::enum_member("low".into(), vec![1]),
-    ///             __private::enum_member("high".into(), vec![2]),
+    ///             EnumMember::new(DatatypeMemberName::new("low")?, vec![1]),
+    ///             EnumMember::new(DatatypeMemberName::new(b"high\xff")?, vec![2]),
     ///         ],
     ///     },
     /// )?;
     /// let bytes = enumeration.serialize(OffsetWidth::Eight)?;
     /// assert_eq!(&bytes[..8], &[0x58, 2, 0, 0, 1, 0, 0, 0]);
     /// assert_eq!(bytes[8], 0x20);
-    /// assert_eq!(&bytes[20..], b"low\0high\0\x01\x02");
+    /// assert_eq!(&bytes[20..], b"low\0high\xff\0\x01\x02");
     /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
     /// assert_eq!(parsed, enumeration);
     /// assert_eq!(consumed, bytes.len());
@@ -926,7 +926,7 @@ impl ContainerProperties<'_> {
                 )?;
                 for member in *members {
                     preparation.add(1)?;
-                    preparation.add(member.name.len())?;
+                    preparation.add(member.name.as_bytes().len())?;
                     preparation.add(member.value.len())?;
                 }
                 Ok(parent_size)

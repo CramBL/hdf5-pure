@@ -2,7 +2,6 @@
 use alloc::vec;
 
 use super::*;
-use crate::FillTime;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::convert;
@@ -11,6 +10,7 @@ use crate::datatype::layout::FloatingPointLayout;
 use crate::datatype::{CharacterSet, StringPadding};
 use crate::fill_value::FillPattern;
 use crate::source;
+use crate::{DatatypeMemberName, FillTime};
 
 mod numeric;
 
@@ -120,7 +120,10 @@ fn make_enum_type(base: Datatype, members: &[(&str, i64)]) -> Datatype {
     let members = members
         .iter()
         .map(|(name, value)| {
-            crate::EnumMember::new((*name).to_string(), value.to_le_bytes()[..width].to_vec())
+            crate::EnumMember::new(
+                DatatypeMemberName::new(name).unwrap(),
+                value.to_le_bytes()[..width].to_vec(),
+            )
         })
         .collect();
     Datatype::Enumeration(crate::EnumerationType::new(base, members).unwrap())

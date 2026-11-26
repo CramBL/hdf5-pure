@@ -132,7 +132,7 @@ Several other structured dataset kinds round out the type system. [Element types
 | [`with_array_data(base_type, array_dims, raw_data, num_elements)`](crate::DatasetBuilder::with_array_data) | Fixed-size array elements |
 | [`with_path_references(paths)`](crate::DatasetBuilder::with_path_references) | Object references, resolved by path |
 
-Enumeration datatypes are constructed with [`EnumTypeBuilder`](crate::EnumTypeBuilder). Use [`EnumTypeBuilder::i32_based()`](crate::EnumTypeBuilder::i32_based) or [`EnumTypeBuilder::u8_based()`](crate::EnumTypeBuilder::u8_based), add named values with [`value(name, val)`](crate::EnumTypeBuilder::value) or [`u8_value(name, val)`](crate::EnumTypeBuilder::u8_value), and finish with [`build()`](crate::EnumTypeBuilder::build), which returns a `Result` because a member value has to fit its base type:
+Use [`EnumTypeBuilder::i32_based()`](crate::EnumTypeBuilder::i32_based) or [`EnumTypeBuilder::u8_based()`](crate::EnumTypeBuilder::u8_based) to construct an enumeration. Add named values with [`value(name, val)`](crate::EnumTypeBuilder::value) or [`u8_value(name, val)`](crate::EnumTypeBuilder::u8_value), and finish with [`build()`](crate::EnumTypeBuilder::build). Pass names as strings or byte slices. The builder checks for embedded NUL bytes and values that exceed the base type's range.
 
 ```rust
 # use hdf5_pure::FileBuilder;
@@ -173,5 +173,7 @@ assert_eq!(enumeration.members()[1].value, 40_000u16.to_le_bytes());
 [`raw_value(name, bytes)`](crate::EnumTypeBuilder::raw_value) takes a member's encoded bytes in the base type's byte order. Use it to reproduce stored bytes or supply a value outside the integer builder methods' range. [`build()`](crate::EnumTypeBuilder::build) requires a fixed-point base and checks each member's value.
 
 Decoded enumerations retain the stored base datatype, including supported floating-point bases. [`EnumerationType::base_type`](crate::EnumerationType::base_type) and [`EnumerationType::members`](crate::EnumerationType::members) expose the base and the stored members.
+
+Each member has a [`DatatypeMemberName`](crate::DatatypeMemberName). Use [`as_bytes()`](crate::DatatypeMemberName::as_bytes) to read its stored bytes or [`as_str()`](crate::DatatypeMemberName::as_str) to interpret them as UTF-8.
 
 For more on the writing entry points used throughout this page, see [Writing files](crate::_guide::writing).
