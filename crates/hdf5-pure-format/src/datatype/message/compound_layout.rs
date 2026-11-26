@@ -4,7 +4,7 @@ use core::num::NonZeroU32;
 use hdf5_pure_core::{DatatypeMemberName, FormatError};
 
 use super::DatatypeVersion;
-use super::description::NameLayout;
+use super::name_layout::NameLayout;
 
 /// The layout of a compound member's name, offset, and optional dimension block.
 ///

@@ -236,7 +236,7 @@ pub(super) const DATATYPE_CLASS_MASK: u8 = 0x0F;
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 pub(super) const DATATYPE_VERSION_SHIFT: u8 = 4;
 
-// The format specification, version 4.0, defines these class and version codes
+// The format specification, version 4.0, defines these class codes
 // in "The Datatype Message".
 pub(super) const FIXED_POINT_CLASS: u8 = 0;
 pub(super) const FLOATING_POINT_CLASS: u8 = 1;
@@ -250,15 +250,6 @@ pub(super) const ENUMERATION_CLASS: u8 = 8;
 pub(super) const VARIABLE_LENGTH_CLASS: u8 = 9;
 pub(super) const ARRAY_CLASS: u8 = 10;
 pub(super) const COMPLEX_CLASS: u8 = 11;
-pub(super) const DATATYPE_VERSION_ONE: u8 = 1;
-pub(super) const DATATYPE_VERSION_TWO: u8 = 2;
-pub(super) const DATATYPE_VERSION_THREE: u8 = 3;
-/// Datatype message version 4, defined in "The Datatype Message" of the
-/// [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const DATATYPE_VERSION_FOUR: u8 = 4;
-pub(super) const DATATYPE_VERSION_FIVE: u8 = 5;
 
 /// Writes an eight-byte test header from its raw fields.
 #[cfg(test)]

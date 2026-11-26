@@ -70,3 +70,25 @@ pub fn stored_element_size_usize(
 ) -> Result<NonZeroUsize, FormatError> {
     stored_element_size(datatype, offset_width)?.narrow()
 }
+
+/// Converts a datatype element size to a positive byte count.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ZeroSizedDatatype`] if `size` is zero.
+pub(super) fn positive_size(class: u8, size: u32) -> Result<NonZeroU32, FormatError> {
+    NonZeroU32::new(size).ok_or(FormatError::ZeroSizedDatatype { class })
+}
+
+/// Checks a declared enumeration size against its base datatype's stored size.
+///
+/// # Errors
+///
+/// Returns [`FormatError::EnumBaseSizeMismatch`] if the sizes differ.
+pub(super) fn check_enum_base_size(size: u32, base_size: u32) -> Result<(), FormatError> {
+    // `H5O__dtype_decode_helper` in `H5Odtype.c`, HDF5 1.14.6, checks that the sizes agree.
+    if size != base_size {
+        return Err(FormatError::EnumBaseSizeMismatch { size, base_size });
+    }
+    Ok(())
+}

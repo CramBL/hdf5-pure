@@ -14,8 +14,7 @@ use test_util::datatype as fixture;
 use test_util::datatype::containers::{self, EnumValue};
 
 use super::header::{
-    self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPOUND_CLASS, DATATYPE_SIZE_BYTES, DATATYPE_VERSION_FIVE,
-    DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO, FIXED_POINT_CLASS,
+    self, ARRAY_CLASS, BIT_FIELD_CLASS, COMPOUND_CLASS, DATATYPE_SIZE_BYTES, FIXED_POINT_CLASS,
     FLOATING_POINT_CLASS, OPAQUE_CLASS, STRING_CLASS, TIME_CLASS, VARIABLE_LENGTH_CLASS,
 };
 use super::message::atomic::{
@@ -24,6 +23,9 @@ use super::message::atomic::{
     FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
 };
 use super::message::compound_layout;
+use super::message::version::{
+    DATATYPE_VERSION_FIVE, DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO,
+};
 use super::references;
 use super::semantic;
 use super::stored_size;

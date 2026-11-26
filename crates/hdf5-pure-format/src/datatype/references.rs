@@ -4,7 +4,7 @@ use super::header::{
     ARRAY_CLASS, COMPOUND_CLASS, DATATYPE_CLASS_MASK, ENUMERATION_CLASS, Header, REFERENCE_CLASS,
     VARIABLE_LENGTH_CLASS,
 };
-use super::message;
+use super::stored_size;
 use crate::error::FormatError;
 
 /// Returns `true` if a datatype of this encoded class can hold an object
@@ -82,7 +82,7 @@ pub(super) fn decode_reference(header: &Header) -> Result<Datatype, FormatError>
         kind => return Err(FormatError::InvalidReferenceType(kind)),
     };
     Ok(Datatype::Reference {
-        size: message::positive_size(header.class.code(), header.size)?.get(),
+        size: stored_size::positive_size(header.class.code(), header.size)?.get(),
         ref_type,
     })
 }

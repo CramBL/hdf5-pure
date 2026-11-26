@@ -21,7 +21,7 @@ use crate::datatype::header::{
     TIME_CLASS,
 };
 use crate::datatype::opaque::{OPAQUE_TAG_ALIGNMENT, OpaqueTagWire};
-use crate::datatype::string;
+use crate::datatype::{stored_size, string};
 
 impl AtomicClass {
     /// Decodes atomic properties from a cursor positioned after their header.
@@ -68,7 +68,7 @@ impl AtomicClass {
                 let padding = string::parse_string_padding(flags & STRING_PADDING_MASK)?;
                 let charset = string::parse_charset(flags >> STRING_CHARSET_SHIFT)?;
                 DecodedAtomic::String {
-                    size: super::positive_size(self as u8, fields.size)?,
+                    size: stored_size::positive_size(self as u8, fields.size)?,
                     padding,
                     charset,
                 }
@@ -88,7 +88,7 @@ impl AtomicClass {
                 }
                 let tag = OpaqueTagWire::parse(flags, cursor)?;
                 DecodedAtomic::Opaque {
-                    size: super::positive_size(self as u8, fields.size)?,
+                    size: stored_size::positive_size(self as u8, fields.size)?,
                     tag,
                 }
             }

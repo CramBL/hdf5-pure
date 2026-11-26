@@ -20,6 +20,7 @@ mod header;
 pub(crate) mod layout;
 mod legacy_member;
 pub(crate) mod message;
+mod nesting;
 mod opaque;
 mod references;
 mod semantic;
