@@ -84,31 +84,6 @@ impl EnumerationType {
         )
     }
 
-    /// Constructs an enumeration from its decoded base and stored member values.
-    ///
-    /// Pass the descriptor widths recorded while reading the base.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::EnumBaseSizeMismatch`] if the base's stored size differs from
-    /// `size`, or [`FormatError::EnumMemberValueSize`] if a value has a different width.
-    /// Propagates errors from [`DatatypeOffsets::stored_type_size`].
-    pub(crate) fn from_stored_parts(
-        base_type: Datatype,
-        size: NonZeroU32,
-        offsets: DatatypeOffsets,
-        members: Vec<EnumMember>,
-    ) -> Result<Self, FormatError> {
-        let base_size = offsets.stored_type_size(&base_type)?;
-        if base_size != size.get() {
-            return Err(FormatError::EnumBaseSizeMismatch {
-                size: size.get(),
-                base_size,
-            });
-        }
-        Self::from_parts(base_type, size, members, offsets)
-    }
-
     /// Pairs a base with its established size and checks each value against that size.
     ///
     /// # Errors
@@ -154,11 +129,6 @@ impl EnumerationType {
     pub fn members(&self) -> &[EnumMember] {
         &self.members
     }
-
-    /// Returns the descriptor widths of the base as stored in the message.
-    pub(crate) const fn offsets(&self) -> DatatypeOffsets {
-        self.offsets
-    }
 }
 
 /// Borrows an enumeration member's name and encoded value bytes.
@@ -196,12 +166,19 @@ pub fn enumeration_from_stored_parts(
     offsets: DatatypeOffsets,
     members: Vec<EnumMember>,
 ) -> Result<EnumerationType, FormatError> {
-    EnumerationType::from_stored_parts(base_type, size, offsets, members)
+    let base_size = offsets.stored_type_size(&base_type)?;
+    if base_size != size.get() {
+        return Err(FormatError::EnumBaseSizeMismatch {
+            size: size.get(),
+            base_size,
+        });
+    }
+    EnumerationType::from_parts(base_type, size, members, offsets)
 }
 
 /// Returns the descriptor offset widths recorded when reading the enumeration's base.
 ///
 /// The result is empty for an enumeration created with [`EnumerationType::new`].
 pub const fn enumeration_base_offsets(datatype: &EnumerationType) -> DatatypeOffsets {
-    datatype.offsets()
+    datatype.offsets
 }
