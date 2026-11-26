@@ -169,8 +169,7 @@ impl DenseLinkPlan {
         let mut name_records = Vec::new();
         for (hash, index) in order {
             let id = PreparedHeapId::new(&id_layout, &ids[index])?;
-            name_records.extend_from_slice(&hash.to_le_bytes());
-            name_records.extend_from_slice(id.bytes());
+            btree_v2::LinkIndexKey::NameHash(hash).append_record(&mut name_records, id);
         }
         let heap_offset = FractalHeapHeader::serialized_size(offset_width, length_width).to_u64();
         let mut cursor = heap_offset
@@ -203,8 +202,7 @@ impl DenseLinkPlan {
             let mut records = Vec::new();
             for (creation, index) in order {
                 let id = PreparedHeapId::new(&id_layout, &ids[index])?;
-                records.extend_from_slice(&creation.to_le_bytes());
-                records.extend_from_slice(id.bytes());
+                btree_v2::LinkIndexKey::CreationOrder(creation).append_record(&mut records, id);
             }
             Some(PlannedIndex::new(
                 widths,

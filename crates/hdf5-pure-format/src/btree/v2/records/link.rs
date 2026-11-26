@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::ops::Range;
 
 use super::raw::NAME_HASH_LEN;
@@ -5,7 +6,25 @@ use crate::btree::v2::BTreeV2Header;
 use crate::btree::v2::BTreeV2Layout;
 use crate::btree::v2::BTreeV2Record;
 use crate::error::FormatError;
+use crate::fractal_heap::PreparedHeapId;
 use crate::width::OffsetWidth;
+
+/// The creation order or name hash preceding the heap ID in a dense link index record.
+pub(crate) enum LinkIndexKey {
+    CreationOrder(u64),
+    NameHash(u32),
+}
+
+impl LinkIndexKey {
+    /// Appends the little-endian key followed by the original encoded heap ID.
+    pub(crate) fn append_record(self, output: &mut Vec<u8>, id: PreparedHeapId<'_>) {
+        match self {
+            Self::NameHash(hash) => output.extend_from_slice(&hash.to_le_bytes()),
+            Self::CreationOrder(order) => output.extend_from_slice(&order.to_le_bytes()),
+        }
+        output.extend_from_slice(id.bytes());
+    }
+}
 
 impl BTreeV2Record {
     /// Returns a borrowed heap ID after checking the link-index type and complete record prefix.

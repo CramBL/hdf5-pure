@@ -33,4 +33,5 @@ pub use link::BTREE_V2_LINK_NAME;
 pub use link::BTreeV2LinkNameIndex;
 pub use link::BTreeV2LinkRecord;
 pub use link::BTreeV2LinkRecordContext;
+pub(crate) use link::LinkIndexKey;
 pub use raw::BTreeV2Record;
