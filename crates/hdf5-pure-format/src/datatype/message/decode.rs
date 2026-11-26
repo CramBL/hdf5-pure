@@ -16,7 +16,7 @@ use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{ComplexType, DatatypeMemberName, EnumMember, FormatError};
 
 use super::atomic;
-use super::{DatatypeVersion, MessageDepth};
+use super::{DatatypeVersion, MessageDepth, NameLayout};
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::datatype::header::{AtomicClass, Context, DatatypeClass, Header};
@@ -79,6 +79,9 @@ impl Layout {
         Ok(match class {
             DatatypeClass::Atomic(class) => Self::Atomic(class),
             DatatypeClass::Compound => {
+                if projection == Projection::Retained {
+                    version.for_class(COMPOUND_CLASS, DatatypeVersion::Three)?;
+                }
                 let names = MemberNames::from_header(header, projection)?;
                 let fields = match version {
                     DatatypeVersion::One => CompoundFields::LegacyWithShape,
@@ -249,8 +252,7 @@ impl MemberNames {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidDatatypeVersion`] for a retained description before
-    /// version 3, or [`FormatError::InvalidDatatypeFlags`] if that description has reserved
+    /// Returns [`FormatError::InvalidDatatypeFlags`] if a retained description has reserved
     /// class bits set.
     fn from_header(header: &Header, projection: Projection) -> Result<Self, FormatError> {
         let &Header {
@@ -259,21 +261,14 @@ impl MemberNames {
             flags: [low, high, _],
             size: _,
         } = header;
-        let class = class.code();
         if projection == Projection::Retained {
-            version.for_class(class, DatatypeVersion::Three)?;
             header
                 .fields()
-                .reject_reserved_flags(class, MEMBER_COUNT_RESERVED)?;
+                .reject_reserved_flags(class.code(), MEMBER_COUNT_RESERVED)?;
         }
-        let layout = if version < DatatypeVersion::Three {
-            NameLayout::Padded
-        } else {
-            NameLayout::Unpadded
-        };
         Ok(Self {
             count: u16::from_le_bytes([low, high]),
-            layout,
+            layout: NameLayout::for_version(version),
             projection,
         })
     }
@@ -298,21 +293,9 @@ impl MemberNames {
                 available,
             });
         };
-        let length = name.to_bytes_with_nul().len();
-        let extent = match self.layout {
-            NameLayout::Padded => length.next_multiple_of(NAME_ALIGNMENT),
-            NameLayout::Unpadded => length,
-        };
-        cursor.take(extent)?;
+        cursor.take(self.layout.field_len(name.to_bytes().len()))?;
         Ok(name)
     }
-}
-
-// "The Datatype Message" in format specification version 4.0 defines padded names for
-// versions 1 and 2 and unpadded names for version 3.
-enum NameLayout {
-    Padded,
-    Unpadded,
 }
 
 // "The Datatype Message" in format specification version 4.0 includes permutation indices
@@ -484,9 +467,6 @@ fn descriptor_width(size: u32) -> Result<OffsetWidth, FormatError> {
         .ok_or(FormatError::InvalidVariableLengthSize { size })
 }
 
-// "The Datatype Message" in format specification version 4.0 pads terminated compound and
-// enumeration names to a multiple of eight bytes in versions 1 and 2.
-const NAME_ALIGNMENT: usize = 8;
 // "The Datatype Message" in format specification version 4.0 defines no array class bits.
 const ARRAY_RESERVED: u32 = 0xff_ffff;
 // "The Datatype Message" in format specification version 4.0 reserves bits 16 through 23

@@ -1,4 +1,4 @@
-//! Modern compound and enumeration datatype message fixtures.
+//! Compound, enumeration, and array datatype message fixtures.
 //!
 //! The layout is defined in "The Datatype Message" of the [format specification,
 //! version 4.0][spec].
@@ -84,11 +84,12 @@ impl MemberOffset {
     }
 }
 
-/// Builds an enumeration message using the property layout of versions 3 through 5.
+/// Builds an enumeration message with padded or unpadded names.
 ///
-/// Writes the parent, all NUL-terminated names, and all raw values in that order, without
-/// padding. Accepts unchecked header fields, parent bytes, names, and values for malformed
-/// fixtures. The count in `flags` is independent of `members`. The layout is defined in
+/// Writes the parent, all NUL-terminated names, and all raw values in that order. Pads each
+/// terminated name to a multiple of eight bytes in versions 1 and 2. Accepts unchecked
+/// header fields, parent bytes, names, and values for malformed fixtures. The count in
+/// `flags` is independent of `members`. The layout is defined in
 /// "The Datatype Message" of the [format specification, version 4.0][spec].
 ///
 /// # Examples
@@ -117,14 +118,24 @@ pub fn enumeration(
     let mut bytes = super::header(Class::ENUMERATED, version, flags, size);
     bytes.extend_from_slice(parent);
     for EnumValue { name, value: _ } in members {
+        let start = bytes.len();
         bytes.extend_from_slice(name);
         bytes.push(0);
+        if version <= Version::Two.get() {
+            while (bytes.len() - start) % ENUM_NAME_ALIGNMENT != 0 {
+                bytes.push(0);
+            }
+        }
     }
     for EnumValue { name: _, value } in members {
         bytes.extend_from_slice(value);
     }
     bytes
 }
+
+// "The Datatype Message" in format specification version 4.0 defines the alignment of
+// enumeration names in versions 1 and 2.
+const ENUM_NAME_ALIGNMENT: usize = 8;
 
 /// An enumeration member's raw name and stored value bytes.
 pub struct EnumValue<'a> {

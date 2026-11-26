@@ -6,11 +6,14 @@ use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
 use rstest::rstest;
-use test_util::datatype;
 use test_util::datatype::containers::{self, CompoundField, EnumValue, MemberOffset};
 use test_util::datatype::leaf::{Leaf, Order, Version};
+use test_util::datatype::{self, VariableLengthSequence};
 
 #[rstest]
+#[case::one_one(DatatypeVersion::One, Version::One)]
+#[case::two_one(DatatypeVersion::Two, Version::One)]
+#[case::two_two(DatatypeVersion::Two, Version::Two)]
 #[case::three_one(DatatypeVersion::Three, Version::One)]
 #[case::three_two(DatatypeVersion::Three, Version::Two)]
 #[case::three_three(DatatypeVersion::Three, Version::Three)]
@@ -87,20 +90,20 @@ fn datatype_enum_codecs_preserve_member_counts(#[case] count: u16) {
 }
 
 #[rstest]
+#[case::legacy_one(DatatypeVersion::One, Version::One)]
+#[case::legacy_two(DatatypeVersion::Two, Version::Two)]
+#[case::unpadded(DatatypeVersion::Three, Version::Two)]
 fn datatype_enum_codecs_preserve_nested_mixtures(
+    #[case] enum_version: DatatypeVersion,
+    #[case] integer_version: Version,
     #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
 ) {
-    let child = Leaf::Integer.bytes(Version::Two);
-    let enumeration = containers::enumeration(
-        3,
-        [1, 0, 0],
-        4,
-        &child,
-        &[EnumValue {
-            name: b"x",
-            value: &[1, 2, 3, 4],
-        }],
-    );
+    let child = Leaf::Integer.bytes(integer_version);
+    let fields = [EnumValue {
+        name: b"member\xffx",
+        value: &[1, 2, 3, 4],
+    }];
+    let enumeration = containers::enumeration(enum_version.get(), [1, 0, 0], 4, &child, &fields);
     let array = datatype::array(4, [0; 3], 8, 1, &[2], &enumeration);
     let descriptor = 8 + u32::from(width.get());
     let sequence = datatype::variable_length(4, [0; 3], descriptor, &array);
@@ -118,7 +121,12 @@ fn datatype_enum_codecs_preserve_nested_mixtures(
     let bytes = datatype::array(5, [0; 3], descriptor * 2, 1, &[2], &compound);
     let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
+    assert_eq!(
+        format::parse_datatype(&bytes).unwrap(),
+        (message.to_datatype().unwrap(), consumed)
+    );
     assert_eq!(message.serialize(width).unwrap(), bytes);
+    assert_bounded_encoding(&message, width, &bytes);
     let DatatypeProperties::Array {
         base_type,
         dimensions,
@@ -146,18 +154,7 @@ fn datatype_enum_codecs_preserve_nested_mixtures(
         panic!("{base_type:?}")
     };
     assert_eq!(dimensions, &[2]);
-    assert_eq!(base_type.version(), DatatypeVersion::Three);
-    let DatatypeProperties::Enumeration { base_type, members } = base_type.properties() else {
-        panic!("{base_type:?}")
-    };
-    assert_eq!(base_type.version(), DatatypeVersion::Two);
-    assert_eq!(
-        members,
-        &[EnumMember::new(
-            DatatypeMemberName::new("x").unwrap(),
-            vec![1, 2, 3, 4]
-        )]
-    );
+    assert_eq!(**base_type, checked(enum_version, &child, &fields).unwrap());
 }
 
 #[rstest]
@@ -168,54 +165,48 @@ fn datatype_enum_codecs_preserve_nested_mixtures(
 fn datatype_enum_codecs_reject_invalid_members(
     #[case] members: Vec<(&[u8], Vec<u8>)>,
     #[case] expected: FormatError,
+    #[values(DatatypeVersion::One, DatatypeVersion::Three)] version: DatatypeVersion,
 ) {
     let child = Leaf::Integer.bytes(Version::One);
     let fields = members
         .iter()
         .map(|(name, value)| EnumValue { name, value })
         .collect::<Vec<_>>();
-    assert_eq!(
-        checked(DatatypeVersion::Three, &child, &fields).unwrap_err(),
-        expected
-    );
+    assert_eq!(checked(version, &child, &fields).unwrap_err(), expected);
     let [low, high] = u16::try_from(fields.len()).unwrap().to_le_bytes();
-    let bytes = containers::enumeration(3, [low, high, 0], 4, &child, &fields);
+    let bytes = containers::enumeration(version.get(), [low, high, 0], 4, &child, &fields);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
-}
-
-#[rstest]
-#[case::one(1)]
-#[case::two(2)]
-fn datatype_enum_parser_rejects_legacy_layouts(#[case] version: u8) {
-    assert_eq!(
-        DatatypeMessage::parse(&datatype::header(
-            datatype::Class::ENUMERATED,
-            version,
-            [0; 3],
-            4
-        ))
-        .unwrap_err(),
-        FormatError::InvalidDatatypeVersion { class: 8, version }
-    );
 }
 
 #[rstest]
 #[case::low([1, 0, 1], 0x01_0001)]
 #[case::high([0, 0, 0x80], 0x80_0000)]
-fn datatype_enum_parser_rejects_reserved_flags(#[case] flags: [u8; 3], #[case] bits: u32) {
+fn datatype_enum_parser_rejects_reserved_flags(
+    #[case] flags: [u8; 3],
+    #[case] bits: u32,
+    #[values(Version::One, Version::Two, Version::Three)] version: Version,
+) {
     assert_eq!(
-        DatatypeMessage::parse(&datatype::header(datatype::Class::ENUMERATED, 3, flags, 4))
-            .unwrap_err(),
+        DatatypeMessage::parse(&datatype::header(
+            datatype::Class::ENUMERATED,
+            version.get(),
+            flags,
+            4
+        ))
+        .unwrap_err(),
         FormatError::InvalidDatatypeFlags {
             class: 8,
-            version: 3,
+            version: version.get(),
             flags: bits
         }
     );
 }
 
-#[test]
-fn datatype_enum_parser_rejects_newer_bases() {
+#[rstest]
+fn datatype_enum_parser_rejects_newer_bases(
+    #[values(DatatypeVersion::One, DatatypeVersion::Two, DatatypeVersion::Three)]
+    version: DatatypeVersion,
+) {
     let child = Leaf::Integer.bytes(Version::Five);
     let members = [EnumValue {
         name: b"x",
@@ -223,16 +214,19 @@ fn datatype_enum_parser_rejects_newer_bases() {
     }];
     let expected = FormatError::DatatypeChildVersion {
         class: 8,
-        version: 3,
+        version: version.get(),
         child_version: 5,
     };
+    assert_eq!(checked(version, &child, &members).unwrap_err(), expected);
     assert_eq!(
-        checked(DatatypeVersion::Three, &child, &members).unwrap_err(),
-        expected
-    );
-    assert_eq!(
-        DatatypeMessage::parse(&containers::enumeration(3, [1, 0, 0], 4, &child, &members))
-            .unwrap_err(),
+        DatatypeMessage::parse(&containers::enumeration(
+            version.get(),
+            [1, 0, 0],
+            4,
+            &child,
+            &members
+        ))
+        .unwrap_err(),
         expected
     );
 }
@@ -317,6 +311,8 @@ fn datatype_enum_parser_preserves_float_base_errors(
 }
 
 #[rstest]
+#[case::one(DatatypeVersion::One)]
+#[case::two(DatatypeVersion::Two)]
 #[case::three(DatatypeVersion::Three)]
 #[case::four(DatatypeVersion::Four)]
 #[case::five(DatatypeVersion::Five)]
@@ -348,47 +344,70 @@ fn datatype_enum_codecs_preserve_name_bytes(#[case] version: DatatypeVersion) {
             name: &all_nonzero,
             value: &[6; 4],
         },
+        EnumValue {
+            name: b"seven\xffx",
+            value: &[7; 4],
+        },
+        EnumValue {
+            name: b"eight\xffxy",
+            value: &[8; 4],
+        },
+        EnumValue {
+            name: b"nine\xffxyzw",
+            value: &[9; 4],
+        },
     ];
-    let bytes = containers::enumeration(version.get(), [6, 0, 0], 4, &child, &members);
+    let bytes = containers::enumeration(version.get(), [9, 0, 0], 4, &child, &members);
     let expected = checked(version, &child, &members).unwrap();
+    assert_bounded_encoding(&expected, OffsetWidth::Eight, &bytes);
     assert_encoding(&bytes, expected);
     let (semantic, _) = format::parse_datatype(&bytes).unwrap();
-    let canonical = containers::enumeration(3, [6, 0, 0], 4, &child, &members);
+    let canonical = containers::enumeration(3, [9, 0, 0], 4, &child, &members);
     assert_eq!(format::serialize_datatype(&semantic).unwrap(), canonical);
 }
 
-#[rstest]
-#[case::one(Version::One)]
-#[case::two(Version::Two)]
-fn datatype_enum_semantic_decoder_preserves_legacy_name_bytes(#[case] version: Version) {
-    let child = Leaf::Integer.bytes(Version::One);
-    let mut bytes = datatype::header(datatype::Class::ENUMERATED, version.get(), [2, 0, 0], 4);
-    bytes.extend_from_slice(&child);
-    bytes.extend_from_slice(b"\xff\0\0\0\0\0\0\0\xfe\0\0\0\0\0\0\0");
-    bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+#[test]
+fn datatype_enum_codecs_exclude_legacy_padding_from_names() {
+    let bytes = containers::legacy_enumeration();
+    let mut input = bytes.clone();
+    input[26..28].copy_from_slice(&[0xfe, 0xff]);
+    input[35] = 0xfd;
 
-    let (semantic, consumed) = format::parse_datatype(&bytes).unwrap();
-    assert_eq!(consumed, bytes.len());
-    let members = [
-        EnumValue {
-            name: b"\xff",
-            value: &[1, 2, 3, 4],
-        },
-        EnumValue {
-            name: b"\xfe",
-            value: &[5, 6, 7, 8],
-        },
-    ];
+    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    assert_eq!(consumed, input.len());
+    assert_eq!(message, DatatypeMessage::parse(&bytes).unwrap().0);
     assert_eq!(
-        semantic,
-        checked(DatatypeVersion::Three, &child, &members)
-            .unwrap()
-            .to_datatype()
-            .unwrap()
+        format::parse_datatype(&input).unwrap(),
+        (message.to_datatype().unwrap(), consumed)
+    );
+    assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+}
+
+#[rstest]
+#[case::unterminated_name(34, 35, 29)]
+#[case::padding(35, 36, 36)]
+#[case::values(43, 44, 44)]
+fn datatype_enum_parsers_report_incomplete_nested_legacy_fields(
+    #[case] available: usize,
+    #[case] retained_expected: usize,
+    #[case] semantic_expected: usize,
+) {
+    let child = containers::legacy_enumeration();
+    let body = VariableLengthSequence::new(Version::Five, 8, &child[..available]).build();
+    let prefix = body.len() - available;
+    assert_eq!(
+        DatatypeMessage::parse(&body).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: prefix + retained_expected,
+            available: body.len(),
+        }
     );
     assert_eq!(
-        format::serialize_datatype(&semantic).unwrap(),
-        containers::enumeration(3, [2, 0, 0], 4, &child, &members)
+        format::parse_datatype(&body).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: prefix + semantic_expected,
+            available: body.len(),
+        }
     );
 }
 
@@ -482,6 +501,24 @@ fn assert_encoding(bytes: &[u8], expected: DatatypeMessage) {
         (expected.to_datatype().unwrap(), bytes.len())
     );
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+}
+
+fn assert_bounded_encoding(message: &DatatypeMessage, width: OffsetWidth, bytes: &[u8]) {
+    let prepared = message.prepare(width).unwrap();
+    assert_eq!(prepared.encoded_size(), bytes.len());
+    let mut output = vec![0xff; bytes.len() + 1];
+    let available = bytes.len() - 1;
+    assert_eq!(
+        prepared.write_into(&mut output[..available]).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected: bytes.len(),
+            available,
+        }
+    );
+    assert_eq!(output, vec![0xff; bytes.len() + 1]);
+    assert_eq!(prepared.write_into(&mut output).unwrap(), bytes.len());
+    assert_eq!(output[..bytes.len()], *bytes);
+    assert_eq!(output[bytes.len()..], [0xff]);
 }
 
 #[test]

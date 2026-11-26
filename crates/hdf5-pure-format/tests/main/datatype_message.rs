@@ -274,7 +274,6 @@ fn container_versions_below_child_versions_are_rejected(#[case] class: Container
 
 #[rstest]
 #[case::compound(Container::Compound)]
-#[case::enumeration(Container::Enumeration)]
 #[case::array(Container::Array)]
 fn legacy_container_versions_are_outside_the_message_representation(
     #[values(1, 2)] raw: u8,
@@ -755,12 +754,6 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
         size: 8,
         members: vec![__private::compound_member("offset".into(), 4, integer_datatype())],
     })]
-#[case::enumeration_v1(
-    containers::legacy_enumeration(),
-    Class::ENUMERATED,
-    Version::One,
-    enumeration_datatype()
-)]
 #[case::array_v2(containers::legacy_array(), Class::ARRAY, Version::Two,
     Datatype::Array {
         base_type: Box::new(integer_datatype()),
@@ -903,7 +896,6 @@ fn datatype_parsers_report_nested_eof_from_the_supplied_subslice(
 )]
 #[case::compound_v2(containers::legacy_compound_v2(), Class::COMPOUND, Version::Two)]
 #[case::array_v2(containers::legacy_array(), Class::ARRAY, Version::Two)]
-#[case::enumeration_v1(containers::legacy_enumeration(), Class::ENUMERATED, Version::One)]
 fn semantic_parser_reports_nested_legacy_eof_from_the_outer_description(
     #[case] mut child: Vec<u8>,
     #[case] class: Class,

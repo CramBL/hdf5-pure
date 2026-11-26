@@ -19,26 +19,35 @@ use libhdf5_sys::h5i::hid_t;
 use libhdf5_sys::h5t;
 use rstest::rstest;
 use test_util::datatype;
-use test_util_hdf5::{lock, storage};
+use test_util_hdf5::__private::c_object;
+use test_util_hdf5::lock;
 
 #[rstest]
+#[case::earliest_direct(LibraryVersion::Earliest, Shape::Direct)]
+#[case::earliest_sequence(LibraryVersion::Earliest, Shape::Sequence)]
+#[case::v110_direct(LibraryVersion::V110, Shape::Direct)]
+#[case::v110_array(LibraryVersion::V110, Shape::Array)]
+#[case::v110_sequence(LibraryVersion::V110, Shape::Sequence)]
+#[case::latest_direct(LibraryVersion::latest(), Shape::Direct)]
+#[case::latest_array(LibraryVersion::latest(), Shape::Array)]
+#[case::latest_sequence(LibraryVersion::latest(), Shape::Sequence)]
 fn datatype_enum_codecs_preserve_native_descriptions(
+    #[case] version: LibraryVersion,
+    #[case] shape: Shape,
     #[values(false, true)] big_endian: bool,
-    #[values(false, true)] latest: bool,
-    #[values(Shape::Direct, Shape::Array, Shape::Sequence)] shape: Shape,
 ) {
     let _guard = lock::libhdf5_guard();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("enum.h5");
-    let version = if latest {
-        LibraryVersion::latest()
+    let upper_bound = if version == LibraryVersion::Earliest {
+        LibraryVersion::V18
     } else {
-        LibraryVersion::V110
+        version
     };
     let name = b"\xff";
     let datatype = shape.native(big_endian, name);
     let file = libhdf5::File::with_options()
-        .with_fapl(|properties| properties.libver_bounds(version, version))
+        .with_fapl(|properties| properties.libver_bounds(version, upper_bound))
         .create(&path)
         .unwrap();
     let dataset = file
@@ -47,6 +56,7 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         .shape(0)
         .create("values")
         .unwrap();
+    let address = c_object::header_address(&file, "values");
     drop(dataset);
     drop(datatype);
     file.close().unwrap();
@@ -56,7 +66,7 @@ fn datatype_enum_codecs_preserve_native_descriptions(
     let header = ObjectHeader::parse_with_base_and_widths(
         &image,
         AccessMode::ReadOnly,
-        usize::try_from(storage::root_object_address(&pure, &image, "values").get()).unwrap(),
+        usize::try_from(address).unwrap(),
         FormatWidths {
             offsets: superblock.offset_size,
             lengths: superblock.length_size,
@@ -75,28 +85,31 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         format::parse_datatype(bytes).unwrap(),
         (message.to_datatype().unwrap(), consumed)
     );
+    let semantic = shape.semantic(big_endian, name);
+    assert_eq!(message.to_datatype().unwrap(), semantic);
     assert_eq!(
-        message.to_datatype().unwrap(),
-        shape.semantic(big_endian, name)
+        pure.dataset("values").unwrap().datatype().unwrap(),
+        semantic
     );
     assert_eq!(
         message.serialize(superblock.offset_size).unwrap(),
         bytes[..consumed]
     );
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
-    let semantic = shape.semantic(big_endian, name);
     let canonical =
         format::serialize_datatype_with_offset_width(&semantic, superblock.offset_size).unwrap();
     let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
     assert_eq!(consumed, canonical.len());
     assert_eq!(parsed.to_datatype().unwrap(), semantic);
     assert_eq!(parsed.version(), DatatypeVersion::Three);
-    if !latest {
-        assert_eq!(message.version(), DatatypeVersion::Three);
-    }
-    #[cfg(feature = "__libhdf5-2")]
-    if latest {
-        assert_eq!(message.version(), DatatypeVersion::Five);
+    match version {
+        LibraryVersion::Earliest => assert_eq!(message.version(), DatatypeVersion::One),
+        LibraryVersion::V110 => assert_eq!(message.version(), DatatypeVersion::Three),
+        #[cfg(feature = "__libhdf5-2")]
+        version if version == LibraryVersion::latest() => {
+            assert_eq!(message.version(), DatatypeVersion::Five);
+        }
+        _ => {}
     }
     drop(pure);
 }

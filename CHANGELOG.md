@@ -32,6 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `EnumMember::name` and related enumeration name fields replace `String` with
+  checked byte strings. The retained datatype parser and writer support padded name fields in
+  version 1 and 2 enumerations ([#1390](https://github.com/CramBL/hdf5-pure/pull/1390)).
 - **Breaking:** `Datatype::Enumeration` replaces its public base, size, and member fields
   with a checked `EnumerationType` payload ([#1375](https://github.com/CramBL/hdf5-pure/pull/1375)).
 - **Breaking:** Removed the `std` Cargo feature from `hdf5-pure-core`. Its error types, including
