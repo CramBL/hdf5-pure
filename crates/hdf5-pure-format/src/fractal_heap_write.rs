@@ -366,7 +366,7 @@ impl ManagedHeapPlan {
         &self,
         addresses: &[StoredAddress],
     ) -> Result<ManagedHeapPlacement<'_>, FormatError> {
-        let expected = self.indirects.len() + self.directs.len();
+        let expected = self.block_lengths().len();
         if addresses.len() != expected {
             return Err(FormatError::FractalHeapBlockCount {
                 expected,
@@ -383,12 +383,7 @@ impl ManagedHeapPlan {
                     offset: address.get(),
                     length,
                 })?;
-            if end > StoredAddress::undefined(self.offset_width).get() {
-                return Err(FormatError::AddressTooLarge {
-                    address: end,
-                    offset_size: self.offset_width.get(),
-                });
-            }
+            self.require_end(end)?;
             ranges.push((address.get(), end, index));
         }
         ranges.sort_unstable();
@@ -422,11 +417,7 @@ impl ManagedHeapPlan {
         &self,
         region_address: StoredAddress,
     ) -> Result<StoredAddress, FormatError> {
-        let root_offset = self
-            .indirects
-            .last()
-            .map_or(self.directs[0].region_offset, |root| root.region_offset);
-        self.address_at(region_address, root_offset)
+        self.address_at(region_address, self.block_offset(self.root_index()))
     }
 
     /// Returns the root indirect block's row count, or zero for a direct root.
@@ -493,14 +484,9 @@ impl ManagedHeapPlan {
                 length: self.region_size,
             },
         )?;
-        if end > StoredAddress::undefined(self.offset_width).get() {
-            return Err(FormatError::AddressTooLarge {
-                address: end,
-                offset_size: self.offset_width.get(),
-            });
-        }
+        self.require_end(end)?;
         let mut region = vec![0; self.region_size.to_usize()?];
-        for index in 0..self.indirects.len() + self.directs.len() {
+        for index in 0..self.block_lengths().len() {
             let data = self.encode_block(index, objects, heap_header_address, |child| {
                 self.address_at(region_address, self.block_offset(child))
             })?;
@@ -524,6 +510,20 @@ impl ManagedHeapPlan {
             }
         }
         Ok(())
+    }
+
+    fn require_end(&self, end: u64) -> Result<(), FormatError> {
+        if end > StoredAddress::undefined(self.offset_width).get() {
+            return Err(FormatError::AddressTooLarge {
+                address: end,
+                offset_size: self.offset_width.get(),
+            });
+        }
+        Ok(())
+    }
+
+    fn root_index(&self) -> usize {
+        self.indirects.len().saturating_sub(1)
     }
 
     fn block_length(&self, index: usize) -> u64 {
@@ -1013,7 +1013,7 @@ pub struct ManagedHeapPlacement<'a> {
 impl ManagedHeapPlacement<'_> {
     /// Returns the root block's stored address for the heap header.
     pub fn root_address(&self) -> StoredAddress {
-        self.addresses[self.plan.indirects.len().saturating_sub(1)]
+        self.addresses[self.plan.root_index()]
     }
 
     /// Returns each block's stored address and complete serialized length in placement order.
