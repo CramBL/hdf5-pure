@@ -392,7 +392,7 @@ impl<'a> PreparedDatatype<'a> {
 
     /// Returns the exact body size in bytes, including all nested descriptions.
     pub fn encoded_size(&self) -> usize {
-        self.encoded_len()
+        self.len
     }
 
     /// Writes the entire body to the start of `output` and returns the number of bytes written.
@@ -454,15 +454,13 @@ impl<'a> PreparedDatatype<'a> {
             computed_sizes,
             len,
         } = self;
-        let mut output = Output {
+        Output::emit(
+            description,
+            __private::variable_length_descriptor_size(*offset_width),
+            computed_sizes,
+            *len,
             write_field,
-            position: 0,
-            descriptor_size: __private::variable_length_descriptor_size(*offset_width),
-            computed_sizes: computed_sizes.iter(),
-        };
-        description.write(&mut output);
-        debug_assert_eq!(output.position, *len);
-        debug_assert!(output.computed_sizes.as_slice().is_empty());
+        );
     }
 }
 
@@ -470,16 +468,16 @@ impl Encode for PreparedDatatype<'_> {
     type Error = bytes::UnexpectedEof;
 
     fn encoded_len(&self) -> usize {
-        self.len
+        self.encoded_size()
     }
 
     fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
         let available = output.len();
         let body = output
-            .get_mut(..self.len)
-            .ok_or_else(|| bytes::UnexpectedEof::new(self.len, available))?;
+            .get_mut(..self.encoded_size())
+            .ok_or_else(|| bytes::UnexpectedEof::new(self.encoded_size(), available))?;
         self.write_body(body);
-        Ok(self.len)
+        Ok(self.encoded_size())
     }
 }
 
@@ -774,7 +772,7 @@ impl ContainerProperties<'_> {
                     *size,
                     parent_size,
                     *offsets,
-                    preparation.offset_width,
+                    preparation.offset_width(),
                 )?;
                 for member in *members {
                     preparation.add(name_layout.field_len(member.name.as_bytes().len()))?;
@@ -784,7 +782,7 @@ impl ContainerProperties<'_> {
             }
             Self::VariableLength { base_type, .. } => {
                 base_type.prepare(preparation, child_depth)?;
-                Ok(preparation.descriptor_size)
+                Ok(preparation.descriptor_size())
             }
             Self::Array {
                 base_type,
@@ -901,7 +899,7 @@ impl ContainerProperties<'_> {
                     DatatypeVersion::One,
                     child.version,
                     flags,
-                    output.descriptor_size,
+                    output.descriptor_size(),
                 )
             }
             Self::Array {
@@ -995,7 +993,7 @@ impl CompoundMembers<'_> {
                     // Check the canonical member's bounds before returning its preparation error.
                     if let Description::Canonical(datatype) = child {
                         let size =
-                            stored_size::stored_type_size(datatype, preparation.offset_width)?;
+                            stored_size::stored_type_size(datatype, preparation.offset_width())?;
                         layout.member_end(offset, size, || Ok(name.clone()))?;
                     }
                     return Err(error);
@@ -1128,6 +1126,14 @@ impl Preparation {
         Ok(())
     }
 
+    fn offset_width(&self) -> OffsetWidth {
+        self.offset_width
+    }
+
+    fn descriptor_size(&self) -> u32 {
+        self.descriptor_size
+    }
+
     fn add(&mut self, len: usize) -> Result<(), FormatError> {
         self.len = self
             .len
@@ -1150,6 +1156,28 @@ pub(super) struct Output<'a, WriteField> {
 }
 
 impl<WriteField: FnMut(usize, &[u8])> Output<'_, WriteField> {
+    fn emit(
+        description: &Description<'_>,
+        descriptor_size: u32,
+        computed_sizes: &[u32],
+        len: usize,
+        write_field: WriteField,
+    ) {
+        let mut output = Output {
+            write_field,
+            position: 0,
+            descriptor_size,
+            computed_sizes: computed_sizes.iter(),
+        };
+        description.write(&mut output);
+        debug_assert_eq!(output.position, len);
+        debug_assert!(output.computed_sizes.as_slice().is_empty());
+    }
+
+    fn descriptor_size(&self) -> u32 {
+        self.descriptor_size
+    }
+
     /// Passes `bytes` to the field writer at the current position and advances by their length.
     pub(super) fn write(&mut self, bytes: &[u8]) {
         let position = self.advance(bytes.len());
