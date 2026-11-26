@@ -5,11 +5,11 @@ use test_util::free_space;
 use super::*;
 use crate::address::StoredAddressExt;
 use crate::free_space_manager::file_header::{
-    FILE_FSM_CLIENT_ID, FILE_FSM_EXPAND_PCT, FILE_FSM_NUM_CLASSES, FILE_FSM_SHRINK_PCT,
+    FILE_FSM_CLIENT_ID, FILE_FSM_EXPAND_PCT, FILE_FSM_SHRINK_PCT,
 };
-use crate::free_space_manager::{
-    self, FILE_FSM_MAX_SECTION_SIZE, FreeSpaceManagerHeader, SECTION_CLASS_SIMPLE, test_support,
-};
+use crate::free_space_manager::file_section::FILE_FSM_NUM_CLASSES;
+use crate::free_space_manager::geometry::FILE_FSM_MAX_SECTION_SIZE;
+use crate::free_space_manager::{self, FreeSpaceManagerHeader, SECTION_CLASS_SIMPLE, test_support};
 
 #[rstest]
 #[case::header(true)]
@@ -462,3 +462,19 @@ fn region(start: u64, bytes: &[u8]) -> FileRegion<'_> {
 }
 
 const FRACTAL_HEAP_FSM_NUM_CLASSES: u16 = 4;
+
+#[rstest]
+#[case::two_byte_widths(test_support::widths(2, 2), 34)]
+#[case::four_byte_widths(test_support::widths(4, 4), 50)]
+#[case::four_byte_lengths(test_support::widths(8, 4), 54)]
+#[case::four_byte_offsets(test_support::widths(4, 8), 78)]
+#[case::eight_byte_widths(test_support::widths(8, 8), 82)]
+fn a_header_holds_one_offset_and_seven_length_fields(
+    #[case] widths: FormatWidths,
+    #[case] expected: u64,
+) {
+    assert_eq!(
+        free_space_manager::free_space_manager_header_len(widths),
+        expected
+    );
+}

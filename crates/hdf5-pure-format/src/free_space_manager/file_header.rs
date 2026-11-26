@@ -6,8 +6,9 @@ use crate::address::StoredAddress;
 use crate::error::FormatError;
 use crate::width::{FormatWidths, LengthWidth};
 
-use super::SectionFields;
 use super::address_space::AddressSpaceBits;
+use super::file_section::FILE_FSM_NUM_CLASSES;
+use super::geometry::SectionFields;
 use super::header::FreeSpaceManagerHeaderFrame;
 
 /// A free-space manager header, signature `FSHD`, with the fields a reader of its section list
@@ -194,9 +195,6 @@ impl FreeSpaceManagerHeader {
     }
 }
 
-/// The number of section classes the header of a file free-space manager stores, the three
-/// classes the C library registers for the file client (`H5MF.c`, HDF5 2.2.0).
-pub(super) const FILE_FSM_NUM_CLASSES: u16 = 3;
 /// The shrink percent the header stores, `H5MF_FSPACE_SHRINK`.
 pub(super) const FILE_FSM_SHRINK_PCT: u16 = 80;
 /// The expand percent the header stores, `H5MF_FSPACE_EXPAND`.
