@@ -17,14 +17,14 @@ use hdf5_pure_core::{
 
 use super::compound_layout::CompoundLayout;
 use crate::convert::Narrow;
-use crate::datatype::legacy_member::CompoundV1Shape;
-use crate::datatype::{
+use crate::datatype::header::{
     ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_VERSION_FIVE,
     DATATYPE_VERSION_FOUR, DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO,
-    ENUMERATION_CLASS, FIXED_POINT_CLASS, FLOAT_BYTE_ORDER_HIGH_BIT, FLOAT_BYTE_ORDER_LOW_BIT,
-    FLOAT_RESERVED_MASK, FLOATING_POINT_CLASS, OPAQUE_CLASS, OPAQUE_TAG_ALIGNMENT, STRING_CLASS,
+    ENUMERATION_CLASS, FIXED_POINT_CLASS, FLOATING_POINT_CLASS, OPAQUE_CLASS, STRING_CLASS,
     TIME_CLASS, VARIABLE_LENGTH_CLASS,
 };
+use crate::datatype::legacy_member::CompoundV1Shape;
+use crate::datatype::opaque::OPAQUE_TAG_ALIGNMENT;
 use crate::width::OffsetWidth;
 
 /// A datatype message version from 1 through 5.
@@ -964,3 +964,21 @@ pub(super) const NAME_ALIGNMENT: usize = 8;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const MAX_OPAQUE_TAG_LEN: usize = (u8::MAX - u8::MAX % OPAQUE_TAG_ALIGNMENT) as usize;
+
+/// The mask for reserved bits 7 and 16 through 23 of a floating-point class bit field.
+///
+/// The bits for datatype message versions 1 through 5 are defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_RESERVED_MASK: u32 = 0xFF_0080;
+
+// The floating-point byte-order table in "The Datatype Message" of the format
+// specification, version 4.0, defines these bits together. See `FloatingPointByteOrder`
+// for how the table's use of bit 6 relates to the reserved-bit row.
+
+/// Bit 0 of a floating-point class bit field, the low bit of its byte order.
+pub(in crate::datatype) const FLOAT_BYTE_ORDER_LOW_BIT: u8 = 0x01;
+
+/// Bit 6 of a floating-point class bit field, the high bit of its byte order.
+pub(in crate::datatype) const FLOAT_BYTE_ORDER_HIGH_BIT: u8 = 0x40;

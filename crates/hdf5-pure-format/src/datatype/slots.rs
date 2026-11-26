@@ -4,10 +4,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use hdf5_pure_core::__private;
+use hdf5_pure_core::{__private, Datatype, ReferenceType, VariableLengthType};
 
+use super::{references, stored_size};
 use crate::convert::Narrow;
-use crate::datatype::{self, Datatype, ReferenceType, VariableLengthType};
 use crate::error::FormatError;
 use crate::variable_length_descriptor::VariableLengthDescriptor;
 use crate::width::OffsetWidth;
@@ -252,12 +252,12 @@ impl DatatypeSlots {
                 size: 8,
             } if matches!(kind, SlotKind::Object) => (8, Some(SlotGroup::field(8, 1))),
             Datatype::VariableLength(variable) if matches!(kind, SlotKind::VariableLength) => {
-                let size = datatype::stored_type_size(datatype, offset_width)?;
+                let size = stored_size::stored_type_size(datatype, offset_width)?;
                 let multiplier = match variable {
                     VariableLengthType::String(_) => 1,
                     VariableLengthType::Sequence { element_type } => {
                         let size: usize =
-                            datatype::stored_type_size(element_type, offset_width)?.narrow()?;
+                            stored_size::stored_type_size(element_type, offset_width)?.narrow()?;
                         size.max(1)
                     }
                 };
@@ -343,7 +343,7 @@ impl DatatypeSlots {
             }
             _ => {
                 if matches!(kind, SlotKind::Object)
-                    && datatype::datatype_holds_object_address(datatype)
+                    && references::datatype_holds_object_address(datatype)
                 {
                     return Ok(None);
                 }

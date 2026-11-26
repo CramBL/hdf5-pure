@@ -1,4 +1,4 @@
-//! Atomic datatype property parsing and encoding, and legacy reference parsing.
+//! Atomic datatype property parsing and encoding.
 //!
 //! The atomic property layouts for datatype message versions 1 through 5 are defined in
 //! "The Datatype Message" of the [format specification, version 4.0][spec].
@@ -9,20 +9,19 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_core::{
     BitFieldType, CharacterSet, Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType,
-    FormatError, MantissaNormalization, ReferenceType, StringPadding, TimeType,
+    FormatError, MantissaNormalization, StringPadding, TimeType,
 };
 
-use super::codec::{self, NodeHeader, Output};
+use super::codec::{NodeHeader, Output};
 use super::{DatatypeProperties, DatatypeVersion, FloatingPointByteOrder};
 use crate::bytes::{ByteCursor, UnexpectedEof};
-use crate::datatype::header::{AtomicClass, Context, Header, HeaderFields};
-use crate::datatype::{
-    self, BIT_FIELD_CLASS, FIXED_POINT_CLASS, FLOAT_INTERNAL_PADDING_BIT,
-    FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE, FLOAT_NORMALIZATION_LEADING_ONE,
-    FLOAT_NORMALIZATION_MASK, FLOAT_NORMALIZATION_SHIFT, FLOAT_NORMALIZATION_UNNORMALIZED,
-    FLOATING_POINT_CLASS, HIGH_PADDING_BIT, LOW_PADDING_BIT, OPAQUE_CLASS, OPAQUE_TAG_ALIGNMENT,
-    OpaqueTagWire, STRING_CLASS, TIME_CLASS,
+use crate::datatype::header::{AtomicClass, Context, HeaderFields};
+use crate::datatype::header::{
+    BIT_FIELD_CLASS, FIXED_POINT_CLASS, FLOATING_POINT_CLASS, OPAQUE_CLASS, STRING_CLASS,
+    TIME_CLASS,
 };
+use crate::datatype::opaque::{OPAQUE_TAG_ALIGNMENT, OpaqueTagWire};
+use crate::datatype::string;
 
 impl AtomicClass {
     /// Decodes atomic properties from a cursor positioned after their header.
@@ -45,11 +44,11 @@ impl AtomicClass {
         Ok(match self {
             Self::FixedPoint => {
                 let (offset, precision) = read_bit_range(cursor)?;
-                flag_policy.check(self, fields, codec::FIXED_RESERVED)?;
+                flag_policy.check(self, fields, FIXED_RESERVED)?;
                 let datatype = FixedPointType::new(
                     fields.size,
                     binary_order(flags),
-                    flags & codec::SIGNED_BIT != 0,
+                    flags & SIGNED_BIT != 0,
                     offset,
                     precision,
                 )?
@@ -61,13 +60,13 @@ impl AtomicClass {
             }
             Self::Time => {
                 let precision = u16::from_le_bytes(cursor.array::<TIME_PROPERTIES_SIZE>()?);
-                flag_policy.check(self, fields, codec::TIME_RESERVED)?;
+                flag_policy.check(self, fields, TIME_RESERVED)?;
                 DecodedAtomic::Time(TimeType::new(fields.size, binary_order(flags), precision)?)
             }
             Self::String => {
-                flag_policy.check(self, fields, codec::STRING_RESERVED)?;
-                let padding = datatype::parse_string_padding(flags & codec::STRING_PADDING_MASK)?;
-                let charset = datatype::parse_charset(flags >> codec::STRING_CHARSET_SHIFT)?;
+                flag_policy.check(self, fields, STRING_RESERVED)?;
+                let padding = string::parse_string_padding(flags & STRING_PADDING_MASK)?;
+                let charset = string::parse_charset(flags >> STRING_CHARSET_SHIFT)?;
                 DecodedAtomic::String {
                     size: super::positive_size(self as u8, fields.size)?,
                     padding,
@@ -76,7 +75,7 @@ impl AtomicClass {
             }
             Self::BitField => {
                 let (offset, precision) = read_bit_range(cursor)?;
-                flag_policy.check(self, fields, codec::BITFIELD_RESERVED)?;
+                flag_policy.check(self, fields, BITFIELD_RESERVED)?;
                 let datatype =
                     BitFieldType::new(fields.size, binary_order(flags), offset, precision)?
                         .with_padding(flags & LOW_PADDING_BIT != 0, flags & HIGH_PADDING_BIT != 0);
@@ -247,28 +246,6 @@ pub(in crate::datatype) fn decode_floating_point(
     ))
 }
 
-/// Decodes a legacy object or dataset-region datatype from its common header.
-///
-/// Retains the declared element size.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidReferenceType`] for a kind other than legacy object or dataset
-/// region, or [`FormatError::ZeroSizedDatatype`] for a zero element size.
-pub(in crate::datatype) fn decode_reference(header: &Header) -> Result<Datatype, FormatError> {
-    // `H5O__dtype_decode_helper` reads legacy kinds at every supported datatype message version
-    // (H5Odtype.c, HDF5 2.2.0).
-    let ref_type = match header.flags[0] & REFERENCE_KIND_MASK {
-        codec::OBJECT_REFERENCE_KIND => ReferenceType::Object,
-        codec::REGION_REFERENCE_KIND => ReferenceType::DatasetRegion,
-        kind => return Err(FormatError::InvalidReferenceType(kind)),
-    };
-    Ok(Datatype::Reference {
-        size: super::positive_size(header.class.code(), header.size)?.get(),
-        ref_type,
-    })
-}
-
 /// Reads the bit offset and precision as one four-byte block.
 ///
 /// # Errors
@@ -284,16 +261,12 @@ fn read_bit_range(cursor: &mut ByteCursor<'_>) -> Result<(u16, u16), UnexpectedE
 }
 
 fn binary_order(flags: u8) -> DatatypeByteOrder {
-    if flags & codec::BINARY_ORDER_BIT == 0 {
+    if flags & BINARY_ORDER_BIT == 0 {
         DatatypeByteOrder::LittleEndian
     } else {
         DatatypeByteOrder::BigEndian
     }
 }
-
-// "The Datatype Message" in format specification version 4.0 assigns bits 0 through 3
-// of the reference class bit field to the reference kind.
-const REFERENCE_KIND_MASK: u8 = 0x0f;
 
 /// Borrowed atomic properties.
 pub(in crate::datatype) enum AtomicProperties<'a> {
@@ -363,13 +336,9 @@ impl AtomicProperties<'_> {
                 let layout = datatype.layout();
                 output.write(&bit_range(layout.bit_offset(), layout.bit_precision()));
                 [
-                    codec::binary_order_bit(datatype.byte_order())
-                        | datatype::padding_bits(layout.low_padding(), layout.high_padding())
-                        | if layout.signed() {
-                            codec::SIGNED_BIT
-                        } else {
-                            0
-                        },
+                    binary_order_bit(datatype.byte_order())
+                        | padding_bits(layout.low_padding(), layout.high_padding())
+                        | if layout.signed() { SIGNED_BIT } else { 0 },
                     0,
                     0,
                 ]
@@ -404,7 +373,7 @@ impl AtomicProperties<'_> {
                 };
                 [
                     FloatingPointByteOrder::bits_for(datatype.byte_order())
-                        | datatype::padding_bits(layout.low_padding(), layout.high_padding())
+                        | padding_bits(layout.low_padding(), layout.high_padding())
                         | if layout.internal_padding() {
                             FLOAT_INTERNAL_PADDING_BIT
                         } else {
@@ -419,15 +388,15 @@ impl AtomicProperties<'_> {
                 let properties: [u8; TIME_PROPERTIES_SIZE] =
                     datatype.bit_precision().get().to_le_bytes();
                 output.write(&properties);
-                [codec::binary_order_bit(datatype.byte_order()), 0, 0]
+                [binary_order_bit(datatype.byte_order()), 0, 0]
             }
             Self::String {
                 padding,
                 charset,
                 size: _,
             } => [
-                codec::padding_code(padding)
-                    | (codec::charset_code(charset) << codec::STRING_CHARSET_SHIFT),
+                string::padding_code(padding)
+                    | (string::charset_code(charset) << STRING_CHARSET_SHIFT),
                 0,
                 0,
             ],
@@ -437,8 +406,8 @@ impl AtomicProperties<'_> {
                     datatype.bit_precision().get(),
                 ));
                 [
-                    codec::binary_order_bit(datatype.byte_order())
-                        | datatype::padding_bits(datatype.low_padding(), datatype.high_padding()),
+                    binary_order_bit(datatype.byte_order())
+                        | padding_bits(datatype.low_padding(), datatype.high_padding()),
                     0,
                     0,
                 ]
@@ -500,7 +469,150 @@ fn bit_range(offset: u16, precision: u16) -> [u8; BIT_RANGE_SIZE] {
     [offset_low, offset_high, precision_low, precision_high]
 }
 
+/// Encodes the low and high padding values in bits 1 and 2 of the class bit field.
+pub(in crate::datatype) fn padding_bits(low: bool, high: bool) -> u8 {
+    (if low { LOW_PADDING_BIT } else { 0 }) | (if high { HIGH_PADDING_BIT } else { 0 })
+}
+
+/// Encodes bit 0 for fixed-point, time, and bitfield byte order.
+///
+/// Callers pass [`DatatypeByteOrder::LittleEndian`] or [`DatatypeByteOrder::BigEndian`]
+/// from checked metadata. The fields are defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+fn binary_order_bit(order: DatatypeByteOrder) -> u8 {
+    if order == DatatypeByteOrder::BigEndian {
+        BINARY_ORDER_BIT
+    } else {
+        0
+    }
+}
+
 const BIT_RANGE_SIZE: usize = 2 * size_of::<u16>();
 const FLOATING_POINT_PROPERTIES_SIZE: usize =
     BIT_RANGE_SIZE + size_of::<[u8; 4]>() + size_of::<u32>();
 const TIME_PROPERTIES_SIZE: usize = size_of::<u16>();
+
+/// Bit 1 of the fixed-point, floating-point, and bitfield class bit fields, the low padding bit.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const LOW_PADDING_BIT: u8 = 0x02;
+/// Bit 2 of the fixed-point, floating-point, and bitfield class bit fields, the high padding bit.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const HIGH_PADDING_BIT: u8 = 0x04;
+/// Bit 3 of the floating-point class bit field, the internal padding bit.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const FLOAT_INTERNAL_PADDING_BIT: u8 = 0x08;
+
+/// The bit position of mantissa normalization in the floating-point class bit field.
+///
+/// The field and its values are defined in "The Datatype Message" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const FLOAT_NORMALIZATION_SHIFT: u8 = 4;
+/// The mask for the two mantissa normalization bits after shifting.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const FLOAT_NORMALIZATION_MASK: u8 = 0x03;
+/// The encoded value for a mantissa stored without normalization.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const FLOAT_NORMALIZATION_UNNORMALIZED: u8 = 0;
+/// The encoded value for a stored leading mantissa bit that is set, except for zero.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const FLOAT_NORMALIZATION_LEADING_ONE: u8 = 1;
+/// The encoded value for an implied leading mantissa bit.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) const FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE: u8 = 2;
+/// The reserved mantissa normalization value.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+#[cfg(test)]
+pub(in crate::datatype) const FLOAT_NORMALIZATION_RESERVED: u8 = 3;
+
+/// The mask for reserved fixed-point class bits 4 through 23.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FIXED_RESERVED: u32 = 0xff_fff0;
+/// The mask for reserved time class bits 1 through 23.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const TIME_RESERVED: u32 = 0xff_fffe;
+/// The mask for reserved string class bits 8 through 23.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const STRING_RESERVED: u32 = 0xff_ff00;
+/// The mask for reserved bitfield class bits 3 through 23.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const BITFIELD_RESERVED: u32 = 0xff_fff8;
+/// Bit 0, the byte-order bit for fixed-point, time, and bitfield descriptions.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const BINARY_ORDER_BIT: u8 = 0x01;
+/// Bit 3, the signed-integer flag for fixed-point descriptions.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const SIGNED_BIT: u8 = 0x08;
+/// The mask for string padding bits 0 through 3.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const STRING_PADDING_MASK: u8 = 0x0f;
+/// The position of the string character-set field at bit 4.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const STRING_CHARSET_SHIFT: u8 = 4;
