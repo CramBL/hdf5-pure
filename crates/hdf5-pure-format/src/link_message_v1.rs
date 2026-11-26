@@ -10,8 +10,7 @@ use crate::datatype::CharacterSet;
 use crate::error::FormatError;
 use crate::link_message::{LinkMessage, LinkTarget};
 use crate::link_message_read::{LinkMessageView, LinkTargetView, USER_LINK_MIN};
-use crate::link_message_write::{self, PreparedLink};
-use crate::link_storage::LinkStorageError;
+use crate::link_message_write::{self, PreparedLink, StoredLink};
 use crate::width::{OffsetWidth, UintWidth};
 
 /// A version 1 Link message with checked fields and retained encoding choices.
@@ -54,8 +53,7 @@ impl LinkMessageV1 {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Self::parse_prefix`], or [`LinkStorageError::TrailingBytes`]
-    /// wrapped in [`LinkWireError::Storage`] if bytes follow the target.
+    /// Returns the errors of [`Self::parse_prefix`], or [`LinkWireError::TrailingBytes`] if bytes follow the target.
     pub fn parse(data: &[u8], offset_width: OffsetWidth) -> Result<Self, LinkWireError> {
         Ok(Self::from_view(&LinkMessageView::parse(
             data,
@@ -70,15 +68,15 @@ impl LinkMessageV1 {
     ///
     /// # Errors
     ///
-    /// Returns [`LinkWireError::Storage`] for invalid names, reserved flags, undefined hard-link
+    /// Returns [`LinkWireError::Format`] for invalid names, reserved flags, undefined hard-link
     /// addresses, invalid symbolic targets, or malformed external-link framing. Decoding errors,
     /// including reserved kinds, unknown versions or character sets, and truncated fields, are
-    /// wrapped in [`LinkStorageError::Format`].
+    /// wrapped in [`LinkWireError::Format`].
     pub fn parse_prefix(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<(Self, usize), LinkWireError> {
-        let link = LinkMessageView::parse_prefix(data, offset_width).map_err(decoded_link_error)?;
+        let link = LinkMessageView::parse_prefix(data, offset_width)?;
         Ok((Self::from_view(&link), link.consumed()))
     }
 
@@ -90,7 +88,7 @@ impl LinkMessageV1 {
     ///
     /// # Errors
     ///
-    /// Returns [`LinkWireError::Storage`] if a hard-link address is undefined at eight bytes,
+    /// Returns [`LinkWireError::Format`] if a hard-link address is undefined at eight bytes,
     /// a symbolic path is empty or contains NUL, or a target value exceeds [`u16::MAX`] bytes.
     /// An external value includes its version byte and two terminating NUL bytes in this limit.
     /// A hard-link address is checked against the supplied width during encoding.
@@ -134,7 +132,7 @@ impl LinkMessageV1 {
     ///
     /// # Errors
     ///
-    /// Returns [`LinkWireError::Storage`] if a hard-link address does not fit `offset_width`
+    /// Returns [`LinkWireError::Format`] if a hard-link address does not fit `offset_width`
     /// or is undefined at that width, or the body length exceeds [`usize::MAX`].
     pub fn encoded_len(&self, offset_width: OffsetWidth) -> Result<usize, LinkWireError> {
         Ok(self.prepare(offset_width)?.encoded_size())
@@ -157,11 +155,7 @@ impl LinkMessageV1 {
     ///
     /// Returns the address and body length errors of [`Self::encoded_len`].
     pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'_>, LinkWireError> {
-        Ok(PreparedLink::for_wire(self, offset_width)?)
-    }
-
-    pub(crate) fn target_value_len(&self) -> u16 {
-        self.target_value_len
+        PreparedLink::for_stored(self, offset_width)
     }
 
     fn from_view(link: &LinkMessageView<'_>) -> Self {
@@ -214,6 +208,21 @@ impl LinkMessageV1 {
             name,
         } = self;
         (target, creation_order, charset, name, target_value_len)
+    }
+}
+
+impl StoredLink for LinkMessageV1 {
+    fn name_field(&self) -> (&[u8], UintWidth) {
+        (self.name.as_bytes(), self.name.width())
+    }
+    fn target_field(&self) -> (LinkTargetView<'_>, u16) {
+        (self.target.as_view(), self.target_value_len)
+    }
+    fn creation_index(&self) -> Option<u64> {
+        self.creation_order
+    }
+    fn charset_field(&self) -> Option<CharacterSet> {
+        self.charset.clone()
     }
 }
 
@@ -296,7 +305,7 @@ impl LinkName {
     ///
     /// # Errors
     ///
-    /// Returns [`LinkStorageError::InvalidName`] wrapped in [`LinkWireError::Storage`] if the
+    /// Returns [`FormatError::InvalidLinkNameBytes`] wrapped in [`LinkWireError::Format`] if the
     /// bytes are empty, equal `.`, or contain NUL or `/`.
     pub fn new(bytes: Vec<u8>) -> Result<Self, LinkWireError> {
         let width = UintWidth::smallest_for_len(bytes.len());
@@ -322,7 +331,7 @@ impl LinkName {
     /// ```
     pub fn with_width(bytes: Vec<u8>, width: UintWidth) -> Result<Self, LinkWireError> {
         if !Self::is_valid(&bytes) {
-            return Err(LinkStorageError::InvalidName(bytes).into());
+            return Err(FormatError::InvalidLinkNameBytes(bytes).into());
         }
         if UintWidth::smallest_for_len(bytes.len()).get() > width.get() {
             return Err(LinkWireError::NameWidth {
@@ -462,9 +471,9 @@ impl UserLinkValue {
     ///
     /// # Errors
     ///
-    /// Returns [`LinkStorageError::TargetLength`] if the value exceeds [`u16::MAX`] bytes.
-    pub fn new(value: Vec<u8>) -> Result<Self, LinkStorageError> {
-        u16::try_from(value.len()).map_err(|_error| LinkStorageError::TargetLength(value.len()))?;
+    /// Returns [`LinkWireError::TargetLength`] if the value exceeds [`u16::MAX`] bytes.
+    pub fn new(value: Vec<u8>) -> Result<Self, LinkWireError> {
+        u16::try_from(value.len()).map_err(|_error| LinkWireError::TargetLength(value.len()))?;
         Ok(Self(value))
     }
 
@@ -515,14 +524,19 @@ impl Error for LinkProjectionError {
 
 /// An error constructing, decoding, or encoding a version 1 Link message.
 ///
-/// [`Error::source`] returns the wrapped [`LinkStorageError`] for [`Self::Storage`].
+/// [`Error::source`] returns the wrapped [`FormatError`] for [`Self::Format`].
 /// [`Self::NameWidth`] reports the name length and field width in bytes and has no source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkWireError {
     /// The name length does not fit the selected field width.
-    NameWidth { length: usize, width: UintWidth },
+    NameWidth {
+        length: usize,
+        width: UintWidth,
+    },
     /// An error in a field, the message framing, or the encoded length.
-    Storage(LinkStorageError),
+    Format(FormatError),
+    TargetLength(usize),
+    TrailingBytes,
 }
 
 impl fmt::Display for LinkWireError {
@@ -533,7 +547,11 @@ impl fmt::Display for LinkWireError {
                 "link name length {length} exceeds its {}-byte field",
                 width.get()
             ),
-            Self::Storage(error) => fmt::Display::fmt(error, f),
+            Self::Format(error) => fmt::Display::fmt(error, f),
+            Self::TargetLength(length) => {
+                write!(f, "link target length {length} exceeds its two-byte field")
+            }
+            Self::TrailingBytes => f.write_str("trailing bytes after link message fields"),
         }
     }
 }
@@ -541,34 +559,14 @@ impl fmt::Display for LinkWireError {
 impl Error for LinkWireError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::NameWidth { .. } => None,
-            Self::Storage(error) => Some(error),
+            Self::NameWidth { .. } | Self::TargetLength(_) | Self::TrailingBytes => None,
+            Self::Format(error) => Some(error),
         }
-    }
-}
-
-impl From<LinkStorageError> for LinkWireError {
-    fn from(error: LinkStorageError) -> Self {
-        Self::Storage(error)
     }
 }
 
 impl From<FormatError> for LinkWireError {
     fn from(error: FormatError) -> Self {
-        Self::Storage(decoded_link_error(error))
-    }
-}
-
-pub(crate) fn decoded_link_error(error: FormatError) -> LinkStorageError {
-    match error {
-        FormatError::InvalidLinkFlags(flags) => LinkStorageError::Flags(flags),
-        FormatError::InvalidLinkNameBytes(name) => LinkStorageError::InvalidName(name),
-        FormatError::DefinedAddressIsUndefined { .. } => LinkStorageError::UndefinedAddress,
-        FormatError::InvalidLinkTarget => LinkStorageError::InvalidTarget,
-        FormatError::InvalidExternalLinkValue => LinkStorageError::ExternalValue,
-        FormatError::InvalidExternalLinkVersionFlags(flags) => {
-            LinkStorageError::ExternalVersionFlags(flags)
-        }
-        error => LinkStorageError::Format(error),
+        Self::Format(error)
     }
 }

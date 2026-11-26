@@ -16,8 +16,7 @@ use crate::link_message_read::{
     ASCII, CHARSET_PRESENT, CREATION_ORDER_LEN, CREATION_ORDER_PRESENT, EXTERNAL_VERSION_FLAGS,
     LinkMessageView, LinkTargetView, PREFIX_LEN, TYPE_PRESENT, UTF8, VERSION,
 };
-use crate::link_message_v1::{self, LinkMessageV1, LinkName};
-use crate::link_storage::{LinkStorageError, OwnedLink};
+use crate::link_message_v1::{self, LinkName, LinkWireError};
 use crate::width::{OffsetWidth, UintWidth};
 
 /// A version 1 Link body ready to write at a checked offset width.
@@ -35,46 +34,30 @@ pub struct PreparedLink<'a> {
 }
 
 impl<'a> PreparedLink<'a> {
-    pub(crate) fn for_wire(
-        link: &'a LinkMessageV1,
+    pub(crate) fn for_stored(
+        link: &'a impl StoredLink,
         offset_width: OffsetWidth,
-    ) -> Result<Self, LinkStorageError> {
+    ) -> Result<Self, LinkWireError> {
+        let (target, value_len) = link.target_field();
+        let (name, name_width) = link.name_field();
         Self::from_checked(
             offset_width,
             LinkFields {
-                target: link.target().as_view(),
-                value_len: link.target_value_len(),
-                creation_order: link.creation_order(),
-                charset: link.charset(),
-                name: link.name().as_bytes(),
-                name_width: link.name().width(),
+                target,
+                value_len,
+                creation_order: link.creation_index(),
+                charset: link.charset_field(),
+                name,
+                name_width,
             },
         )
-        .map_err(encoding_error)
-    }
-
-    pub(crate) fn for_owned(
-        link: &'a OwnedLink,
-        offset_width: OffsetWidth,
-    ) -> Result<Self, LinkStorageError> {
-        Self::from_checked(
-            offset_width,
-            LinkFields {
-                target: link.target_view(),
-                value_len: link.target_value_len(),
-                creation_order: link.creation_order(),
-                charset: link.stored_charset(),
-                name: link.name(),
-                name_width: link.name_width(),
-            },
-        )
-        .map_err(encoding_error)
+        .map_err(LinkWireError::from)
     }
 
     pub(crate) fn for_view(
         link: &LinkMessageView<'a>,
         offset_width: OffsetWidth,
-    ) -> Result<Self, LinkStorageError> {
+    ) -> Result<Self, LinkWireError> {
         Self::from_checked(
             offset_width,
             LinkFields {
@@ -86,7 +69,7 @@ impl<'a> PreparedLink<'a> {
                 name_width: link.name_width(),
             },
         )
-        .map_err(encoding_error)
+        .map_err(LinkWireError::from)
     }
 
     pub(crate) fn for_text(
@@ -409,6 +392,13 @@ impl From<LinkOutputTooSmall> for FormatError {
     }
 }
 
+pub(crate) trait StoredLink {
+    fn name_field(&self) -> (&[u8], UintWidth);
+    fn target_field(&self) -> (LinkTargetView<'_>, u16);
+    fn creation_index(&self) -> Option<u64>;
+    fn charset_field(&self) -> Option<CharacterSet>;
+}
+
 #[derive(Debug)]
 struct LinkFields<'a> {
     target: LinkTargetView<'a>,
@@ -434,12 +424,12 @@ fn target_type(target: LinkTargetView<'_>) -> Option<u8> {
 ///
 /// # Errors
 ///
-/// Returns [`LinkStorageError::UndefinedAddress`] for an eight-byte undefined hard address,
-/// [`LinkStorageError::InvalidTarget`] for an empty path or one containing a NUL,
-/// [`LinkStorageError::TargetLength`] if the value exceeds [`u16::MAX`] bytes, or
-/// [`LinkStorageError::LengthOverflow`] if computing the external value length exceeds
+/// Returns [`FormatError::DefinedAddressIsUndefined`] for an eight-byte undefined hard address,
+/// [`FormatError::InvalidLinkTarget`] for an empty path or one containing a NUL,
+/// [`LinkWireError::TargetLength`] if the value exceeds [`u16::MAX`] bytes, or
+/// [`FormatError::LinkMessageLengthOverflow`] if computing the external value length exceeds
 /// [`usize::MAX`].
-pub(crate) fn initial_value_len(target: LinkTargetView<'_>) -> Result<u16, LinkStorageError> {
+pub(crate) fn initial_value_len(target: LinkTargetView<'_>) -> Result<u16, LinkWireError> {
     if let LinkTargetView::Hard {
         object_header_address,
         ..
@@ -447,21 +437,13 @@ pub(crate) fn initial_value_len(target: LinkTargetView<'_>) -> Result<u16, LinkS
     {
         DecodedStoredAddress::Defined(object_header_address)
             .to_stored(OffsetWidth::Eight)
-            .map_err(encoding_error)?;
+            .map_err(LinkWireError::from)?;
     }
     checked_value_len(target).map_err(|error| match error {
-        ValueLengthError::InvalidPath => LinkStorageError::InvalidTarget,
-        ValueLengthError::Overflow => LinkStorageError::LengthOverflow,
-        ValueLengthError::TooLong(len) => LinkStorageError::TargetLength(len),
+        ValueLengthError::InvalidPath => FormatError::InvalidLinkTarget.into(),
+        ValueLengthError::Overflow => FormatError::LinkMessageLengthOverflow.into(),
+        ValueLengthError::TooLong(len) => LinkWireError::TargetLength(len),
     })
-}
-
-fn encoding_error(error: FormatError) -> LinkStorageError {
-    match error {
-        FormatError::DefinedAddressIsUndefined { .. } => LinkStorageError::UndefinedAddress,
-        FormatError::LinkMessageLengthOverflow => LinkStorageError::LengthOverflow,
-        error => LinkStorageError::Format(error),
-    }
 }
 
 enum ValueLengthError {

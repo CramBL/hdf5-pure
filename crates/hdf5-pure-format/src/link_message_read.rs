@@ -12,7 +12,6 @@ use crate::error::FormatError;
 use crate::link_message::{EXTERNAL_LINK, HARD_LINK, LinkMessage, LinkTarget, SOFT_LINK};
 use crate::link_message_v1::{self, LinkName, LinkProjectionError, LinkWireError, UserLinkKind};
 use crate::link_message_write::PreparedLink;
-use crate::link_storage::LinkStorageError;
 use crate::width::{OffsetWidth, UintWidth};
 
 /// The checked fields of a version 1 Link message, borrowed from the message body.
@@ -40,12 +39,12 @@ impl<'a> LinkMessageView<'a> {
     /// # Errors
     ///
     /// Returns the errors of [`Self::parse_prefix`] converted to [`LinkWireError`], or
-    /// [`LinkStorageError::TrailingBytes`] wrapped in [`LinkWireError::Storage`] if bytes
+    /// [`LinkWireError::TrailingBytes`] if bytes
     /// follow the target.
     pub fn parse(data: &'a [u8], offset_width: OffsetWidth) -> Result<Self, LinkWireError> {
         let link = Self::decode(data, offset_width)?;
         if link.consumed() != data.len() {
-            return Err(LinkStorageError::TrailingBytes.into());
+            return Err(LinkWireError::TrailingBytes);
         }
         Ok(link)
     }
@@ -99,10 +98,10 @@ impl<'a> LinkMessageView<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`LinkStorageError::UndefinedAddress`] for the new width's undefined address,
-    /// [`LinkStorageError::Format`] if the hard address exceeds that width, or
-    /// [`LinkStorageError::LengthOverflow`] if the body length exceeds [`usize::MAX`].
-    pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'a>, LinkStorageError> {
+    /// Returns [`FormatError::DefinedAddressIsUndefined`] for the new width's undefined address,
+    /// [`LinkWireError::Format`] if the hard address exceeds that width, or
+    /// [`FormatError::LinkMessageLengthOverflow`] if the body length exceeds [`usize::MAX`].
+    pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'a>, LinkWireError> {
         PreparedLink::for_view(self, offset_width)
     }
 
