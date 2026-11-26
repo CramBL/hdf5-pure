@@ -2,8 +2,6 @@
 
 use alloc::vec::Vec;
 
-use crate::fractal_heap::FractalHeapLayoutError;
-
 /// Describes the doubling table of a fractal heap independently of file placement and field widths.
 ///
 /// Each row has the same number of child slots. Blocks in the first two rows have the starting
@@ -271,6 +269,13 @@ impl FractalHeapGeometry {
             .checked_add(self.slot_offset(row, column)?)
             .ok_or(FractalHeapLayoutError::InvalidGeometry)
     }
+}
+
+/// Describes invalid fractal-heap doubling-table geometry or geometry outside representable bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FractalHeapLayoutError {
+    /// The header fields or a requested row describe invalid doubling-table geometry.
+    InvalidGeometry,
 }
 
 #[cfg(test)]

@@ -12,8 +12,8 @@ use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes;
 use crate::convert::{self, Narrow};
 use crate::error::FormatError;
+use crate::fractal_heap::FractalHeapGeometry;
 use crate::fractal_heap_block::{CHECKSUM_LEN, DIRECT_SIGNATURE, INDIRECT_SIGNATURE, VERSION};
-use crate::fractal_heap_geometry::FractalHeapGeometry;
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 /// The attribute-heap row width, `H5O_FHEAP_MAN_WIDTH` in `H5Oprivate.h` (HDF5 2.2.0).
