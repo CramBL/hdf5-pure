@@ -14,11 +14,13 @@ use crate::error::FormatError;
 use crate::width;
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
-use super::{
-    AddressSpaceBits, CHECKSUM_LEN, FILE_FSM_CLIENT_ID, FILE_FSM_EXPAND_PCT, FILE_FSM_NUM_CLASSES,
-    FILE_FSM_SHRINK_PCT, FSHD_SIGNATURE, FSHD_VERSION, FSSE_SIGNATURE, FSSE_VERSION, FreeSection,
-    SectionFields, SectionInfoCounts,
+use super::address_space::AddressSpaceBits;
+use super::file_header::{
+    FILE_FSM_CLIENT_ID, FILE_FSM_EXPAND_PCT, FILE_FSM_NUM_CLASSES, FILE_FSM_SHRINK_PCT,
 };
+use super::header::{FSHD_SIGNATURE, FSHD_VERSION};
+use super::section_list::{FSSE_SIGNATURE, FSSE_VERSION};
+use super::{CHECKSUM_LEN, FreeSection, SectionFields, SectionInfoCounts};
 
 /// The checked sections and block lengths of a file free-space manager before placement.
 ///
@@ -146,7 +148,7 @@ impl PreparedFreeSpaceManager {
 
     /// Returns the header length in bytes, including its checksum.
     pub fn header_len(&self) -> usize {
-        super::header_len(self.widths)
+        super::header::header_len(self.widths)
     }
 
     /// Returns the section-list length in bytes, including its checksum and excluding padding.
@@ -346,7 +348,7 @@ impl FreeSpaceManagerHeaderEncoding {
     }
 
     /// The header length in bytes at eight-byte offset and length widths, including the checksum.
-    pub const MAX_ENCODED_SIZE: usize = super::header_len(FormatWidths {
+    pub const MAX_ENCODED_SIZE: usize = super::header::header_len(FormatWidths {
         offsets: OffsetWidth::Eight,
         lengths: LengthWidth::Eight,
     });
@@ -356,7 +358,7 @@ impl Encode for FreeSpaceManagerHeaderEncoding {
     type Error = UnexpectedEof;
 
     fn encoded_len(&self) -> usize {
-        super::header_len(self.widths)
+        super::header::header_len(self.widths)
     }
 
     fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
