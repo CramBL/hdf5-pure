@@ -232,7 +232,7 @@ fn sealed_structs_keep_their_attribute() {
             "pub struct CompoundMember {",
         ),
         (
-            "crates/hdf5-pure-core/src/datatype/mod.rs",
+            "crates/hdf5-pure-core/src/datatype/enumeration.rs",
             "pub struct EnumMember {",
         ),
         ("src/mat/opaque.rs", "pub struct MatDatetime {"),
