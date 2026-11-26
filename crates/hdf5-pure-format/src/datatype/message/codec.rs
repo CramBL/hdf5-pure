@@ -165,7 +165,7 @@ impl DatatypeMessage {
                     )?
                     .into_properties();
                 return Ok(Decoded {
-                    datatype: Self::with_properties(header.version, properties),
+                    datatype: Self::from_parsed(ParsedProperties::new(header.version, properties)),
                     stored_size: super::positive_size(header.class.code(), header.size)?,
                     offsets,
                 });
@@ -196,7 +196,9 @@ impl DatatypeMessage {
                         if member_index == index {
                             Some(DatatypeMemberName::from(name))
                         } else {
-                            members.get(member_index).map(|member| member.name.clone())
+                            members
+                                .get(member_index)
+                                .map(|member| member.name().clone())
                         }
                     })?;
                     members.push(
@@ -212,10 +214,10 @@ impl DatatypeMessage {
                 }
                 drop(layout);
                 return Ok(Decoded {
-                    datatype: Self::with_properties(
+                    datatype: Self::from_parsed(ParsedProperties::new(
                         header.version,
                         members.into_properties(header.version, header.size)?,
-                    ),
+                    )),
                     stored_size,
                     offsets,
                 });
@@ -228,17 +230,19 @@ impl DatatypeMessage {
                     offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
                 let members = enumeration.members(cursor, header.size, base_size)?;
-                description::compatible_child(header.version, ENUMERATION_CLASS, &base_type)?;
+                header
+                    .version
+                    .check_child(ENUMERATION_CLASS, base_type.version())?;
                 description::check_enumeration_members(&members, base_size.get())?;
                 return Ok(Decoded {
-                    datatype: Self {
+                    datatype: Self::from_parsed(ParsedProperties {
                         version: header.version,
                         properties: DatatypeProperties::Enumeration {
                             base_type: Box::new(base_type),
                             members,
                         },
                         enumeration_base_offsets: base_offsets,
-                    },
+                    }),
                     stored_size: base_size,
                     offsets: base_offsets.in_enumeration(),
                 });
@@ -268,15 +272,17 @@ impl DatatypeMessage {
                     offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
                 let stored_size = decode::array_size(header.size, base_size, &dimensions)?;
-                description::compatible_child(header.version, ARRAY_CLASS, &base_type)?;
+                header
+                    .version
+                    .check_child(ARRAY_CLASS, base_type.version())?;
                 return Ok(Decoded {
-                    datatype: Self::with_properties(
+                    datatype: Self::from_parsed(ParsedProperties::new(
                         header.version,
                         DatatypeProperties::Array {
                             base_type: Box::new(base_type),
                             dimensions,
                         },
-                    ),
+                    )),
                     stored_size,
                     offsets: base_offsets,
                 });
@@ -284,10 +290,10 @@ impl DatatypeMessage {
             Layout::Complex(complex) => {
                 let (datatype, version) = complex.component(cursor, depth)?;
                 DatatypeProperties::Complex {
-                    component: Box::new(Self::with_properties(
+                    component: Box::new(Self::from_parsed(ParsedProperties::new(
                         version,
                         DatatypeProperties::FloatingPoint(datatype.component()),
-                    )),
+                    ))),
                 }
             }
         };
@@ -548,6 +554,31 @@ impl DatatypeMessage {
     /// ```
     pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedDatatype<'_>, FormatError> {
         PreparedDatatype::prepare(Description::Preserved(self), offset_width)
+    }
+}
+
+pub(super) struct ParsedProperties {
+    version: DatatypeVersion,
+    properties: DatatypeProperties,
+    enumeration_base_offsets: DatatypeOffsets,
+}
+
+impl ParsedProperties {
+    fn new(version: DatatypeVersion, properties: DatatypeProperties) -> Self {
+        Self {
+            version,
+            properties,
+            enumeration_base_offsets: DatatypeOffsets::default(),
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (DatatypeVersion, DatatypeProperties, DatatypeOffsets) {
+        let Self {
+            version,
+            properties,
+            enumeration_base_offsets,
+        } = self;
+        (version, properties, enumeration_base_offsets)
     }
 }
 
@@ -883,7 +914,7 @@ impl Description<'_> {
 
     fn version(&self) -> Option<DatatypeVersion> {
         match self {
-            Self::Preserved(message) => Some(message.version),
+            Self::Preserved(message) => Some(message.version()),
             _ => None,
         }
     }
@@ -983,7 +1014,7 @@ impl<'a> Body<'a> {
     }
 
     fn preserved(message: &'a DatatypeMessage) -> Self {
-        let properties = match &message.properties {
+        let properties = match message.properties() {
             DatatypeProperties::FixedPoint(datatype) => {
                 return Self::Atomic(AtomicProperties::FixedPoint(datatype));
             }
@@ -1013,7 +1044,7 @@ impl<'a> Body<'a> {
             DatatypeProperties::Compound { size, members } => ContainerProperties::Compound {
                 size: *size,
                 members: CompoundMembers::Preserved(members),
-                fields: CompoundFields::for_version(message.version, *size),
+                fields: CompoundFields::for_version(message.version(), *size),
             },
             DatatypeProperties::CompoundV1 { size, members } => ContainerProperties::Compound {
                 size: *size,
@@ -1025,8 +1056,8 @@ impl<'a> Body<'a> {
                     size: description::enumeration_value_width(members),
                     base_type: Description::Preserved(base_type),
                     members,
-                    name_layout: NameLayout::for_version(message.version),
-                    offsets: message.enumeration_base_offsets,
+                    name_layout: NameLayout::for_version(message.version()),
+                    offsets: message.enumeration_base_offsets(),
                 }
             }
             DatatypeProperties::VariableLengthSequence { base_type } => {
