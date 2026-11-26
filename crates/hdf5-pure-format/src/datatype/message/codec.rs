@@ -22,10 +22,8 @@ use hdf5_pure_core::{
 use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
 use super::compound_layout::CompoundLayout;
 use super::decode::{self, Decoded, Layout, Member, Projection};
-use super::{
-    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, NAME_ALIGNMENT,
-    NameLayout,
-};
+use super::description::{self, NAME_ALIGNMENT, NameLayout};
+use super::{DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion};
 use crate::bytes::{self, ByteCursor};
 use crate::codec::{Decode, Encode};
 use crate::convert::Narrow;
@@ -162,7 +160,7 @@ impl DatatypeMessage {
             Layout::Compound(compound) => {
                 let stored_size = super::positive_size(COMPOUND_CLASS, header.size)?;
                 let count = compound.member_count();
-                super::compound_member_count(count)?;
+                description::compound_member_count(count)?;
                 let mut members: Vec<DatatypeMessageMember> = Vec::new();
                 let mut layout = CompoundLayout::new(header.size);
                 for _ in 0..count {
@@ -220,8 +218,8 @@ impl DatatypeMessage {
                     offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
                 let members = enumeration.members(cursor, header.size, base_size)?;
-                super::compatible_child(header.version, ENUMERATION_CLASS, &base_type)?;
-                super::check_enumeration_members(&members, base_size.get())?;
+                description::compatible_child(header.version, ENUMERATION_CLASS, &base_type)?;
+                description::check_enumeration_members(&members, base_size.get())?;
                 return Ok(Decoded {
                     datatype: Self {
                         version: header.version,
@@ -260,7 +258,7 @@ impl DatatypeMessage {
                     offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
                 let stored_size = decode::array_size(header.size, base_size, &dimensions)?;
-                super::compatible_child(header.version, ARRAY_CLASS, &base_type)?;
+                description::compatible_child(header.version, ARRAY_CLASS, &base_type)?;
                 return Ok(Decoded {
                     datatype: Self::with_properties(
                         header.version,
@@ -900,7 +898,7 @@ impl<'a> Body<'a> {
             },
             DatatypeProperties::Enumeration { base_type, members } => {
                 ContainerProperties::Enumeration {
-                    size: super::enumeration_value_width(members),
+                    size: description::enumeration_value_width(members),
                     base_type: Description::Preserved(base_type),
                     members,
                     name_layout: NameLayout::for_version(message.version),
@@ -984,7 +982,7 @@ impl ContainerProperties<'_> {
             } => {
                 check_member_count(members.len(), child_depth.is_some())?;
                 let parent_size = base_type.prepare(preparation, child_depth)?;
-                super::check_enum_base_layout(
+                description::check_enum_base_layout(
                     *size,
                     parent_size,
                     *offsets,
@@ -1149,13 +1147,15 @@ impl ContainerProperties<'_> {
 }
 
 fn check_member_count(count: usize, preserved: bool) -> Result<(), FormatError> {
-    super::member_count(count).map(|_| ()).map_err(|error| {
-        if preserved {
-            FormatError::Internal("a checked datatype member count exceeds u16".into())
-        } else {
-            error
-        }
-    })
+    description::member_count(count)
+        .map(|_| ())
+        .map_err(|error| {
+            if preserved {
+                FormatError::Internal("a checked datatype member count exceeds u16".into())
+            } else {
+                error
+            }
+        })
 }
 
 enum CompoundMembers<'a> {

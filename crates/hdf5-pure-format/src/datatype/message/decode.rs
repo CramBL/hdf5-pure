@@ -14,7 +14,8 @@ use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{ComplexType, DatatypeMemberName, EnumMember, FormatError};
 
 use super::atomic;
-use super::{DatatypeVersion, MessageDepth, NameLayout};
+use super::description::{self, NameLayout};
+use super::{DatatypeVersion, MessageDepth};
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
 use crate::datatype::header::{AtomicClass, Context, DatatypeClass, Header};
@@ -183,7 +184,7 @@ impl Enumeration {
         declared_size: u32,
         value_width: NonZeroU32,
     ) -> Result<Vec<EnumMember>, FormatError> {
-        super::check_enum_base_size(declared_size, value_width.get())?;
+        description::check_enum_base_size(declared_size, value_width.get())?;
         let count = usize::from(self.0.count);
         let mut members = Vec::new();
         for _ in 0..count {
