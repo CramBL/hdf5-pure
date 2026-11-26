@@ -264,16 +264,7 @@ impl BTreeV2Layout {
         } = node;
         let depth = kind.depth();
         if let BTreeV2Geometry::Indexed(info) = geometry {
-            let capacity = info
-                .max_nrec
-                .get(usize::from(depth))
-                .copied()
-                .ok_or(FormatError::InvalidBTreeV2Signature)?;
-            let subtree_capacity = info
-                .cum_max_nrec
-                .get(usize::from(depth))
-                .copied()
-                .ok_or(FormatError::InvalidBTreeV2Signature)?;
+            let (capacity, subtree_capacity) = info.capacities(depth)?;
             let minimum = u64::from(records)
                 .checked_add(1)
                 .and_then(|children| children.checked_mul((1u64 << depth) - 1))
@@ -2017,6 +2008,14 @@ pub struct BTreeV2NodeInfo {
 }
 
 impl BTreeV2NodeInfo {
+    fn capacities(&self, depth: u16) -> Result<(u64, u64), FormatError> {
+        self.max_nrec
+            .get(usize::from(depth))
+            .copied()
+            .zip(self.cum_max_nrec.get(usize::from(depth)).copied())
+            .ok_or(FormatError::InvalidBTreeV2Signature)
+    }
+
     /// Returns the table of a tree whose root is a leaf with room for `max_nrec0` records.
     fn leaf_only(max_nrec0: u64) -> Self {
         BTreeV2NodeInfo {
