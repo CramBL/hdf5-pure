@@ -5,6 +5,7 @@ mod geometry;
 mod header;
 mod id;
 mod layout;
+pub(crate) mod location;
 #[cfg(test)]
 mod test_support;
 

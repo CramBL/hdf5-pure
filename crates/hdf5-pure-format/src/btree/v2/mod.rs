@@ -26,6 +26,7 @@ use crate::chunk_record;
 use crate::convert::Narrow;
 use crate::data_layout::LayoutVersion;
 use crate::error::FormatError;
+use crate::fractal_heap::location::{self, HugeObjectLocationEncoding};
 use crate::fractal_heap::{FilteredHugeObjectLocation, FractalHeapFiltering, FractalHeapHeader};
 use crate::fractal_heap::{FractalHeapIdLayout, FractalHeapIdView};
 use crate::message_flags::MessageFlags;
@@ -1321,10 +1322,12 @@ impl HugeObjectDirectRecord {
         offsets: OffsetWidth,
         lengths: LengthWidth,
     ) -> Result<(), FormatError> {
-        bytes::require_defined_offset(self.address.get(), offsets)?;
-        bytes::require_length(self.length, lengths)?;
-        bytes::write_offset(buf, self.address.get(), offsets);
-        bytes::write_length(buf, self.length, lengths);
+        HugeObjectLocationEncoding::new(
+            FormatWidths { offsets, lengths },
+            self.address,
+            self.length,
+        )?
+        .append(buf);
         Ok(())
     }
 }
@@ -1370,14 +1373,23 @@ impl HugeObjectRecord {
         offset_width: OffsetWidth,
         length_width: LengthWidth,
     ) -> Result<(), FormatError> {
-        write::HugeObjectRecordEncoding::new(
-            *self,
+        let Self {
+            address,
+            length,
+            id,
+        } = *self;
+        let location = HugeObjectLocationEncoding::new(
             FormatWidths {
                 offsets: offset_width,
                 lengths: length_width,
             },
-        )?
-        .append(buf)
+            address,
+            length,
+        )?;
+        bytes::require_length(id, length_width)?;
+        location.append(buf);
+        bytes::write_length(buf, id, length_width);
+        Ok(())
     }
 }
 
@@ -1665,18 +1677,7 @@ impl HugeObjectRecordDecoder {
             }
             HugeObjectRecordEncoding::Indirect | HugeObjectRecordEncoding::Direct => {
                 let mut cursor = bytes::ByteCursor::new(data);
-                let address = cursor.address(offsets)?;
-                let length = cursor.length(lengths)?;
-                if address.get() >= StoredAddress::undefined(offsets).get() || length == 0 {
-                    return Err(FormatError::InvalidFractalHeapGeometry);
-                }
-                address
-                    .get()
-                    .checked_add(length)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: address.get(),
-                        length,
-                    })?;
+                let (address, length) = location::read_unfiltered(&mut cursor, layout.widths)?;
                 if layout.encoding == HugeObjectRecordEncoding::Indirect {
                     HugeObjectTrackerRecord::Indirect(HugeObjectRecord {
                         address,
