@@ -57,8 +57,10 @@ fn prepared_global_heap_reproduces_native_terminal_forms(
         PreparedGlobalHeapCollection::new(lengths, collection.range().length(), &members).unwrap();
     let encoded = prepared.serialize().unwrap();
     let start = usize::try_from(collection.range().start().get()).unwrap();
-    let end = start + encoded.len();
-    assert_eq!(encoded, image[start..end]);
+    let end = start + global_heap::MIN_COLLECTION_SIZE;
+    let mut native = image[start..end].to_vec();
+    clear_unspecified_bytes(&mut native, lengths, terminal);
+    assert_eq!(encoded, native);
     image[start..end].copy_from_slice(&encoded);
     std::fs::write(&path, image).unwrap();
     let file = libhdf5::File::open(&path).unwrap();
@@ -155,12 +157,30 @@ enum Terminal {
 
 impl Terminal {
     fn payload_size(self) -> usize {
-        let free = match self {
+        global_heap::MIN_COLLECTION_SIZE - 2 * HEADER_SIZE - self.free_size()
+    }
+
+    fn free_size(self) -> usize {
+        match self {
             Self::Explicit => HEADER_SIZE,
             Self::Full => 0,
             Self::Implied => ALIGNMENT,
-        };
-        global_heap::MIN_COLLECTION_SIZE - 2 * HEADER_SIZE - free
+        }
+    }
+}
+
+// `H5HG_create` and `H5HG_alloc` in `H5HG.c`, HDF5 1.8.23, can leave alignment padding and
+// implied free space uninitialized.
+fn clear_unspecified_bytes(collection: &mut [u8], lengths: LengthWidth, terminal: Terminal) {
+    let size_field_end = SIZE_FIELD_OFFSET + usize::from(lengths.get());
+    collection[size_field_end..HEADER_SIZE].fill(0);
+    collection[HEADER_SIZE + size_field_end..2 * HEADER_SIZE].fill(0);
+
+    let free_start = collection.len() - terminal.free_size();
+    let free = &mut collection[free_start..];
+    match terminal {
+        Terminal::Explicit => free[size_field_end..].fill(0),
+        Terminal::Full | Terminal::Implied => free.fill(0),
     }
 }
 
@@ -211,6 +231,9 @@ fn region(bytes: &[u8]) -> FileRegion<'_> {
 
 // `H5HG_SIZEOF_HDR` and `H5HG_SIZEOF_OBJHDR` in `H5HGpkg.h`, HDF5 2.2.0.
 const HEADER_SIZE: usize = 16;
+
+// `H5HG_SIZEOF_HDR` and `H5HG_SIZEOF_OBJHDR` in `H5HGpkg.h`, HDF5 1.8.23.
+const SIZE_FIELD_OFFSET: usize = 8;
 
 // Version 1 collections use this geometry ("Global Heap", format specification, version 4.0).
 const ALIGNMENT: usize = 8;
