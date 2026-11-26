@@ -109,23 +109,16 @@ fn canonical_array_sizes_preserve_constructed_models(
 #[rstest]
 #[case::vax(vax_float(), DATATYPE_VERSION_THREE, 4)]
 #[case::complex(complex_bytes(), DATATYPE_VERSION_FIVE, 8)]
-fn constructed_enum_bases_propagate_versions(
+fn canonical_enumeration_version_supports_the_base_datatype(
     #[case] base: Vec<u8>,
     #[case] version: u8,
     #[case] size: u32,
 ) {
-    let datatype = Datatype::Enumeration {
-        size,
-        base_type: Box::new(parse_datatype(&base).unwrap().0),
-        members: Vec::new(),
-    };
     let mut expected = build_dt_header(ENUMERATION_CLASS, version, [0, 0, 0], size);
     expected.extend_from_slice(&base);
+    let (datatype, consumed) = parse_datatype(&expected).unwrap();
+    assert_eq!(consumed, expected.len());
     assert_eq!(serialize_datatype(&datatype).unwrap(), expected);
-    assert_eq!(
-        parse_datatype(&expected).unwrap(),
-        (datatype, expected.len())
-    );
 }
 
 #[rstest]
@@ -184,14 +177,18 @@ fn nested_opaque_tags_keep_their_encoding_boundaries(
                 "nested".into(),
                 8,
                 Datatype::VariableLength(VariableLengthType::sequence(Datatype::Array {
-                    base_type: Box::new(Datatype::Enumeration {
-                        size: 4,
-                        base_type: Box::new(Datatype::Opaque {
-                            size: 4,
-                            tag: tag.clone(),
-                        }),
-                        members: Vec::new(),
-                    }),
+                    base_type: Box::new(Datatype::Enumeration(
+                        __private::enumeration_from_stored_parts(
+                            Datatype::Opaque {
+                                size: 4,
+                                tag: tag.clone(),
+                            },
+                            NonZeroU32::new(4).unwrap(),
+                            OffsetWidth::Eight,
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                    )),
                     dimensions: vec![2],
                 })),
             ),
@@ -449,13 +446,10 @@ fn datatype_member_counts_check_their_fixed_width_fields(
     #[values(false, true)] enumeration: bool,
 ) {
     let datatype = if enumeration {
-        Datatype::Enumeration {
-            size: 1,
-            base_type: Box::new(byte_member_type()),
-            members: (0..count)
-                .map(|index| __private::enum_member(index.to_string(), vec![0]))
-                .collect(),
-        }
+        let members = (0..count)
+            .map(|index| EnumMember::new(index.to_string(), vec![0]))
+            .collect();
+        Datatype::Enumeration(EnumerationType::new(FixedPointType::u8(), members).unwrap())
     } else {
         Datatype::Compound {
             size: u32::try_from(count).unwrap(),

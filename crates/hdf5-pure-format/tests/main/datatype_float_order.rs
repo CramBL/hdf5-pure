@@ -1,3 +1,5 @@
+use core::num::NonZeroU32;
+
 use hdf5_pure_core::__private;
 use hdf5_pure_core::ComplexType;
 use hdf5_pure_core::Datatype;
@@ -5,6 +7,7 @@ use hdf5_pure_core::DatatypeByteOrder;
 use hdf5_pure_core::FloatingPointType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::MantissaNormalization;
+use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
@@ -107,11 +110,15 @@ fn ordinary_float_parser_applies_order_rules_in_every_context(
             }
         }
         Context::EnumerationOne | Context::EnumerationTwo | Context::EnumerationThree => {
-            Datatype::Enumeration {
-                size: 8,
-                base_type: Box::new(datatype),
-                members: vec![__private::enum_member("x".into(), vec![0; 8])],
-            }
+            Datatype::Enumeration(
+                __private::enumeration_from_stored_parts(
+                    datatype,
+                    NonZeroU32::new(8).unwrap(),
+                    OffsetWidth::Eight,
+                    vec![__private::enum_member("x".into(), vec![0; 8])],
+                )
+                .unwrap(),
+            )
         }
         Context::ArrayTwo | Context::ArrayThree => Datatype::Array {
             base_type: Box::new(datatype),

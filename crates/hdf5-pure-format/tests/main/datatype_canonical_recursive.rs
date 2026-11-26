@@ -1,7 +1,11 @@
 use hdf5_pure_core::__private;
-use hdf5_pure_core::{Datatype, FixedPointType, FormatError, ReferenceType, VariableLengthType};
+use hdf5_pure_core::{
+    Datatype, EnumMember, EnumerationType, FormatError, ReferenceType, VariableLengthType,
+};
 use hdf5_pure_format::__private as format;
-use hdf5_pure_format::__private::{DatatypeMessage, OffsetWidth};
+use hdf5_pure_format::__private::{
+    DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, OffsetWidth,
+};
 use rstest::rstest;
 use test_util::datatype;
 use test_util::datatype::Class;
@@ -278,14 +282,19 @@ fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
         .0
         .to_datatype()
         .unwrap();
-    let datatype = Datatype::Enumeration {
-        size: 4,
-        base_type: Box::new(base),
-        members: vec![
-            __private::enum_member("first".into(), vec![0x11; 4]),
-            __private::enum_member("第二".into(), vec![0x22; 4]),
-        ],
+    let Datatype::FixedPoint(base) = base else {
+        panic!("expected fixed-point base, got {base:?}");
     };
+    let datatype = Datatype::Enumeration(
+        EnumerationType::new(
+            base,
+            vec![
+                EnumMember::new("first".into(), vec![0x11; 4]),
+                EnumMember::new("第二".into(), vec![0x22; 4]),
+            ],
+        )
+        .unwrap(),
+    );
     let parent = leaf.bytes(Version::One);
     let expected = containers::enumeration(
         Version::Three.get(),
@@ -315,49 +324,20 @@ fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
 }
 
 #[rstest]
-#[case::first(None, [vec![1, 2], vec![]], "first", 2)]
-#[case::later(None, [vec![1], vec![]], "last", 0)]
-#[case::nested(Some(Wrapper::Array), [vec![], vec![1, 2]], "first", 0)]
-#[case::nested_later(Some(Wrapper::Compound), [vec![1], vec![2, 3]], "last", 2)]
-fn datatype_canonical_enumeration_rejects_values_of_a_different_width(
-    #[case] wrapper: Option<Wrapper>,
-    #[case] values: [Vec<u8>; 2],
-    #[case] name: &str,
-    #[case] actual: usize,
+fn enumeration_values_keep_the_width_of_the_decoded_parent(
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] source: OffsetWidth,
+    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] destination: OffsetWidth,
+    #[values(false, true)] array_parent: bool,
 ) {
-    let [first, last] = values;
-    let datatype = Datatype::Enumeration {
-        size: 1,
-        base_type: Box::new(Datatype::FixedPoint(FixedPointType::u8())),
-        members: vec![
-            __private::enum_member("first".into(), first),
-            __private::enum_member("last".into(), last),
-        ],
-    };
-    let datatype = match wrapper {
-        Some(wrapper) => wrapper.wrap(datatype),
-        None => datatype,
-    };
-    assert_eq!(
-        format::PreparedDatatype::new(&datatype, OffsetWidth::Eight).unwrap_err(),
-        FormatError::EnumMemberValueSize(name.into(), 1, actual)
-    );
-}
-
-#[rstest]
-fn datatype_canonical_enumeration_uses_the_stored_parent_width(
-    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
-) {
-    let parent = Parent::Sequence;
-    let size = parent.size(width);
-    let base = parent.bytes(width, false);
+    let sequence = Parent::Sequence;
+    let mut size = sequence.size(source);
+    let mut base = sequence.bytes(source, false);
+    if array_parent {
+        size *= 2;
+        base = datatype::array(Version::Three.get(), [0; 3], size, 1, &[2], &base);
+    }
     let value = vec![0x5a; size as usize];
-    let datatype = Datatype::Enumeration {
-        size,
-        base_type: Box::new(format::parse_datatype(&base).unwrap().0),
-        members: vec![__private::enum_member("value".into(), value.clone())],
-    };
-    let expected = containers::enumeration(
+    let bytes = containers::enumeration(
         Version::Three.get(),
         [1, 0, 0],
         size,
@@ -367,35 +347,101 @@ fn datatype_canonical_enumeration_uses_the_stored_parent_width(
             value: &value,
         }],
     );
-    assert_prepared_capacity(&datatype, width, &expected);
+
+    let (datatype, consumed) = format::parse_datatype(&bytes).unwrap();
+    let (retained, retained_consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(retained_consumed, bytes.len());
+    assert_eq!(retained.to_datatype().unwrap(), datatype);
+    let Datatype::Enumeration(enumeration) = &datatype else {
+        panic!("expected an enumeration, got {datatype:?}");
+    };
     assert_eq!(
-        format::parse_datatype(&expected).unwrap(),
-        (datatype, expected.len())
+        enumeration.base_type(),
+        &format::parse_datatype(&base).unwrap().0
     );
+    assert_eq!(enumeration.size().get(), size);
+    assert_eq!(
+        enumeration.members(),
+        [EnumMember::new("value".into(), value)]
+    );
+
+    if source == destination {
+        assert_eq!(retained.stored_size(destination).unwrap(), size);
+        assert_prepared_capacity(&datatype, source, &bytes);
+        assert_eq!(retained.serialize(source).unwrap(), bytes);
+    } else {
+        let base_size = sequence.size(destination) * if array_parent { 2 } else { 1 };
+        let expected = FormatError::EnumBaseSizeMismatch { size, base_size };
+        assert_eq!(
+            format::PreparedDatatype::new(&datatype, destination).unwrap_err(),
+            expected
+        );
+        assert_eq!(retained.stored_size(destination).unwrap_err(), expected);
+        assert_eq!(retained.serialize(destination).unwrap_err(), expected);
+    }
 }
 
 #[rstest]
-#[case::zero(0)]
-#[case::mismatched(7)]
-fn datatype_canonical_enumeration_rejects_a_size_different_from_its_integer_parent(
-    #[case] size: u32,
-    #[values(Wrapper::Array, Wrapper::Compound, Wrapper::Sequence)] wrapper: Wrapper,
-    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
+fn constructed_containers_keep_a_retained_enumeration_width(
+    #[values(OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
 ) {
-    let source = Leaf::Integer.bytes(Version::One);
-    let base = DatatypeMessage::parse(&source)
-        .unwrap()
-        .0
-        .to_datatype()
-        .unwrap();
-    let datatype = Datatype::Enumeration {
+    let sequence = Parent::Sequence;
+    let size = sequence.size(width);
+    let enumeration = containers::enumeration(
+        Version::Three.get(),
+        [1, 0, 0],
         size,
-        base_type: Box::new(base),
-        members: vec![__private::enum_member("raw".into(), vec![1, 2, 3, 4])],
-    };
+        &sequence.bytes(width, false),
+        &[EnumValue {
+            name: b"value",
+            value: &vec![0; size as usize],
+        }],
+    );
+    let (retained, consumed) = DatatypeMessage::parse(&enumeration).unwrap();
+    assert_eq!(consumed, enumeration.len());
+    let array = DatatypeMessage::new(
+        DatatypeVersion::Three,
+        DatatypeProperties::Array {
+            base_type: Box::new(retained.clone()),
+            dimensions: vec![2],
+        },
+    )
+    .unwrap();
+    assert_eq!(array.stored_size(width).unwrap(), 2 * size);
     assert_eq!(
-        format::serialize_datatype_with_offset_width(&wrapper.wrap(datatype), width).unwrap_err(),
-        FormatError::EnumBaseSizeMismatch { size, base_size: 4 }
+        array.serialize(width).unwrap(),
+        datatype::array(
+            Version::Three.get(),
+            [0; 3],
+            2 * size,
+            1,
+            &[2],
+            &enumeration
+        )
+    );
+    let compound = DatatypeMessage::new(
+        DatatypeVersion::Three,
+        DatatypeProperties::Compound {
+            size,
+            members: vec![DatatypeMessageMember::new("member".into(), 0, retained).unwrap()],
+        },
+    )
+    .unwrap();
+    assert_eq!(compound.stored_size(width).unwrap(), size);
+    assert_eq!(
+        compound.serialize(width).unwrap(),
+        containers::compound(
+            Version::Three.get(),
+            [1, 0, 0],
+            size,
+            MemberOffset::One,
+            &[CompoundField {
+                name: b"member",
+                offset: 0,
+                datatype: &enumeration,
+            }],
+        )
     );
 }
 
@@ -600,11 +646,12 @@ impl EmptyModel {
                 size: self.size(),
                 members: vec![],
             },
-            Self::Enumeration => Datatype::Enumeration {
-                size: self.size(),
-                base_type: Box::new(parent),
-                members: vec![],
-            },
+            Self::Enumeration => {
+                let Datatype::FixedPoint(base) = parent else {
+                    panic!("expected fixed-point base, got {parent:?}");
+                };
+                Datatype::Enumeration(EnumerationType::new(base, Vec::new()).unwrap())
+            }
         }
     }
 

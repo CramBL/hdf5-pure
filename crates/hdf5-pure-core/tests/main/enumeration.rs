@@ -1,4 +1,10 @@
-use hdf5_pure_core::{DatatypeByteOrder, EnumMember, EnumerationType, FixedPointType, FormatError};
+use core::num::NonZeroU32;
+
+use hdf5_pure_core::__private;
+use hdf5_pure_core::{
+    Datatype, DatatypeByteOrder, EnumMember, EnumerationType, FixedPointType, FormatError,
+    OffsetWidth, VariableLengthType,
+};
 use rstest::rstest;
 
 #[rstest]
@@ -42,7 +48,7 @@ fn enumeration_preserves_wide_base_and_member_bytes(#[case] byte_order: Datatype
     let expected = members.clone();
     let member_storage = members.as_ptr();
     let enumeration = EnumerationType::new(base_type, members).unwrap();
-    assert_eq!(enumeration.base_type(), base_type);
+    assert_eq!(enumeration.base_type(), &Datatype::FixedPoint(base_type));
     assert_eq!(enumeration.size().get(), 16);
     assert_eq!(enumeration.members(), expected);
     assert_eq!(enumeration.members().as_ptr(), member_storage);
@@ -52,7 +58,27 @@ fn enumeration_preserves_wide_base_and_member_bytes(#[case] byte_order: Datatype
 fn empty_enumeration_keeps_its_base_and_width() {
     let base_type = FixedPointType::u32();
     let enumeration = EnumerationType::new(base_type, Vec::new()).unwrap();
-    assert_eq!(enumeration.base_type(), base_type);
+    assert_eq!(enumeration.base_type(), &Datatype::FixedPoint(base_type));
     assert_eq!(enumeration.size().get(), 4);
     assert_eq!(enumeration.members(), &[]);
+}
+
+#[test]
+fn decoded_enumeration_uses_the_supplied_base_offset_width() {
+    let base = Datatype::VariableLength(VariableLengthType::sequence(Datatype::FixedPoint(
+        FixedPointType::u8(),
+    )));
+    assert_eq!(
+        __private::enumeration_from_stored_parts(
+            base,
+            NonZeroU32::new(12).unwrap(),
+            OffsetWidth::Two,
+            vec![EnumMember::new("value".into(), vec![0; 12])],
+        )
+        .unwrap_err(),
+        FormatError::EnumBaseSizeMismatch {
+            size: 12,
+            base_size: 10
+        },
+    );
 }

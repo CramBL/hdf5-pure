@@ -1,6 +1,7 @@
 use rstest::rstest;
 
 use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
+use hdf5_pure_core::{EnumMember, EnumerationType};
 
 use super::super::*;
 
@@ -161,11 +162,13 @@ fn a_member_name_cannot_carry_a_control_character_into_a_message() {
     assert!(!shown.chars().any(char::is_control), "{shown}");
     assert_eq!(shown, "compound{a\\nb\\u{1b}[31m: u32}");
 
-    let enumeration = Datatype::Enumeration {
-        size: 4,
-        base_type: Box::new(u32_datatype()),
-        members: vec![__private::enum_member("red\u{0}".into(), vec![0, 0, 0, 0])],
-    };
+    let enumeration = Datatype::Enumeration(
+        EnumerationType::new(
+            FixedPointType::u32(),
+            vec![EnumMember::new("red\u{0}".into(), vec![0, 0, 0, 0])],
+        )
+        .unwrap(),
+    );
     let shown = enumeration.to_string();
     assert!(!shown.chars().any(char::is_control), "{shown}");
     assert_eq!(shown, "enum<u32>[red\\0]");
@@ -187,13 +190,11 @@ fn a_long_member_list_is_elided_and_reports_the_remainder() {
             .map(|i| __private::compound_member(format!("m{i}"), (i * 4) as u64, u32_datatype()))
             .collect(),
     };
-    let enumeration = Datatype::Enumeration {
-        size: 4,
-        base_type: Box::new(u32_datatype()),
-        members: (0..over_cap)
-            .map(|i| __private::enum_member(format!("m{i}"), vec![0, 0, 0, 0]))
-            .collect(),
-    };
+    let members = (0..over_cap)
+        .map(|i| EnumMember::new(format!("m{i}"), vec![0, 0, 0, 0]))
+        .collect();
+    let enumeration =
+        Datatype::Enumeration(EnumerationType::new(FixedPointType::u32(), members).unwrap());
 
     for (datatype, close) in [(compound, "}"), (enumeration, "]")] {
         let shown = datatype.to_string();
@@ -212,12 +213,9 @@ fn a_member_list_at_exactly_the_cap_is_not_elided() {
     let members: Vec<_> = (0..DISPLAY_MAX_MEMBERS)
         .map(|i| __private::enum_member(format!("m{i}"), vec![0, 0, 0, 0]))
         .collect();
-    let shown = Datatype::Enumeration {
-        size: 4,
-        base_type: Box::new(u32_datatype()),
-        members,
-    }
-    .to_string();
+    let shown =
+        Datatype::Enumeration(EnumerationType::new(FixedPointType::u32(), members).unwrap())
+            .to_string();
 
     assert!(!shown.contains('…'), "{shown}");
     assert!(

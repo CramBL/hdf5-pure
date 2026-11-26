@@ -170,11 +170,9 @@ fn a_nested_address_makes_the_whole_datatype_position_dependent() {
         },
         compound_of(i32_type()),
         array_of(i32_type()),
-        Datatype::Enumeration {
-            size: 4,
-            base_type: Box::new(i32_type()),
-            members: vec![],
-        },
+        Datatype::Enumeration(
+            crate::EnumerationType::new(crate::FixedPointType::i32(), Vec::new()).unwrap(),
+        ),
     ] {
         assert!(
             attr_bytes_are_position_independent(&independent),

@@ -168,7 +168,7 @@ What a read cannot recover, because [`AttrValue`](crate::AttrValue) has no way t
 - **A scalar in MATLAB's sequence-of-one-byte-strings shape.** Its array form reads as [`VarLenAsciiCharArray`](crate::AttrValue::VarLenAsciiCharArray), the form MATLAB writes. A scalar in that shape has no variant and reads as [`AsciiString`](crate::AttrValue::AsciiString), which writes a fixed-width slot. A standard variable-length string keeps its datatype at either arity.
 - **Rank.** Every array variant is one-dimensional, so a rank-2 attribute reads as its elements flattened.
 - **String padding.** A fixed-width string reports its content and the `STRSIZE` it was stored at, but not which padding rule filled the bytes past the content: every variant writes back `NULLPAD`.
-- **Enumeration member names.** An enum attribute decodes through its integer base, so its codes arrive and its labels do not.
+- **Enumeration member names.** An enum attribute decodes through its base datatype. Datatype inspection returns its member names.
 
 The variant may become **more specific** in a future release as [`AttrValue`](crate::AttrValue) grows further variants, as the numeric widths did, so match with a `_` arm, which the `#[non_exhaustive]` enum requires anyway, or read through the accessors, which are unaffected by such a change.
 
@@ -196,9 +196,9 @@ use hdf5_pure::Datatype;
 let root = file.root();
 let is_bool = matches!(
     root.attr_datatypes()?.get("success"),
-    Some(Datatype::Enumeration { base_type, members, .. })
-        if matches!(base_type.as_ref(), Datatype::FixedPoint(numeric) if numeric.size().get() == 1)
-            && members.iter().any(|m| m.name == "TRUE")
+    Some(Datatype::Enumeration(enumeration))
+        if matches!(enumeration.base_type(), Datatype::FixedPoint(numeric) if numeric.size().get() == 1)
+            && enumeration.members().iter().any(|member| member.name == "TRUE")
 );
 let value = root.attrs()?.get("success").and_then(AttrValue::as_i64);
 # assert!(!is_bool); // this crate writes `I8`, which the check separates from a boolean

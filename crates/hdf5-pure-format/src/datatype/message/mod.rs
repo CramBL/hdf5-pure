@@ -208,13 +208,18 @@ impl FloatingPointByteOrder {
 pub struct DatatypeMessage {
     version: DatatypeVersion,
     properties: DatatypeProperties,
+    /// The offset width inferred from an enumeration's decoded base. [`Self::to_datatype`]
+    /// uses this width to compute the base's stored size.
+    enumeration_base_offsets: Option<OffsetWidth>,
 }
 
 impl DatatypeMessage {
     /// Constructs a description with compatible versions and class properties.
     ///
     /// A compound must have at least one member, with unique names. Member ranges must be
-    /// disjoint and fit at the smallest supported offset width of two bytes.
+    /// disjoint and fit within the declared size. Construction measures variable-length
+    /// descriptors at two-byte offsets and uses the retained value width for decoded
+    /// enumerations.
     /// An enumeration must have at least one member, with nonempty, NUL-free, unique names
     /// and distinct raw values of the integer parent's width. Array dimensions and element
     /// sizes must fit their stored fields. Opaque tags may contain
@@ -306,7 +311,7 @@ impl DatatypeMessage {
                     let datatype = &member.datatype;
                     let field_size = positive_size(
                         datatype.properties.class(),
-                        datatype.stored_size(OffsetWidth::Two)?,
+                        datatype.size_with_offsets(None)?,
                     )?;
                     layout.insert(member.byte_offset, field_size, index, |index| {
                         members.get(index).map(|member| member.name.as_str())
@@ -315,36 +320,10 @@ impl DatatypeMessage {
             }
             DatatypeProperties::Enumeration { base_type, members } => {
                 compatible_child(version, class, base_type)?;
-                if !matches!(base_type.properties, DatatypeProperties::FixedPoint(_)) {
+                let DatatypeProperties::FixedPoint(base) = base_type.properties else {
                     return Err(FormatError::EnumBaseNotInteger);
-                }
-                enumeration_member_count(members.len())?;
-                let size = base_type.stored_size(OffsetWidth::Two)?;
-                let mut names = BTreeSet::new();
-                let mut values = BTreeMap::new();
-                for (index, member) in members.iter().enumerate() {
-                    let (name, value) = __private::enum_member_parts(member);
-                    if name.is_empty() {
-                        return Err(FormatError::EmptyEnumMemberName { index });
-                    }
-                    member_name(class, name)?;
-                    if value.len().to_u64() != u64::from(size) {
-                        return Err(FormatError::EnumMemberValueSize(
-                            name.into(),
-                            size,
-                            value.len(),
-                        ));
-                    }
-                    if !names.insert(name) {
-                        return Err(FormatError::DuplicateEnumMemberName(name.into()));
-                    }
-                    if let Some(first) = values.insert(value, name) {
-                        return Err(FormatError::DuplicateEnumMemberValue {
-                            first: first.into(),
-                            second: name.into(),
-                        });
-                    }
-                }
+                };
+                check_enumeration_members(members, base.size().get())?;
             }
             DatatypeProperties::VariableLengthSequence { base_type }
             | DatatypeProperties::VariableLengthString { base_type, .. } => {
@@ -363,7 +342,7 @@ impl DatatypeMessage {
                 })?;
                 positive_size(
                     class,
-                    super::array_type_size(base_type.stored_size(OffsetWidth::Two)?, dimensions)?,
+                    __private::array_type_size(base_type.size_with_offsets(None)?, dimensions)?,
                 )?;
             }
             DatatypeProperties::Complex { component } => {
@@ -377,10 +356,15 @@ impl DatatypeMessage {
             }
             _ => {}
         }
-        Ok(Self {
+        Ok(Self::with_properties(version, properties))
+    }
+
+    fn with_properties(version: DatatypeVersion, properties: DatatypeProperties) -> Self {
+        Self {
             version,
             properties,
-        })
+            enumeration_base_offsets: None,
+        }
     }
 
     /// Returns this description's message version.
@@ -396,23 +380,31 @@ impl DatatypeMessage {
     /// Returns one element's stored byte size at `offset_width`.
     ///
     /// Variable-length elements include a heap address of the selected width. Array sizes
-    /// include their base type's stored size at that width.
+    /// include their base type's stored size at that width. An enumeration keeps its encoded
+    /// value width, which must match the base type's size at that width.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte size
     /// field. Propagates errors from nested stored-size calculations and [`ComplexType::new`].
+    /// Returns [`FormatError::EnumBaseSizeMismatch`] if the selected width changes the stored
+    /// size of an enumeration's base type.
     /// Returns [`FormatError::Internal`] if a complex component is not floating point.
     pub fn stored_size(&self, offset_width: OffsetWidth) -> Result<u32, FormatError> {
+        self.size_with_offsets(Some(offset_width))
+    }
+
+    fn size_with_offsets(&self, destination: Option<OffsetWidth>) -> Result<u32, FormatError> {
+        // Construction uses the minimum descriptor size and keeps retained enum widths.
         match &self.properties {
             DatatypeProperties::VariableLengthSequence { .. }
-            | DatatypeProperties::VariableLengthString { .. } => Ok(super::SEQUENCE_LENGTH_SIZE
-                + u32::from(offset_width.get())
-                + super::HEAP_INDEX_SIZE),
+            | DatatypeProperties::VariableLengthString { .. } => Ok(
+                __private::variable_length_descriptor_size(destination.unwrap_or(OffsetWidth::Two)),
+            ),
             DatatypeProperties::Array {
                 base_type,
                 dimensions,
-            } => super::array_type_size(base_type.stored_size(offset_width)?, dimensions),
+            } => __private::array_type_size(base_type.size_with_offsets(destination)?, dimensions),
             DatatypeProperties::FixedPoint(datatype) => Ok(datatype.size().get()),
             DatatypeProperties::FloatingPoint(datatype) => Ok(datatype.size().get()),
             DatatypeProperties::Time(datatype) => Ok(datatype.size().get()),
@@ -420,8 +412,12 @@ impl DatatypeMessage {
             DatatypeProperties::String { size, .. }
             | DatatypeProperties::Opaque { size, .. }
             | DatatypeProperties::Compound { size, .. } => Ok(*size),
-            DatatypeProperties::Enumeration { base_type, .. } => {
-                base_type.stored_size(offset_width)
+            DatatypeProperties::Enumeration { base_type, members } => {
+                let size = enumeration_value_width(members);
+                if destination.is_some() {
+                    check_enum_base_size(size, base_type.size_with_offsets(destination)?)?;
+                }
+                Ok(size)
             }
             DatatypeProperties::Complex { component } => {
                 let DatatypeProperties::FloatingPoint(component) = component.properties else {
@@ -473,11 +469,15 @@ impl DatatypeMessage {
                     })
                     .collect::<Result<_, FormatError>>()?,
             },
-            DatatypeProperties::Enumeration { base_type, members } => Datatype::Enumeration {
-                size: base_type.stored_size(OffsetWidth::Eight)?,
-                base_type: Box::new(base_type.to_datatype()?),
-                members: members.clone(),
-            },
+            DatatypeProperties::Enumeration { base_type, members } => {
+                let size = positive_size(ENUMERATION_CLASS, enumeration_value_width(members))?;
+                Datatype::Enumeration(__private::enumeration_from_stored_parts(
+                    base_type.to_datatype()?,
+                    size,
+                    self.enumeration_base_offsets.unwrap_or(OffsetWidth::Eight),
+                    members.clone(),
+                )?)
+            }
             DatatypeProperties::VariableLengthSequence { base_type } => {
                 Datatype::VariableLength(VariableLengthType::sequence(base_type.to_datatype()?))
             }
@@ -550,7 +550,7 @@ pub enum DatatypeProperties {
     },
     /// Enumeration members using the property layout of version 3 or later.
     Enumeration {
-        /// The integer base description, including its message version.
+        /// The base description, including its message version.
         base_type: Box<DatatypeMessage>,
         /// The names and raw values of the members.
         members: Vec<EnumMember>,
@@ -581,6 +581,45 @@ pub enum DatatypeProperties {
         /// The floating-point component description, including its message version.
         component: Box<DatatypeMessage>,
     },
+}
+
+fn check_enumeration_members(members: &[EnumMember], size: u32) -> Result<(), FormatError> {
+    enumeration_member_count(members.len())?;
+    let mut names = BTreeSet::new();
+    let mut values = BTreeMap::new();
+    for (index, member) in members.iter().enumerate() {
+        let (name, value) = __private::enum_member_parts(member);
+        if name.is_empty() {
+            return Err(FormatError::EmptyEnumMemberName { index });
+        }
+        member_name(ENUMERATION_CLASS, name)?;
+        if value.len().to_u64() != u64::from(size) {
+            return Err(FormatError::EnumMemberValueSize(
+                name.into(),
+                size,
+                value.len(),
+            ));
+        }
+        if !names.insert(name) {
+            return Err(FormatError::DuplicateEnumMemberName(name.into()));
+        }
+        if let Some(first) = values.insert(value, name) {
+            return Err(FormatError::DuplicateEnumMemberValue {
+                first: first.into(),
+                second: name.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "the retained decoder and constructor check every value's u32 width"
+)]
+fn enumeration_value_width(members: &[EnumMember]) -> u32 {
+    // Retained enumerations have at least one member and each value has the checked u32 width.
+    u32::try_from(members[0].value.len()).expect("the stored enumeration value fits in u32")
 }
 
 impl DatatypeProperties {

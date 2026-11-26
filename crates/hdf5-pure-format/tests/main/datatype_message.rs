@@ -1,7 +1,8 @@
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, FixedPointType,
-    FloatingPointType, FormatError, StringPadding, TimeType, VariableLengthType,
+    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, EnumMember,
+    EnumerationType, FixedPointType, FloatingPointType, FormatError, StringPadding, TimeType,
+    VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -958,16 +959,16 @@ fn enum_values() -> [EnumValue<'static>; 2] {
 }
 
 fn enumeration_datatype() -> Datatype {
-    Datatype::Enumeration {
-        size: 4,
-        base_type: Box::new(integer_datatype()),
-        members: enum_values()
-            .into_iter()
-            .map(|EnumValue { name, value }| {
-                __private::enum_member(core::str::from_utf8(name).unwrap().into(), value.to_vec())
-            })
-            .collect(),
-    }
+    let Datatype::FixedPoint(base) = integer_datatype() else {
+        panic!("expected fixed-point base");
+    };
+    let members = enum_values()
+        .into_iter()
+        .map(|EnumValue { name, value }| {
+            EnumMember::new(core::str::from_utf8(name).unwrap().into(), value.to_vec())
+        })
+        .collect();
+    Datatype::Enumeration(EnumerationType::new(base, members).unwrap())
 }
 
 fn integer_datatype() -> Datatype {

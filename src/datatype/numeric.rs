@@ -64,24 +64,8 @@ impl NumericDecodePlan {
 impl TryFrom<&Datatype> for NumericDecodePlan {
     type Error = FormatError;
 
-    fn try_from(mut datatype: &Datatype) -> Result<Self, Self::Error> {
-        while let Datatype::Enumeration {
-            size,
-            base_type,
-            members: _,
-        } = datatype
-        {
-            let base_size = base_type.type_size();
-            if *size != base_size {
-                return Err(FormatError::EnumBaseSizeMismatch {
-                    size: *size,
-                    base_size,
-                });
-            }
-            datatype = base_type;
-        }
-
-        match datatype {
+    fn try_from(datatype: &Datatype) -> Result<Self, Self::Error> {
+        match crate::data_read::effective_numeric(datatype) {
             Datatype::FixedPoint(numeric) => Self::fixed_point(*numeric),
             Datatype::FloatingPoint(numeric) => {
                 let element_size = NumericElementSize::new(numeric.size())?;

@@ -314,8 +314,7 @@ pub enum FormatError {
     },
     /// A tiny heap ID needs a nonempty payload.
     EmptyTinyHeapIdPayload,
-    /// An enumeration datatype was built over a base type that is not an
-    /// integer. HDF5 enumerations must have a fixed-point base.
+    /// The supplied base datatype for enumeration construction is not fixed point.
     EnumBaseNotInteger,
     /// An enumeration's element size differs from its base type's element size.
     EnumBaseSizeMismatch {

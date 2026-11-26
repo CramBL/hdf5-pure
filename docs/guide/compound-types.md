@@ -156,16 +156,22 @@ builder
 For any other integer base type, use [`EnumTypeBuilder::with_base(datatype)`](crate::EnumTypeBuilder::with_base): the enumeration's element size comes from the base type, and [`value(name, val)`](crate::EnumTypeBuilder::value) encodes into that width:
 
 ```rust
-use hdf5_pure::{EnumTypeBuilder, make_u16_type};
+use hdf5_pure::{Datatype, EnumTypeBuilder, make_u16_type};
 
 let datatype = EnumTypeBuilder::with_base(make_u16_type())
     .value("Low", 1)
     .value("High", 40_000)
     .build()?;
-# assert!(matches!(datatype, hdf5_pure::Datatype::Enumeration { .. }));
+let Datatype::Enumeration(enumeration) = datatype else {
+    panic!("expected an enumeration");
+};
+assert_eq!(enumeration.size().get(), 2);
+assert_eq!(enumeration.members()[1].value, 40_000u16.to_le_bytes());
 # Ok::<(), hdf5_pure::FormatError>(())
 ```
 
-[`raw_value(name, bytes)`](crate::EnumTypeBuilder::raw_value) takes a member's raw little-endian bytes, for values wider than an `i64` (a `u64` base near its maximum) or to reproduce stored bytes verbatim. [`build()`](crate::EnumTypeBuilder::build) rejects a non-integer base, a value that does not fit the base type, and raw bytes whose length disagrees with it. Each of the three would produce a datatype message libhdf5 cannot read.
+[`raw_value(name, bytes)`](crate::EnumTypeBuilder::raw_value) takes a member's encoded bytes in the base type's byte order. Use it to reproduce stored bytes or supply a value outside the integer builder methods' range. [`build()`](crate::EnumTypeBuilder::build) requires a fixed-point base and checks each member's value.
+
+Decoded enumerations retain the stored base datatype, including supported floating-point bases. [`EnumerationType::base_type`](crate::EnumerationType::base_type) and [`EnumerationType::members`](crate::EnumerationType::members) expose the base and the stored members.
 
 For more on the writing entry points used throughout this page, see [Writing files](crate::_guide::writing).

@@ -7,8 +7,9 @@
 use std::fmt::Debug;
 
 use hdf5_pure::{
-    CharacterSet, Dataset, Datatype, DatatypeByteOrder, Error, File, FileBuilder, FixedAscii,
-    FixedPointType, FloatingPointType, FormatError, H5Element, MaxExtent, StringPadding,
+    CharacterSet, Dataset, Datatype, DatatypeByteOrder, EnumerationType, Error, File, FileBuilder,
+    FixedAscii, FixedPointType, FloatingPointType, FormatError, H5Element, MaxExtent,
+    StringPadding,
 };
 use rstest::rstest;
 
@@ -153,15 +154,11 @@ fn converts_eight_bit_targets_like_numeric_reads(
     #[case] signed_values: &[i8],
     #[values(false, true)] enumeration: bool,
 ) {
-    let datatype = Datatype::FixedPoint(FixedPointType::new(2, order, signed, 0, 16).unwrap());
+    let base = FixedPointType::new(2, order, signed, 0, 16).unwrap();
     let datatype = if enumeration {
-        Datatype::Enumeration {
-            size: 2,
-            base_type: Box::new(datatype),
-            members: Vec::new(),
-        }
+        Datatype::Enumeration(EnumerationType::new(base, Vec::new()).unwrap())
     } else {
-        datatype
+        Datatype::FixedPoint(base)
     };
     let mut builder = FileBuilder::new();
     let count = u64::try_from(unsigned.len()).unwrap();

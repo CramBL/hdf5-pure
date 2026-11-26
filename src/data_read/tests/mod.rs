@@ -113,20 +113,17 @@ fn read_u8_data() {
 }
 
 fn make_enum_type(base: Datatype, members: &[(&str, i64)]) -> Datatype {
-    let width = base.type_size() as usize;
-    Datatype::Enumeration {
-        size: base.type_size(),
-        base_type: Box::new(base),
-        members: members
-            .iter()
-            .map(|(name, v)| {
-                crate::datatype::__private::enum_member(
-                    (*name).to_string(),
-                    v.to_le_bytes()[..width].to_vec(),
-                )
-            })
-            .collect(),
-    }
+    let Datatype::FixedPoint(base) = base else {
+        panic!("expected fixed-point base, got {base:?}");
+    };
+    let width = base.size().get() as usize;
+    let members = members
+        .iter()
+        .map(|(name, value)| {
+            crate::EnumMember::new((*name).to_string(), value.to_le_bytes()[..width].to_vec())
+        })
+        .collect();
+    Datatype::Enumeration(crate::EnumerationType::new(base, members).unwrap())
 }
 
 #[test]

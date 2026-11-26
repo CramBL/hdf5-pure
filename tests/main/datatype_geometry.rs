@@ -1,17 +1,19 @@
-use hdf5_pure::{
-    CompoundTypeBuilder, Datatype, EnumTypeBuilder, Error, FileBuilder, FormatError, OffsetWidth,
-};
+use hdf5_pure::{CompoundTypeBuilder, Datatype, Error, FileBuilder, FormatError, OffsetWidth};
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::PreparedDatatype;
 use rstest::rstest;
+use test_util::datatype::VariableLengthSequence;
+use test_util::datatype::containers::{self, EnumValue};
+use test_util::datatype::leaf::{Leaf, Version};
 
 #[rstest]
 #[case::overlap(overlapping_compound(), FormatError::CompoundFieldOverlap {
     first: "first".into(),
     second: "second".into(),
 })]
-#[case::enum_size(mismatched_enumeration(), FormatError::EnumBaseSizeMismatch {
-    size: 2,
-    base_size: 1,
+#[case::enumeration(decoded_narrow_enumeration(), FormatError::EnumBaseSizeMismatch {
+    size: 12,
+    base_size: 16,
 })]
 fn writer_rejects_invalid_datatype_geometry_before_output(
     #[case] datatype: Datatype,
@@ -23,6 +25,7 @@ fn writer_rejects_invalid_datatype_geometry_before_output(
         expected
     );
     let mut builder = FileBuilder::new();
+    builder.with_offset_width(OffsetWidth::Eight);
     if committed {
         builder.commit_datatype("value", datatype);
     } else {
@@ -39,46 +42,23 @@ fn writer_rejects_invalid_datatype_geometry_before_output(
     assert_eq!(destination, b"previous bytes");
 }
 
-#[rstest]
-#[case::inline_dataset(false)]
-#[case::committed_datatype(true)]
-fn writer_rejects_mismatched_enumeration_value_widths_before_output(#[case] committed: bool) {
-    let build = || {
-        let mut datatype = EnumTypeBuilder::u8_based()
-            .u8_value("first", 1)
-            .u8_value("last", 2)
-            .build()
-            .unwrap();
-        let Datatype::Enumeration { members, .. } = &mut datatype else {
-            panic!("expected an enumeration datatype");
-        };
-        members[0].value.push(2);
-        members[1].value.clear();
-
-        let mut builder = FileBuilder::new();
-        if committed {
-            builder.commit_datatype("value", datatype);
-        } else {
-            builder
-                .create_dataset("value")
-                .with_enum_u8_data(datatype, &[1, 2]);
-        }
-        builder
-    };
-    let expected = FormatError::EnumMemberValueSize("first".into(), 1, 2);
-    let error = build().finish().unwrap_err();
-    let Error::Format(error) = error else {
-        panic!("expected a format error, got {error:?}");
-    };
-    assert_eq!(error, expected);
-
-    let mut destination = b"previous bytes".to_vec();
-    let error = build().finish_to(&mut destination).unwrap_err();
-    let Error::Format(error) = error else {
-        panic!("expected a format error, got {error:?}");
-    };
-    assert_eq!(error, expected);
-    assert_eq!(destination, b"previous bytes");
+fn decoded_narrow_enumeration() -> Datatype {
+    let leaf = Leaf::LittleInteger.bytes(Version::One);
+    let sequence = VariableLengthSequence::new(Version::One, 4, &leaf);
+    let size = sequence.descriptor_size();
+    let bytes = containers::enumeration(
+        Version::Three.get(),
+        [1, 0, 0],
+        size,
+        &sequence.build(),
+        &[EnumValue {
+            name: b"empty",
+            value: &[0; 12],
+        }],
+    );
+    let (datatype, consumed) = format::parse_datatype(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    datatype
 }
 
 fn overlapping_compound() -> Datatype {
@@ -91,17 +71,5 @@ fn overlapping_compound() -> Datatype {
         panic!("expected a compound datatype");
     };
     members[1].byte_offset = 3;
-    datatype
-}
-
-fn mismatched_enumeration() -> Datatype {
-    let mut datatype = EnumTypeBuilder::u8_based()
-        .u8_value("first", 1)
-        .build()
-        .unwrap();
-    let Datatype::Enumeration { size, .. } = &mut datatype else {
-        panic!("expected an enumeration datatype");
-    };
-    *size = 2;
     datatype
 }

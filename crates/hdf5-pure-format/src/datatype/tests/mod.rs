@@ -1,5 +1,7 @@
-use hdf5_pure_core::FloatingPointField;
+use hdf5_pure_core::{EnumMember, EnumerationType, FloatingPointField};
 use rstest::rstest;
+use test_util::datatype as fixture;
+use test_util::datatype::containers::{self, EnumValue};
 
 use super::*;
 
@@ -58,14 +60,6 @@ fn the_class_gate_admits_every_reference_holding_datatype() {
             Datatype::VariableLength(VariableLengthType::sequence(object_ref())),
         ),
         (
-            "an enumeration over one",
-            Datatype::Enumeration {
-                size: 8,
-                base_type: Box::new(object_ref()),
-                members: vec![__private::enum_member("a".into(), vec![0; 8])],
-            },
-        ),
-        (
             "one nested two deep",
             Datatype::Array {
                 base_type: Box::new(Datatype::Compound {
@@ -89,6 +83,40 @@ fn the_class_gate_admits_every_reference_holding_datatype() {
             encoded[0] & 0x0F
         );
     }
+}
+
+#[test]
+fn object_address_checks_recognize_enumerations_with_reference_bases() {
+    let parent = fixture::object_reference(8);
+    let value = 0x1234u64.to_le_bytes();
+    let bytes = containers::enumeration(
+        DATATYPE_VERSION_THREE,
+        [1, 0, 0],
+        8,
+        &parent,
+        &[EnumValue {
+            name: b"object",
+            value: &value,
+        }],
+    );
+    let (datatype, consumed) = parse_datatype(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    let Datatype::Enumeration(enumeration) = &datatype else {
+        panic!("expected an enumeration, got {datatype:?}");
+    };
+    assert_eq!(
+        enumeration.base_type(),
+        &Datatype::Reference {
+            size: 8,
+            ref_type: ReferenceType::Object,
+        }
+    );
+    assert_eq!(
+        enumeration.members(),
+        [EnumMember::new("object".into(), value.to_vec())]
+    );
+    assert!(datatype_holds_object_address(&datatype));
+    assert!(class_may_hold_object_address(bytes[0]));
 }
 
 /// `class_may_hold_object_address` is a necessary condition for holding an
@@ -794,12 +822,13 @@ fn test_enumeration() {
 
     let (dt, _) = parse_datatype(&buf).unwrap();
     match dt {
-        Datatype::Enumeration {
-            size,
-            base_type,
-            members,
-        } => {
-            assert_eq!(size, 4);
+        Datatype::Enumeration(datatype) => {
+            assert_eq!(
+                datatype.base_type(),
+                &Datatype::FixedPoint(FixedPointType::i32())
+            );
+            assert_eq!(datatype.size().get(), 4);
+            let members = datatype.members();
             assert_eq!(members.len(), 3);
             assert_eq!(members[0].name, "RED");
             assert_eq!(members[0].value, 0i32.to_le_bytes().to_vec());
@@ -807,11 +836,6 @@ fn test_enumeration() {
             assert_eq!(members[1].value, 1i32.to_le_bytes().to_vec());
             assert_eq!(members[2].name, "BLUE");
             assert_eq!(members[2].value, 2i32.to_le_bytes().to_vec());
-            match *base_type {
-                Datatype::FixedPoint(numeric)
-                    if numeric.size().get() == 4 && numeric.layout().signed() => {}
-                other => panic!("expected i32, got {other:?}"),
-            }
         }
         _ => panic!("expected Enumeration"),
     }
@@ -1292,7 +1316,8 @@ fn test_nested_compound_array_enum() {
                 } => {
                     assert_eq!(dimensions, &[2]);
                     match base_type.as_ref() {
-                        Datatype::Enumeration { members, .. } => {
+                        Datatype::Enumeration(datatype) => {
+                            let members = datatype.members();
                             assert_eq!(members.len(), 2);
                             assert_eq!(members[0].name, "A");
                             assert_eq!(members[1].name, "B");
@@ -1393,65 +1418,52 @@ fn serialize_parse_compound_roundtrip() {
 
 #[test]
 fn serialize_parse_enum_roundtrip() {
-    let dt = Datatype::Enumeration {
-        size: 4,
-        base_type: Box::new(Datatype::FixedPoint(
-            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
-        )),
-        members: vec![
-            __private::enum_member("RED".to_string(), 0i32.to_le_bytes().to_vec()),
-            __private::enum_member("GREEN".to_string(), 1i32.to_le_bytes().to_vec()),
-            __private::enum_member("BLUE".to_string(), 2i32.to_le_bytes().to_vec()),
-        ],
-    };
+    let dt = make_enum(
+        FixedPointType::i32(),
+        &[("RED", 0), ("GREEN", 1), ("BLUE", 2)],
+    );
     let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, _) = parse_datatype(&bytes).unwrap();
     assert_eq!(parsed, dt);
 }
 
 /// Builds a fixed-point base type for enumeration tests.
-fn enum_base_fp(size: u32, be: bool, signed: bool) -> Datatype {
-    Datatype::FixedPoint(
-        FixedPointType::new(
-            size,
-            if be {
-                DatatypeByteOrder::BigEndian
-            } else {
-                DatatypeByteOrder::LittleEndian
-            },
-            signed,
-            0,
-            u16::try_from(size * 8).unwrap(),
-        )
-        .unwrap(),
+fn fixed_point_enum_base(size: u32, be: bool, signed: bool) -> FixedPointType {
+    FixedPointType::new(
+        size,
+        if be {
+            DatatypeByteOrder::BigEndian
+        } else {
+            DatatypeByteOrder::LittleEndian
+        },
+        signed,
+        0,
+        u16::try_from(size * 8).unwrap(),
     )
+    .unwrap()
 }
 
 /// Builds an enum datatype over `base`, storing each member value truncated to
 /// the base width (the value blob is opaque bytes, so any content round-trips).
-fn make_enum(base: Datatype, members: &[(&str, i64)]) -> Datatype {
-    let size = base.type_size();
-    let width = size as usize;
-    Datatype::Enumeration {
-        size,
-        base_type: Box::new(base),
-        members: members
-            .iter()
-            .map(|(name, v)| {
-                __private::enum_member((*name).to_string(), v.to_le_bytes()[..width].to_vec())
-            })
-            .collect(),
-    }
+fn make_enum(base: FixedPointType, members: &[(&str, i64)]) -> Datatype {
+    let width = base.size().get() as usize;
+    let members = members
+        .iter()
+        .map(|(name, value)| {
+            EnumMember::new((*name).to_string(), value.to_le_bytes()[..width].to_vec())
+        })
+        .collect();
+    Datatype::Enumeration(EnumerationType::new(base, members).unwrap())
 }
 
 #[test]
 fn serialize_parse_enum_base_type_variety() {
     for base in [
-        enum_base_fp(1, false, false), // u8
-        enum_base_fp(2, true, true),   // i16 big-endian
-        enum_base_fp(8, false, true),  // i64
+        fixed_point_enum_base(1, false, false), // u8
+        fixed_point_enum_base(2, true, true),   // i16 big-endian
+        fixed_point_enum_base(8, false, true),  // i64
     ] {
-        let dt = make_enum(base.clone(), &[("A", 0), ("B", 1), ("NEG", -1)]);
+        let dt = make_enum(base, &[("A", 0), ("B", 1), ("NEG", -1)]);
         let bytes = serialize_datatype(&dt).unwrap();
         let (parsed, consumed) = parse_datatype(&bytes).unwrap();
         assert_eq!(parsed, dt, "round-trip failed for base {base:?}");
@@ -1465,33 +1477,18 @@ fn serialize_parse_enum_large_member_count() {
     // split across bf0/bf1 in the datatype message header.
     let owned: Vec<(String, i64)> = (0..300).map(|i| (format!("M{i}"), i)).collect();
     let members: Vec<(&str, i64)> = owned.iter().map(|(n, v)| (n.as_str(), *v)).collect();
-    let dt = make_enum(enum_base_fp(4, false, true), &members);
+    let dt = make_enum(fixed_point_enum_base(4, false, true), &members);
     let bytes = serialize_datatype(&dt).unwrap();
     let (parsed, _) = parse_datatype(&bytes).unwrap();
     assert_eq!(parsed, dt);
     match parsed {
-        Datatype::Enumeration { members, .. } => {
+        Datatype::Enumeration(datatype) => {
+            let members = datatype.members();
             assert_eq!(members.len(), 300);
             assert_eq!(members[299].name, "M299");
         }
         other => panic!("expected Enumeration, got {other:?}"),
     }
-}
-
-#[test]
-fn canonical_enumeration_serialization_rejects_an_oversized_value() {
-    let dt = Datatype::Enumeration {
-        size: 1,
-        base_type: Box::new(enum_base_fp(1, false, false)),
-        members: vec![__private::enum_member(
-            "X".to_string(),
-            5i32.to_le_bytes().to_vec(),
-        )],
-    };
-    assert_eq!(
-        serialize_datatype(&dt).unwrap_err(),
-        FormatError::EnumMemberValueSize("X".into(), 1, 4)
-    );
 }
 
 #[test]

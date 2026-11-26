@@ -192,13 +192,14 @@ fn reads_c_offset_integers(
     let stored = dataset.datatype().unwrap();
     assert_eq!(u8::convert_raw(&[0xB0, 0x30], &stored).unwrap(), [11, 3]);
     assert_eq!(i8::convert_raw(&[0xB0, 0x30], &stored).unwrap(), [11, 3]);
-    let base = match &stored {
-        Datatype::Enumeration { base_type, .. } => base_type.as_ref(),
-        other => other,
+    let base = match (enumeration, &stored) {
+        (true, Datatype::Enumeration(datatype)) => datatype.base_type(),
+        (false, Datatype::FixedPoint(_)) => &stored,
+        _ => panic!("unexpected datatype {stored:?}"),
     };
     assert_eq!(
-        *base,
-        Datatype::FixedPoint(FixedPointType::new(1, pure_order(big_endian), false, 4, 4).unwrap())
+        base,
+        &Datatype::FixedPoint(FixedPointType::new(1, pure_order(big_endian), false, 4, 4).unwrap())
     );
 }
 

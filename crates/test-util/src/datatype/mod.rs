@@ -1,6 +1,16 @@
 //! Datatype message bodies: section
 //! `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
 
+use crate::data_layout;
+use crate::dataspace;
+use crate::image::Image;
+use crate::link_message::HardLink;
+use crate::object_header::Message;
+use crate::object_header::MessageType;
+use crate::object_header::v2::Header;
+use crate::superblock::v2::Superblock;
+use crate::widths::Widths;
+
 pub mod containers;
 pub mod float_context;
 pub mod leaf;
@@ -241,3 +251,89 @@ const IEEE754_BINARY64_CLASS_FIELDS: [u8; 3] = [0x20, 0x3F, 0];
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 const OBJECT_REFERENCE: [u8; 3] = [0; 3];
+
+// "The Datatype Message" of the format specification, version 4.0, defines 2 as the
+// normalization value for an implied leading bit.
+const MANTISSA_NORMALIZATION_IMPLIED_LEADING_ONE: u8 = 2 << 4;
+const IEEE754_BINARY32_CLASS_FIELDS: [u8; 3] = [MANTISSA_NORMALIZATION_IMPLIED_LEADING_ONE, 31, 0];
+
+/// Encodes a version 3 enumeration with a binary32 base and one member.
+///
+/// Pass `4` for a matching declared size or another size to test mismatched widths.
+pub fn float_enum_body(size: u32) -> Vec<u8> {
+    let mut parent = header(
+        Class::FLOATING_POINT,
+        leaf::Version::One.get(),
+        IEEE754_BINARY32_CLASS_FIELDS,
+        4,
+    );
+    parent.extend_from_slice(&[0, 0, 32, 0, 23, 8, 0, 23, 127, 0, 0, 0]);
+    containers::enumeration(
+        leaf::Version::Three.get(),
+        [1, 0, 0],
+        size,
+        &parent,
+        &[containers::EnumValue {
+            name: b"one",
+            value: &1.0f32.to_le_bytes(),
+        }],
+    )
+}
+
+/// Builds a file with a compact dataset whose datatype comes from [`float_enum_body`].
+pub fn float_enum_dataset(size: u32) -> Vec<u8> {
+    let mut image = Image::starting_with(&[0; ENUM_FIXTURE_SUPERBLOCK_SIZE]);
+    let datatype = float_enum_body(size);
+    let dataspace = dataspace::v2(
+        1,
+        dataspace::Flags::NONE,
+        dataspace::Kind::SIMPLE,
+        &[1],
+        None,
+    );
+    let layout = data_layout::compact(&1.0f32.to_le_bytes());
+    let dataset = u64::try_from(
+        image.append(
+            &Header::new()
+                .messages([
+                    Message::new(MessageType::DATASPACE, &dataspace),
+                    Message::new(MessageType::DATATYPE, &datatype),
+                    Message::new(MessageType::DATA_LAYOUT, &layout),
+                ])
+                .build(),
+        ),
+    )
+    .unwrap();
+    let mut link_info = vec![ENUM_FIXTURE_LINK_INFO_VERSION, 0];
+    link_info.extend_from_slice(&[u8::MAX; 16]);
+    let root = u64::try_from(
+        image.append(
+            &Header::new()
+                .messages([
+                    Message::new(MessageType::LINK_INFO, &link_info),
+                    Message::new(
+                        MessageType::GROUP_INFO,
+                        &[ENUM_FIXTURE_GROUP_INFO_VERSION, 0],
+                    ),
+                    Message::new(
+                        MessageType::LINK,
+                        &HardLink::new("values", dataset).build(Widths::EIGHT),
+                    ),
+                ])
+                .build(),
+        ),
+    )
+    .unwrap();
+    let superblock = Superblock::new(Widths::EIGHT)
+        .root_header_address(root)
+        .eof_address(u64::try_from(image.as_bytes().len()).unwrap())
+        .build();
+    image.place(0, &superblock);
+    image.build()
+}
+
+// "Format Signature and Superblock", "The Link Info Message", and "The Group Info
+// Message" in the format specification, version 4.0, define these structures.
+const ENUM_FIXTURE_SUPERBLOCK_SIZE: usize = 48;
+const ENUM_FIXTURE_LINK_INFO_VERSION: u8 = 0;
+const ENUM_FIXTURE_GROUP_INFO_VERSION: u8 = 0;

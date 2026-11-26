@@ -7,7 +7,7 @@ use rstest::rstest;
 
 use crate::data_read::*;
 use crate::datatype::layout::FloatingPointLayout;
-use crate::{Error, H5Element, MantissaNormalization};
+use crate::{EnumerationType, Error, H5Element, MantissaNormalization};
 use crate::{FixedPointType, FloatingPointType};
 
 macro_rules! assert_targets {
@@ -215,36 +215,6 @@ fn rejects_partial_elements(#[values(false, true)] floating: bool) {
 }
 
 #[rstest]
-#[case::declared_wider(2, 1)]
-#[case::base_wider(1, 2)]
-#[case::zero_declared_width(0, 1)]
-fn rejects_enumeration_width_mismatch(
-    #[case] size: u32,
-    #[case] base_size: u32,
-    #[values(&[][..], &[0][..], &[0; 8][..])] raw: &[u8],
-    #[values(false, true)] nested: bool,
-) {
-    let datatype = Datatype::Enumeration {
-        size,
-        base_type: Box::new(fixed(
-            base_size,
-            false,
-            DatatypeByteOrder::LittleEndian,
-            0,
-            8,
-        )),
-        members: Vec::new(),
-    };
-    let datatype = maybe_enumeration(datatype, nested);
-    assert_targets!(
-        assert_rejects,
-        raw,
-        &datatype,
-        FormatError::EnumBaseSizeMismatch { size, base_size }
-    );
-}
-
-#[rstest]
 #[case::byte_nibble(1, 4, 4, &[0xB0, 0x70])]
 #[case::three_byte_nibble(3, 4, 4, &[0xB0, 0, 0, 0x70, 0, 0])]
 #[case::high_nibble(8, 60, 4, &[0, 0, 0, 0, 0, 0, 0, 0xB0, 0, 0, 0, 0, 0, 0, 0, 0x70])]
@@ -285,15 +255,13 @@ fn fixed(
 }
 
 fn maybe_enumeration(datatype: Datatype, enumeration: bool) -> Datatype {
-    if enumeration {
-        Datatype::Enumeration {
-            size: datatype.type_size(),
-            base_type: Box::new(datatype),
-            members: Vec::new(),
-        }
-    } else {
-        datatype
+    if !enumeration {
+        return datatype;
     }
+    let Datatype::FixedPoint(base) = datatype else {
+        panic!("expected fixed-point base, got {datatype:?}");
+    };
+    Datatype::Enumeration(EnumerationType::new(base, Vec::new()).unwrap())
 }
 
 #[rstest]
@@ -374,15 +342,7 @@ fn converts_scalar_bit_ranges(
     order: DatatypeByteOrder,
 ) {
     let datatype = fixed(2, true, order, 4, 12);
-    let datatype = if enumeration {
-        Datatype::Enumeration {
-            size: 2,
-            base_type: Box::new(datatype),
-            members: Vec::new(),
-        }
-    } else {
-        datatype
-    };
+    let datatype = maybe_enumeration(datatype, enumeration);
     let raw = match order {
         DatatypeByteOrder::LittleEndian => 0x02A0u16.to_le_bytes(),
         DatatypeByteOrder::BigEndian => 0x02A0u16.to_be_bytes(),

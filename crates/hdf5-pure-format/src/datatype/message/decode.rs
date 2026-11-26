@@ -32,6 +32,9 @@ pub(in crate::datatype) struct Decoded<T> {
     pub(in crate::datatype) datatype: T,
     /// The size in bytes of one stored element.
     pub(in crate::datatype) stored_size: NonZeroU32,
+    /// The offset width inferred from a variable-length descriptor's size, including
+    /// through array bases.
+    pub(in crate::datatype) size_offsets: Option<OffsetWidth>,
 }
 
 /// Whether to decode a semantic datatype or retain its message versions.
@@ -49,7 +52,7 @@ pub(in crate::datatype) enum Layout {
     Compound(Compound),
     Reference,
     Enumeration(Enumeration),
-    VariableLength(VariableLengthMetadata),
+    VariableLength(VariableLengthMetadata, OffsetWidth),
     Array(Array),
     Complex(Complex),
 }
@@ -92,8 +95,7 @@ impl Layout {
             }
             DatatypeClass::VariableLength => {
                 let metadata = datatype::parse_variable_length_metadata(flags)?;
-                descriptor_width(size)?;
-                Self::VariableLength(metadata)
+                Self::VariableLength(metadata, descriptor_width(size)?)
             }
             DatatypeClass::Array => Self::Array(Array::from_header(header, projection)?),
             DatatypeClass::Complex => Self::Complex(Complex::from_header(header)?),
@@ -411,7 +413,7 @@ pub(in crate::datatype) fn array_size(
 ) -> Result<NonZeroU32, FormatError> {
     let expected = super::positive_size(
         ARRAY_CLASS,
-        datatype::array_type_size(base_size.get(), dimensions)?,
+        __private::array_type_size(base_size.get(), dimensions)?,
     )?;
     if declared_size != expected.get() {
         return Err(FormatError::InvalidDatatypeSize {
@@ -492,12 +494,10 @@ impl Complex {
 /// Returns [`FormatError::InvalidVariableLengthSize`] if the descriptor size is not 10, 12,
 /// or 16 bytes.
 fn descriptor_width(size: u32) -> Result<OffsetWidth, FormatError> {
-    let width = size
-        .checked_sub(datatype::SEQUENCE_LENGTH_SIZE + datatype::HEAP_INDEX_SIZE)
-        .and_then(|width| u8::try_from(width).ok())
-        .ok_or(FormatError::InvalidVariableLengthSize { size })?;
-    OffsetWidth::try_from(width)
-        .map_err(|_invalid_width| FormatError::InvalidVariableLengthSize { size })
+    [OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight]
+        .into_iter()
+        .find(|&offsets| __private::variable_length_descriptor_size(offsets) == size)
+        .ok_or(FormatError::InvalidVariableLengthSize { size })
 }
 
 // "The Datatype Message" in format specification version 4.0 pads terminated compound and

@@ -59,8 +59,8 @@ impl DatatypeMessage {
     /// Checks compound member bounds and overlaps using the sizes stored in the member
     /// descriptions. Reserves member capacity after reading a member's nested datatype and
     /// checking its byte range. A compound must have at least one member, with unique UTF-8 names.
-    /// Enumerations have a fixed-point parent and at least one member, with nonempty, unique
-    /// UTF-8 names and distinct raw values of the parent's width. The nesting limit is 64
+    /// Retains the enumeration's parent and reads at least one member, each with a nonempty,
+    /// unique UTF-8 name and a distinct raw value of the parent's width. The nesting limit is 64
     /// descriptions on one parent chain, including the outer description.
     ///
     /// The parser accepts an opaque property filled with tag bytes without a NUL terminator.
@@ -94,8 +94,8 @@ impl DatatypeMessage {
     /// Returns [`FormatError::UnsupportedDatatypeMemberEncoding`] if a member name is not
     /// UTF-8, retaining the name's byte offset and the original [`core::str::Utf8Error`].
     ///
-    /// Returns [`FormatError::EnumBaseNotInteger`] for a non-fixed-point enumeration parent,
-    /// and [`FormatError::EnumBaseSizeMismatch`] if its size differs from the enumeration size.
+    /// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration size differs from its
+    /// parent's size.
     /// Returns [`FormatError::InvalidEnumerationMemberCount`] for an enumeration without members,
     /// [`FormatError::EmptyEnumMemberName`] for an empty name,
     /// [`FormatError::DuplicateEnumMemberName`] for duplicate names, and
@@ -139,6 +139,7 @@ impl DatatypeMessage {
         depth: MessageDepth,
     ) -> Result<Decoded<Self>, FormatError> {
         let header = Header::parse(cursor, Context::Description)?;
+        let mut size_offsets = None;
         let properties = match Layout::from_header(&header, Projection::Retained)? {
             Layout::Atomic(class) => {
                 let properties = class
@@ -150,11 +151,9 @@ impl DatatypeMessage {
                     )?
                     .into_properties();
                 return Ok(Decoded {
-                    datatype: Self {
-                        version: header.version,
-                        properties,
-                    },
+                    datatype: Self::with_properties(header.version, properties),
                     stored_size: super::positive_size(header.class.code(), header.size)?,
+                    size_offsets: None,
                 });
             }
             Layout::Compound(compound) => {
@@ -172,6 +171,7 @@ impl DatatypeMessage {
                     let Decoded {
                         datatype,
                         stored_size: field_size,
+                        ..
                     } = Self::parse_at(cursor, depth.child()?)?;
                     let index = members.len();
                     layout.insert(offset, field_size, index, |member_index| {
@@ -193,14 +193,15 @@ impl DatatypeMessage {
                     member.check_compound_name_and_version(header.version, &mut names)?;
                 }
                 return Ok(Decoded {
-                    datatype: Self {
-                        version: header.version,
-                        properties: DatatypeProperties::Compound {
+                    datatype: Self::with_properties(
+                        header.version,
+                        DatatypeProperties::Compound {
                             size: header.size,
                             members,
                         },
-                    },
+                    ),
                     stored_size,
+                    size_offsets: None,
                 });
             }
             Layout::Reference => return Err(FormatError::InvalidDatatypeClass(REFERENCE_CLASS)),
@@ -208,16 +209,26 @@ impl DatatypeMessage {
                 let Decoded {
                     datatype: base_type,
                     stored_size: base_size,
+                    size_offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
-                if !matches!(base_type.properties, DatatypeProperties::FixedPoint(_)) {
-                    return Err(FormatError::EnumBaseNotInteger);
-                }
-                DatatypeProperties::Enumeration {
-                    members: enumeration.members(cursor, header.size, base_size)?,
-                    base_type: Box::new(base_type),
-                }
+                let members = enumeration.members(cursor, header.size, base_size)?;
+                super::compatible_child(header.version, ENUMERATION_CLASS, &base_type)?;
+                super::check_enumeration_members(&members, base_size.get())?;
+                return Ok(Decoded {
+                    datatype: Self {
+                        version: header.version,
+                        properties: DatatypeProperties::Enumeration {
+                            base_type: Box::new(base_type),
+                            members,
+                        },
+                        enumeration_base_offsets: base_offsets,
+                    },
+                    stored_size: base_size,
+                    size_offsets: None,
+                });
             }
-            Layout::VariableLength(metadata) => {
+            Layout::VariableLength(metadata, offsets) => {
+                size_offsets = Some(offsets);
                 let base_type = Self::parse_at(cursor, depth.child()?)?.datatype;
                 let base_type = Box::new(base_type);
                 match metadata {
@@ -238,33 +249,36 @@ impl DatatypeMessage {
                 let Decoded {
                     datatype: base_type,
                     stored_size: base_size,
+                    size_offsets: base_offsets,
                 } = Self::parse_at(cursor, depth.child()?)?;
                 let stored_size = decode::array_size(header.size, base_size, &dimensions)?;
                 super::compatible_child(header.version, ARRAY_CLASS, &base_type)?;
                 return Ok(Decoded {
-                    datatype: Self {
-                        version: header.version,
-                        properties: DatatypeProperties::Array {
+                    datatype: Self::with_properties(
+                        header.version,
+                        DatatypeProperties::Array {
                             base_type: Box::new(base_type),
                             dimensions,
                         },
-                    },
+                    ),
                     stored_size,
+                    size_offsets: base_offsets,
                 });
             }
             Layout::Complex(complex) => {
                 let (datatype, version) = complex.component(cursor, depth)?;
                 DatatypeProperties::Complex {
-                    component: Box::new(Self {
+                    component: Box::new(Self::with_properties(
                         version,
-                        properties: DatatypeProperties::FloatingPoint(datatype.component()),
-                    }),
+                        DatatypeProperties::FloatingPoint(datatype.component()),
+                    )),
                 }
             }
         };
         Ok(Decoded {
             datatype: Self::new(header.version, properties)?,
             stored_size: super::positive_size(header.class.code(), header.size)?,
+            size_offsets,
         })
     }
 
@@ -274,9 +288,9 @@ impl DatatypeMessage {
     /// variable-length descriptor size from `offset_width`, including nested descriptions.
     /// The writer computes each array size from the dimensions and the base datatype's stored
     /// element size at that width.
-    /// Atomic element sizes are independent of it. Enumeration sizes are derived from the
-    /// encoded integer parent. The writer appends unpadded, NUL-terminated names, followed
-    /// by the raw values in the same member order. Values retain their stored bytes.
+    /// Atomic element sizes are independent of it. An enumeration's stored size must match
+    /// the base type's size at that width. The writer appends unpadded, NUL-terminated names,
+    /// followed by the raw values in the same member order.
     /// Compound sizes and member offsets are retained. The writer checks member bounds and
     /// overlaps using the stored member sizes at that width and writes each UTF-8 name with a
     /// NUL terminator.
@@ -294,6 +308,8 @@ impl DatatypeMessage {
     /// limit, and [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte size
     /// field at `offset_width`. Propagates errors from checking floating-point version/order
     /// compatibility and calculating the stored element size. Returns
+    /// [`FormatError::EnumBaseSizeMismatch`] if the enumeration's value width differs from its
+    /// parent's size at `offset_width`. Returns
     /// [`FormatError::CompoundFieldOutOfBounds`] if a member exceeds its compound element
     /// at `offset_width`, and [`FormatError::CompoundFieldOverlap`] if members overlap at that
     /// width. Returns [`FormatError::AllocationFailed`] if allocation for computed array or
@@ -457,8 +473,7 @@ impl<'a> PreparedDatatype<'a> {
     ///
     /// Counts the encoded bytes without allocating an output buffer. Uses `offset_width` to size
     /// variable-length descriptors at every level. Checks compound member ranges at that width.
-    /// Requires each enumeration's declared size and value widths to match the stored size of
-    /// its base datatype.
+    /// Checks each enumeration's value width against its base type's size at `offset_width`.
     ///
     /// The writer uses at least version 3 for compounds, enumerations, and arrays, and at least
     /// version 1 for variable-length descriptions. The writer raises each container's version
@@ -480,9 +495,8 @@ impl<'a> PreparedDatatype<'a> {
     /// its compound element or [`FormatError::CompoundFieldOverlap`] if nonempty member ranges
     /// overlap.
     ///
-    /// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's declared size differs
-    /// from its base datatype's stored size, or [`FormatError::EnumMemberValueSize`] if a member
-    /// value's byte length differs from that size.
+    /// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's value width differs
+    /// from its base datatype's stored size at `offset_width`.
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the message body would exceed [`isize::MAX`]
     /// bytes, or [`FormatError::Internal`] for a datatype or reference kind without a canonical
@@ -495,7 +509,7 @@ impl<'a> PreparedDatatype<'a> {
         description: Description<'a>,
         offset_width: OffsetWidth,
     ) -> Result<Self, FormatError> {
-        let descriptor_size = variable_length_size(offset_width);
+        let descriptor_size = __private::variable_length_descriptor_size(offset_width);
         let mut preparation = Preparation {
             len: 0,
             offset_width,
@@ -600,7 +614,7 @@ impl<'a> PreparedDatatype<'a> {
         let mut output = Output {
             write_field,
             position: 0,
-            descriptor_size: variable_length_size(*offset_width),
+            descriptor_size: __private::variable_length_descriptor_size(*offset_width),
             computed_sizes: computed_sizes.iter(),
         };
         description.write(&mut output);
@@ -751,14 +765,10 @@ impl<'a> Body<'a> {
                 size: *size,
                 members: CompoundMembers::Canonical(members),
             },
-            Datatype::Enumeration {
-                size,
-                base_type,
-                members,
-            } => ContainerProperties::Enumeration {
-                declared_size: Some(*size),
-                base_type: Description::Canonical(base_type),
-                members,
+            Datatype::Enumeration(datatype) => ContainerProperties::Enumeration {
+                size: datatype.size().get(),
+                base_type: Description::Canonical(datatype.base_type()),
+                members: datatype.members(),
             },
             Datatype::VariableLength(kind) => ContainerProperties::VariableLength {
                 base_type: Description::Canonical(kind.base_type()),
@@ -819,7 +829,7 @@ impl<'a> Body<'a> {
             },
             DatatypeProperties::Enumeration { base_type, members } => {
                 ContainerProperties::Enumeration {
-                    declared_size: None,
+                    size: super::enumeration_value_width(members),
                     base_type: Description::Preserved(base_type),
                     members,
                 }
@@ -860,7 +870,7 @@ enum ContainerProperties<'a> {
         members: CompoundMembers<'a>,
     },
     Enumeration {
-        declared_size: Option<u32>,
+        size: u32,
         base_type: Description<'a>,
         members: &'a [EnumMember],
     },
@@ -891,29 +901,17 @@ impl ContainerProperties<'_> {
                 Ok(*size)
             }
             Self::Enumeration {
-                declared_size,
+                size,
                 base_type,
                 members,
             } => {
                 check_member_count(members.len(), child_depth.is_some())?;
                 let parent_size = base_type.prepare(preparation, child_depth)?;
-                if let Some(size) = declared_size {
-                    super::check_enum_base_size(*size, parent_size)?;
-                }
+                super::check_enum_base_size(*size, parent_size)?;
                 for member in *members {
-                    let (name, value) = __private::enum_member_parts(member);
-                    // The format specification, version 4.0, defines packed enumeration values
-                    // of the parent type's width in "The Datatype Message".
-                    if value.len().to_u64() != u64::from(parent_size) {
-                        return Err(FormatError::EnumMemberValueSize(
-                            name.into(),
-                            parent_size,
-                            value.len(),
-                        ));
-                    }
                     preparation.add(1)?;
-                    preparation.add(name.len())?;
-                    preparation.add(parent_size as usize)?;
+                    preparation.add(member.name.len())?;
+                    preparation.add(member.value.len())?;
                 }
                 Ok(parent_size)
             }
@@ -937,7 +935,7 @@ impl ContainerProperties<'_> {
                 })?;
                 preparation.add(1 + usize::from(rank) * size_of::<u32>())?;
                 let parent_size = base_type.prepare(preparation, child_depth)?;
-                let size = datatype::array_type_size(parent_size, dimensions)?;
+                let size = __private::array_type_size(parent_size, dimensions)?;
                 preparation.record_size(size)?;
                 Ok(size)
             }
@@ -982,21 +980,18 @@ impl ContainerProperties<'_> {
                 )
             }
             Self::Enumeration {
+                size,
                 base_type,
                 members,
-                declared_size: _,
             } => {
                 let child = base_type.write(output);
+                debug_assert_eq!(*size, child.size);
                 for member in *members {
-                    let (name, _) = __private::enum_member_parts(member);
-                    output.write(name.as_bytes());
+                    output.write(member.name.as_bytes());
                     output.write(&[0]);
                 }
                 for member in *members {
-                    let (_, value) = __private::enum_member_parts(member);
-                    // The borrowed values each have the child's checked stored size.
-                    let position = output.advance(child.size as usize);
-                    (output.write_field)(position, value);
+                    output.write(&member.value);
                 }
                 (
                     ENUMERATION_CLASS,
@@ -1067,10 +1062,6 @@ impl ContainerProperties<'_> {
             size,
         }
     }
-}
-
-fn variable_length_size(offset_width: OffsetWidth) -> u32 {
-    datatype::SEQUENCE_LENGTH_SIZE + u32::from(offset_width.get()) + datatype::HEAP_INDEX_SIZE
 }
 
 fn check_member_count(count: usize, preserved: bool) -> Result<(), FormatError> {

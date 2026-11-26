@@ -2,21 +2,23 @@
 
 use std::ffi::CString;
 
-use hdf5_pure::File;
-use hdf5_pure_core::__private;
+use hdf5_pure::{File, FileBuilder};
 use hdf5_pure_core::{
-    Datatype, DatatypeByteOrder, FixedPointType, MessageType, VariableLengthType,
+    Datatype, DatatypeByteOrder, EnumMember, EnumerationType, FixedPointType, MessageType,
+    VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader,
 };
 use libhdf5::Datatype as NativeDatatype;
+use libhdf5::datatype::{ByteOrder, EncodedEnumVariant};
 use libhdf5::file::LibraryVersion;
 use libhdf5::globals;
 use libhdf5_sys::h5i::hid_t;
 use libhdf5_sys::h5t;
 use rstest::rstest;
+use test_util::datatype;
 use test_util_hdf5::{lock, storage};
 
 #[rstest]
@@ -95,6 +97,81 @@ fn datatype_enum_codecs_preserve_native_descriptions(
     drop(pure);
 }
 
+#[test]
+fn native_reader_preserves_a_decoded_floating_point_enumeration() {
+    let _guard = lock::libhdf5_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("decoded_enum.h5");
+    std::fs::write(&path, datatype::float_enum_dataset(4)).unwrap();
+
+    let file = libhdf5::File::open(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let enumeration = dataset.dtype().unwrap();
+    let base = NativeDatatype::from_type::<f32>()
+        .unwrap()
+        .with_byte_order(ByteOrder::LittleEndian)
+        .unwrap();
+    assert_eq!(enumeration.base().unwrap(), base);
+    assert_eq!(enumeration.size(), 4);
+    assert_eq!(
+        enumeration.encoded_enum_variants().unwrap(),
+        [EncodedEnumVariant {
+            name: "one".into(),
+            value: 1.0f32.to_le_bytes().into()
+        }]
+    );
+    drop(enumeration);
+    drop(dataset);
+    file.close().unwrap();
+}
+
+#[rstest]
+fn native_reader_preserves_canonical_integer_enumeration_bytes(
+    #[values(false, true)] big_endian: bool,
+) {
+    let _guard = lock::libhdf5_guard();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("canonical_enum.h5");
+    let mut builder = FileBuilder::new();
+    let data = value(-3, big_endian);
+    builder.create_dataset("values").with_raw_data(
+        Shape::Direct.semantic(big_endian),
+        data.to_vec(),
+        1,
+    );
+    builder.write(&path).unwrap();
+
+    let file = libhdf5::File::open(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let enumeration = dataset.dtype().unwrap();
+    let base = NativeDatatype::from_type::<i16>()
+        .unwrap()
+        .with_byte_order(if big_endian {
+            ByteOrder::BigEndian
+        } else {
+            ByteOrder::LittleEndian
+        })
+        .unwrap();
+    assert_eq!(enumeration.base().unwrap(), base);
+    assert_eq!(enumeration.size(), 2);
+    assert_eq!(
+        enumeration.encoded_enum_variants().unwrap(),
+        [
+            EncodedEnumVariant {
+                name: "negative".into(),
+                value: data.into()
+            },
+            EncodedEnumVariant {
+                name: "é".into(),
+                value: value(7, big_endian).into()
+            },
+        ],
+    );
+    drop(enumeration);
+    drop(dataset);
+    file.close().unwrap();
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Shape {
     Array,
@@ -155,27 +232,23 @@ impl Shape {
     }
 
     fn semantic(self, big_endian: bool) -> Datatype {
-        let enumeration = Datatype::Enumeration {
-            size: 2,
-            base_type: Box::new(Datatype::FixedPoint(
-                FixedPointType::new(
-                    2,
-                    if big_endian {
-                        DatatypeByteOrder::BigEndian
-                    } else {
-                        DatatypeByteOrder::LittleEndian
-                    },
-                    true,
-                    0,
-                    16,
-                )
-                .unwrap(),
-            )),
-            members: vec![
-                __private::enum_member("negative".into(), value(-3, big_endian).to_vec()),
-                __private::enum_member("é".into(), value(7, big_endian).to_vec()),
-            ],
-        };
+        let base = FixedPointType::new(
+            2,
+            if big_endian {
+                DatatypeByteOrder::BigEndian
+            } else {
+                DatatypeByteOrder::LittleEndian
+            },
+            true,
+            0,
+            16,
+        )
+        .unwrap();
+        let members = vec![
+            EnumMember::new("negative".into(), value(-3, big_endian).to_vec()),
+            EnumMember::new("é".into(), value(7, big_endian).to_vec()),
+        ];
+        let enumeration = Datatype::Enumeration(EnumerationType::new(base, members).unwrap());
         match self {
             Self::Array => Datatype::Array {
                 base_type: Box::new(enumeration),
