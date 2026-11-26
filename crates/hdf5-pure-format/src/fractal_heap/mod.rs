@@ -10,6 +10,7 @@ pub(crate) mod location;
 #[cfg(test)]
 mod test_support;
 mod tracker;
+pub(crate) mod write;
 
 pub use free_space::FractalHeapFreeSection;
 pub use free_space::FractalHeapFreeSpace;

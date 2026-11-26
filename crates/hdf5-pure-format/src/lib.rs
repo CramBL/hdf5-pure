@@ -50,7 +50,6 @@ mod fixed_array;
 #[cfg(test)]
 mod fixture;
 mod fractal_heap;
-mod fractal_heap_write;
 mod free_space_manager;
 mod global_heap;
 mod group_info;

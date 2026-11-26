@@ -18,5 +18,7 @@ pub use indirect::{
     FractalHeapIndirectBlock, FractalHeapIndirectBlockRef, FractalHeapIndirectBlockView,
 };
 
-pub(crate) use layout::{CHECKSUM_LEN, DIRECT_SIGNATURE, INDIRECT_SIGNATURE, VERSION};
+pub(in crate::fractal_heap) use layout::{
+    CHECKSUM_LEN, DIRECT_SIGNATURE, INDIRECT_SIGNATURE, VERSION,
+};
 pub use layout::{FractalHeapBlock, FractalHeapBlockLayout};

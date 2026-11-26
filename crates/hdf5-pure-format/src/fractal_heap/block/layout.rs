@@ -226,11 +226,11 @@ pub enum FractalHeapBlock<'a> {
 
 // The block signatures, version, and checksum width are defined in "Fractal Heap"
 // of the format specification, version 4.0.
-pub(crate) const DIRECT_SIGNATURE: [u8; 4] = *b"FHDB";
-pub(crate) const INDIRECT_SIGNATURE: [u8; 4] = *b"FHIB";
-pub(crate) const VERSION: u8 = 0;
+pub(in crate::fractal_heap) const DIRECT_SIGNATURE: [u8; 4] = *b"FHDB";
+pub(in crate::fractal_heap) const INDIRECT_SIGNATURE: [u8; 4] = *b"FHIB";
+pub(in crate::fractal_heap) const VERSION: u8 = 0;
 const SIGNATURE_LEN: usize = 4;
-pub(crate) const CHECKSUM_LEN: usize = 4;
+pub(in crate::fractal_heap) const CHECKSUM_LEN: usize = 4;
 pub(super) const FILTER_MASK_LEN: usize = 4;
 
 #[cfg(test)]

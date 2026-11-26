@@ -32,15 +32,15 @@ use crate::fractal_heap::FractalHeapFiltering;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap::PreparedHeapId;
-use crate::fractal_heap_write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
-use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
-use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
-use crate::fractal_heap_write::ATTRIBUTE_HEAP_MAX_HEAP_SPACE;
-use crate::fractal_heap_write::ATTRIBUTE_HEAP_START_ROOT_ROWS;
-use crate::fractal_heap_write::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
-use crate::fractal_heap_write::ATTRIBUTE_HEAP_TABLE_WIDTH;
-use crate::fractal_heap_write::ManagedHeapPlan;
-use crate::fractal_heap_write::ManagedHeapPlanError;
+use crate::fractal_heap::write::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
+use crate::fractal_heap::write::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
+use crate::fractal_heap::write::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
+use crate::fractal_heap::write::ATTRIBUTE_HEAP_MAX_HEAP_SPACE;
+use crate::fractal_heap::write::ATTRIBUTE_HEAP_START_ROOT_ROWS;
+use crate::fractal_heap::write::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
+use crate::fractal_heap::write::ATTRIBUTE_HEAP_TABLE_WIDTH;
+use crate::fractal_heap::write::ManagedHeapPlan;
+use crate::fractal_heap::write::ManagedHeapPlanError;
 use crate::message_flags::MessageFlags;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
@@ -1084,12 +1084,12 @@ impl EncodedDenseAttrs {
             indexed,
         } = self;
         let count = attributes.len();
-        let max_direct = crate::fractal_heap_write::maximum_direct_block_size(
+        let max_direct = crate::fractal_heap::write::maximum_direct_block_size(
             ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
             widths.lengths,
         );
         let max_managed: u32 = (max_direct
-            - crate::fractal_heap_write::attribute_heap_direct_block_header(widths.offsets)
+            - crate::fractal_heap::write::attribute_heap_direct_block_header(widths.offsets)
                 .to_u64())
         .narrow()?;
 

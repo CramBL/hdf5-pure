@@ -22,15 +22,15 @@ use crate::fractal_heap::FractalHeapFiltering;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap::PreparedHeapId;
-use crate::fractal_heap_write::GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE;
-use crate::fractal_heap_write::GROUP_HEAP_MAX_HEAP_SIZE_BITS;
-use crate::fractal_heap_write::GROUP_HEAP_MAX_MANAGED_OBJECT;
-use crate::fractal_heap_write::GROUP_HEAP_START_ROOT_ROWS;
-use crate::fractal_heap_write::GROUP_HEAP_STARTING_BLOCK_SIZE;
-use crate::fractal_heap_write::GROUP_HEAP_TABLE_WIDTH;
-use crate::fractal_heap_write::ManagedHeapPlacement;
-use crate::fractal_heap_write::ManagedHeapPlan;
-use crate::fractal_heap_write::ManagedHeapPlanError;
+use crate::fractal_heap::write::GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE;
+use crate::fractal_heap::write::GROUP_HEAP_MAX_HEAP_SIZE_BITS;
+use crate::fractal_heap::write::GROUP_HEAP_MAX_MANAGED_OBJECT;
+use crate::fractal_heap::write::GROUP_HEAP_START_ROOT_ROWS;
+use crate::fractal_heap::write::GROUP_HEAP_STARTING_BLOCK_SIZE;
+use crate::fractal_heap::write::GROUP_HEAP_TABLE_WIDTH;
+use crate::fractal_heap::write::ManagedHeapPlacement;
+use crate::fractal_heap::write::ManagedHeapPlan;
+use crate::fractal_heap::write::ManagedHeapPlanError;
 use crate::link_info::{LinkInfoAddressField, LinkInfoMessage};
 use crate::link_storage::GroupLinkStorage;
 use crate::link_storage::LinkCreationPolicy;
@@ -517,7 +517,7 @@ impl DenseLinkPlan {
             tiny_objects_count: 0,
             table_width: GROUP_HEAP_TABLE_WIDTH,
             starting_block_size: GROUP_HEAP_STARTING_BLOCK_SIZE,
-            max_direct_block_size: crate::fractal_heap_write::maximum_direct_block_size(
+            max_direct_block_size: crate::fractal_heap::write::maximum_direct_block_size(
                 GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE,
                 length_width,
             ),

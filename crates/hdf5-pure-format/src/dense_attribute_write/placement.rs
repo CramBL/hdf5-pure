@@ -9,7 +9,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap::PreparedHeapId;
-use crate::fractal_heap_write::ManagedHeapPlacement;
+use crate::fractal_heap::write::ManagedHeapPlacement;
 use crate::message_flags::MessageFlags;
 
 use super::DenseAttrPlan;
