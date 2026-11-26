@@ -19,7 +19,8 @@ Within a module, we prefer to order items top-down. This means that items within
 
 Usually `const` values will thus go on the bottom of the module (least complex, usually no dependencies of their own), although in larger modules it can make sense to place a `const` directly below the user (especially if there is a single user, or just a few co-located users).
 
-The `#[cfg(test)] mod tests {}` module goes on the very bottom, if present. Module declarations (`mod foo;`) come after the imports and before other items.
+Put `#[cfg(test)] mod tests` last. Place other module declarations written as `mod name;`
+after the imports and before other items. See [Modules](#modules) for `mod.rs` and inline modules.
 
 Top-down ordering decides where an item sits in a module. The [HDF5 file format specification][spec] decides the order of everything that mirrors it: the fields of a struct that holds an on-disk structure are declared in the order the specification lists them, a parser reads them in that order, a writer emits them in that order, and an enum of message types, datatype classes or filter identifiers lists its variants in the specification's order. So a module that implements a specification section reads top-down from the public type to its helpers, and the public type reads like the specification's table.
 
@@ -201,11 +202,24 @@ We prefer not to elide lifetimes when naming types that are generic over lifetim
 
 ## Modules
 
-A module is a file. An inline module (`mod foo { .. }`) has two uses: `#[cfg(test)] mod tests` at the bottom of the file it tests, and a private module that seals a trait, so that the trait's bound cannot be implemented outside the crate. Everything else that would be an inline module is a file.
+A `mod.rs` is a module index at every depth, including `tests/mod.rs`. It may contain only
+module documentation, module-level attributes, declarations such as `mod reader;`, and
+re-exports of specific items, such as `pub(super) use self::reader::Reader;`.
+Attributes may also appear on declarations and re-exports.
 
-Apply the file rule once a separate module helps organize the tests.
+Put implementation and test code in files named for their responsibilities. Shared types
+and orchestration belong in named files with a clear owner. Keep a type's private
+representation and the operations that establish its invariants together.
 
-[TESTING.md](TESTING.md#test-organization) defines test module ownership and integration-test bundling.
+A cohesive leaf module can remain a single named file. Introduce a directory when child
+modules help separate its responsibilities.
+
+In files other than `mod.rs`, use an inline module (`mod name { ... }`) only for a
+`#[cfg(test)] mod tests` at the end of the file it tests or for a private module that seals
+a trait. Move inline tests into named files when separate modules help organize them.
+
+[TESTING.md](TESTING.md#test-organization) defines test module ownership and integration-test
+bundling.
 
 ## Imports
 
