@@ -697,6 +697,7 @@ pub use hdf5_pure_core::Datatype;
 #[doc(inline)]
 pub use hdf5_pure_core::DatatypeByteOrder;
 #[doc(inline)]
+pub use hdf5_pure_core::DatatypeMemberName;
 pub use hdf5_pure_core::EnumMember;
 pub use hdf5_pure_core::EnumerationType;
 #[doc(inline)]

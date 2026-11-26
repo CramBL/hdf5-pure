@@ -47,7 +47,7 @@ use crate::vl_data::VlElement;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
-use crate::{EnumMember, EnumerationType, FixedPointType, FloatingPointType};
+use crate::{DatatypeMemberName, EnumMember, EnumerationType, FixedPointType, FloatingPointType};
 
 mod zfp;
 
@@ -468,6 +468,9 @@ impl CompoundTypeBuilder {
 /// [`raw_value(name, bytes)`](Self::raw_value) for one wider than an `i64`. Then call
 /// [`build`](Self::build).
 ///
+/// Pass names as strings or byte slices. [`build`](Self::build) preserves the name bytes and
+/// rejects embedded NUL bytes.
+///
 /// # Examples
 ///
 /// ```rust
@@ -483,7 +486,7 @@ impl CompoundTypeBuilder {
 /// ```
 pub struct EnumTypeBuilder {
     base_type: Datatype,
-    members: Vec<(String, PendingEnumValue)>,
+    members: Vec<(Vec<u8>, PendingEnumValue)>,
 }
 
 /// A member value awaiting the base type's width, resolved by
@@ -518,18 +521,16 @@ impl EnumTypeBuilder {
         }
     }
 
-    /// Add a named value, encoded little-endian into the base type's width.
+    /// Adds a named value, encoded little-endian into the base type's width.
     ///
-    /// A value that does not fit the base type is refused by
-    /// [`build`](Self::build) with [`FormatError::EnumMemberValueRange`].
-    pub fn value(mut self, name: &str, val: i32) -> Self {
-        self.members
-            .push((name.to_string(), PendingEnumValue::Int(val as i64)));
-        self
+    /// [`build`](Self::build) returns [`FormatError::EnumMemberValueRange`] if the value is out
+    /// of range or the base is wider than eight bytes.
+    pub fn value(self, name: impl AsRef<[u8]>, val: i32) -> Self {
+        self.i64_value(name, i64::from(val))
     }
 
-    /// Add a named u8 value.
-    pub fn u8_value(self, name: &str, val: u8) -> Self {
+    /// Adds a named value from a `u8`.
+    pub fn u8_value(self, name: impl AsRef<[u8]>, val: u8) -> Self {
         self.value(name, i32::from(val))
     }
 
@@ -537,9 +538,9 @@ impl EnumTypeBuilder {
     ///
     /// [`build`](Self::build) returns [`FormatError::EnumMemberValueRange`] if
     /// the value is out of range or the base is wider than eight bytes.
-    pub fn i64_value(mut self, name: &str, val: i64) -> Self {
+    pub fn i64_value(mut self, name: impl AsRef<[u8]>, val: i64) -> Self {
         self.members
-            .push((name.to_string(), PendingEnumValue::Int(val)));
+            .push((name.as_ref().to_vec(), PendingEnumValue::Int(val)));
         self
     }
 
@@ -548,9 +549,11 @@ impl EnumTypeBuilder {
     /// Pass the bytes in the base type's byte order. [`build`](Self::build)
     /// returns [`FormatError::EnumMemberValueSize`] if `bytes` has a different
     /// length than the base type's size.
-    pub fn raw_value(mut self, name: &str, bytes: &[u8]) -> Self {
-        self.members
-            .push((name.to_string(), PendingEnumValue::Raw(bytes.to_vec())));
+    pub fn raw_value(mut self, name: impl AsRef<[u8]>, bytes: &[u8]) -> Self {
+        self.members.push((
+            name.as_ref().to_vec(),
+            PendingEnumValue::Raw(bytes.to_vec()),
+        ));
         self
     }
 
@@ -563,7 +566,7 @@ impl EnumTypeBuilder {
     /// than the base. Returns [`FormatError::EnumMemberValueRange`] if an integer value
     /// is out of range or the base is wider than eight bytes.
     /// Returns [`FormatError::ValueTooLargeForPlatform`] if the base width does not fit in
-    /// [`usize`].
+    /// [`usize`] and [`FormatError::DatatypeMemberNameContainsNul`] if a name contains a NUL byte.
     pub fn build(self) -> Result<Datatype, FormatError> {
         let Datatype::FixedPoint(base_type) = self.base_type else {
             return Err(FormatError::EnumBaseNotInteger);
@@ -574,6 +577,7 @@ impl EnumTypeBuilder {
 
         let mut members = Vec::with_capacity(self.members.len());
         for (name, pending) in self.members {
+            let name = DatatypeMemberName::try_from(name)?;
             let value = match pending {
                 PendingEnumValue::Raw(bytes) => {
                     if bytes.len() != width {

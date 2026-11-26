@@ -95,6 +95,7 @@ pub use hdf5_pure_core::ComplexType;
 pub use hdf5_pure_core::CompoundMember;
 pub use hdf5_pure_core::Datatype;
 pub use hdf5_pure_core::DatatypeByteOrder;
+pub use hdf5_pure_core::DatatypeMemberName;
 pub use hdf5_pure_core::EnumMember;
 pub use hdf5_pure_core::EnumerationType;
 pub use hdf5_pure_core::FillTime;

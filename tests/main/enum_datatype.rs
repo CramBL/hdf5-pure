@@ -7,8 +7,9 @@
 //! itself preserves the member name/value pairs. See issue #129.
 
 use hdf5_pure::{
-    DType, Datatype, DatatypeByteOrder, EnumMember, EnumTypeBuilder, EnumerationType, Error, File,
-    FileBuilder, FixedPointType, FloatingPointType, FormatError, MessageType, RepackOptions,
+    DType, Datatype, DatatypeByteOrder, DatatypeMemberName, EnumMember, EnumTypeBuilder,
+    EnumerationType, Error, File, FileBuilder, FixedPointType, FloatingPointType, FormatError,
+    MessageType, RepackOptions,
 };
 use hdf5_pure_format::__private::{AccessMode, ObjectHeader};
 use rstest::rstest;
@@ -44,7 +45,7 @@ fn i32_enum_dataset_preserves_members_and_values() {
             let pairs: Vec<(&str, &[u8])> = datatype
                 .members()
                 .iter()
-                .map(|m| (m.name.as_str(), m.value.as_slice()))
+                .map(|m| (m.name.as_str().unwrap(), m.value.as_slice()))
                 .collect();
             assert_eq!(
                 pairs,
@@ -100,9 +101,49 @@ fn enum_dataset_classifies_as_dtype_enum_of_member_names() {
     // recover them via `datatype()` when needed).
     assert_eq!(
         ds.dtype().unwrap(),
-        DType::Enum(vec!["RED".into(), "GREEN".into(), "BLUE".into()])
+        DType::Enum(
+            ["RED", "GREEN", "BLUE"]
+                .map(|name| DatatypeMemberName::new(name).unwrap())
+                .to_vec()
+        )
     );
     assert_eq!(format!("{}", ds.dtype().unwrap()), "enum[RED, GREEN, BLUE]");
+}
+
+#[test]
+fn enum_dataset_preserves_byte_names_in_dtype() {
+    let datatype = EnumTypeBuilder::u8_based()
+        .u8_value(b"\xff", 1)
+        .raw_value(b"\xfe", &[2])
+        .build()
+        .unwrap();
+    let file = file_builder::build_and_open(|builder| {
+        builder
+            .create_dataset("values")
+            .with_enum_u8_data(datatype, &[1, 2]);
+    });
+    let dataset = file.dataset("values").unwrap();
+    let dtype = dataset.dtype().unwrap();
+    assert_eq!(
+        dtype,
+        DType::Enum(vec![
+            DatatypeMemberName::new(b"\xff").unwrap(),
+            DatatypeMemberName::new(b"\xfe").unwrap(),
+        ])
+    );
+    assert_eq!(dtype.to_string(), "enum[\\xff, \\xfe]");
+    assert_eq!(dataset.read_u8().unwrap(), [1, 2]);
+}
+
+#[test]
+fn enum_builder_rejects_nul_in_a_member_name() {
+    assert_eq!(
+        EnumTypeBuilder::u8_based()
+            .u8_value(b"\xff\0", 1)
+            .build()
+            .unwrap_err(),
+        FormatError::DatatypeMemberNameContainsNul { index: 1 }
+    );
 }
 
 #[test]
@@ -120,7 +161,11 @@ fn u8_enum_dataset_roundtrips() {
 
     assert_eq!(
         ds.dtype().unwrap(),
-        DType::Enum(vec!["OFF".into(), "ON".into()])
+        DType::Enum(
+            ["OFF", "ON"]
+                .map(|name| DatatypeMemberName::new(name).unwrap())
+                .to_vec()
+        )
     );
     // One byte per element on disk.
     assert_eq!(ds.read_raw().unwrap().len(), 4);
@@ -249,7 +294,7 @@ fn enum_over_u16_base_round_trips() {
             assert_eq!(datatype.size().get(), 2);
             let members = datatype.members();
             assert_eq!(members.len(), 2);
-            assert_eq!(members[1].name, "high");
+            assert_eq!(members[1].name.as_bytes(), b"high");
             assert_eq!(members[1].value, 40_000u16.to_le_bytes().to_vec());
         }
         other => panic!("expected an Enumeration, got {other:?}"),
@@ -280,7 +325,7 @@ fn integer_convenience_value_requires_a_base_at_most_eight_bytes_wide() {
         .unwrap_err();
     assert_eq!(
         error,
-        FormatError::EnumMemberValueRange("one".into(), 1, 16)
+        FormatError::EnumMemberValueRange(DatatypeMemberName::new("one").unwrap(), 1, 16)
     );
 }
 
@@ -297,7 +342,10 @@ fn raw_value_preserves_the_full_width_of_a_wide_base() {
         Datatype::Enumeration(
             EnumerationType::new(
                 base,
-                vec![EnumMember::new("negative".into(), value.to_vec())]
+                vec![EnumMember::new(
+                    DatatypeMemberName::new("negative").unwrap(),
+                    value.to_vec()
+                )]
             )
             .unwrap()
         )
@@ -311,7 +359,7 @@ fn build_refuses_a_value_too_wide_for_the_base() {
         .build()
         .expect_err("300 does not fit one unsigned byte");
     assert!(
-        matches!(err, FormatError::EnumMemberValueRange(ref n, 300, 1) if n == "too_big"),
+        matches!(err, FormatError::EnumMemberValueRange(ref n, 300, 1) if n.as_bytes() == b"too_big"),
         "got {err:?}"
     );
 }
@@ -323,7 +371,7 @@ fn build_refuses_a_negative_value_for_an_unsigned_base() {
         .build()
         .expect_err("an unsigned base cannot hold -1");
     assert!(
-        matches!(err, FormatError::EnumMemberValueRange(ref name, -1, 2) if name == "negative"),
+        matches!(err, FormatError::EnumMemberValueRange(ref name, -1, 2) if name.as_bytes() == b"negative"),
         "got {err:?}"
     );
 }
@@ -335,7 +383,7 @@ fn build_refuses_raw_bytes_of_the_wrong_width() {
         .build()
         .expect_err("three bytes cannot back a two-byte base");
     assert!(
-        matches!(err, FormatError::EnumMemberValueSize(ref n, 2, 3) if n == "three_bytes"),
+        matches!(err, FormatError::EnumMemberValueSize(ref n, 2, 3) if n.as_bytes() == b"three_bytes"),
         "got {err:?}"
     );
 }
@@ -375,8 +423,8 @@ fn file_builder_writes_checked_enumeration_bytes(#[case] committed: bool) {
         EnumerationType::new(
             FixedPointType::u8(),
             vec![
-                EnumMember::new("first".into(), vec![1]),
-                EnumMember::new("last".into(), vec![2]),
+                EnumMember::new(DatatypeMemberName::new("first").unwrap(), vec![1]),
+                EnumMember::new(DatatypeMemberName::new("last").unwrap(), vec![2]),
             ],
         )
         .unwrap(),
@@ -457,7 +505,10 @@ fn repack_preserves_a_decoded_enumeration_with_a_floating_point_base() {
         assert_eq!(enumeration.size().get(), 4);
         assert_eq!(
             enumeration.members(),
-            [EnumMember::new("one".into(), 1.0f32.to_le_bytes().to_vec())]
+            [EnumMember::new(
+                DatatypeMemberName::new("one").unwrap(),
+                1.0f32.to_le_bytes().to_vec()
+            )]
         );
         assert_eq!(dataset.read_f32().unwrap(), [1.0]);
     }

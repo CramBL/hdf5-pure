@@ -4,6 +4,8 @@ use hdf5_pure_core::__private;
 use hdf5_pure_core::ComplexType;
 use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
+use hdf5_pure_core::DatatypeMemberName;
+use hdf5_pure_core::EnumMember;
 use hdf5_pure_core::FloatingPointType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::MantissaNormalization;
@@ -114,7 +116,10 @@ fn ordinary_float_parser_applies_order_rules_in_every_context(
                     datatype,
                     NonZeroU32::new(8).unwrap(),
                     __private::DatatypeOffsets::default(),
-                    vec![__private::enum_member("x".into(), vec![0; 8])],
+                    vec![EnumMember::new(
+                        DatatypeMemberName::new("x").unwrap(),
+                        vec![0; 8],
+                    )],
                 )
                 .unwrap(),
             )

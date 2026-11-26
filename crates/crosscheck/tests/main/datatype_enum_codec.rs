@@ -4,8 +4,8 @@ use std::ffi::CString;
 
 use hdf5_pure::{File, FileBuilder};
 use hdf5_pure_core::{
-    Datatype, DatatypeByteOrder, EnumMember, EnumerationType, FixedPointType, MessageType,
-    VariableLengthType,
+    Datatype, DatatypeByteOrder, DatatypeMemberName, EnumMember, EnumerationType, FixedPointType,
+    MessageType, VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -35,7 +35,8 @@ fn datatype_enum_codecs_preserve_native_descriptions(
     } else {
         LibraryVersion::V110
     };
-    let datatype = shape.native(big_endian);
+    let name = b"\xff";
+    let datatype = shape.native(big_endian, name);
     let file = libhdf5::File::with_options()
         .with_fapl(|properties| properties.libver_bounds(version, version))
         .create(&path)
@@ -74,13 +75,16 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         format::parse_datatype(bytes).unwrap(),
         (message.to_datatype().unwrap(), consumed)
     );
-    assert_eq!(message.to_datatype().unwrap(), shape.semantic(big_endian));
+    assert_eq!(
+        message.to_datatype().unwrap(),
+        shape.semantic(big_endian, name)
+    );
     assert_eq!(
         message.serialize(superblock.offset_size).unwrap(),
         bytes[..consumed]
     );
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
-    let semantic = shape.semantic(big_endian);
+    let semantic = shape.semantic(big_endian, name);
     let canonical =
         format::serialize_datatype_with_offset_width(&semantic, superblock.offset_size).unwrap();
     let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
@@ -135,7 +139,7 @@ fn native_reader_preserves_canonical_integer_enumeration_bytes(
     let mut builder = FileBuilder::new();
     let data = value(-3, big_endian);
     builder.create_dataset("values").with_raw_data(
-        Shape::Direct.semantic(big_endian),
+        Shape::Direct.semantic(big_endian, "é".as_bytes()),
         data.to_vec(),
         1,
     );
@@ -180,7 +184,7 @@ enum Shape {
 }
 
 impl Shape {
-    fn native(self, big_endian: bool) -> NativeDatatype {
+    fn native(self, big_endian: bool, name: &[u8]) -> NativeDatatype {
         libhdf5::sync::sync(|| {
             let base = if big_endian {
                 *globals::H5T_STD_I16BE
@@ -190,7 +194,7 @@ impl Shape {
             // SAFETY: The predefined integer parent is live and the call creates a new ID.
             let enumeration = owned(unsafe { h5t::H5Tenum_create(base) });
             let negative = CString::new("negative").unwrap();
-            let positive = CString::new("é").unwrap();
+            let positive = CString::new(name).unwrap();
             let negative_value = value(-3, big_endian);
             let positive_value = value(7, big_endian);
             assert_eq!(
@@ -231,7 +235,7 @@ impl Shape {
         })
     }
 
-    fn semantic(self, big_endian: bool) -> Datatype {
+    fn semantic(self, big_endian: bool, name: &[u8]) -> Datatype {
         let base = FixedPointType::new(
             2,
             if big_endian {
@@ -245,8 +249,14 @@ impl Shape {
         )
         .unwrap();
         let members = vec![
-            EnumMember::new("negative".into(), value(-3, big_endian).to_vec()),
-            EnumMember::new("é".into(), value(7, big_endian).to_vec()),
+            EnumMember::new(
+                DatatypeMemberName::new("negative").unwrap(),
+                value(-3, big_endian).to_vec(),
+            ),
+            EnumMember::new(
+                DatatypeMemberName::new(name).unwrap(),
+                value(7, big_endian).to_vec(),
+            ),
         ];
         let enumeration = Datatype::Enumeration(EnumerationType::new(base, members).unwrap());
         match self {

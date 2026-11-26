@@ -6,6 +6,7 @@ use core::num::NonZeroU32;
 
 use self::byte_order::DatatypeByteOrder;
 use self::layout::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
+pub use self::member_name::DatatypeMemberName;
 use crate::display;
 use crate::display::DISPLAY_MAX_MEMBERS;
 use crate::display::Dims;
@@ -15,6 +16,7 @@ use crate::{FormatError, OffsetWidth};
 
 pub mod byte_order;
 pub mod layout;
+mod member_name;
 
 /// String padding type.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,8 +73,8 @@ pub struct CompoundMember {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct EnumMember {
-    /// Member name.
-    pub name: String,
+    /// The stored name bytes.
+    pub name: DatatypeMemberName,
     /// The encoded value bytes. [`EnumerationType::new`] checks their length against the base
     /// datatype's width.
     pub value: Vec<u8>,
@@ -80,7 +82,7 @@ pub struct EnumMember {
 
 impl EnumMember {
     /// Constructs a named member and stores its value bytes as supplied.
-    pub fn new(name: String, value: Vec<u8>) -> Self {
+    pub fn new(name: DatatypeMemberName, value: Vec<u8>) -> Self {
         Self { name, value }
     }
 }
@@ -93,7 +95,7 @@ impl EnumMember {
 /// enumeration size and accepts other parent classes (`H5O__dtype_decode_helper` in `H5Odtype.c`,
 /// HDF5 2.2.0).
 ///
-/// The writer preserves the member bytes. The offset width of each variable-length
+/// The writer preserves the member names and value bytes. The offset width of each variable-length
 /// descriptor in a decoded base must match the destination's offset width.
 ///
 /// Class 8 of the datatype message is defined in "The Datatype Message" of the [format
@@ -122,14 +124,15 @@ impl EnumerationType {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::{Datatype, EnumMember, EnumerationType, FixedPointType};
+    /// use hdf5_pure_core::{Datatype, DatatypeMemberName, EnumMember, EnumerationType, FixedPointType};
     ///
     /// let base = FixedPointType::u16();
-    /// let member = EnumMember::new("active".into(), 1_u16.to_le_bytes().to_vec());
+    /// let name = DatatypeMemberName::new("active")?;
+    /// let member = EnumMember::new(name, 1_u16.to_le_bytes().to_vec());
     /// let enumeration = EnumerationType::new(base, vec![member])?;
     /// assert_eq!(enumeration.base_type(), &Datatype::FixedPoint(base));
     /// assert_eq!(enumeration.size().get(), 2);
-    /// assert_eq!(enumeration.members()[0].name, "active");
+    /// assert_eq!(enumeration.members()[0].name.as_bytes(), b"active");
     /// assert_eq!(enumeration.members()[0].value, [1, 0]);
     /// # Ok::<(), hdf5_pure_core::FormatError>(())
     /// ```
@@ -541,7 +544,7 @@ impl fmt::Display for Datatype {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{}", EscapedName(&member.name))?;
+                    write!(f, "{}", member.name)?;
                 }
                 display::write_elided(f, members.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
                 f.write_str("]")

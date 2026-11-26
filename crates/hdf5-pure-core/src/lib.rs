@@ -49,6 +49,7 @@ pub use datatype::CharacterSet;
 pub use datatype::ComplexType;
 pub use datatype::CompoundMember;
 pub use datatype::Datatype;
+pub use datatype::DatatypeMemberName;
 pub use datatype::EnumMember;
 pub use datatype::EnumerationType;
 pub use datatype::ReferenceType;

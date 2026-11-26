@@ -5,11 +5,11 @@ use std::fmt;
 
 #[cfg(test)]
 use crate::VariableLengthStringType;
-use crate::VariableLengthType;
 use crate::address::AddressContext;
 use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError};
+use crate::{DatatypeMemberName, VariableLengthType};
 #[cfg(test)]
 use crate::{FixedPointType, FloatingPointType, TimeType};
 
@@ -60,7 +60,8 @@ pub enum DType {
     U64,
     String,
     Compound(Vec<(std::string::String, DType)>),
-    Enum(Vec<std::string::String>),
+    /// An enumeration's member name bytes, in declaration order.
+    Enum(Vec<DatatypeMemberName>),
     Array(Box<DType>, Vec<u32>),
     VariableLengthString,
     /// HDF5 object reference (8-byte address).
@@ -105,7 +106,7 @@ impl fmt::Display for DType {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", EscapedName(name))?;
+                    write!(f, "{name}")?;
                 }
                 display::write_elided(f, names.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
                 write!(f, "]")

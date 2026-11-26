@@ -1,8 +1,8 @@
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
-    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, EnumMember,
-    EnumerationType, FixedPointType, FloatingPointType, FormatError, StringPadding, TimeType,
-    VariableLengthType,
+    BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, DatatypeMemberName,
+    EnumMember, EnumerationType, FixedPointType, FloatingPointType, FormatError, StringPadding,
+    TimeType, VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -385,11 +385,14 @@ fn enum_values_have_the_integer_base_width(
             DatatypeVersion::Three,
             DatatypeProperties::Enumeration {
                 base_type: Box::new(base_type),
-                members: vec![__private::enum_member(name.into(), value)],
+                members: vec![EnumMember::new(
+                    DatatypeMemberName::new(name).unwrap(),
+                    value
+                )],
             }
         )
         .unwrap_err(),
-        FormatError::EnumMemberValueSize(name.into(), expected, actual),
+        FormatError::EnumMemberValueSize(DatatypeMemberName::new(name).unwrap(), expected, actual),
     );
 }
 
@@ -497,30 +500,6 @@ fn enumeration_bases_must_be_integer_messages() {
         )
         .unwrap_err(),
         FormatError::EnumBaseNotInteger,
-    );
-}
-
-#[rstest]
-#[case::two_byte_base(integer(DatatypeVersion::One), "bad\0name", vec![0; 2])]
-#[case::four_byte_base(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap().0, "x\0y", vec![0; 4])]
-fn enumeration_names_reject_embedded_nuls(
-    #[case] base_type: DatatypeMessage,
-    #[case] name: &str,
-    #[case] value: Vec<u8>,
-) {
-    assert_eq!(
-        DatatypeMessage::new(
-            DatatypeVersion::Three,
-            DatatypeProperties::Enumeration {
-                base_type: Box::new(base_type),
-                members: vec![__private::enum_member(name.into(), value)],
-            }
-        )
-        .unwrap_err(),
-        FormatError::InvalidDatatypeMemberName {
-            class: 8,
-            name: name.into()
-        },
     );
 }
 
@@ -642,7 +621,10 @@ fn container(class: Container, child: DatatypeMessage) -> DatatypeProperties {
         },
         Container::Enumeration => DatatypeProperties::Enumeration {
             base_type: Box::new(child),
-            members: vec![__private::enum_member("value".into(), vec![1, 2])],
+            members: vec![EnumMember::new(
+                DatatypeMemberName::new("value").unwrap(),
+                vec![1, 2],
+            )],
         },
         Container::Sequence => DatatypeProperties::VariableLengthSequence {
             base_type: Box::new(child),
@@ -965,7 +947,7 @@ fn enumeration_datatype() -> Datatype {
     let members = enum_values()
         .into_iter()
         .map(|EnumValue { name, value }| {
-            EnumMember::new(core::str::from_utf8(name).unwrap().into(), value.to_vec())
+            EnumMember::new(DatatypeMemberName::new(name).unwrap(), value.to_vec())
         })
         .collect();
     Datatype::Enumeration(EnumerationType::new(base, members).unwrap())

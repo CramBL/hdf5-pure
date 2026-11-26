@@ -198,11 +198,11 @@ let is_bool = matches!(
     root.attr_datatypes()?.get("success"),
     Some(Datatype::Enumeration(enumeration))
         if matches!(enumeration.base_type(), Datatype::FixedPoint(numeric) if numeric.size().get() == 1)
-            && enumeration.members().iter().any(|member| member.name == "TRUE")
+            && enumeration.members().iter().any(|member| member.name.as_bytes() == b"TRUE")
 );
 let value = root.attrs()?.get("success").and_then(AttrValue::as_i64);
-# assert!(!is_bool); // this crate writes `I8`, which the check separates from a boolean
-# assert_eq!(value, Some(1));
+assert!(!is_bool);
+assert_eq!(value, Some(1));
 # Ok::<(), hdf5_pure::Error>(())
 ```
 

@@ -70,12 +70,7 @@ impl fmt::Display for QuotedBytes<'_> {
 /// A name read from the file, escaped so it cannot carry control characters
 /// into a message, and truncated so it cannot flood one.
 ///
-/// A member name, an enum label and a filter name are all decoded with
-/// `String::from_utf8_lossy`, which rejects nothing a file can hold: a
-/// crafted name can carry a newline, a NUL or a terminal escape sequence
-/// straight into the message that quotes it. Delegates to
-/// [`str::escape_debug`], so an ordinary name passes through unchanged and a
-/// hostile one arrives as Rust escapes.
+/// Uses [`str::escape_debug`] for text such as compound member names and filter names.
 ///
 /// This bounds a name to one line of printable output. It does not make every
 /// name unambiguous  -  one holding `, ` still reads like two, and one written in
@@ -85,15 +80,22 @@ pub struct EscapedName<'a>(pub &'a str);
 
 impl fmt::Display for EscapedName<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut escaped = self.0.escape_debug();
-        for ch in escaped.by_ref().take(DISPLAY_MAX_NAME_CHARS) {
-            f.write_char(ch)?;
-        }
-        if escaped.next().is_some() {
-            f.write_str("…")?;
-        }
-        Ok(())
+        write_escaped_name(f, self.0.escape_debug())
     }
+}
+
+/// Writes up to [`DISPLAY_MAX_NAME_CHARS`] escaped characters and appends an ellipsis on truncation.
+pub(crate) fn write_escaped_name(
+    f: &mut fmt::Formatter<'_>,
+    mut escaped: impl Iterator<Item = char>,
+) -> fmt::Result {
+    for ch in escaped.by_ref().take(DISPLAY_MAX_NAME_CHARS) {
+        f.write_char(ch)?;
+    }
+    if escaped.next().is_some() {
+        f.write_str("…")?;
+    }
+    Ok(())
 }
 
 /// The `, … N more` tail of a truncated list, written only when the list was in

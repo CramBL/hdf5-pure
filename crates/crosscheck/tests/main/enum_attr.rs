@@ -125,7 +125,7 @@ fn a_c_written_bool_attribute_keeps_its_enumeration_in_the_datatype_channel() {
     let mapping: BTreeMap<&str, &[u8]> = datatype
         .members()
         .iter()
-        .map(|m| (m.name.as_str(), m.value.as_slice()))
+        .map(|m| (m.name.as_str().unwrap(), m.value.as_slice()))
         .collect();
     assert_eq!(
         mapping,
