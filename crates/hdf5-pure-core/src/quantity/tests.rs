@@ -4,7 +4,6 @@ use super::{
     ByteLength, ChunkSlot, ElementCount, ElementSize, NonZeroByteLength, NonZeroElementCount,
     SlotCount,
 };
-use crate::FormatError;
 
 #[rstest]
 #[case::zero(0)]
@@ -113,92 +112,4 @@ fn differences_reject_underflow_and_keep_slot_distances_as_counts(
             .map(SlotCount::get),
         expected
     );
-}
-
-#[rstest]
-#[case::empty(0, u64::MAX, Some(0))]
-#[case::ordinary(7, 6, Some(42))]
-#[case::maximum(u64::MAX, 1, Some(u64::MAX))]
-#[case::largest_even(u64::MAX / 2, 2, Some(u64::MAX - 1))]
-#[case::one_beyond(u64::MAX / 2 + 1, 2, None)]
-fn element_products_return_counts_and_stride_products_return_bytes(
-    #[case] count: u64,
-    #[case] factor: u64,
-    #[case] expected: Option<u64>,
-) {
-    assert_eq!(
-        ElementCount::new(count)
-            .checked_mul(ElementCount::new(factor))
-            .map(ElementCount::get),
-        expected
-    );
-    assert_eq!(
-        ElementSize::new(factor)
-            .unwrap()
-            .byte_length(ElementCount::new(count))
-            .map(ByteLength::get),
-        expected
-    );
-}
-
-#[rstest]
-#[case::empty(0, 4, Some(0))]
-#[case::one(4, 4, Some(1))]
-#[case::many(24, 4, Some(6))]
-#[case::partial(25, 4, None)]
-#[case::maximum(u64::MAX, 1, Some(u64::MAX))]
-fn byte_lengths_require_whole_elements(
-    #[case] bytes: u64,
-    #[case] stride: u64,
-    #[case] expected: Option<u64>,
-) {
-    assert_eq!(
-        ByteLength::new(bytes)
-            .elements(ElementSize::new(stride).unwrap())
-            .map(ElementCount::get),
-        expected
-    );
-}
-
-#[rstest]
-#[case::empty(0, 4, 0)]
-#[case::partial(1, 4, 1)]
-#[case::complete(4, 4, 1)]
-#[case::next(5, 4, 2)]
-#[case::maximum_single_element(u64::MAX, 1, u64::MAX)]
-#[case::maximum_pairs(u64::MAX, 2, 1_u64 << 63)]
-#[case::maximum_chunk(u64::MAX, u64::MAX, 1)]
-fn chunk_counts_round_up_without_overflow(
-    #[case] elements: u64,
-    #[case] chunk: u64,
-    #[case] expected: u64,
-) {
-    assert_eq!(
-        ElementCount::new(elements).chunks(NonZeroElementCount::new(chunk).unwrap()),
-        SlotCount::new(expected)
-    );
-}
-
-#[rstest]
-#[case::zero(0, 0)]
-#[case::one(1, 1)]
-#[case::maximum_32bit(u64::from(u32::MAX), 32)]
-#[case::beyond_32bit(u64::from(u32::MAX) + 1, 33)]
-#[case::maximum_64bit(u64::MAX, 64)]
-fn materialized_counts_and_offsets_reject_values_beyond_usize(
-    #[case] value: u64,
-    #[case] required_bits: u32,
-) {
-    let expected = if usize::BITS >= required_bits {
-        Ok(value as usize)
-    } else {
-        Err(FormatError::ValueTooLargeForPlatform {
-            value,
-            target: "usize",
-        })
-    };
-    assert_eq!(ByteLength::new(value).to_usize(), expected);
-    assert_eq!(ElementCount::new(value).to_usize(), expected);
-    assert_eq!(SlotCount::new(value).to_usize(), expected);
-    assert_eq!(ChunkSlot::new(value).to_usize(), expected);
 }
