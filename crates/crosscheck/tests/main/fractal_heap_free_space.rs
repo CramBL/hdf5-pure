@@ -11,6 +11,7 @@ use hdf5_pure_core::FormatError;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FractalHeapFreeSection;
+use hdf5_pure_format::__private::FractalHeapFreeSpaceManager;
 use hdf5_pure_format::__private::FractalHeapHeaderLocator;
 use hdf5_pure_format::__private::FractalHeapSectionClass;
 use hdf5_pure_format::__private::FreeSpaceManagerHeaderRef;
@@ -89,7 +90,8 @@ fn parses_c_written_managed_free_space(
         FreeSpaceManagerHeaderRef::new(widths, base.resolve(header_addr).unwrap()).unwrap();
     let frame = header_ref.parse(region).unwrap();
     assert_eq!(frame.client_id(), FRACTAL_HEAP_CLIENT_ID);
-    let manager = frame.fractal_heap_header(&heap).unwrap();
+    let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
+    let frame = manager.header();
     let DecodedStoredAddress::Defined(list_addr) = frame.section_list_addr() else {
         panic!("expected a managed section list")
     };

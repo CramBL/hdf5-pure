@@ -30,7 +30,6 @@ use crate::fractal_heap::FractalHeapLayout;
 use crate::fractal_heap::FractalHeapLayoutError;
 use crate::free_space_manager::FreeSpaceManagerHeaderFrame;
 use crate::free_space_manager::FreeSpaceManagerSectionListRef;
-use crate::width::FormatWidths;
 
 /// A section class in the fractal heap's managed address space.
 ///
@@ -52,9 +51,8 @@ pub enum FractalHeapSectionClass {
 
 /// A free-space manager header interpreted with a fractal heap's doubling table.
 ///
-/// Constructed by [`FreeSpaceManagerHeaderFrame::fractal_heap_header`]. Header validation
-/// checks the fractal-heap client ID, section counts, and heap geometry. Section-list parsing
-/// validates the serialized records and their reconstructed counts and accounting sizes.
+/// [`Self::from_frame`] checks the client ID, section counts, and heap geometry. The
+/// section-list parser checks the serialized records and reconstructs their counts and sizes.
 #[derive(Clone, Debug)]
 pub struct FractalHeapFreeSpaceManager<'a> {
     frame: FreeSpaceManagerHeaderFrame,
@@ -67,8 +65,88 @@ pub struct FractalHeapFreeSpaceManager<'a> {
 }
 
 impl<'a> FractalHeapFreeSpaceManager<'a> {
-    pub(crate) fn new(
-        widths: FormatWidths,
+    /// Constructs a manager from a parsed header and its fractal heap.
+    ///
+    /// Uses the offset and length widths from `frame` to interpret the heap geometry.
+    /// Checks client ID 0, the section class count, the heap address width and maximum
+    /// direct-block size, and the sum of serialized and ghost section counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFreeSpaceManager`] if the client, section counts, or heap
+    /// geometry disagree, a nonempty manager has no serialized proxy, or serialized records
+    /// have an undefined section-list address. Returns [`FormatError::InvalidFractalHeapGeometry`]
+    /// for invalid doubling-table geometry, and [`FormatError::OffsetOverflow`] if derived heap
+    /// offsets overflow.
+    ///
+    /// # Examples
+    ///
+    /// The caller supplies header and used section-list bytes. The reconstructed section
+    /// count includes normal rows represented by serialized first-row records. The caller
+    /// reconstructs a normal row and an indirect child from a parsed first-row record.
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::BaseAddressExt;
+    /// use hdf5_pure_core::__private::DecodedStoredAddress;
+    /// use hdf5_pure_core::__private::FileRegion;
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::BaseAddress;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_format::__private::FormatWidths;
+    /// use hdf5_pure_format::__private::FreeSpaceManagerHeaderRef;
+    /// use hdf5_pure_format::__private::FractalHeapFreeSection;
+    /// use hdf5_pure_format::__private::FractalHeapFreeSpaceManager;
+    /// use hdf5_pure_format::__private::FractalHeapSectionClass;
+    /// # use hdf5_pure_format::__private::FractalHeapHeader;
+    /// # use hdf5_pure_format::FormatError;
+    /// # use test_util::fractal_heap;
+    /// # let widths = FormatWidths::from_sizes(8, 8)?;
+    /// # let heap_bytes = fractal_heap::Header::new(256).build(test_util::widths::Widths::EIGHT);
+    /// # let mut heap = FractalHeapHeader::parse_bytes(&heap_bytes, widths.offsets, widths.lengths)?;
+    /// # heap.current_rows_in_root_indirect_block = 6;
+    /// # heap.managed_space = 16384;
+    /// # let header_bytes = [
+    /// #     0x46, 0x53, 0x48, 0x44, 0x00, 0x00, 0x01, 0x0f, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    /// #     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x00, 0x04, 0x00, 0x50, 0x00, 0x78, 0x00, 0x10, 0x00, 0x00, 0x04,
+    /// #     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x00,
+    /// #     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4e, 0x6e, 0x78, 0x88,
+    /// # ];
+    /// # let list_bytes = [
+    /// #     0x46, 0x53, 0x53, 0x45, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x01, 0x71, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /// #     0x00, 0x18, 0x00, 0x82, 0x46, 0x8a, 0xb2,
+    /// # ];
+    /// let widths = FormatWidths::from_sizes(8, 8)?;
+    /// let base = BaseAddress::new(512);
+    /// let header_addr = StoredAddress::new(32);
+    /// let header_ref = FreeSpaceManagerHeaderRef::new(widths, base.resolve(header_addr)?)?;
+    /// let frame = header_ref.parse(FileRegion::new(header_ref.parse_range(), &header_bytes)?)?;
+    /// let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap)?;
+    /// let DecodedStoredAddress::Defined(list_addr) = manager.header().section_list_addr() else {
+    ///     return Ok(());
+    /// };
+    /// let list_ref = manager.section_list_ref(header_addr, base.resolve(list_addr)?)?;
+    /// let space = list_ref.parse(FileRegion::new(list_ref.parse_range(), &list_bytes)?)?;
+    /// assert_eq!(space.sections().len(), 1);
+    /// assert_eq!(space.total_sections(), 17);
+    /// let Some(FractalHeapFreeSection::FirstRow { indirect, .. }) = space.sections().first() else {
+    ///     panic!("expected first-row section");
+    /// };
+    /// let row = manager.row_section(*indirect, 3)?;
+    /// assert_eq!(row.class(), FractalHeapSectionClass::NormalRow);
+    /// assert_eq!((row.offset(), row.size(), row.blocks()), (2048, 497, 4));
+    /// let child = manager.child_section(*indirect, 5, 0)?;
+    /// assert_eq!(child.class(), FractalHeapSectionClass::Indirect);
+    /// assert_eq!((child.block_offset(), child.rows(), child.blocks()), (8192, 3, 12));
+    /// let child_row = manager.row_section(child, 0)?;
+    /// assert_eq!(child_row.class(), FractalHeapSectionClass::NormalRow);
+    /// assert_eq!((child_row.offset(), child_row.size()), (8192, 113));
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn from_frame(
         frame: FreeSpaceManagerHeaderFrame,
         heap: &'a FractalHeapHeader,
     ) -> Result<Self, FormatError> {
@@ -102,6 +180,7 @@ impl<'a> FractalHeapFreeSpaceManager<'a> {
                 "a serialized heap manager has no section-list address".into(),
             ));
         }
+        let widths = frame.widths();
         let layout = FractalHeapLayout::new(heap, widths.offsets, widths.lengths)?;
         if heap.current_rows_in_root_indirect_block > layout.max_root_rows() {
             return Err(FormatError::InvalidFreeSpaceManager(
@@ -182,7 +261,7 @@ impl<'a> FractalHeapFreeSpaceManager<'a> {
     /// See the [example] for obtaining a parsed first-row record and reconstructing a direct
     /// row and an indirect child.
     ///
-    /// [example]: FreeSpaceManagerHeaderFrame::fractal_heap_header
+    /// [example]: FractalHeapFreeSpaceManager::from_frame
     pub fn row_section(
         &self,
         indirect: FractalHeapIndirectSection,
@@ -233,7 +312,7 @@ impl<'a> FractalHeapFreeSpaceManager<'a> {
     /// See the [example] for obtaining a parsed first-row record and reconstructing a direct
     /// row and an indirect child.
     ///
-    /// [example]: FreeSpaceManagerHeaderFrame::fractal_heap_header
+    /// [example]: FractalHeapFreeSpaceManager::from_frame
     pub fn child_section(
         &self,
         indirect: FractalHeapIndirectSection,
@@ -930,7 +1009,9 @@ mod tests {
     use test_util::widths::Widths;
 
     use crate::checksum;
+    use crate::free_space_manager::FreeSpaceManagerHeader;
     use crate::free_space_manager::FreeSpaceManagerHeaderRef;
+    use crate::width::FormatWidths;
 
     use super::*;
 
@@ -953,7 +1034,7 @@ mod tests {
             frame.section_list_addr(),
             DecodedStoredAddress::Defined(StoredAddress::new(5069))
         );
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(1403), PhysicalAddress::new(5069))
             .unwrap();
@@ -1016,7 +1097,7 @@ mod tests {
         let records = single_record(FractalHeapSectionClass::Single as u8, overhead, 10);
         let (header, list) = encoded_manager(widths, &records, 1, 1, 0, 10, 0);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1042,7 +1123,7 @@ mod tests {
         let records = first_row_record(1, 113, 0, 0, 0, 24);
         let (header, list) = encoded_manager(widths, &records, 17, 1, 16, 3841, 64);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1084,7 +1165,7 @@ mod tests {
         let records = single_record(class_id, 15, 10);
         let (header, list) = encoded_manager(widths, &records, 1, 1, 0, 10, 0);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1170,7 +1251,7 @@ mod tests {
         records[6..8].copy_from_slice(&u16::try_from(block_offset).unwrap().to_le_bytes());
         let (header, list) = encoded_manager(widths, &records, 1, 1, 0, size, 0);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1194,7 +1275,7 @@ mod tests {
             0,
         );
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1221,7 +1302,7 @@ mod tests {
             0,
         );
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1263,7 +1344,7 @@ mod tests {
         refresh_checksum(&mut header);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
         assert_eq!(
-            frame.fractal_heap_header(&heap).unwrap_err(),
+            FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap_err(),
             FormatError::InvalidFreeSpaceManager(reason.into())
         );
     }
@@ -1309,7 +1390,7 @@ mod tests {
             0,
         );
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1345,7 +1426,7 @@ mod tests {
             0,
         );
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1373,7 +1454,7 @@ mod tests {
         records[at] = value;
         let (header, list) = encoded_manager(widths, &records, 1, 1, 0, 10, 0);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1401,7 +1482,7 @@ mod tests {
             0,
         );
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1434,7 +1515,7 @@ mod tests {
         list[at] = value;
         refresh_checksum(&mut list);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1482,7 +1563,7 @@ mod tests {
             FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap_err()
         } else {
             let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-            let manager = frame.fractal_heap_header(&heap).unwrap();
+            let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
             let reference = manager
                 .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
                 .unwrap();
@@ -1519,7 +1600,7 @@ mod tests {
         records[6..8].copy_from_slice(&block_offset.to_le_bytes());
         let (header, list) = encoded_manager(widths, &records, count, 1, count - 1, space, 0);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1550,7 +1631,7 @@ mod tests {
         records[6..8].copy_from_slice(&offset.to_le_bytes());
         let (header, list) = encoded_manager(widths, &records, 1, 1, 0, 113, 0);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1584,7 +1665,7 @@ mod tests {
         header[44] = 64;
         refresh_checksum(&mut header);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        let manager = frame.fractal_heap_header(&heap).unwrap();
+        let manager = FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap();
         let reference = manager
             .section_list_ref(StoredAddress::new(32), PhysicalAddress::new(4096))
             .unwrap();
@@ -1615,7 +1696,7 @@ mod tests {
         );
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
         assert_eq!(
-            frame.file_header().unwrap_err(),
+            FreeSpaceManagerHeader::from_frame(&frame).unwrap_err(),
             FormatError::InvalidFreeSpaceManager(
                 "the client ID is 0, not 1, the ID of the file client".into()
             )
@@ -1624,9 +1705,14 @@ mod tests {
         header[38] = 3;
         refresh_checksum(&mut header);
         let frame = FreeSpaceManagerHeaderFrame::parse(widths, &header).unwrap();
-        assert_eq!(frame.file_header().unwrap().total_sections(), 1);
         assert_eq!(
-            frame.fractal_heap_header(&heap).unwrap_err(),
+            FreeSpaceManagerHeader::from_frame(&frame)
+                .unwrap()
+                .total_sections(),
+            1
+        );
+        assert_eq!(
+            FractalHeapFreeSpaceManager::from_frame(frame, &heap).unwrap_err(),
             FormatError::InvalidFreeSpaceManager(
                 "the client ID is 1, not 0, the ID of the fractal heap client".into()
             )

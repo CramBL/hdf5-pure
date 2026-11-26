@@ -24,6 +24,7 @@ use hdf5_pure_format::__private::FractalHeapBlockFilters;
 use hdf5_pure_format::__private::FractalHeapBlockLayout;
 use hdf5_pure_format::__private::FractalHeapDirectBlock;
 use hdf5_pure_format::__private::FractalHeapDirectBlockRef;
+use hdf5_pure_format::__private::FractalHeapFreeSpaceManager;
 use hdf5_pure_format::__private::FractalHeapHeader;
 #[cfg(any(test, doc))]
 use hdf5_pure_format::__private::FractalHeapLayout;
@@ -440,7 +441,8 @@ fn collect_managed_fsm_storage(
     let range = reference.parse_range();
     let bytes = heap_source.read_range(range)?;
     let frame = reference.parse_checked(bytes.region())?;
-    let manager = frame.fractal_heap_header(heap)?;
+    let manager = FractalHeapFreeSpaceManager::from_frame(frame, heap)?;
+    let frame = manager.header();
     allocations.push((extent, FractalHeapAllocation::ManagedFsmHeader));
     let DecodedStoredAddress::Defined(list_address) = frame.section_list_addr() else {
         if frame.section_list_used() != 0
