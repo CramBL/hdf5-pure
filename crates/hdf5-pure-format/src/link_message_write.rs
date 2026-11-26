@@ -11,7 +11,7 @@ use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
-use crate::link_message::{EXTERNAL_LINK, HARD_LINK, LinkMessage, SOFT_LINK};
+use crate::link_message::{EXTERNAL_LINK, HARD_LINK, SOFT_LINK};
 use crate::link_message_read::{
     ASCII, CHARSET_PRESENT, CREATION_ORDER_LEN, CREATION_ORDER_PRESENT, EXTERNAL_VERSION_FLAGS,
     LinkMessageView, LinkTargetView, PREFIX_LEN, TYPE_PRESENT, UTF8, VERSION,
@@ -72,16 +72,35 @@ impl<'a> PreparedLink<'a> {
         .map_err(LinkWireError::from)
     }
 
-    pub(crate) fn for_text(
-        link: &'a LinkMessage,
+    pub(crate) fn from_text_fields(
         offset_width: OffsetWidth,
+        name: &'a str,
+        creation_order: Option<u64>,
+        charset: &CharacterSet,
+        target: LinkTargetView<'a>,
     ) -> Result<Self, FormatError> {
-        Self::from_text_fields(
+        let name_bytes = name.as_bytes();
+        if !LinkName::is_valid(name_bytes) {
+            return Err(FormatError::InvalidLinkName(name.into()));
+        }
+        let value_len = checked_value_len(target).map_err(|error| match error {
+            ValueLengthError::InvalidPath => FormatError::InvalidLinkTarget,
+            ValueLengthError::Overflow => FormatError::LinkMessageLengthOverflow,
+            ValueLengthError::TooLong(len) => FormatError::LengthTooLarge {
+                length: len.to_u64(),
+                length_size: VALUE_LENGTH_LEN,
+            },
+        })?;
+        Self::from_checked(
             offset_width,
-            &link.name,
-            link.creation_order,
-            canonical_charset(&link.charset),
-            link.link_target.as_view(),
+            LinkFields {
+                target,
+                value_len,
+                creation_order,
+                charset: canonical_charset(charset),
+                name: name_bytes,
+                name_width: UintWidth::smallest_for_len(name_bytes.len()),
+            },
         )
     }
 
@@ -107,7 +126,7 @@ impl<'a> PreparedLink<'a> {
             offset_width,
             name,
             creation_order,
-            canonical_charset(&charset),
+            &charset,
             LinkTargetView::Hard {
                 object_header_address,
                 explicit_type: false,
@@ -268,38 +287,6 @@ impl<'a> PreparedLink<'a> {
             }
             LinkTargetView::UserDefined { value, .. } => output.copy_from_slice(value),
         }
-    }
-
-    fn from_text_fields(
-        offset_width: OffsetWidth,
-        name: &'a str,
-        creation_order: Option<u64>,
-        charset: Option<CharacterSet>,
-        target: LinkTargetView<'a>,
-    ) -> Result<Self, FormatError> {
-        let name_bytes = name.as_bytes();
-        if !LinkName::is_valid(name_bytes) {
-            return Err(FormatError::InvalidLinkName(name.into()));
-        }
-        let value_len = checked_value_len(target).map_err(|error| match error {
-            ValueLengthError::InvalidPath => FormatError::InvalidLinkTarget,
-            ValueLengthError::Overflow => FormatError::LinkMessageLengthOverflow,
-            ValueLengthError::TooLong(len) => FormatError::LengthTooLarge {
-                length: len.to_u64(),
-                length_size: VALUE_LENGTH_LEN,
-            },
-        })?;
-        Self::from_checked(
-            offset_width,
-            LinkFields {
-                target,
-                value_len,
-                creation_order,
-                charset,
-                name: name_bytes,
-                name_width: UintWidth::smallest_for_len(name_bytes.len()),
-            },
-        )
     }
 
     /// Checks the hard address and computes the exact length from checked fields.

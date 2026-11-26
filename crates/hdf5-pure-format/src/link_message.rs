@@ -219,7 +219,12 @@ impl LinkMessage {
         if !name_matches(prefix.name, name) {
             return Ok(None);
         }
-        Ok(Some(prefix.read_text_target(offset_width)?))
+        Ok(Some(
+            prefix
+                .target_view(offset_width)?
+                .to_text()
+                .map_err(LinkProjectionError::into_format)?,
+        ))
     }
 
     /// Returns the byte range of the object header address in the Link message `data`, or `None`
@@ -265,7 +270,13 @@ impl LinkMessage {
     /// or [`FormatError::LengthTooLarge`] if a symbolic target exceeds its two-byte length field.
     /// The external target size includes its version and flags byte and both NUL terminators.
     pub fn prepare(&self, offset_width: OffsetWidth) -> Result<PreparedLink<'_>, FormatError> {
-        PreparedLink::for_text(self, offset_width)
+        PreparedLink::from_text_fields(
+            offset_width,
+            &self.name,
+            self.creation_order,
+            &self.charset,
+            self.link_target.as_view(),
+        )
     }
 
     /// Parses the body of a Link message.

@@ -159,31 +159,8 @@ impl LinkMessageV1 {
     }
 
     fn from_view(link: &LinkMessageView<'_>) -> Self {
-        let target = match link.target() {
-            LinkTargetView::Hard {
-                object_header_address,
-                explicit_type,
-            } => LinkTargetV1::Hard {
-                object_header_address,
-                explicit_type,
-            },
-            LinkTargetView::Soft { target_path } => LinkTargetV1::Soft {
-                target_path: target_path.to_vec(),
-            },
-            LinkTargetView::External {
-                filename,
-                object_path,
-            } => LinkTargetV1::External {
-                filename: filename.to_vec(),
-                object_path: object_path.to_vec(),
-            },
-            LinkTargetView::UserDefined { kind, value } => LinkTargetV1::UserDefined {
-                kind,
-                value: UserLinkValue(value.to_vec()),
-            },
-        };
         Self {
-            target,
+            target: LinkTargetV1::from_view(link),
             target_value_len: link.target_value_len(),
             creation_order: link.creation_order(),
             charset: link.charset(),
@@ -405,6 +382,32 @@ pub enum LinkTargetV1 {
 }
 
 impl LinkTargetV1 {
+    pub(crate) fn from_view(link: &LinkMessageView<'_>) -> Self {
+        match link.target() {
+            LinkTargetView::Hard {
+                object_header_address,
+                explicit_type,
+            } => LinkTargetV1::Hard {
+                object_header_address,
+                explicit_type,
+            },
+            LinkTargetView::Soft { target_path } => LinkTargetV1::Soft {
+                target_path: target_path.to_vec(),
+            },
+            LinkTargetView::External {
+                filename,
+                object_path,
+            } => LinkTargetV1::External {
+                filename: filename.to_vec(),
+                object_path: object_path.to_vec(),
+            },
+            LinkTargetView::UserDefined { kind, value } => LinkTargetV1::UserDefined {
+                kind,
+                value: UserLinkValue(value.to_vec()),
+            },
+        }
+    }
+
     pub(crate) fn as_view(&self) -> LinkTargetView<'_> {
         match self {
             Self::Hard {
