@@ -159,11 +159,11 @@ impl<'a> LinkMessageView<'a> {
     /// [`LinkProjectionError::Format`] with [`FormatError::InvalidSoftLinkEncoding`] for a
     /// soft path with invalid UTF-8.
     pub fn to_text(&self) -> Result<LinkMessage, LinkProjectionError> {
-        let link_target = self.target.to_text()?;
+        let link_target = self.target().to_text()?;
         Ok(LinkMessage {
-            name: String::from_utf8_lossy(self.name).into_owned(),
+            name: String::from_utf8_lossy(self.name_bytes()).into_owned(),
             link_target,
-            creation_order: self.creation_order,
+            creation_order: self.creation_order(),
             charset: self.charset().unwrap_or(CharacterSet::Ascii),
         })
     }
@@ -264,7 +264,7 @@ impl<'a> LinkTargetView<'a> {
         })
     }
 
-    fn to_text(self) -> Result<LinkTarget, LinkProjectionError> {
+    pub(crate) fn to_text(self) -> Result<LinkTarget, LinkProjectionError> {
         Ok(match self {
             Self::Hard {
                 object_header_address,
@@ -374,11 +374,11 @@ impl<'a> LinkPrefix<'a> {
         self.target.position()
     }
 
-    pub(crate) fn read_text_target(&self, width: OffsetWidth) -> Result<LinkTarget, FormatError> {
-        self.read_target(width)?
-            .0
-            .to_text()
-            .map_err(LinkProjectionError::into_format)
+    pub(crate) fn target_view(
+        &self,
+        width: OffsetWidth,
+    ) -> Result<LinkTargetView<'a>, FormatError> {
+        Ok(self.read_target(width)?.0)
     }
 
     pub(crate) fn discover_hard_link(
