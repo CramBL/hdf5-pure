@@ -52,5 +52,6 @@ pub use records::HugeObjectRecord;
 pub use records::HugeObjectRecordContext;
 pub use records::HugeObjectRecordDecoder;
 pub use records::HugeObjectTrackerRecord;
+pub(crate) use records::LinkIndexKey;
 pub use records::PrivateAttributeId;
 pub use records::SharedAttributeId;
