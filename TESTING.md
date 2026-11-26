@@ -30,7 +30,7 @@ Assert specific error variants and fields using the [exact-error rules][errors].
 | Test | Location |
 | --- | --- |
 | Ordinary integration tests | One target per crate. Declare modules in `tests/main/main.rs`, for example `tests/main/append.rs` and `tests/main/edit_reference_counts.rs`. |
-| Private unit tests | The owning module's `#[cfg(test)] mod tests`, inline or in a separate file. |
+| Private unit tests | The owning module's `#[cfg(test)] mod tests`, inline or in a separate file. A `tests/mod.rs` follows the [module-index rule][modules]. |
 | Native crosschecks | `crates/crosscheck/tests/main/` for external tests, or an owner-local `native_crosschecks` module with the existing [capability gate][architecture]. |
 
 Keep separate targets for process-wide allocators, fixture binaries, WASM,
@@ -117,6 +117,7 @@ The `-full` recipes enable the full public feature profile. Use
 [seals]: tests/main/seals.rs
 [fixtures]: tests/data/NOTICE.md
 [errors]: CODE_STYLE.md#assert-the-exact-error
+[modules]: CODE_STYLE.md#modules
 [complex-tests]: crates/hdf5-pure-core/tests/main/complex.rs
 [continuation-tests]: tests/main/object_header_continuation.rs
 [dense-attribute-tests]: crates/crosscheck/tests/main/dense_attributes.rs
