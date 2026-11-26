@@ -181,6 +181,51 @@ pub struct FileSpaceInfo {
     pub manager_addrs: Vec<DecodedStoredAddress>,
 }
 
+/// The message fields a workspace crate supplies to construct a [`FileSpaceInfo`].
+///
+/// Supply the recorded strategy parameters and manager addresses. Use [`FileSpaceSettings`]
+/// for the effective configuration.
+pub struct FileSpaceInfoFields {
+    pub strategy: FileSpaceStrategy,
+    /// Whether the free-space managers persist their sections across file close.
+    pub persist: bool,
+    /// The smallest free section the managers track, in bytes.
+    pub threshold: u64,
+    pub page_size: FileSpacePageSize,
+    /// The smallest page-end free section the managers track under paged aggregation, in bytes.
+    pub page_end_meta_threshold: u16,
+    /// The end of allocation before allocating metadata for self-referential managers.
+    pub eoa_pre_fsm: Option<DecodedStoredAddress>,
+    /// The free-space manager header addresses when [`Self::persist`] is true.
+    ///
+    /// Use [`DecodedStoredAddress::Undefined`] for unused slots.
+    pub manager_addrs: Vec<DecodedStoredAddress>,
+}
+
+impl FileSpaceInfoFields {
+    /// Constructs a [`FileSpaceInfo`], retaining the recorded parameters and manager addresses.
+    pub fn build(self) -> FileSpaceInfo {
+        let Self {
+            strategy,
+            persist,
+            threshold,
+            page_size,
+            page_end_meta_threshold,
+            eoa_pre_fsm,
+            manager_addrs,
+        } = self;
+        FileSpaceInfo {
+            strategy,
+            persist,
+            threshold,
+            page_size,
+            page_end_meta_threshold,
+            eoa_pre_fsm,
+            manager_addrs,
+        }
+    }
+}
+
 /// A file space page size in bytes, from 512 bytes to 1 GiB.
 ///
 /// A version 1 File Space Info message stores a page size under every strategy, and under

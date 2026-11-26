@@ -104,6 +104,74 @@ impl Superblock {
     }
 }
 
+/// The fields a workspace crate supplies to construct a [`Superblock`].
+///
+/// Supply the version and its width-checked consistency flags together in [`SuperblockStatus`].
+/// The base and end-of-file addresses are absolute, and the other addresses are base-relative.
+/// Use `None` for fields absent from the selected version.
+pub struct SuperblockFields {
+    pub status: SuperblockStatus,
+    /// The width of file addresses in bytes.
+    pub offset_size: OffsetWidth,
+    /// The width of lengths in bytes.
+    pub length_size: LengthWidth,
+    pub base_address: BaseAddress,
+    /// The address of the first byte past the HDF5 data.
+    pub eof_address: u64,
+    /// The address of the root group's object header.
+    pub root_group_address: StoredAddress,
+    /// The group leaf node K for versions 0 and 1.
+    pub group_leaf_node_k: Option<u16>,
+    /// The group internal node K for versions 0 and 1.
+    pub group_internal_node_k: Option<u16>,
+    /// The indexed storage internal node K for version 1.
+    pub indexed_storage_internal_node_k: Option<u16>,
+    /// The free-space address for versions 0 and 1.
+    pub free_space_address: Option<StoredAddress>,
+    /// The driver information block address for versions 0 and 1.
+    pub driver_info_address: Option<StoredAddress>,
+    /// The superblock extension address for versions 2 and 3.
+    pub superblock_extension_address: Option<StoredAddress>,
+    /// The Jenkins lookup3 checksum for versions 2 and 3.
+    pub checksum: Option<u32>,
+}
+
+impl SuperblockFields {
+    /// Constructs a [`Superblock`], preserving the supplied version, flag bits, and addresses.
+    pub fn build(self) -> Superblock {
+        let Self {
+            status,
+            offset_size,
+            length_size,
+            base_address,
+            eof_address,
+            root_group_address,
+            group_leaf_node_k,
+            group_internal_node_k,
+            indexed_storage_internal_node_k,
+            free_space_address,
+            driver_info_address,
+            superblock_extension_address,
+            checksum,
+        } = self;
+        Superblock {
+            status,
+            offset_size,
+            length_size,
+            base_address,
+            eof_address,
+            root_group_address,
+            group_leaf_node_k,
+            group_internal_node_k,
+            indexed_storage_internal_node_k,
+            free_space_address,
+            driver_info_address,
+            superblock_extension_address,
+            checksum,
+        }
+    }
+}
+
 /// The encoding version of a [`Superblock`].
 ///
 /// The superblock stores this value in its "Version Number of the Superblock" field, defined in
@@ -296,6 +364,11 @@ impl TryFrom<SuperblockStatusFlags> for u8 {
     }
 }
 
+/// Creates status flags from an encoded field, preserving every bit.
+pub const fn superblock_status_flags(bits: u32) -> SuperblockStatusFlags {
+    SuperblockStatusFlags::from_bits(bits)
+}
+
 /// An access flag in a version 3 superblock's [`SuperblockStatusFlags`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SuperblockStatusFlag {
@@ -321,7 +394,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::__private::SuperblockFields;
     use crate::address::{BaseAddressExt, StoredAddressExt};
 
     #[rstest]
