@@ -15,6 +15,7 @@ use hdf5_pure_core::{
     TimeType, VariableLengthStringType, VariableLengthType,
 };
 
+use super::codec::ParsedProperties;
 use super::compound_layout::CompoundLayout;
 use crate::convert::Narrow;
 use crate::datatype::header::{
@@ -67,6 +68,22 @@ impl DatatypeVersion {
             });
         }
         Ok(self)
+    }
+
+    /// Checks the child's version against its containing message's version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DatatypeChildVersion`] if the child's version is higher.
+    pub(super) fn check_child(self, class: u8, child: Self) -> Result<(), FormatError> {
+        if child > self {
+            return Err(FormatError::DatatypeChildVersion {
+                class,
+                version: self.get(),
+                child_version: child.get(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -200,12 +217,12 @@ impl FloatingPointByteOrder {
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 #[derive(Clone, Debug, PartialEq)]
 pub struct DatatypeMessage {
-    pub(super) version: DatatypeVersion,
-    pub(super) properties: DatatypeProperties,
+    version: DatatypeVersion,
+    properties: DatatypeProperties,
     /// The offset widths inferred from an enumeration's decoded base. [`Self::to_datatype`]
     /// records them in the semantic enumeration, and [`Self::stored_size`] checks
     /// them against the destination width.
-    pub(super) enumeration_base_offsets: DatatypeOffsets,
+    enumeration_base_offsets: DatatypeOffsets,
 }
 
 impl DatatypeMessage {
@@ -315,7 +332,7 @@ impl DatatypeMessage {
                 })?;
             }
             DatatypeProperties::Enumeration { base_type, members } => {
-                compatible_child(version, class, base_type)?;
+                version.check_child(class, base_type.version())?;
                 let DatatypeProperties::FixedPoint(base) = base_type.properties else {
                     return Err(FormatError::EnumBaseNotInteger);
                 };
@@ -323,13 +340,13 @@ impl DatatypeMessage {
             }
             DatatypeProperties::VariableLengthSequence { base_type }
             | DatatypeProperties::VariableLengthString { base_type, .. } => {
-                compatible_child(version, class, base_type)?;
+                version.check_child(class, base_type.version())?;
             }
             DatatypeProperties::Array {
                 base_type,
                 dimensions,
             } => {
-                compatible_child(version, class, base_type)?;
+                version.check_child(class, base_type.version())?;
                 dimensions.len().narrow_or_else::<u8, _>(|| {
                     FormatError::ValueTooLargeForRepresentation {
                         value: dimensions.len().to_u64(),
@@ -342,7 +359,7 @@ impl DatatypeMessage {
                 )?;
             }
             DatatypeProperties::Complex { component } => {
-                compatible_child(version, class, component)?;
+                version.check_child(class, component.version())?;
                 let DatatypeProperties::FloatingPoint(component) = component.properties else {
                     return Err(FormatError::InvalidComplexParent {
                         class: component.properties.class(),
@@ -352,17 +369,19 @@ impl DatatypeMessage {
             }
             _ => {}
         }
-        Ok(Self::with_properties(version, properties))
-    }
-
-    pub(super) fn with_properties(
-        version: DatatypeVersion,
-        properties: DatatypeProperties,
-    ) -> Self {
-        Self {
+        Ok(Self {
             version,
             properties,
             enumeration_base_offsets: DatatypeOffsets::default(),
+        })
+    }
+
+    pub(super) fn from_parsed(parsed: ParsedProperties) -> Self {
+        let (version, properties, enumeration_base_offsets) = parsed.into_parts();
+        Self {
+            version,
+            properties,
+            enumeration_base_offsets,
         }
     }
 
@@ -392,6 +411,10 @@ impl DatatypeMessage {
     /// Returns [`FormatError::Internal`] if a complex component is not floating point.
     pub fn stored_size(&self, offset_width: OffsetWidth) -> Result<u32, FormatError> {
         self.size_with_offsets(Some(offset_width))
+    }
+
+    pub(super) const fn enumeration_base_offsets(&self) -> DatatypeOffsets {
+        self.enumeration_base_offsets
     }
 
     fn size_with_offsets(&self, destination: Option<OffsetWidth>) -> Result<u32, FormatError> {
@@ -664,9 +687,9 @@ impl DatatypeProperties {
 /// A compound member's name, byte offset, and versioned datatype description.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DatatypeMessageMember {
-    pub(super) name: DatatypeMemberName,
-    pub(super) byte_offset: u64,
-    pub(super) datatype: DatatypeMessage,
+    name: DatatypeMemberName,
+    byte_offset: u64,
+    datatype: DatatypeMessage,
 }
 
 impl DatatypeMessageMember {
@@ -728,7 +751,7 @@ impl DatatypeMessageMember {
         if !names.insert(&self.name) {
             return Err(FormatError::DuplicateCompoundField(self.name.clone()));
         }
-        compatible_child(version, COMPOUND_CLASS, &self.datatype)
+        version.check_child(COMPOUND_CLASS, self.datatype.version())
     }
 }
 
@@ -816,26 +839,6 @@ fn check_compound_members<'a>(
         layout.insert(member.byte_offset, field_size, index, |index| {
             Some(member_at(index).0.name.clone())
         })?;
-    }
-    Ok(())
-}
-
-/// Checks the child's version against its containing message's version.
-///
-/// # Errors
-///
-/// Returns [`FormatError::DatatypeChildVersion`] if the child's version is higher.
-pub(super) fn compatible_child(
-    version: DatatypeVersion,
-    class: u8,
-    child: &DatatypeMessage,
-) -> Result<(), FormatError> {
-    if child.version > version {
-        return Err(FormatError::DatatypeChildVersion {
-            class,
-            version: version.get(),
-            child_version: child.version.get(),
-        });
     }
     Ok(())
 }
