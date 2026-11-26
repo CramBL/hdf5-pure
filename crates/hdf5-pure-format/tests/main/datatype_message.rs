@@ -1,4 +1,4 @@
-use hdf5_pure_core::__private;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::{
     BitFieldType, CharacterSet, ComplexType, Datatype, DatatypeByteOrder, DatatypeMemberName,
     EnumMember, EnumerationType, FixedPointType, FloatingPointType, FormatError, StringPadding,
@@ -396,22 +396,13 @@ fn enum_values_have_the_integer_base_width(
 }
 
 #[test]
-fn compound_member_names_reject_embedded_nuls() {
-    assert_eq!(
-        DatatypeMessageMember::new("bad\0name".into(), 0, integer(DatatypeVersion::One))
-            .unwrap_err(),
-        FormatError::InvalidDatatypeMemberName {
-            class: 6,
-            name: "bad\0name".into()
-        },
-    );
-}
-
-#[test]
 fn compound_member_ranges_must_fit_at_a_supported_offset_width() {
-    let member =
-        DatatypeMessageMember::new("field".into(), 1, integer(DatatypeVersion::One)).unwrap();
-    assert_eq!(member.name(), "field");
+    let member = DatatypeMessageMember::new(
+        DatatypeMemberName::from(c"field"),
+        1,
+        integer(DatatypeVersion::One),
+    );
+    assert_eq!(member.name().as_bytes(), b"field");
     assert_eq!(member.byte_offset(), 1);
     assert_eq!(member.datatype(), &integer(DatatypeVersion::One));
     assert_eq!(
@@ -424,7 +415,7 @@ fn compound_member_ranges_must_fit_at_a_supported_offset_width() {
         )
         .unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
-            name: "field".into(),
+            name: DatatypeMemberName::from(c"field"),
             offset: 1,
             field_size: 2,
             compound_size: 2
@@ -555,7 +546,7 @@ fn nested_messages_retain_each_containing_and_child_version() {
         },
     )
     .unwrap();
-    let member = DatatypeMessageMember::new("values".into(), 0, array).unwrap();
+    let member = DatatypeMessageMember::new(DatatypeMemberName::from(c"values"), 0, array);
     let message = DatatypeMessage::new(
         DatatypeVersion::Five,
         DatatypeProperties::Compound {
@@ -590,8 +581,8 @@ fn nested_messages_retain_each_containing_and_child_version() {
         message.to_datatype().unwrap(),
         Datatype::Compound {
             size: 32,
-            members: vec![__private::compound_member(
-                "values".into(),
+            members: vec![CompoundMember::new(
+                DatatypeMemberName::from(c"values"),
                 0,
                 Datatype::Array {
                     base_type: Box::new(Datatype::VariableLength(VariableLengthType::sequence(
@@ -616,7 +607,11 @@ fn container(class: Container, child: DatatypeMessage) -> DatatypeProperties {
     match class {
         Container::Compound => DatatypeProperties::Compound {
             size: 2,
-            members: vec![DatatypeMessageMember::new("field".into(), 0, child).unwrap()],
+            members: vec![DatatypeMessageMember::new(
+                DatatypeMemberName::from(c"field"),
+                0,
+                child,
+            )],
         },
         Container::Enumeration => DatatypeProperties::Enumeration {
             base_type: Box::new(child),
@@ -676,21 +671,21 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
     let expected = Datatype::Compound {
         size: 56,
         members: vec![
-            __private::compound_member(
-                "array".into(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"array"),
                 0,
                 Datatype::Array {
                     base_type: Box::new(enumeration_datatype()),
                     dimensions: vec![2, 3],
                 },
             ),
-            __private::compound_member(
-                "sequence".into(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"sequence"),
                 24,
                 Datatype::VariableLength(VariableLengthType::sequence(integer_datatype())),
             ),
-            __private::compound_member(
-                "complex".into(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"complex"),
                 40,
                 Datatype::Complex(
                     ComplexType::new(FloatingPointType::ieee754_binary64(
@@ -740,8 +735,8 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
 #[case::compound_v1(test_util::legacy_compound::array_member(), Class::COMPOUND, Version::One,
     Datatype::Compound {
         size: 16,
-        members: vec![__private::compound_member(
-            "arr".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"arr"),
             0,
             Datatype::Array {
                 base_type: Box::new(Datatype::FixedPoint(FixedPointType::i32())),
@@ -752,7 +747,7 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
 #[case::compound_v2(containers::legacy_compound_v2(), Class::COMPOUND, Version::Two,
     Datatype::Compound {
         size: 8,
-        members: vec![__private::compound_member("offset".into(), 4, integer_datatype())],
+        members: vec![CompoundMember::new(DatatypeMemberName::from(c"offset"), 4, integer_datatype())],
     })]
 #[case::array_v2(containers::legacy_array(), Class::ARRAY, Version::Two,
     Datatype::Array {

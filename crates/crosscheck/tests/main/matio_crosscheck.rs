@@ -822,9 +822,9 @@ fn hdf5_pure_reads_complex_int16_written_by_matio() {
     match ds.datatype().unwrap() {
         hdf5_pure::Datatype::Compound { size, members } => {
             assert_eq!(size, 4);
-            assert_eq!(members[0].name, "real");
+            assert_eq!(members[0].name.as_bytes(), b"real");
             assert_eq!(members[0].byte_offset, 0);
-            assert_eq!(members[1].name, "imag");
+            assert_eq!(members[1].name.as_bytes(), b"imag");
             assert_eq!(members[1].byte_offset, 2);
             for m in &members {
                 match m.datatype {

@@ -4,6 +4,7 @@ use core::num::NonZeroUsize;
 
 use hdf5_pure::CompoundMember;
 use hdf5_pure::Datatype;
+use hdf5_pure::DatatypeMemberName;
 use hdf5_pure::FillTime;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::FormatError;
@@ -205,13 +206,13 @@ fn source_and_heap_diagnostics_preserve_full_width_positions(
 
 #[test]
 fn public_member_fields_remain_nameable() {
-    fn compound(member: &CompoundMember) -> (&str, u64, &Datatype) {
+    fn compound(member: &CompoundMember) -> (&DatatypeMemberName, u64, &Datatype) {
         (&member.name, member.byte_offset, &member.datatype)
     }
     fn enumeration(member: &hdf5_pure::EnumMember) -> (&hdf5_pure::DatatypeMemberName, &[u8]) {
         (&member.name, &member.value)
     }
-    let _: fn(&CompoundMember) -> (&str, u64, &Datatype) = compound;
+    let _: fn(&CompoundMember) -> (&DatatypeMemberName, u64, &Datatype) = compound;
     let _: fn(&hdf5_pure::EnumMember) -> (&hdf5_pure::DatatypeMemberName, &[u8]) = enumeration;
 }
 

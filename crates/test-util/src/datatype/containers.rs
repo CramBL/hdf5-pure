@@ -8,11 +8,12 @@
 use super::Class;
 use super::leaf::{Leaf, Version};
 
-/// Builds a compound message using the property layout of versions 3 through 5.
+/// Builds a compound message with scalar members in version 1.
 ///
 /// Accepts unchecked header fields, names, offsets, and child encodings for malformed
-/// fixtures. The count in `flags` is independent of `members`. Appends a NUL terminator
-/// to each name and truncates each offset to the low bytes selected by `width`.
+/// fixtures. The count in `flags` is independent of `members`. Pads each NUL-terminated name to
+/// a multiple of eight bytes in versions 1 and 2. Truncates offsets to the low bytes selected by
+/// `width` and writes a zeroed dimension block after each version 1 offset.
 ///
 /// # Examples
 ///
@@ -42,9 +43,11 @@ pub fn compound(
         datatype,
     } in members
     {
-        bytes.extend_from_slice(name);
-        bytes.push(0);
+        append_member_name(&mut bytes, version, name);
         bytes.extend_from_slice(&offset.to_le_bytes()[..width.get()]);
+        if version == Version::One.get() {
+            bytes.extend_from_slice(&[0; COMPOUND_DIMENSION_BLOCK_LEN]);
+        }
         bytes.extend_from_slice(datatype);
     }
     bytes
@@ -59,6 +62,7 @@ pub struct CompoundField<'a> {
     /// The complete encoded child description.
     pub datatype: &'a [u8],
 }
+
 /// The width of a compound member's byte-offset field.
 #[derive(Clone, Copy, Debug)]
 pub enum MemberOffset {
@@ -118,14 +122,7 @@ pub fn enumeration(
     let mut bytes = super::header(Class::ENUMERATED, version, flags, size);
     bytes.extend_from_slice(parent);
     for EnumValue { name, value: _ } in members {
-        let start = bytes.len();
-        bytes.extend_from_slice(name);
-        bytes.push(0);
-        if version <= Version::Two.get() {
-            while (bytes.len() - start) % ENUM_NAME_ALIGNMENT != 0 {
-                bytes.push(0);
-            }
-        }
+        append_member_name(&mut bytes, version, name);
     }
     for EnumValue { name: _, value } in members {
         bytes.extend_from_slice(value);
@@ -133,9 +130,24 @@ pub fn enumeration(
     bytes
 }
 
-// "The Datatype Message" in format specification version 4.0 defines the alignment of
-// enumeration names in versions 1 and 2.
-const ENUM_NAME_ALIGNMENT: usize = 8;
+fn append_member_name(bytes: &mut Vec<u8>, version: u8, name: &[u8]) {
+    let start = bytes.len();
+    bytes.extend_from_slice(name);
+    bytes.push(0);
+    if version <= Version::Two.get() {
+        while (bytes.len() - start) % MEMBER_NAME_ALIGNMENT != 0 {
+            bytes.push(0);
+        }
+    }
+}
+
+// "The Datatype Message" of the format specification, version 4.0, defines this alignment
+// in bytes for terminated compound and enumeration names in versions 1 and 2.
+const MEMBER_NAME_ALIGNMENT: usize = 8;
+
+// "The Datatype Message" of the format specification, version 4.0, gives the fields
+// of the dimension block after a version 1 compound member offset.
+const COMPOUND_DIMENSION_BLOCK_LEN: usize = 28;
 
 /// An enumeration member's raw name and stored value bytes.
 pub struct EnumValue<'a> {

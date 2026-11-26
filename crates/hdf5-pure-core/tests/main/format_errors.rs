@@ -6,6 +6,7 @@ use core::str::Utf8Error;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::AddressRange;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::EditStorageConflict;
@@ -41,7 +42,6 @@ fn allocation_failure_exposes_its_reservation_error() {
 #[rstest::rstest]
 #[case::local_heap(|source| FormatError::InvalidLocalHeapName { offset: 8, source })]
 #[case::soft_link(|source| FormatError::InvalidSoftLinkEncoding { source })]
-#[case::datatype_member(|source| FormatError::UnsupportedDatatypeMemberEncoding { class: 6, offset: 8, source })]
 fn utf8_decoding_errors_expose_their_source(#[case] make_error: fn(Utf8Error) -> FormatError) {
     let source = core::str::from_utf8(core::slice::from_ref(&u8::MAX)).unwrap_err();
     let error = make_error(source);
@@ -191,10 +191,13 @@ fn enumeration_diagnostics_preserve_their_fields(
 #[test]
 fn compound_member_parts_borrow_the_complete_member() {
     let datatype = Datatype::FixedPoint(FixedPointType::u32());
-    let member = __private::compound_member("field".into(), 3, datatype.clone());
+    let member = CompoundMember::new(DatatypeMemberName::from(c"field"), 3, datatype.clone());
     let (name, offset, borrowed) = __private::compound_member_parts(&member);
-    assert_eq!((name, offset, borrowed), ("field", 3, &datatype));
-    assert_eq!(name.as_ptr(), member.name.as_ptr());
+    assert_eq!(
+        (name.as_bytes(), offset, borrowed),
+        (b"field".as_slice(), 3, &datatype)
+    );
+    assert!(core::ptr::eq(name, &member.name));
     assert!(core::ptr::eq(borrowed, &member.datatype));
 }
 

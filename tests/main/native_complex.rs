@@ -1,3 +1,4 @@
+use hdf5_pure::DatatypeMemberName;
 use hdf5_pure::{
     AttrValue, ComplexType, CompoundTypeBuilder, DType, Datatype, DatatypeByteOrder, Error, File,
     FileAccessProperties, FileBuilder, FloatingPointType, FormatError, Layout, LibVer, MaxExtent,
@@ -673,7 +674,7 @@ fn dtype(component: Component, container: Container) -> DType {
     match container {
         Container::Native => native,
         Container::Array => DType::Array(Box::new(native), vec![2]),
-        Container::Compound => DType::Compound(vec![("value".into(), native)]),
+        Container::Compound => DType::Compound(vec![(DatatypeMemberName::from(c"value"), native)]),
         Container::MatlabCompound => {
             let scalar = if component.size() == 4 {
                 DType::F32
@@ -681,8 +682,8 @@ fn dtype(component: Component, container: Container) -> DType {
                 DType::F64
             };
             DType::Compound(vec![
-                ("real".into(), scalar.clone()),
-                ("imag".into(), scalar),
+                (DatatypeMemberName::from(c"real"), scalar.clone()),
+                (DatatypeMemberName::from(c"imag"), scalar),
             ])
         }
     }

@@ -1,6 +1,5 @@
-use core::error::Error;
-
-use hdf5_pure_core::__private;
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::{Datatype, FixedPointType, FormatError, VariableLengthType};
 use hdf5_pure_format::__private::{
     self as format, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
@@ -50,8 +49,8 @@ fn datatype_compound_codecs_preserve_compound_properties(
         DatatypeProperties::Compound {
             size: 32,
             members: vec![
-                DatatypeMessageMember::new("first".into(), 0, child.clone()).unwrap(),
-                DatatypeMessageMember::new("第二".into(), 16, child).unwrap(),
+                DatatypeMessageMember::new(DatatypeMemberName::from(c"first"), 0, child.clone()),
+                DatatypeMessageMember::new(DatatypeMemberName::from(c"第二"), 16, child),
             ],
         },
     )
@@ -86,14 +85,11 @@ fn datatype_compound_codecs_preserve_member_offset_widths(
         DatatypeVersion::Three,
         DatatypeProperties::Compound {
             size,
-            members: vec![
-                DatatypeMessageMember::new(
-                    "x".into(),
-                    offset,
-                    DatatypeMessage::parse(&child).unwrap().0,
-                )
-                .unwrap(),
-            ],
+            members: vec![DatatypeMessageMember::new(
+                DatatypeMemberName::from(c"x"),
+                offset,
+                DatatypeMessage::parse(&child).unwrap().0,
+            )],
         },
     )
     .unwrap();
@@ -113,13 +109,13 @@ fn datatype_compound_parser_uses_source_member_extent() {
         10,
         MemberOffset::One,
         &[CompoundField {
-            name: b"x",
+            name: b"\xff",
             offset: 0,
             datatype: &sequence,
         }],
     );
     let expected = FormatError::CompoundFieldOutOfBounds {
-        name: "x".into(),
+        name: DatatypeMemberName::from(c"\xff"),
         offset: 0,
         field_size: 16,
         compound_size: 10,
@@ -156,8 +152,8 @@ fn compound_v1_sequence_member_fits_at_its_stored_size(
         (
             Datatype::Compound {
                 size: SEQUENCE_MEMBER_OFFSET + count * descriptor_size,
-                members: vec![__private::compound_member(
-                    "arr".into(),
+                members: vec![CompoundMember::new(
+                    DatatypeMemberName::from(c"arr"),
                     u64::from(SEQUENCE_MEMBER_OFFSET),
                     member,
                 )],
@@ -184,7 +180,7 @@ fn compound_v1_sequence_member_rejects_a_one_byte_overrun(
     assert_eq!(
         format::parse_datatype(&bytes).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
-            name: "arr".into(),
+            name: DatatypeMemberName::from(c"arr"),
             offset: u64::from(SEQUENCE_MEMBER_OFFSET),
             field_size,
             compound_size,
@@ -220,8 +216,8 @@ fn compound_v1_implicit_array_rejects_an_overlapping_member(
     assert_eq!(
         format::parse_datatype(&bytes).unwrap_err(),
         FormatError::CompoundFieldOverlap {
-            first: "arr".into(),
-            second: "tag".into(),
+            first: DatatypeMemberName::from(c"arr"),
+            second: DatatypeMemberName::from(c"tag"),
         }
     );
 }
@@ -237,7 +233,7 @@ fn datatype_compound_encoder_uses_selected_member_extent() {
         10,
         MemberOffset::One,
         &[CompoundField {
-            name: b"x",
+            name: b"\xff",
             offset: 0,
             datatype: &sequence,
         }],
@@ -246,7 +242,7 @@ fn datatype_compound_encoder_uses_selected_member_extent() {
     assert_eq!(
         message.serialize(OffsetWidth::Eight).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
-            name: "x".into(),
+            name: DatatypeMemberName::from(c"\xff"),
             offset: 0,
             field_size: 16,
             compound_size: 10
@@ -319,12 +315,12 @@ fn datatype_compound_codecs_preserve_recursive_mixtures(
         MemberOffset::One,
         &[
             CompoundField {
-                name: b"array",
+                name: b"array\xff",
                 offset: 0,
                 datatype: &array,
             },
             CompoundField {
-                name: b"complex",
+                name: b"complex\xfe",
                 offset: 32,
                 datatype: &complex,
             },
@@ -336,14 +332,19 @@ fn datatype_compound_codecs_preserve_recursive_mixtures(
         64,
         MemberOffset::One,
         &[CompoundField {
-            name: b"inner",
+            name: b"inner\xff",
             offset: 0,
             datatype: &inner,
         }],
     );
-    let bytes = datatype::array(5, [0; 3], 128, 1, &[2], &outer);
+    let array = datatype::array(5, [0; 3], 128, 1, &[2], &outer);
+    let bytes = datatype::variable_length(Version::Five.get(), [0; 3], 10, &array);
     let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
+    assert_eq!(
+        message.to_datatype().unwrap(),
+        format::parse_datatype(&bytes).unwrap().0
+    );
     let descriptor = 8 + u32::from(width.get());
     let sequence = datatype::variable_length(4, [0; 3], descriptor, &parent);
     let array = datatype::array(4, [0; 3], descriptor * 2, 1, &[2], &sequence);
@@ -354,12 +355,12 @@ fn datatype_compound_codecs_preserve_recursive_mixtures(
         MemberOffset::One,
         &[
             CompoundField {
-                name: b"array",
+                name: b"array\xff",
                 offset: 0,
                 datatype: &array,
             },
             CompoundField {
-                name: b"complex",
+                name: b"complex\xfe",
                 offset: 32,
                 datatype: &complex,
             },
@@ -371,14 +372,15 @@ fn datatype_compound_codecs_preserve_recursive_mixtures(
         64,
         MemberOffset::One,
         &[CompoundField {
-            name: b"inner",
+            name: b"inner\xff",
             offset: 0,
             datatype: &inner,
         }],
     );
+    let array = datatype::array(5, [0; 3], 128, 1, &[2], &outer);
     assert_eq!(
         message.serialize(width).unwrap(),
-        datatype::array(5, [0; 3], 128, 1, &[2], &outer)
+        datatype::variable_length(Version::Five.get(), [0; 3], descriptor, &array)
     );
 }
 
@@ -436,8 +438,8 @@ fn datatype_compound_codecs_reject_duplicate_member_names() {
     let parent = Leaf::Integer.bytes(Version::One);
     let child = DatatypeMessage::parse(&parent).unwrap().0;
     let members = vec![
-        DatatypeMessageMember::new("x".into(), 0, child.clone()).unwrap(),
-        DatatypeMessageMember::new("x".into(), 4, child).unwrap(),
+        DatatypeMessageMember::new(DatatypeMemberName::from(c"\xff"), 0, child.clone()),
+        DatatypeMessageMember::new(DatatypeMemberName::from(c"\xff"), 4, child),
     ];
     assert_eq!(
         DatatypeMessage::new(
@@ -445,7 +447,7 @@ fn datatype_compound_codecs_reject_duplicate_member_names() {
             DatatypeProperties::Compound { size: 8, members }
         )
         .unwrap_err(),
-        FormatError::DuplicateCompoundField("x".into())
+        FormatError::DuplicateCompoundField(DatatypeMemberName::from(c"\xff"))
     );
     let bytes = containers::compound(
         3,
@@ -454,12 +456,12 @@ fn datatype_compound_codecs_reject_duplicate_member_names() {
         MemberOffset::One,
         &[
             CompoundField {
-                name: b"x",
+                name: b"\xff",
                 offset: 0,
                 datatype: &parent,
             },
             CompoundField {
-                name: b"x",
+                name: b"\xff",
                 offset: 4,
                 datatype: &parent,
             },
@@ -467,7 +469,7 @@ fn datatype_compound_codecs_reject_duplicate_member_names() {
     );
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap_err(),
-        FormatError::DuplicateCompoundField("x".into())
+        FormatError::DuplicateCompoundField(DatatypeMemberName::from(c"\xff"))
     );
 }
 
@@ -526,40 +528,198 @@ fn datatype_compound_parser_rejects_newer_children() {
     );
 }
 
-#[test]
-fn datatype_compound_parser_rejects_non_utf8_member_names() {
-    let parent = Leaf::Integer.bytes(Version::One);
+#[rstest]
+fn datatype_compound_codecs_preserve_member_name_bytes(
+    #[values(DatatypeVersion::Three, DatatypeVersion::Four, DatatypeVersion::Five)]
+    version: DatatypeVersion,
+) {
+    let all: Vec<u8> = (1..=u8::MAX).collect();
+    let names = [
+        b"first".as_slice(),
+        "第二".as_bytes(),
+        b"\xff",
+        b"\xfe",
+        "\u{fffd}".as_bytes(),
+        &all,
+        b"",
+    ];
+    let integer = leaf::unsigned_byte(Version::One);
+    let wide_integer = Leaf::Integer.bytes(Version::Two);
+    let fields: Vec<_> = names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| CompoundField {
+            name,
+            offset: u64::try_from(index).unwrap(),
+            datatype: if index == names.len() - 1 {
+                &wide_integer
+            } else {
+                &integer
+            },
+        })
+        .collect();
+    let size = 10;
+    let count = u8::try_from(fields.len()).unwrap();
     let bytes = containers::compound(
-        3,
+        version.get(),
+        [count, 0, 0],
+        size,
+        MemberOffset::One,
+        &fields,
+    );
+    let expected = Datatype::Compound {
+        size,
+        members: fields
+            .iter()
+            .map(|field| {
+                CompoundMember::new(
+                    DatatypeMemberName::new(field.name).unwrap(),
+                    field.offset,
+                    format::parse_datatype(field.datatype).unwrap().0,
+                )
+            })
+            .collect(),
+    };
+    let mut input = bytes.clone();
+    input.push(0xff);
+    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(message.version(), version);
+    let DatatypeProperties::Compound { members, .. } = message.properties() else {
+        panic!("expected compound properties");
+    };
+    assert_eq!(members.len(), fields.len());
+    for (member, field) in members.iter().zip(fields) {
+        assert_eq!(member.name().as_bytes(), field.name);
+        assert_eq!(member.byte_offset(), field.offset);
+        assert_eq!(
+            member.datatype().serialize(OffsetWidth::Eight).unwrap(),
+            field.datatype
+        );
+    }
+    assert_eq!(message.to_datatype().unwrap(), expected);
+    assert_eq!(
+        format::parse_datatype(&input).unwrap(),
+        (expected, bytes.len())
+    );
+    assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+}
+
+#[test]
+fn prepared_compound_write_preserves_output_outside_its_extent() {
+    let child = leaf::unsigned_byte(Version::One);
+    let bytes = containers::compound(
+        Version::Three.get(),
         [1, 0, 0],
-        4,
+        1,
         MemberOffset::One,
         &[CompoundField {
-            name: &[0xff],
+            name: b"a\xff",
             offset: 0,
-            datatype: &parent,
+            datatype: &child,
         }],
     );
-    let error = DatatypeMessage::parse(&bytes).unwrap_err();
-    let FormatError::UnsupportedDatatypeMemberEncoding {
-        class,
-        offset,
-        source,
-    } = &error
-    else {
-        panic!("{error:?}")
-    };
-    assert_eq!(*class, 6);
-    assert_eq!(*offset, 8);
-    assert_eq!(source.valid_up_to(), 0);
-    assert_eq!(source.error_len(), Some(1));
+    let (message, _) = DatatypeMessage::parse(&bytes).unwrap();
+    let prepared = message.prepare(OffsetWidth::Eight).unwrap();
+    let expected = bytes.len();
+    let available = expected - 1;
+    let mut output = vec![0xaa; expected + 1];
+    assert_eq!(prepared.encoded_size(), expected);
     assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<core::str::Utf8Error>()
-            .unwrap(),
-        source
+        prepared.write_into(&mut output[..available]).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected,
+            available
+        }
+    );
+    assert_eq!(output, vec![0xaa; expected + 1]);
+    assert_eq!(prepared.write_into(&mut output).unwrap(), expected);
+    assert_eq!(&output[..expected], bytes);
+    assert_eq!(output[expected], 0xaa);
+}
+
+#[test]
+fn compound_member_text_access_returns_the_original_utf8_error() {
+    let name = DatatypeMemberName::from(c"x\xff");
+    let expected = core::str::from_utf8(name.as_bytes()).unwrap_err();
+    assert_eq!(name.as_str(), Err(expected));
+    assert_eq!(name.as_bytes(), b"x\xff");
+}
+
+#[rstest]
+fn canonical_encoding_preserves_legacy_compound_member_name_bytes(
+    #[values(Version::One, Version::Two)] version: Version,
+) {
+    let child = leaf::unsigned_byte(Version::One);
+    let names = [b"\xff234567".as_slice(), b"\xfe2345678", b"\xff23456789"];
+    let fields: Vec<_> = names
+        .into_iter()
+        .zip([5, 0, 2])
+        .map(|(name, offset)| CompoundField {
+            name,
+            offset,
+            datatype: &child,
+        })
+        .collect();
+    let flags = [u8::try_from(fields.len()).unwrap(), 0, 0];
+    let size = 6;
+    let legacy = containers::compound(version.get(), flags, size, MemberOffset::Four, &fields);
+    let canonical = containers::compound(
+        Version::Three.get(),
+        flags,
+        size,
+        MemberOffset::One,
+        &fields,
+    );
+    let expected = Datatype::Compound {
+        size,
+        members: fields
+            .iter()
+            .map(|field| {
+                CompoundMember::new(
+                    DatatypeMemberName::new(field.name).unwrap(),
+                    field.offset,
+                    Datatype::FixedPoint(FixedPointType::u8()),
+                )
+            })
+            .collect(),
+    };
+    let (datatype, consumed) = format::parse_datatype(&legacy).unwrap();
+    assert_eq!(consumed, legacy.len());
+    assert_eq!(datatype, expected);
+    assert_eq!(
+        format::serialize_datatype_with_offset_width(&datatype, OffsetWidth::Eight).unwrap(),
+        canonical
+    );
+}
+
+#[rstest]
+#[case::missing_terminator(16, 9)]
+#[case::missing_padding(17, 24)]
+#[case::truncated_offset(27, 28)]
+fn semantic_compound_parser_reports_incomplete_legacy_name_and_offset_fields(
+    #[case] available: usize,
+    #[case] expected: usize,
+    #[values(Version::One, Version::Two)] version: Version,
+) {
+    let child = leaf::unsigned_byte(Version::One);
+    let bytes = containers::compound(
+        version.get(),
+        [1, 0, 0],
+        1,
+        MemberOffset::Four,
+        &[CompoundField {
+            name: b"\xff2345678",
+            offset: 0,
+            datatype: &child,
+        }],
+    );
+    assert_eq!(
+        format::parse_datatype(&bytes[..available]).unwrap_err(),
+        FormatError::UnexpectedEof {
+            expected,
+            available
+        }
     );
 }
 
@@ -579,7 +739,7 @@ fn datatype_compound_parser_reports_incomplete_fields(
         4,
         MemberOffset::One,
         &[CompoundField {
-            name: b"x",
+            name: b"\xff",
             offset: 0,
             datatype: &parent,
         }],
@@ -632,14 +792,11 @@ fn datatype_compound_codecs_preserve_float_member_versions(
         DatatypeVersion::Five,
         DatatypeProperties::Compound {
             size: 8,
-            members: vec![
-                DatatypeMessageMember::new(
-                    "x".into(),
-                    0,
-                    DatatypeMessage::parse(&parent).unwrap().0,
-                )
-                .unwrap(),
-            ],
+            members: vec![DatatypeMessageMember::new(
+                DatatypeMemberName::from(c"x"),
+                0,
+                DatatypeMessage::parse(&parent).unwrap().0,
+            )],
         },
     )
     .unwrap();
@@ -670,7 +827,11 @@ fn datatype_compound_codecs_bound_recursion() {
             DatatypeVersion::Three,
             DatatypeProperties::Compound {
                 size: 1,
-                members: vec![DatatypeMessageMember::new("x".into(), 0, expected).unwrap()],
+                members: vec![DatatypeMessageMember::new(
+                    DatatypeMemberName::from(c"x"),
+                    0,
+                    expected,
+                )],
             },
         )
         .unwrap();
@@ -706,7 +867,11 @@ fn datatype_compound_codecs_bound_recursion() {
         DatatypeVersion::Three,
         DatatypeProperties::Compound {
             size: 1,
-            members: vec![DatatypeMessageMember::new("x".into(), 0, message).unwrap()],
+            members: vec![DatatypeMessageMember::new(
+                DatatypeMemberName::from(c"x"),
+                0,
+                message,
+            )],
         },
     )
     .unwrap();
@@ -732,13 +897,13 @@ fn semantic_parser_accepts_v1_compound_in_v3_and_retained_parser_rejects_it() {
     );
     let expected = Datatype::Compound {
         size: 20,
-        members: vec![__private::compound_member(
-            "inner".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"inner"),
             4,
             Datatype::Compound {
                 size: 16,
-                members: vec![__private::compound_member(
-                    "arr".into(),
+                members: vec![CompoundMember::new(
+                    DatatypeMemberName::from(c"arr"),
                     0,
                     Datatype::Array {
                         base_type: Box::new(Datatype::FixedPoint(FixedPointType::i32())),

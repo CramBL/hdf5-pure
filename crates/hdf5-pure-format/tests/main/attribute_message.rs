@@ -1,5 +1,6 @@
-use hdf5_pure_core::__private as core_format;
 use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::{
     CharacterSet, FormatError, LengthWidth, MaxExtent, OffsetWidth, StoredAddress, StringPadding,
     VariableLengthType,
@@ -195,8 +196,8 @@ fn attribute_name_size_error_precedes_the_datatype_size_error() {
     let long_name = "x".repeat(usize::from(u16::MAX));
     message.datatype = Datatype::Compound {
         size: 1,
-        members: vec![core_format::compound_member(
-            long_name.clone(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::new(&long_name).unwrap(),
             0,
             one_byte_string(),
         )],

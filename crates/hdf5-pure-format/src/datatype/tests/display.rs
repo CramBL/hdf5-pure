@@ -1,6 +1,7 @@
 use rstest::rstest;
 
 use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::{DatatypeMemberName, EnumMember, EnumerationType};
 
 use super::super::*;
@@ -81,8 +82,8 @@ fn nested_types_recurse_through_their_members() {
     let compound = Datatype::Compound {
         size: 12,
         members: vec![
-            __private::compound_member(
-                "x".into(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"x"),
                 0,
                 Datatype::FloatingPoint(
                     FloatingPointType::from_layout(
@@ -93,8 +94,8 @@ fn nested_types_recurse_through_their_members() {
                     .unwrap(),
                 ),
             ),
-            __private::compound_member(
-                "n".into(),
+            CompoundMember::new(
+                DatatypeMemberName::from(c"n"),
                 4,
                 Datatype::FixedPoint(
                     FixedPointType::new(8, DatatypeByteOrder::LittleEndian, true, 0, 64).unwrap(),
@@ -152,8 +153,8 @@ fn an_opaque_tag_is_quoted_and_escaped() {
 fn a_member_name_cannot_carry_a_control_character_into_a_message() {
     let compound = Datatype::Compound {
         size: 4,
-        members: vec![__private::compound_member(
-            "a\nb\u{1b}[31m".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"a\nb\u{1b}[31m"),
             0,
             u32_datatype(),
         )],
@@ -190,7 +191,13 @@ fn a_long_member_list_is_elided_and_reports_the_remainder() {
     let compound = Datatype::Compound {
         size: (over_cap * 4) as u32,
         members: (0..over_cap)
-            .map(|i| __private::compound_member(format!("m{i}"), (i * 4) as u64, u32_datatype()))
+            .map(|i| {
+                CompoundMember::new(
+                    DatatypeMemberName::new(format!("m{i}")).unwrap(),
+                    (i * 4) as u64,
+                    u32_datatype(),
+                )
+            })
             .collect(),
     };
     let members = (0..over_cap)

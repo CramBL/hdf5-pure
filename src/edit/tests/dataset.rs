@@ -2,6 +2,8 @@
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::FILTER_PIPELINE_VERSION_TWO;
 use rstest::rstest;
@@ -799,8 +801,8 @@ fn raw_appendable_recurses_into_aggregates() {
     assert!(edit::datatype_is_raw_appendable(&big_endian_u8_type()));
     let be_member = Datatype::Compound {
         size: 8,
-        members: vec![crate::datatype::__private::compound_member(
-            "x".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"x"),
             0,
             be_f64.clone(),
         )],
@@ -808,8 +810,8 @@ fn raw_appendable_recurses_into_aggregates() {
     assert!(!edit::datatype_is_raw_appendable(&be_member));
     let le_member = Datatype::Compound {
         size: 8,
-        members: vec![crate::datatype::__private::compound_member(
-            "x".into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::from(c"x"),
             0,
             le_f64.clone(),
         )],
@@ -943,8 +945,8 @@ fn array_type(base: Datatype, dimensions: Vec<u32>) -> Datatype {
 fn single_member_compound_type(base: Datatype, size: u32, name: &str, offset: u64) -> Datatype {
     Datatype::Compound {
         size,
-        members: vec![crate::datatype::__private::compound_member(
-            name.into(),
+        members: vec![CompoundMember::new(
+            DatatypeMemberName::new(name).unwrap(),
             offset,
             base,
         )],

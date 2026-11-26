@@ -47,7 +47,8 @@ fn an_unclassified_type_carries_the_type_and_writes_a_summary() {
 
 #[test]
 fn a_curated_member_name_is_escaped_in_either_variant() {
-    let compound = DType::Compound(vec![("a\nb".into(), DType::I32)]).to_string();
+    let compound =
+        DType::Compound(vec![(DatatypeMemberName::from(c"a\nb"), DType::I32)]).to_string();
     assert!(!compound.chars().any(char::is_control), "{compound}");
     assert_eq!(compound, "compound{a\\nb: i32}");
 
@@ -67,7 +68,7 @@ fn a_curated_member_list_is_elided_in_either_variant() {
     let compound = DType::Compound(
         names
             .iter()
-            .map(|name| (name.clone(), DType::I32))
+            .map(|name| (DatatypeMemberName::new(name).unwrap(), DType::I32))
             .collect(),
     );
     let enumeration = DType::Enum(

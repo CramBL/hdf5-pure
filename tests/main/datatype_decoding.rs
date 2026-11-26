@@ -112,7 +112,7 @@ fn dataset_datatype_reads_a_narrow_legacy_sequence_member(
     assert_eq!(
         (
             compound_size,
-            member.name.as_str(),
+            member.name.as_str().unwrap(),
             member.byte_offset,
             &member.datatype
         ),

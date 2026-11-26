@@ -117,12 +117,12 @@ pub fn make_vlen_string_type(charset: CharacterSet) -> Datatype {
 /// Builder for constructing HDF5 compound (struct) datatypes.
 ///
 /// Fields are laid out contiguously in insertion order, and the builder computes their offsets.
-/// [`new`](Self::new) starts an empty builder, [`field`](Self::field) adds an arbitrary field, and
-/// the typed helpers [`f64_field`](Self::f64_field), [`f32_field`](Self::f32_field),
+/// Use [`field`](Self::field) for an arbitrary datatype. The typed helpers
+/// [`f64_field`](Self::f64_field), [`f32_field`](Self::f32_field),
 /// [`i8_field`](Self::i8_field), [`i16_field`](Self::i16_field), [`i32_field`](Self::i32_field),
 /// [`i64_field`](Self::i64_field), [`u8_field`](Self::u8_field), [`u16_field`](Self::u16_field),
 /// [`u32_field`](Self::u32_field) and [`u64_field`](Self::u64_field) add a named scalar field.
-/// [`build`](Self::build) rejects a builder with no fields and one whose fields pack to zero bytes.
+/// Pass field names as strings or byte slices.
 ///
 /// For an `H5Tinsert`-style layout with explicit offsets and a fixed total size,
 /// [`with_size`](Self::with_size) returns an [`ExplicitCompoundTypeBuilder`] instead.
@@ -140,69 +140,69 @@ pub fn make_vlen_string_type(charset: CharacterSet) -> Datatype {
 /// # Ok::<(), hdf5_pure::FormatError>(())
 /// ```
 pub struct CompoundTypeBuilder {
-    fields: Vec<(String, Datatype)>,
+    fields: Vec<(Vec<u8>, Datatype)>,
 }
 
 impl CompoundTypeBuilder {
+    /// Starts a builder with no fields.
     pub fn new() -> Self {
         Self { fields: Vec::new() }
     }
 
-    /// Add a named field with the given datatype.
-    pub fn field(mut self, name: &str, datatype: Datatype) -> Self {
-        self.fields.push((name.to_string(), datatype));
+    /// Appends a field whose offset is the sum of the preceding field sizes.
+    pub fn field(mut self, name: impl AsRef<[u8]>, datatype: Datatype) -> Self {
+        self.fields.push((name.as_ref().to_vec(), datatype));
         self
     }
 
     /// Add an f64 field.
-    pub fn f64_field(self, name: &str) -> Self {
+    pub fn f64_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_f64_type())
     }
     /// Add an f32 field.
-    pub fn f32_field(self, name: &str) -> Self {
+    pub fn f32_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_f32_type())
     }
     /// Add an i32 field.
-    pub fn i32_field(self, name: &str) -> Self {
+    pub fn i32_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_i32_type())
     }
     /// Add an i64 field.
-    pub fn i64_field(self, name: &str) -> Self {
+    pub fn i64_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_i64_type())
     }
     /// Add a u8 field.
-    pub fn u8_field(self, name: &str) -> Self {
+    pub fn u8_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_u8_type())
     }
     /// Add an i8 field.
-    pub fn i8_field(self, name: &str) -> Self {
+    pub fn i8_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_i8_type())
     }
     /// Add an i16 field.
-    pub fn i16_field(self, name: &str) -> Self {
+    pub fn i16_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_i16_type())
     }
     /// Add a u16 field.
-    pub fn u16_field(self, name: &str) -> Self {
+    pub fn u16_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_u16_type())
     }
     /// Add a u32 field.
-    pub fn u32_field(self, name: &str) -> Self {
+    pub fn u32_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_u32_type())
     }
     /// Add a u64 field.
-    pub fn u64_field(self, name: &str) -> Self {
+    pub fn u64_field(self, name: impl AsRef<[u8]>) -> Self {
         self.field(name, make_u64_type())
     }
 
-    /// Build the compound datatype, packing the fields in the order they were
-    /// added.
+    /// Packs the fields in insertion order.
     ///
-    /// Fails with [`FormatError::EmptyCompoundType`] over no fields, and with
-    /// [`FormatError::InvalidCompoundSize`] when the fields pack to zero bytes —
-    /// the two things `H5Tcreate(H5T_COMPOUND, ..)` also refuses, and the two
-    /// that make a datatype nothing downstream can use: every writer and reader
-    /// divides raw bytes by the element size to recover an element count.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::EmptyCompoundType`] if there are no fields,
+    /// [`FormatError::InvalidCompoundSize`] if the fields pack to zero bytes, or
+    /// [`FormatError::DatatypeMemberNameContainsNul`] if a name contains a NUL byte.
     pub fn build(self) -> Result<Datatype, FormatError> {
         if self.fields.is_empty() {
             return Err(FormatError::EmptyCompoundType);
@@ -211,8 +211,10 @@ impl CompoundTypeBuilder {
         let mut members = Vec::with_capacity(self.fields.len());
         for (name, dt) in self.fields {
             let sz = dt.type_size();
-            members.push(crate::datatype::__private::compound_member(
-                name, offset, dt,
+            members.push(CompoundMember::new(
+                DatatypeMemberName::try_from(name)?,
+                offset,
+                dt,
             ));
             offset += sz as u64;
         }
@@ -311,13 +313,10 @@ impl_complex_component! {
 
 /// Builder for an HDF5 compound datatype with explicit field offsets and size.
 ///
-/// This is the pure-Rust equivalent of creating an `H5T_COMPOUND` type and
-/// inserting fields with `H5Tinsert`. [`build`](Self::build) validates field
-/// names, bounds, and overlap before returning a datatype.
-///
 /// Each [`field(name, byte_offset, datatype)`](Self::field) (and the typed
 /// [`f64_field(name, byte_offset)`](Self::f64_field) and its siblings) places a field at a chosen
 /// offset within the fixed total size given to [`CompoundTypeBuilder::with_size`].
+/// Pass field names as strings or byte slices, as for [`CompoundTypeBuilder`].
 ///
 /// # Examples
 ///
@@ -334,78 +333,91 @@ impl_complex_component! {
 pub struct ExplicitCompoundTypeBuilder {
     size: u32,
     fields: Vec<CompoundMember>,
+    name_error: Option<FormatError>,
 }
 
 impl ExplicitCompoundTypeBuilder {
-    /// Add a field at an explicit byte offset.
-    pub fn field(mut self, name: &str, byte_offset: u64, datatype: Datatype) -> Self {
-        self.fields
-            .push(crate::datatype::__private::compound_member(
-                name.to_string(),
-                byte_offset,
-                datatype,
-            ));
+    /// Adds a field at a byte offset from the start of the compound element.
+    pub fn field(mut self, name: impl AsRef<[u8]>, byte_offset: u64, datatype: Datatype) -> Self {
+        if self.name_error.is_some() {
+            return self;
+        }
+        match DatatypeMemberName::new(name) {
+            Ok(name) => self
+                .fields
+                .push(CompoundMember::new(name, byte_offset, datatype)),
+            Err(error) => self.name_error = Some(error),
+        }
         self
     }
 
     /// Add an f64 field at an explicit byte offset.
-    pub fn f64_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn f64_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_f64_type())
     }
 
     /// Add an f32 field at an explicit byte offset.
-    pub fn f32_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn f32_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_f32_type())
     }
 
     /// Add an i32 field at an explicit byte offset.
-    pub fn i32_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn i32_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_i32_type())
     }
 
     /// Add an i64 field at an explicit byte offset.
-    pub fn i64_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn i64_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_i64_type())
     }
 
     /// Add a u8 field at an explicit byte offset.
-    pub fn u8_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn u8_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_u8_type())
     }
 
     /// Add an i8 field at an explicit byte offset.
-    pub fn i8_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn i8_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_i8_type())
     }
 
     /// Add an i16 field at an explicit byte offset.
-    pub fn i16_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn i16_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_i16_type())
     }
 
     /// Add a u16 field at an explicit byte offset.
-    pub fn u16_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn u16_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_u16_type())
     }
 
     /// Add a u32 field at an explicit byte offset.
-    pub fn u32_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn u32_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_u32_type())
     }
 
     /// Add a u64 field at an explicit byte offset.
-    pub fn u64_field(self, name: &str, byte_offset: u64) -> Self {
+    pub fn u64_field(self, name: impl AsRef<[u8]>, byte_offset: u64) -> Self {
         self.field(name, byte_offset, make_u64_type())
     }
 
-    /// Validate and build the compound datatype.
+    /// Orders fields by byte offset and checks that their ranges are disjoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidCompoundSize`] for a zero total size,
+    /// [`FormatError::EmptyCompoundType`] if there are no fields, or
+    /// [`FormatError::DatatypeMemberNameContainsNul`] if a name contains a NUL byte.
+    /// Returns [`FormatError::DuplicateCompoundField`] if two names have the same bytes,
+    /// [`FormatError::CompoundFieldOutOfBounds`] if a field has zero size or exceeds the
+    /// total size, or [`FormatError::CompoundFieldOverlap`] if two fields overlap.
     pub fn build(mut self) -> Result<Datatype, crate::error::FormatError> {
         use crate::error::FormatError;
 
         if self.size == 0 {
             return Err(FormatError::InvalidCompoundSize);
         }
-        if self.fields.is_empty() {
+        if self.fields.is_empty() && self.name_error.is_none() {
             return Err(FormatError::EmptyCompoundType);
         }
 
@@ -426,6 +438,9 @@ impl ExplicitCompoundTypeBuilder {
                     compound_size: self.size,
                 });
             }
+        }
+        if let Some(error) = self.name_error {
+            return Err(error);
         }
 
         // Stable on purpose: two fields at one offset are rejected as an overlap
@@ -455,6 +470,7 @@ impl CompoundTypeBuilder {
         ExplicitCompoundTypeBuilder {
             size,
             fields: Vec::new(),
+            name_error: None,
         }
     }
 }

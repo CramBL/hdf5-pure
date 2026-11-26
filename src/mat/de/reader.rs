@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use crate::convert::Narrow;
-use crate::display::EscapedName;
 use crate::error::FormatError;
 use crate::file_writer::AttrValue;
 use crate::mat::class::MatClass;
@@ -742,8 +741,8 @@ fn is_complex_dtype(dtype: &DType) -> bool {
     match dtype {
         DType::Compound(fields) => {
             fields.len() == 2
-                && fields.iter().any(|(n, _)| n == "real")
-                && fields.iter().any(|(n, _)| n == "imag")
+                && fields.iter().any(|(n, _)| n.as_bytes() == b"real")
+                && fields.iter().any(|(n, _)| n.as_bytes() == b"imag")
         }
         _ => false,
     }
@@ -798,15 +797,15 @@ fn validate_complex_dtype(dtype: &DType, tag: ComplexTag) -> Result<(), MatError
             fields.len()
         )));
     };
-    if first != "real" || second != "imag" {
+    if first.as_bytes() != b"real" || second.as_bytes() != b"imag" {
         // The file names these members, so they are escaped for the same reason
         // `DType` escapes them: `{member}` on the next message already is, and
         // a raw name beside it could carry a newline into the same string.
         return Err(MatError::Custom(format!(
             "complex {} compound is ordered {{{}, {}}}, expected {{real, imag}}",
             tag.class().as_str(),
-            EscapedName(first),
-            EscapedName(second)
+            first,
+            second
         )));
     }
     for (name, member) in [(first, first_ty), (second, second_ty)] {
@@ -815,7 +814,7 @@ fn validate_complex_dtype(dtype: &DType, tag: ComplexTag) -> Result<(), MatError
                 "complex {} dataset stores its {} component as {member}, \
                  which is a different class than MATLAB_class claims",
                 tag.class().as_str(),
-                EscapedName(name)
+                name
             )));
         }
     }

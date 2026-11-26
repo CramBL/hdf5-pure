@@ -1,3 +1,4 @@
+use hdf5_pure::DatatypeMemberName;
 use hdf5_pure::{
     CompoundTypeBuilder, Datatype, Error, File, FileBuilder, FormatError, OffsetWidth,
 };
@@ -11,8 +12,8 @@ use test_util::datatype::leaf::{Leaf, Version};
 
 #[rstest]
 #[case::overlap(overlapping_compound(), FormatError::CompoundFieldOverlap {
-    first: "first".into(),
-    second: "second".into(),
+    first: DatatypeMemberName::from(c"first"),
+    second: DatatypeMemberName::from(c"second"),
 })]
 #[case::enumeration(decoded_narrow_enumeration(), FormatError::EnumBaseSizeMismatch {
     size: 12,

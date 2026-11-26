@@ -15,8 +15,8 @@ use core::slice;
 use hdf5_pure_core::__private;
 use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{
-    CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, EnumMember, FloatingPointType,
-    FormatError, ReferenceType, StringPadding, VariableLengthType,
+    CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, DatatypeMemberName, EnumMember,
+    FloatingPointType, FormatError, ReferenceType, StringPadding, VariableLengthType,
 };
 
 use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
@@ -62,7 +62,8 @@ impl DatatypeMessage {
     /// component size.
     /// Checks compound member bounds and overlaps using the sizes stored in the member
     /// descriptions. Reserves member capacity after reading a member's nested datatype and
-    /// checking its byte range. A compound must have at least one member, with unique UTF-8 names.
+    /// checking its byte range. A compound must have at least one member. Compound member
+    /// names must be unique by byte sequence.
     /// Retains the enumeration's parent and reads at least one member. Each member has a
     /// nonempty name, unique by its bytes, and a distinct raw value of the parent's width.
     /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
@@ -95,8 +96,6 @@ impl DatatypeMessage {
     /// [`FormatError::DuplicateCompoundField`] for duplicate names, and
     /// [`FormatError::CompoundFieldOutOfBounds`] for a member outside its compound element.
     /// Returns [`FormatError::CompoundFieldOverlap`] for overlapping member ranges.
-    /// Returns [`FormatError::UnsupportedDatatypeMemberEncoding`] for an invalid UTF-8 compound
-    /// name, with its byte offset and the original [`core::str::Utf8Error`].
     ///
     /// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration size differs from its
     /// parent's size.
@@ -180,15 +179,19 @@ impl DatatypeMessage {
                     let index = members.len();
                     layout.insert(offset, field_size, index, |member_index| {
                         if member_index == index {
-                            Some(name.as_ref())
+                            Some(DatatypeMemberName::from(name))
                         } else {
-                            members.get(member_index).map(|member| member.name.as_str())
+                            members.get(member_index).map(|member| member.name.clone())
                         }
                     })?;
                     decode::push_member(
                         &mut members,
                         count,
-                        DatatypeMessageMember::new(name.into_owned(), offset, datatype)?,
+                        DatatypeMessageMember::new(
+                            DatatypeMemberName::from(name),
+                            offset,
+                            datatype,
+                        ),
                     )?;
                     offsets.include_field(field_offsets);
                 }
@@ -299,8 +302,8 @@ impl DatatypeMessage {
     /// it pads each terminated name to a multiple of eight bytes with zeros. In versions 3
     /// through 5, it omits the padding. The raw values follow in the same member order.
     /// Compound sizes and member offsets are retained. The writer checks member bounds and
-    /// overlaps using the stored member sizes at that width and writes each UTF-8 name with a
-    /// NUL terminator.
+    /// overlaps using the stored member sizes at that width and appends a NUL terminator to
+    /// each compound name.
     /// Member offsets occupy the minimum number of bytes needed for the compound size.
     /// The nesting limit is 64 descriptions on one parent chain, including the outer description.
     ///
@@ -400,10 +403,10 @@ impl DatatypeMessage {
     /// # Ok::<(), FormatError>(())
     /// ```
     ///
-    /// Compound members retain their offsets and individual versions:
+    /// Compound members retain their name bytes, offsets, and individual versions:
     ///
     /// ```
-    /// use hdf5_pure_core::{FixedPointType, FormatError};
+    /// use hdf5_pure_core::{DatatypeMemberName, FixedPointType, FormatError};
     /// use hdf5_pure_format::__private::{
     ///     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, OffsetWidth,
     /// };
@@ -416,12 +419,16 @@ impl DatatypeMessage {
     ///     DatatypeVersion::Five,
     ///     DatatypeProperties::Compound {
     ///         size: 4,
-    ///         members: vec![DatatypeMessageMember::new("x".into(), 3, integer)?],
+    ///         members: vec![DatatypeMessageMember::new(
+    ///             DatatypeMemberName::new(b"x\xff")?,
+    ///             3,
+    ///             integer,
+    ///         )],
     ///     },
     /// )?;
     /// let bytes = compound.serialize(OffsetWidth::Eight)?;
-    /// assert_eq!(&bytes[..11], &[0x56, 1, 0, 0, 4, 0, 0, 0, b'x', 0, 3]);
-    /// assert_eq!(bytes[11], 0x20);
+    /// assert_eq!(&bytes[..12], &[0x56, 1, 0, 0, 4, 0, 0, 0, b'x', 0xff, 0, 3]);
+    /// assert_eq!(bytes[12], 0x20);
     /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
     /// assert_eq!(parsed, compound);
     /// assert_eq!(consumed, bytes.len());
@@ -1174,15 +1181,17 @@ impl CompoundMembers<'_> {
                     // Check the canonical member's bounds before returning its preparation error.
                     if let Description::Canonical(datatype) = child {
                         let size = datatype::stored_type_size(datatype, preparation.offset_width)?;
-                        layout.member_end(offset, size, || Ok(name))?;
+                        layout.member_end(offset, size, || Ok(name.clone()))?;
                     }
                     return Err(error);
                 }
             };
             if let Some(field_size) = NonZeroU32::new(field_size) {
-                layout.insert(offset, field_size, index, |index| self.member_name(index))?;
+                layout.insert(offset, field_size, index, |index| {
+                    self.member_name(index).cloned()
+                })?;
             } else {
-                layout.member_end(offset, field_size, || Ok(name))?;
+                layout.member_end(offset, field_size, || Ok(name.clone()))?;
             }
         }
         Ok(())
@@ -1195,7 +1204,7 @@ impl CompoundMembers<'_> {
         }
     }
 
-    fn member(&self, index: usize) -> (&str, u64, Description<'_>) {
+    fn member(&self, index: usize) -> (&DatatypeMemberName, u64, Description<'_>) {
         match self {
             Self::Canonical(members) => {
                 let (name, offset, datatype) = __private::compound_member_parts(&members[index]);
@@ -1212,10 +1221,10 @@ impl CompoundMembers<'_> {
         }
     }
 
-    fn member_name(&self, index: usize) -> Option<&str> {
+    fn member_name(&self, index: usize) -> Option<&DatatypeMemberName> {
         match self {
-            Self::Canonical(members) => members.get(index).map(|member| member.name.as_str()),
-            Self::Preserved(members) => members.get(index).map(|member| member.name.as_str()),
+            Self::Canonical(members) => members.get(index).map(|member| &member.name),
+            Self::Preserved(members) => members.get(index).map(|member| &member.name),
         }
     }
 }
@@ -1277,8 +1286,12 @@ impl Preparation {
         Ok(())
     }
 
-    fn add_member_prefix(&mut self, name: &str, offset_bytes: usize) -> Result<(), FormatError> {
-        self.add(name.len())?;
+    fn add_member_prefix(
+        &mut self,
+        name: &DatatypeMemberName,
+        offset_bytes: usize,
+    ) -> Result<(), FormatError> {
+        self.add(name.as_bytes().len())?;
         self.add(1 + offset_bytes)
     }
 

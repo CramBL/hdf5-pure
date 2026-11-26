@@ -162,9 +162,9 @@ fn assert_compound_of(dt: &Datatype, size: u32, signed: bool) {
     };
     assert_eq!(*total, size * 2, "compound is two components wide");
     assert_eq!(members.len(), 2);
-    assert_eq!(members[0].name, "real");
+    assert_eq!(members[0].name.as_bytes(), b"real");
     assert_eq!(members[0].byte_offset, 0);
-    assert_eq!(members[1].name, "imag");
+    assert_eq!(members[1].name.as_bytes(), b"imag");
     assert_eq!(members[1].byte_offset, u64::from(size));
     for m in members {
         match &m.datatype {

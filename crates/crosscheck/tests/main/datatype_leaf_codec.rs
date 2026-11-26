@@ -3,8 +3,9 @@
 use std::ffi::CString;
 
 use hdf5_pure::File;
-use hdf5_pure_core::__private;
+use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::Datatype;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::{
     BitFieldType, CharacterSet, DatatypeByteOrder, FixedPointType, FloatingPointType,
     MantissaNormalization, StringPadding, TimeType,
@@ -206,7 +207,11 @@ fn ordinary_float_parser_reads_native_legacy_containers(
     } else {
         Datatype::Compound {
             size: 8,
-            members: vec![__private::compound_member("x".into(), 0, parent)],
+            members: vec![CompoundMember::new(
+                DatatypeMemberName::from(c"x"),
+                0,
+                parent,
+            )],
         }
     };
     let (actual, consumed) = format::parse_datatype(body).unwrap();

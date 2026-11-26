@@ -39,7 +39,7 @@ assert_eq!(back, records);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-The on-disk datatype carries the field names and exact byte offsets. [`Dataset::datatype`](crate::Dataset::datatype) returns the parsed [`Datatype`](crate::Datatype) (a [`Datatype::Compound`](crate::Datatype::Compound) for these records), exposing each field's offset, while [`Dataset::read_raw`](crate::Dataset::read_raw) returns the complete unfiltered record bytes:
+[`Dataset::datatype`](crate::Dataset::datatype) returns a [`Datatype::Compound`](crate::Datatype::Compound) for these records. Each member has a [`DatatypeMemberName`](crate::DatatypeMemberName) and a byte offset. Use [`as_bytes()`](crate::DatatypeMemberName::as_bytes) to borrow the name bytes or [`as_str()`](crate::DatatypeMemberName::as_str) to borrow them as UTF-8 when valid. [`Dataset::read_raw`](crate::Dataset::read_raw) returns the complete unfiltered record bytes.
 
 ```rust
 # use hdf5_pure::{Datatype, File, FileBuilder};
@@ -48,9 +48,14 @@ The on-disk datatype carries the field names and exact byte offsets. [`Dataset::
 # builder.create_dataset("records").with_compound_values(&records)?;
 # let file = File::from_bytes(builder.finish()?)?;
 let dtype = file.dataset("records")?.datatype()?;
+let Datatype::Compound { members, .. } = dtype else {
+    unreachable!();
+};
+assert_eq!(members[0].name.as_bytes(), b"0");
+assert_eq!(members[1].byte_offset, 1);
+
 let raw = file.dataset("records")?.read_raw()?;
-# assert!(matches!(dtype, Datatype::Compound { .. }));
-# assert_eq!(raw.len(), 3 * 13);
+assert_eq!(raw.len(), 3 * 13);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 

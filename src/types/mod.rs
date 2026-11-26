@@ -14,7 +14,7 @@ use crate::{DatatypeMemberName, VariableLengthType};
 use crate::{FixedPointType, FloatingPointType, TimeType};
 
 use crate::convert::Narrow;
-use crate::display::{self, DISPLAY_MAX_MEMBERS, Dims, EscapedName};
+use crate::display::{self, DISPLAY_MAX_MEMBERS, Dims};
 use crate::width::FormatWidths;
 
 pub use crate::file_writer::AttrValue;
@@ -59,7 +59,8 @@ pub enum DType {
     U32,
     U64,
     String,
-    Compound(Vec<(std::string::String, DType)>),
+    /// A compound's member name bytes and simplified field types, in declaration order.
+    Compound(Vec<(DatatypeMemberName, DType)>),
     /// An enumeration's member name bytes, in declaration order.
     Enum(Vec<DatatypeMemberName>),
     Array(Box<DType>, Vec<u32>),
@@ -95,7 +96,7 @@ impl fmt::Display for DType {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}: {dt}", EscapedName(name))?;
+                    write!(f, "{name}: {dt}")?;
                 }
                 display::write_elided(f, fields.len().saturating_sub(DISPLAY_MAX_MEMBERS))?;
                 write!(f, "}}")

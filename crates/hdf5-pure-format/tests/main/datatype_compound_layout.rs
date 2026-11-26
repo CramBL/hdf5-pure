@@ -1,3 +1,4 @@
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::{CharacterSet, FormatError, StringPadding};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -25,12 +26,20 @@ fn compound_layout_rejects_overlapping_members(
     let left = datatype::fixed_string(left_size);
     let right = datatype::fixed_string(right_size);
     let members = vec![
-        DatatypeMessageMember::new("left".into(), left_offset, string(left_size)).unwrap(),
-        DatatypeMessageMember::new("right".into(), right_offset, string(right_size)).unwrap(),
+        DatatypeMessageMember::new(
+            DatatypeMemberName::from(c"left"),
+            left_offset,
+            string(left_size),
+        ),
+        DatatypeMessageMember::new(
+            DatatypeMemberName::from(c"right"),
+            right_offset,
+            string(right_size),
+        ),
     ];
     let expected = FormatError::CompoundFieldOverlap {
-        first: first.into(),
-        second: second.into(),
+        first: DatatypeMemberName::new(first).unwrap(),
+        second: DatatypeMemberName::new(second).unwrap(),
     };
     assert_eq!(
         DatatypeMessage::new(
@@ -90,7 +99,7 @@ fn compound_layout_preserves_disjoint_members_and_record_order(#[case] spans: &[
         .iter()
         .zip(&names)
         .map(|(&(offset, size), name)| {
-            DatatypeMessageMember::new(name.clone(), offset, string(size)).unwrap()
+            DatatypeMessageMember::new(DatatypeMemberName::new(name).unwrap(), offset, string(size))
         })
         .collect();
     let expected = DatatypeMessage::new(
@@ -208,8 +217,8 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
     assert_eq!(message.serialize(OffsetWidth::Two).unwrap(), low);
     assert_eq!(message.serialize(OffsetWidth::Four).unwrap(), middle);
     let expected = FormatError::CompoundFieldOverlap {
-        first: "variable".into(),
-        second: "fixed".into(),
+        first: DatatypeMemberName::from(c"variable"),
+        second: DatatypeMemberName::from(c"fixed"),
     };
     assert_eq!(DatatypeMessage::parse(&high).unwrap_err(), expected);
     assert_eq!(format::parse_datatype(&high).unwrap_err(), expected);
@@ -241,7 +250,11 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
         DatatypeVersion::Three,
         DatatypeProperties::Compound {
             size,
-            members: vec![DatatypeMessageMember::new("inner".into(), 0, message).unwrap()],
+            members: vec![DatatypeMessageMember::new(
+                DatatypeMemberName::from(c"inner"),
+                0,
+                message,
+            )],
         },
     )
     .unwrap();

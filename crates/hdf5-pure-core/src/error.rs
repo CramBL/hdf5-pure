@@ -129,7 +129,7 @@ pub enum FormatError {
     /// A compound field extends past the declared compound size.
     CompoundFieldOutOfBounds {
         /// Field name.
-        name: String,
+        name: DatatypeMemberName,
         /// Field byte offset.
         offset: u64,
         /// Field size in bytes.
@@ -140,9 +140,9 @@ pub enum FormatError {
     /// Two compound fields overlap.
     CompoundFieldOverlap {
         /// Earlier field in byte order.
-        first: String,
+        first: DatatypeMemberName,
         /// Later field in byte order.
-        second: String,
+        second: DatatypeMemberName,
     },
     /// A compound field has an incompatible datatype.
     CompoundFieldTypeMismatch(String),
@@ -284,7 +284,7 @@ pub enum FormatError {
     /// An attribute set contains the same name more than once.
     DuplicateAttributeName(String),
     /// A compound datatype contains the same field name more than once.
-    DuplicateCompoundField(String),
+    DuplicateCompoundField(DatatypeMemberName),
     /// An enumeration datatype contains the same member name more than once.
     DuplicateEnumMemberName(DatatypeMemberName),
     /// Two enumeration members have identical stored value bytes.
@@ -694,13 +694,6 @@ pub enum FormatError {
         version: u8,
         /// The complete 24-bit class bit field.
         flags: u32,
-    },
-    /// A compound member name contains a NUL byte.
-    InvalidDatatypeMemberName {
-        /// The datatype class code.
-        class: u8,
-        /// The rejected member name.
-        name: String,
     },
     /// A datatype message version is outside 1 through 5.
     ///
@@ -1640,15 +1633,6 @@ pub enum FormatError {
     ///
     /// Contains the raw permutation field.
     UnsupportedCompoundV1Permutation(u32),
-    /// A retained compound member name is invalid UTF-8.
-    UnsupportedDatatypeMemberEncoding {
-        /// The containing datatype's class code.
-        class: u8,
-        /// The name's byte offset from the start of the supplied message.
-        offset: usize,
-        /// The original UTF-8 decoding error.
-        source: Utf8Error,
-    },
     /// A dataset's element bytes live in files outside this one
     /// (`H5Pset_external`, the External Data Files header message). Its layout
     /// message is contiguous with an undefined data address, the same encoding
@@ -2042,12 +2026,6 @@ impl fmt::Display for FormatError {
                     "invalid datatype flags {flags:#08x} for class {class} version {version}"
                 )
             }
-            Self::InvalidDatatypeMemberName { class, name } => {
-                write!(
-                    f,
-                    "datatype class {class} member name {name:?} contains a NUL byte"
-                )
-            }
             Self::DatatypeMemberNameContainsNul { index } => {
                 write!(
                     f,
@@ -2065,16 +2043,6 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "datatype class {class} version {version} is below child version {child_version}"
-                )
-            }
-            Self::UnsupportedDatatypeMemberEncoding {
-                class,
-                offset,
-                source,
-            } => {
-                write!(
-                    f,
-                    "datatype class {class} member name at byte {offset} is not UTF-8: {source}"
                 )
             }
             Self::InvalidDatatypeSize {
@@ -2284,7 +2252,7 @@ impl fmt::Display for FormatError {
                 write!(f, "compound datatype must contain at least one field")
             }
             Self::DuplicateCompoundField(name) => {
-                write!(f, "duplicate compound field name: {name}")
+                write!(f, "duplicate compound field name: {name:?}")
             }
             Self::CompoundFieldOutOfBounds {
                 name,
@@ -3404,7 +3372,6 @@ impl Error for FormatError {
             FormatError::AllocationFailed { source, .. } => Some(source),
             FormatError::InvalidLocalHeapName { source, .. } => Some(source),
             FormatError::InvalidSoftLinkEncoding { source } => Some(source),
-            FormatError::UnsupportedDatatypeMemberEncoding { source, .. } => Some(source),
             _ => None,
         }
     }

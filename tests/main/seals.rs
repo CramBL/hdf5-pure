@@ -219,7 +219,7 @@ fn sealed_structs_keep_their_attribute() {
     // Named so a rename breaks the build here rather than silently skipping the
     // assertion below.
     fn _live(info: &FileSpaceInfo, member: &CompoundMember) -> usize {
-        info.manager_addrs.len() + member.name.len()
+        info.manager_addrs.len() + member.name.as_bytes().len()
     }
 
     let expected = [

@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `CompoundMember::name` and related compound name fields replace `String` with
+  checked byte strings ([#1393](https://github.com/CramBL/hdf5-pure/pull/1393)).
 - **Breaking:** `EnumMember::name` and related enumeration name fields replace `String` with
   checked byte strings. The retained datatype parser and writer support padded name fields in
   version 1 and 2 enumerations ([#1390](https://github.com/CramBL/hdf5-pure/pull/1390)).

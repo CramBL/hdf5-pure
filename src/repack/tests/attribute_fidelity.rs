@@ -1,8 +1,10 @@
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
+
 use super::super::*;
 use crate::datatype::CharacterSet;
 use crate::datatype::ReferenceType;
 use crate::datatype::StringPadding;
-
 use crate::{DatatypeByteOrder, File, FileBuilder, RepackOptions};
 
 use super::super::test_util as repack_test_util;
@@ -135,8 +137,8 @@ fn a_nested_address_makes_the_whole_datatype_position_dependent() {
     let compound_of = |member: Datatype| Datatype::Compound {
         size: 24,
         members: vec![
-            crate::datatype::__private::compound_member("plain".into(), 0, i32_type()),
-            crate::datatype::__private::compound_member("nested".into(), 8, member),
+            CompoundMember::new(DatatypeMemberName::from(c"plain"), 0, i32_type()),
+            CompoundMember::new(DatatypeMemberName::from(c"nested"), 8, member),
         ],
     };
     let array_of = |base: Datatype| Datatype::Array {

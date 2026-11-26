@@ -1,11 +1,12 @@
 #![cfg(feature = "__libhdf5-1.10")]
 
-use std::ffi::CString;
+use core::ffi::CStr;
 
 use hdf5_pure::File;
-use hdf5_pure_core::__private;
 #[cfg(feature = "__libhdf5-2")]
 use hdf5_pure_core::ComplexType;
+use hdf5_pure_core::CompoundMember;
+use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, FloatingPointType, MessageType, VariableLengthType,
 };
@@ -171,11 +172,9 @@ impl Shape {
             // SAFETY: Compound is a defined class. Both fields fit within the element.
             let datatype =
                 owned(unsafe { h5t::H5Tcreate(H5T_class_t::H5T_COMPOUND, placement.size()) });
-            let first = CString::new("first").unwrap();
-            let second = CString::new("é").unwrap();
             assert_eq!(
                 // SAFETY: Both IDs and the terminated name are live. The eight-byte field fits.
-                unsafe { h5t::H5Tinsert(datatype.id(), first.as_ptr(), 0, base) },
+                unsafe { h5t::H5Tinsert(datatype.id(), c"first".as_ptr(), 0, base) },
                 0,
             );
             assert_eq!(
@@ -184,7 +183,7 @@ impl Shape {
                 unsafe {
                     h5t::H5Tinsert(
                         datatype.id(),
-                        second.as_ptr(),
+                        SECOND_MEMBER_NAME.as_ptr(),
                         placement.offset(),
                         child.id(),
                     )
@@ -222,9 +221,13 @@ impl Shape {
         Datatype::Compound {
             size,
             members: vec![
-                __private::compound_member("first".into(), 0, Datatype::FloatingPoint(component)),
-                __private::compound_member(
-                    "é".into(),
+                CompoundMember::new(
+                    DatatypeMemberName::from(c"first"),
+                    0,
+                    Datatype::FloatingPoint(component),
+                ),
+                CompoundMember::new(
+                    DatatypeMemberName::from(SECOND_MEMBER_NAME),
                     u64::try_from(placement.offset()).unwrap(),
                     child,
                 ),
@@ -253,6 +256,8 @@ impl Placement {
         }
     }
 }
+
+const SECOND_MEMBER_NAME: &CStr = c"é\xff";
 
 fn owned(id: hid_t) -> NativeDatatype {
     assert!(id >= 0);
