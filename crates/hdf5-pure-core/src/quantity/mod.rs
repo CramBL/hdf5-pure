@@ -58,8 +58,8 @@ impl ByteLength {
     /// Returns the element count, or [`None`] if this length is not a multiple of `size`.
     pub fn elements(self, size: ElementSize) -> Option<ElementCount> {
         self.0
-            .is_multiple_of(size.0.get())
-            .then(|| ElementCount(self.0 / size.0.get()))
+            .is_multiple_of(size.get())
+            .then(|| ElementCount::new(self.0 / size.get()))
     }
 
     /// Converts the byte length to [`usize`].
@@ -83,6 +83,10 @@ impl NonZeroByteLength {
             Some(value) => Some(Self(value)),
             None => None,
         }
+    }
+
+    const fn from_nonzero(value: NonZeroU64) -> Self {
+        Self(value)
     }
 
     /// Returns the positive byte count as a [`u64`].
@@ -151,7 +155,7 @@ impl ElementCount {
     ///
     /// An empty element count requires zero chunks.
     pub fn chunks(self, chunk: NonZeroElementCount) -> SlotCount {
-        SlotCount(self.0.div_ceil(chunk.0.get()))
+        SlotCount::new(self.0.div_ceil(chunk.0.get()))
     }
 
     /// Converts the element count to [`usize`].
@@ -218,12 +222,12 @@ impl ElementSize {
 
     /// Returns the byte length of one element.
     pub const fn bytes(self) -> NonZeroByteLength {
-        NonZeroByteLength(self.0)
+        NonZeroByteLength::from_nonzero(self.0)
     }
 
     /// Returns the byte length of `count` elements, or [`None`] on [`u64`] overflow.
     pub fn byte_length(self, count: ElementCount) -> Option<ByteLength> {
-        self.0.get().checked_mul(count.0).map(ByteLength)
+        self.0.get().checked_mul(count.0).map(ByteLength::new)
     }
 }
 
