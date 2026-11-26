@@ -10,7 +10,6 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width::FormatWidths;
 
-use super::CHECKSUM_LEN;
 use super::address_space::AddressSpaceBits;
 use super::section_list::FreeSpaceManagerSectionListRef;
 
@@ -333,6 +332,8 @@ pub(super) const FSHD_SIGNATURE: &[u8; 4] = b"FSHD";
 
 /// The version of a free-space manager header, the one version the format specification describes.
 pub(super) const FSHD_VERSION: u8 = 0;
+
+pub(super) const CHECKSUM_LEN: usize = 4;
 
 #[cfg(test)]
 #[path = "tests/framing.rs"]

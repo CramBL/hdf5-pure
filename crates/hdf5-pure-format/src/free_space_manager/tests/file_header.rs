@@ -4,9 +4,10 @@ use test_util::free_space;
 
 use super::*;
 use crate::address::StoredAddressExt;
+use crate::free_space_manager::geometry::FILE_FSM_MAX_SECTION_SIZE;
+use crate::free_space_manager::header::CHECKSUM_LEN;
 use crate::free_space_manager::{
-    self, CHECKSUM_LEN, FILE_FSM_MAX_SECTION_SIZE, FreeSection, SECTION_CLASS_SIMPLE, section_list,
-    test_support,
+    self, FreeSection, SECTION_CLASS_SIMPLE, section_list, test_support,
 };
 use crate::width;
 
@@ -429,4 +430,20 @@ fn header_of(list: &[u8], total_sections: u64) -> FreeSpaceManagerHeader {
         section_list_used: list.len() as u64,
         section_list_allocated: list.len() as u64,
     }
+}
+
+#[cfg(feature = "checksum")]
+#[test]
+fn a_header_whose_checksum_does_not_match_fails_to_parse() {
+    let mut fshd = free_space::single_section_header();
+    let stored = fshd.len() - 4;
+    fshd[stored] ^= 0xFF;
+
+    assert_eq!(
+        FreeSpaceManagerHeader::parse(test_support::widths(8, 8), &fshd),
+        Err(FormatError::ChecksumMismatch {
+            expected: 0x1037_1315,
+            computed: 0x1037_13EA,
+        })
+    );
 }

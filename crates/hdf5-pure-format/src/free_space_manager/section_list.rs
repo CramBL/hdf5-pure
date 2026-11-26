@@ -10,7 +10,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
-use super::CHECKSUM_LEN;
+use super::header::CHECKSUM_LEN;
 use super::header::FreeSpaceManagerHeaderFrame;
 
 /// A physical reference to a version 0 free-space section list.
