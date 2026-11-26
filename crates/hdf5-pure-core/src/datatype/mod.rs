@@ -6,12 +6,12 @@ use core::num::NonZeroU32;
 
 use self::byte_order::DatatypeByteOrder;
 use self::layout::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
-use crate::FormatError;
 use crate::display;
 use crate::display::DISPLAY_MAX_MEMBERS;
 use crate::display::Dims;
 use crate::display::EscapedName;
 use crate::display::QuotedBytes;
+use crate::{FormatError, OffsetWidth};
 
 pub mod byte_order;
 pub mod layout;
@@ -85,7 +85,13 @@ impl EnumMember {
     }
 }
 
-/// An enumeration with a fixed-point base datatype and named values of that width.
+/// An enumeration whose named values have the stored width of its base datatype.
+///
+/// [Construction](Self::new) requires a fixed-point base. Decoding retains the stored base,
+/// including supported floating-point datatypes. In libhdf5, `H5Tenum_create` requires an integer
+/// base (`H5Tenum.c`, HDF5 2.2.0). The message decoder checks that the parent size matches the
+/// enumeration size and accepts other parent classes (`H5O__dtype_decode_helper` in `H5Odtype.c`,
+/// HDF5 2.2.0).
 ///
 /// Class 8 of the datatype message is defined in "The Datatype Message" of the [format
 /// specification, version 4.0][spec].
@@ -93,12 +99,13 @@ impl EnumMember {
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnumerationType {
-    base_type: FixedPointType,
+    base_type: Box<Datatype>,
+    size: NonZeroU32,
     members: Vec<EnumMember>,
 }
 
 impl EnumerationType {
-    /// Constructs an enumeration whose values occupy the base type's byte width.
+    /// Constructs an enumeration with a fixed-point base.
     ///
     /// Pass each value in the base type's byte order. Preserves the supplied bytes and
     /// member order, and accepts an empty member list.
@@ -111,40 +118,68 @@ impl EnumerationType {
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure_core::{EnumMember, EnumerationType, FixedPointType};
+    /// use hdf5_pure_core::{Datatype, EnumMember, EnumerationType, FixedPointType};
     ///
     /// let base = FixedPointType::u16();
     /// let member = EnumMember::new("active".into(), 1_u16.to_le_bytes().to_vec());
     /// let enumeration = EnumerationType::new(base, vec![member])?;
-    /// assert_eq!(enumeration.base_type(), base);
+    /// assert_eq!(enumeration.base_type(), &Datatype::FixedPoint(base));
     /// assert_eq!(enumeration.size().get(), 2);
     /// assert_eq!(enumeration.members()[0].name, "active");
     /// assert_eq!(enumeration.members()[0].value, [1, 0]);
     /// # Ok::<(), hdf5_pure_core::FormatError>(())
     /// ```
-    pub fn new(
-        base_type: FixedPointType,
+    pub fn new(base_type: FixedPointType, members: Vec<EnumMember>) -> Result<Self, FormatError> {
+        Self::from_parts(Datatype::FixedPoint(base_type), base_type.size(), members)
+    }
+
+    pub(crate) fn from_stored_parts(
+        base_type: Datatype,
+        size: NonZeroU32,
+        offsets: OffsetWidth,
+        members: Vec<EnumMember>,
+    ) -> Result<Self, FormatError> {
+        let base_size = stored_type_size(&base_type, offsets)?;
+        if base_size != size.get() {
+            return Err(FormatError::EnumBaseSizeMismatch {
+                size: size.get(),
+                base_size,
+            });
+        }
+        Self::from_parts(base_type, size, members)
+    }
+
+    fn from_parts(
+        base_type: Datatype,
+        size: NonZeroU32,
         mut members: Vec<EnumMember>,
     ) -> Result<Self, FormatError> {
-        let size = base_type.size().get();
         if let Some(index) = members
             .iter()
-            .position(|member| u32::try_from(member.value.len()) != Ok(size))
+            .position(|member| u32::try_from(member.value.len()) != Ok(size.get()))
         {
             let EnumMember { name, value } = members.swap_remove(index);
-            return Err(FormatError::EnumMemberValueSize(name, size, value.len()));
+            return Err(FormatError::EnumMemberValueSize(
+                name,
+                size.get(),
+                value.len(),
+            ));
         }
-        Ok(Self { base_type, members })
+        Ok(Self {
+            base_type: Box::new(base_type),
+            size,
+            members,
+        })
     }
 
-    /// Returns the fixed-point datatype that describes each member's encoded value.
-    pub const fn base_type(&self) -> FixedPointType {
-        self.base_type
+    /// Returns the datatype that describes each member's encoded value.
+    pub const fn base_type(&self) -> &Datatype {
+        &self.base_type
     }
 
-    /// Returns the size of one encoded value in bytes, equal to the base type's size.
+    /// Returns the stored size of one value in bytes.
     pub const fn size(&self) -> NonZeroU32 {
-        self.base_type.size()
+        self.size
     }
 
     /// Borrows the members in the order supplied at construction.
@@ -212,15 +247,8 @@ pub enum Datatype {
         /// Kind of object or region referenced.
         ref_type: ReferenceType,
     },
-    /// Class 8: Enumeration type.
-    Enumeration {
-        /// Size of one value, in bytes.
-        size: u32,
-        /// Integer datatype of the stored values.
-        base_type: Box<Datatype>,
-        /// Names and stored values of the enumeration.
-        members: Vec<EnumMember>,
-    },
+    /// Class 8: Enumeration with value widths checked by [`EnumerationType`].
+    Enumeration(EnumerationType),
     /// Class 9: Variable-length type.
     VariableLength(VariableLengthType),
     /// Class 10: Array type.
@@ -246,7 +274,7 @@ impl Datatype {
             Datatype::Opaque { size, .. } => *size,
             Datatype::Compound { size, .. } => *size,
             Datatype::Reference { size, .. } => *size,
-            Datatype::Enumeration { size, .. } => *size,
+            Datatype::Enumeration(datatype) => datatype.size().get(),
             Datatype::VariableLength(_) => 16,
             Datatype::Complex(datatype) => datatype.size().get(),
             Datatype::Array {
@@ -273,7 +301,7 @@ impl Datatype {
             Datatype::Opaque { .. } => 5,
             Datatype::Compound { .. } => 6,
             Datatype::Reference { .. } => 7,
-            Datatype::Enumeration { .. } => 8,
+            Datatype::Enumeration(_) => 8,
             Datatype::VariableLength(_) => 9,
             Datatype::Array { .. } => 10,
             Datatype::Complex(_) => COMPLEX_CLASS,
@@ -436,10 +464,9 @@ impl fmt::Display for Datatype {
                 f.write_str("}")
             }
             Self::Reference { ref_type, .. } => write!(f, "{ref_type}"),
-            Self::Enumeration {
-                base_type, members, ..
-            } => {
-                write!(f, "enum<{base_type}>[")?;
+            Self::Enumeration(datatype) => {
+                write!(f, "enum<{}>[", datatype.base_type())?;
+                let members = datatype.members();
                 for (i, member) in members.iter().take(DISPLAY_MAX_MEMBERS).enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;
@@ -465,6 +492,59 @@ impl fmt::Display for Datatype {
         }
     }
 }
+
+/// Returns the size in bytes of one stored element, including zero-sized types.
+///
+/// Uses `offset_width` for variable-length descriptors and computes array sizes recursively.
+/// Uses [`Datatype::type_size`] for other types, including the retained width of an enumeration.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if an array size exceeds the four-byte datatype
+/// size field.
+pub fn stored_type_size(
+    datatype: &Datatype,
+    offset_width: OffsetWidth,
+) -> Result<u32, FormatError> {
+    match datatype {
+        Datatype::VariableLength(_) => Ok(variable_length_descriptor_size(offset_width)),
+        Datatype::Array {
+            base_type,
+            dimensions,
+        } => array_type_size(stored_type_size(base_type, offset_width)?, dimensions),
+        _ => Ok(datatype.type_size()),
+    }
+}
+
+/// Computes the stored array size in bytes, returning zero if any dimension is zero.
+///
+/// # Errors
+///
+/// Returns [`FormatError::LengthTooLarge`] if the size exceeds the four-byte datatype size field.
+pub fn array_type_size(base_size: u32, dimensions: &[u32]) -> Result<u32, FormatError> {
+    if dimensions.contains(&0) {
+        return Ok(0);
+    }
+    dimensions.iter().try_fold(base_size, |size, &dimension| {
+        size.checked_mul(dimension)
+            .ok_or(FormatError::LengthTooLarge {
+                length: u64::from(size) * u64::from(dimension),
+                length_size: DATATYPE_SIZE_BYTES,
+            })
+    })
+}
+
+/// Returns the size in bytes of a sequence count and a global heap ID at `offset_width`.
+pub const fn variable_length_descriptor_size(offset_width: OffsetWidth) -> u32 {
+    SEQUENCE_LENGTH_SIZE + offset_width.get() as u32 + HEAP_INDEX_SIZE
+}
+
+// `H5T__vlen_disk_write` writes this count before the heap ID (`H5Tvlen.c`, HDF5 2.2.0).
+const SEQUENCE_LENGTH_SIZE: u32 = 4;
+// "Global Heap" of the format specification, version 4.0, defines the object index in the heap ID.
+const HEAP_INDEX_SIZE: u32 = 4;
+// "The Datatype Message" of the format specification, version 4.0, defines the four-byte size field.
+const DATATYPE_SIZE_BYTES: u8 = 4;
 
 /// A homogeneous rectangular complex datatype with a checked element size.
 ///

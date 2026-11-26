@@ -607,9 +607,8 @@ fn holds_unlocated_address(datatype: &Datatype) -> bool {
         Datatype::Compound { members, .. } => members
             .iter()
             .any(|member| holds_unlocated_address(&member.datatype)),
-        Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
-            holds_unlocated_address(base_type)
-        }
+        Datatype::Array { base_type, .. } => holds_unlocated_address(base_type),
+        Datatype::Enumeration(datatype) => holds_unlocated_address(datatype.base_type()),
         _ => crate::datatype::datatype_holds_file_address(datatype),
     }
 }

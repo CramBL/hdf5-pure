@@ -47,7 +47,7 @@ use crate::vl_data::VlElement;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
-use crate::{FixedPointType, FloatingPointType};
+use crate::{EnumMember, EnumerationType, FixedPointType, FloatingPointType};
 
 mod zfp;
 
@@ -506,12 +506,11 @@ impl EnumTypeBuilder {
         Self::with_base(make_u8_type())
     }
 
-    /// Create an enum builder over an arbitrary integer base type, such as
+    /// Creates an enum builder with a fixed-point base, such as
     /// [`make_u16_type`] or [`make_i64_type`].
     ///
-    /// The enumeration's element size comes from `base_type`. A non-integer base
-    /// is refused by [`build`](Self::build) with
-    /// [`FormatError::EnumBaseNotInteger`].
+    /// [`build`](Self::build) returns [`FormatError::EnumBaseNotInteger`] if
+    /// `base_type` is not fixed point.
     pub fn with_base(base_type: Datatype) -> Self {
         Self {
             base_type,
@@ -534,40 +533,44 @@ impl EnumTypeBuilder {
         self.value(name, i32::from(val))
     }
 
-    /// Add a named value from an integer wide enough for any base type.
+    /// Adds a named value from an `i64`, encoded little-endian at the base type's width.
+    ///
+    /// [`build`](Self::build) returns [`FormatError::EnumMemberValueRange`] if
+    /// the value is out of range or the base is wider than eight bytes.
     pub fn i64_value(mut self, name: &str, val: i64) -> Self {
         self.members
             .push((name.to_string(), PendingEnumValue::Int(val)));
         self
     }
 
-    /// Add a named value from its raw little-endian bytes — the form the format
-    /// stores and [`crate::EnumMember::value`] holds.
+    /// Adds a named value from its encoded bytes.
     ///
-    /// `bytes` must be exactly the base type's size, or [`build`](Self::build)
-    /// refuses it with [`FormatError::EnumMemberValueSize`]. Use this for a base
-    /// type whose values do not fit an `i64`, or to reproduce stored bytes
-    /// verbatim.
+    /// Pass the bytes in the base type's byte order. [`build`](Self::build)
+    /// returns [`FormatError::EnumMemberValueSize`] if `bytes` has a different
+    /// length than the base type's size.
     pub fn raw_value(mut self, name: &str, bytes: &[u8]) -> Self {
         self.members
             .push((name.to_string(), PendingEnumValue::Raw(bytes.to_vec())));
         self
     }
 
-    /// Build the enumeration datatype, resolving every member against the base
-    /// type's width.
+    /// Builds an enumeration with member values of the base type's width.
     ///
-    /// Fails if the base type is not an integer, if a member's raw byte length
-    /// disagrees with the base type's size, or if a member's integer value does
-    /// not fit. This prevents writing a datatype message libhdf5
-    /// cannot read.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::EnumBaseNotInteger`] if the base is not fixed point, or
+    /// [`FormatError::EnumMemberValueSize`] if an encoded value has a different byte length
+    /// than the base. Returns [`FormatError::EnumMemberValueRange`] if an integer value
+    /// is out of range or the base is wider than eight bytes.
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the base width does not fit in
+    /// [`usize`].
     pub fn build(self) -> Result<Datatype, FormatError> {
-        let size = self.base_type.type_size();
-        let signed = match &self.base_type {
-            Datatype::FixedPoint(numeric) => numeric.layout().signed(),
-            _ => return Err(FormatError::EnumBaseNotInteger),
+        let Datatype::FixedPoint(base_type) = self.base_type else {
+            return Err(FormatError::EnumBaseNotInteger);
         };
+        let size = base_type.size().get();
         let width = size.to_usize()?;
+        let signed = base_type.layout().signed();
 
         let mut members = Vec::with_capacity(self.members.len());
         for (name, pending) in self.members {
@@ -578,21 +581,23 @@ impl EnumTypeBuilder {
                     }
                     bytes
                 }
-                PendingEnumValue::Int(v) => {
-                    if !int_fits(v, width, signed) {
-                        return Err(FormatError::EnumMemberValueRange(name, v, size));
-                    }
-                    v.to_le_bytes()[..width].to_vec()
+                PendingEnumValue::Int(value) => {
+                    let bytes = value.to_le_bytes();
+                    let Some(bytes) = bytes
+                        .get(..width)
+                        .filter(|_| int_fits(value, width, signed))
+                    else {
+                        return Err(FormatError::EnumMemberValueRange(name, value, size));
+                    };
+                    bytes.to_vec()
                 }
             };
-            members.push(crate::datatype::__private::enum_member(name, value));
+            members.push(EnumMember::new(name, value));
         }
 
-        Ok(Datatype::Enumeration {
-            size,
-            base_type: Box::new(self.base_type),
-            members,
-        })
+        Ok(Datatype::Enumeration(EnumerationType::new(
+            base_type, members,
+        )?))
     }
 }
 

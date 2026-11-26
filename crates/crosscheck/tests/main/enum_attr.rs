@@ -111,23 +111,19 @@ fn a_c_written_bool_attribute_keeps_its_enumeration_in_the_datatype_channel() {
     });
     let datatypes = file.root().attr_datatypes().expect("attr_datatypes");
 
-    let Some(Datatype::Enumeration {
-        size,
-        base_type,
-        members,
-    }) = datatypes.get("flag")
-    else {
+    let Some(Datatype::Enumeration(datatype)) = datatypes.get("flag") else {
         panic!(
             "expected an enumeration for the bool, got {:?}",
             datatypes.get("flag")
         );
     };
-    assert_eq!(*size, 1, "the enum's own width");
-    assert!(
-        matches!(**base_type, Datatype::FixedPoint(numeric) if numeric.size().get() == 1),
-        "the base is the 8-bit integer the codes are stored as, got {base_type:?}"
-    );
-    let mapping: BTreeMap<&str, &[u8]> = members
+    assert_eq!(datatype.size().get(), 1);
+    let Datatype::FixedPoint(base) = datatype.base_type() else {
+        panic!("expected fixed-point base, got {:?}", datatype.base_type());
+    };
+    assert_eq!(base.size().get(), 1);
+    let mapping: BTreeMap<&str, &[u8]> = datatype
+        .members()
         .iter()
         .map(|m| (m.name.as_str(), m.value.as_slice()))
         .collect();

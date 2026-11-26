@@ -57,7 +57,7 @@ fn sealed_enums_still_require_a_wildcard_arm() {
             | Datatype::Opaque { .. }
             | Datatype::Compound { .. }
             | Datatype::Reference { .. }
-            | Datatype::Enumeration { .. }
+            | Datatype::Enumeration(_)
             | Datatype::VariableLength(_)
             | Datatype::Array { .. } => {}
             _ => {}

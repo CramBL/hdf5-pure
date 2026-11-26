@@ -4,6 +4,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use hdf5_pure_core::__private;
+
 use crate::convert::Narrow;
 use crate::datatype::{self, Datatype, ReferenceType, VariableLengthType};
 use crate::error::FormatError;
@@ -316,7 +318,7 @@ impl DatatypeSlots {
                         .fold(base.size, |size, &extent| size.saturating_mul(extent));
                     return Ok(Some(Self { size, slots: None }));
                 }
-                let size = datatype::array_type_size(base.size, dimensions)?;
+                let size = __private::array_type_size(base.size, dimensions)?;
                 let slots = match base.slots {
                     Some(group) if size != 0 => {
                         let stride: usize = base.size.narrow()?;

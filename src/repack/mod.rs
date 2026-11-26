@@ -1453,8 +1453,9 @@ fn attr_bytes_are_position_independent(dt: &Datatype) -> bool {
         Datatype::Compound { members, .. } => members
             .iter()
             .all(|m| attr_bytes_are_position_independent(&m.datatype)),
-        Datatype::Enumeration { base_type, .. } | Datatype::Array { base_type, .. } => {
-            attr_bytes_are_position_independent(base_type)
+        Datatype::Array { base_type, .. } => attr_bytes_are_position_independent(base_type),
+        Datatype::Enumeration(datatype) => {
+            attr_bytes_are_position_independent(datatype.base_type())
         }
         Datatype::VariableLength(_) | Datatype::Reference { .. } | _ => false,
     }
@@ -1613,7 +1614,7 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
             }
             Ok(())
         }
-        Datatype::Enumeration { base_type, .. } => check_datatype(base_type, owner),
+        Datatype::Enumeration(datatype) => check_datatype(datatype.base_type(), owner),
         Datatype::Array { base_type, .. } => check_datatype(base_type, owner),
         _ => bad("unknown class"),
     }
@@ -1654,7 +1655,7 @@ fn check_vlen_base_type(dt: &Datatype, owner: &str) -> Result<(), Error> {
             }
             Ok(())
         }
-        Datatype::Enumeration { base_type, .. } => check_vlen_base_type(base_type, owner),
+        Datatype::Enumeration(datatype) => check_vlen_base_type(datatype.base_type(), owner),
         Datatype::Array { base_type, .. } => check_vlen_base_type(base_type, owner),
         _ => bad("unknown class"),
     }

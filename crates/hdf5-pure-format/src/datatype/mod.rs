@@ -66,9 +66,8 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 pub fn datatype_holds_variable_length(datatype: &Datatype) -> bool {
     match datatype {
         Datatype::VariableLength(_) => true,
-        Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
-            datatype_holds_variable_length(base_type)
-        }
+        Datatype::Array { base_type, .. } => datatype_holds_variable_length(base_type),
+        Datatype::Enumeration(datatype) => datatype_holds_variable_length(datatype.base_type()),
         Datatype::Compound { members, .. } => members
             .iter()
             .any(|member| datatype_holds_variable_length(&member.datatype)),
@@ -106,19 +105,7 @@ pub fn stored_type_size(
     datatype: &Datatype,
     offset_width: OffsetWidth,
 ) -> Result<u32, FormatError> {
-    Ok(match datatype {
-        Datatype::VariableLength(_) => {
-            SEQUENCE_LENGTH_SIZE + u32::from(offset_width.get()) + HEAP_INDEX_SIZE
-        }
-        Datatype::Array {
-            base_type,
-            dimensions,
-        } => {
-            let size = stored_type_size(base_type, offset_width)?;
-            array_type_size(size, dimensions)?
-        }
-        _ => datatype.type_size(),
-    })
+    __private::stored_type_size(datatype, offset_width)
 }
 
 /// Returns the stored element size as a nonzero host-sized integer.
@@ -230,10 +217,7 @@ pub fn stored_element_size_usize(
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     let mut cursor = ByteCursor::new(data);
-    let Decoded {
-        datatype,
-        stored_size: _,
-    } = parse_datatype_at(&mut cursor, MessageDepth::ROOT)?;
+    let Decoded { datatype, .. } = parse_datatype_at(&mut cursor, MessageDepth::ROOT)?;
     Ok((datatype, cursor.position()))
 }
 
@@ -248,6 +232,7 @@ fn parse_datatype_at(
 ) -> Result<Decoded<Datatype>, FormatError> {
     let header = Header::parse(cursor, Context::Description)?;
     let size = header.size;
+    let mut size_offsets = None;
     let datatype = match Layout::from_header(&header, Projection::Semantic)? {
         Layout::Atomic(class) => class
             .decode(
@@ -270,6 +255,7 @@ fn parse_datatype_at(
                 let Decoded {
                     datatype,
                     stored_size,
+                    ..
                 } = parse_nested_datatype(cursor, depth)?;
                 let stored_size = match &shape {
                     Some(shape) => shape.stored_size(stored_size)?,
@@ -300,15 +286,18 @@ fn parse_datatype_at(
             let Decoded {
                 datatype: base_type,
                 stored_size: base_size,
+                size_offsets: base_offsets,
             } = parse_nested_datatype(cursor, depth)?;
             let members = enumeration.members(cursor, size, base_size)?;
-            Datatype::Enumeration {
-                size,
-                base_type: Box::new(base_type),
+            Datatype::Enumeration(__private::enumeration_from_stored_parts(
+                base_type,
+                base_size,
+                base_offsets.unwrap_or(OffsetWidth::Eight),
                 members,
-            }
+            )?)
         }
-        Layout::VariableLength(metadata) => {
+        Layout::VariableLength(metadata, offsets) => {
+            size_offsets = Some(offsets);
             let base_type = parse_nested_datatype(cursor, depth)?.datatype;
             let kind = match metadata {
                 VariableLengthMetadata::Sequence => VariableLengthType::sequence(base_type),
@@ -328,6 +317,7 @@ fn parse_datatype_at(
                     dimensions,
                 },
                 stored_size,
+                size_offsets: base.size_offsets,
             });
         }
         Layout::Complex(complex) => {
@@ -338,6 +328,7 @@ fn parse_datatype_at(
     Ok(Decoded {
         datatype,
         stored_size: message::positive_size(header.class.code(), size)?,
+        size_offsets,
     })
 }
 
@@ -377,8 +368,8 @@ fn parse_nested_datatype(
 /// compound member ranges and computes array sizes from the stored element sizes at that width.
 ///
 /// Canonical serialization accepts empty compound or enumeration member sets and zero
-/// array extents. Each enumeration's declared size and value widths must match the stored size
-/// of its base datatype. Writes each enumeration value as supplied.
+/// array extents. An enumeration's value width must match its base type's size at the
+/// eight-byte offset width. Writes each enumeration value as supplied.
 ///
 /// # Errors
 ///
@@ -841,9 +832,8 @@ pub fn datatype_holds_object_address(dt: &Datatype) -> bool {
         Datatype::Compound { members, .. } => members
             .iter()
             .any(|m| datatype_holds_object_address(&m.datatype)),
-        Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
-            datatype_holds_object_address(base_type)
-        }
+        Datatype::Array { base_type, .. } => datatype_holds_object_address(base_type),
+        Datatype::Enumeration(datatype) => datatype_holds_object_address(datatype.base_type()),
         Datatype::VariableLength(kind) => datatype_holds_object_address(kind.base_type()),
         Datatype::Complex(_) => false,
         _ => false,
@@ -865,9 +855,8 @@ pub fn datatype_holds_file_address(dt: &Datatype) -> bool {
         Datatype::Compound { members, .. } => members
             .iter()
             .any(|m| datatype_holds_file_address(&m.datatype)),
-        Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
-            datatype_holds_file_address(base_type)
-        }
+        Datatype::Array { base_type, .. } => datatype_holds_file_address(base_type),
+        Datatype::Enumeration(datatype) => datatype_holds_file_address(datatype.base_type()),
         Datatype::Complex(_) => false,
         _ => false,
     }
@@ -885,37 +874,11 @@ fn build_dt_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
     buf
 }
 
-/// Computes an array's stored byte size, returning zero when a dimension is zero.
-///
-/// # Errors
-///
-/// Returns [`FormatError::LengthTooLarge`] if a dimension product exceeds the four-byte datatype
-/// size field.
-fn array_type_size(base_size: u32, dimensions: &[u32]) -> Result<u32, FormatError> {
-    if dimensions.contains(&0) {
-        return Ok(0);
-    }
-    dimensions.iter().try_fold(base_size, |size, &dimension| {
-        size.checked_mul(dimension)
-            .ok_or(FormatError::LengthTooLarge {
-                length: u64::from(size) * u64::from(dimension),
-                length_size: DATATYPE_SIZE_BYTES,
-            })
-    })
-}
-
-/// The four-byte sequence count written by `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 2.2.0).
-const SEQUENCE_LENGTH_SIZE: u32 = 4;
-
-/// The four-byte object index in "Global Heap" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
-const HEAP_INDEX_SIZE: u32 = 4;
-
 /// The four-byte Size field in "The Datatype Message" of the [format specification, version
 /// 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+#[cfg(test)]
 const DATATYPE_SIZE_BYTES: u8 = 4;
 
 #[cfg(test)]

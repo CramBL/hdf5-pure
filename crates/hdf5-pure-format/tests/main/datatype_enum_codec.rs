@@ -1,5 +1,5 @@
 use hdf5_pure_core::__private;
-use hdf5_pure_core::{EnumMember, FormatError};
+use hdf5_pure_core::{Datatype, DatatypeByteOrder, EnumMember, FloatingPointType, FormatError};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
@@ -255,18 +255,46 @@ fn datatype_enum_parsers_reject_size_mismatch(#[case] size: u32) {
     assert_eq!(format::parse_datatype(&array).unwrap_err(), expected);
 }
 
+#[test]
+fn datatype_enum_codecs_preserve_the_decoded_floating_point_base() {
+    let bytes = datatype::float_enum_body(4);
+    let mut data = bytes.clone();
+    data.extend_from_slice(&[0xaa, 0xbb]);
+
+    let (semantic, consumed) = format::parse_datatype(&data).unwrap();
+    let (retained, retained_consumed) = DatatypeMessage::parse(&data).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(retained_consumed, consumed);
+    assert_eq!(retained.to_datatype().unwrap(), semantic);
+    let Datatype::Enumeration(enumeration) = &semantic else {
+        panic!("expected an enumeration, got {semantic:?}");
+    };
+    assert_eq!(
+        enumeration.base_type(),
+        &Datatype::FloatingPoint(FloatingPointType::ieee754_binary32(
+            DatatypeByteOrder::LittleEndian,
+        ))
+    );
+    assert_eq!(enumeration.size().get(), 4);
+    assert_eq!(
+        enumeration.members(),
+        &[__private::enum_member(
+            "one".into(),
+            1.0f32.to_le_bytes().to_vec()
+        )]
+    );
+    assert_eq!(retained.serialize(OffsetWidth::Eight).unwrap(), bytes);
+    assert_eq!(format::serialize_datatype(&semantic).unwrap(), bytes);
+}
+
 #[rstest]
 #[case::float(Leaf::Float(Order::Little))]
 #[case::bitfield(Leaf::Bitfield)]
 #[case::string(Leaf::string())]
-fn datatype_enum_codecs_reject_noninteger_bases(#[case] leaf: Leaf) {
+fn datatype_enum_construction_rejects_noninteger_bases(#[case] leaf: Leaf) {
     let child = leaf.bytes(Version::One);
     assert_eq!(
         checked(DatatypeVersion::Three, &child, &[]).unwrap_err(),
-        FormatError::EnumBaseNotInteger
-    );
-    assert_eq!(
-        DatatypeMessage::parse(&containers::enumeration(3, [0; 3], 4, &child, &[])).unwrap_err(),
         FormatError::EnumBaseNotInteger
     );
 }

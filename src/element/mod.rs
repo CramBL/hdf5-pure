@@ -485,7 +485,7 @@ impl<T: NumericReadTarget> ElementDecoder<T> for NumericDecoder<T> {
     }
 
     fn decoded_width(datatype: &Datatype) -> u32 {
-        crate::data_read::effective_numeric(datatype).type_size()
+        datatype.type_size()
     }
 
     fn append_values(&self, raw: &[u8], output: &mut Vec<T>) -> Result<(), Error> {

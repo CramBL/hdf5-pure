@@ -101,11 +101,8 @@ fn eight_bytes_decodes_at_full_range_and_nine_does_not() {
 
 #[test]
 fn an_enumeration_over_a_wide_base_is_rejected() {
-    let dt = Datatype::Enumeration {
-        size: 16,
-        base_type: Box::new(wide_int(16, false, DatatypeByteOrder::LittleEndian)),
-        members: Vec::new(),
-    };
+    let base = FixedPointType::new(16, DatatypeByteOrder::LittleEndian, false, 0, 128).unwrap();
+    let dt = Datatype::Enumeration(crate::EnumerationType::new(base, Vec::new()).unwrap());
     assert!(matches!(
         read_as_u64(&[0xFFu8; 16], &dt),
         Err(FormatError::NumericElementTooWide { size: 16 })

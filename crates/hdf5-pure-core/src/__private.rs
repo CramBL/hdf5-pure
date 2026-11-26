@@ -10,14 +10,17 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use crate::BaseAddress;
 use crate::CompoundMember;
 use crate::Datatype;
 use crate::EnumMember;
+use crate::EnumerationType;
 use crate::FileSpaceInfo;
 use crate::FileSpacePageSize;
 use crate::FileSpaceStrategy;
+use crate::FormatError;
 use crate::LengthWidth;
 use crate::OffsetWidth;
 use crate::StoredAddress;
@@ -30,6 +33,7 @@ pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
 pub use crate::address::StoredAddressExt;
 pub use crate::address_range::NonEmptyRange;
+pub use crate::datatype::{array_type_size, stored_type_size, variable_length_descriptor_size};
 pub use crate::display::DISPLAY_MAX_MEMBERS;
 pub use crate::display::Dims;
 pub use crate::display::EscapedName;
@@ -141,6 +145,24 @@ pub fn enum_member(name: String, value: Vec<u8>) -> EnumMember {
 pub fn enum_member_parts(member: &EnumMember) -> (&str, &[u8]) {
     let EnumMember { name, value } = member;
     (name, value)
+}
+
+/// Constructs an enumeration from a decoded base and member values.
+///
+/// Pass the stored element size and the offset width from the base description.
+///
+/// # Errors
+///
+/// Returns [`FormatError::EnumBaseSizeMismatch`] if `size` differs from the base's stored
+/// size at `offsets`, or [`FormatError::EnumMemberValueSize`] if a member's width differs
+/// from `size`. Propagates base size calculation errors.
+pub fn enumeration_from_stored_parts(
+    base_type: Datatype,
+    size: NonZeroU32,
+    offsets: OffsetWidth,
+    members: Vec<EnumMember>,
+) -> Result<EnumerationType, FormatError> {
+    EnumerationType::from_stored_parts(base_type, size, offsets, members)
 }
 
 /// The fields of a [`Superblock`], for the other workspace crates to build one.

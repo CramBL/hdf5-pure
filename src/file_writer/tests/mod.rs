@@ -67,59 +67,27 @@ fn compact_group_writer_emits_prepared_links_in_record_order() {
 }
 
 #[test]
-fn inline_attribute_writer_rejects_mismatched_enumeration_datatype_size_before_output() {
+fn inline_attribute_writer_preserves_checked_enumeration_members() {
     let mut writer = FileWriter::new();
-    let mut message = type_builders::build_attr_message("invalid", &AttrValue::U8(1)).unwrap();
-    let mut datatype = crate::EnumTypeBuilder::u8_based()
-        .u8_value("first", 1)
-        .build()
-        .unwrap();
-    let Datatype::Enumeration { size, .. } = &mut datatype else {
-        panic!("expected an enumeration datatype");
-    };
-    *size = 2;
-    message.datatype = datatype;
-    message.raw_data.push(0);
-    writer.set_root_attr_verbatim(message, None);
-
-    let mut destination = b"previous bytes".to_vec();
-    let error = writer
-        .finish_to_sink(&mut destination)
-        .unwrap_err()
-        .into_format();
-    assert_eq!(
-        error,
-        FormatError::EnumBaseSizeMismatch {
-            size: 2,
-            base_size: 1,
-        },
-    );
-    assert_eq!(destination, b"previous bytes");
-}
-
-#[test]
-fn inline_attribute_writer_rejects_a_short_enumeration_value_before_output() {
-    let mut writer = FileWriter::new();
-    let mut message = type_builders::build_attr_message("invalid", &AttrValue::U8(1)).unwrap();
-    let mut datatype = crate::EnumTypeBuilder::u8_based()
+    let datatype = crate::EnumTypeBuilder::u8_based()
         .u8_value("first", 1)
         .u8_value("last", 2)
         .build()
         .unwrap();
-    let Datatype::Enumeration { members, .. } = &mut datatype else {
-        panic!("expected an enumeration datatype");
-    };
-    members[1].value.clear();
-    message.datatype = datatype;
+    let mut message = type_builders::build_attr_message("label", &AttrValue::U8(2)).unwrap();
+    message.datatype = datatype.clone();
     writer.set_root_attr_verbatim(message, None);
 
-    let mut destination = b"previous bytes".to_vec();
-    let error = writer
-        .finish_to_sink(&mut destination)
-        .unwrap_err()
-        .into_format();
-    assert_eq!(error, FormatError::EnumMemberValueSize("last".into(), 1, 0));
-    assert_eq!(destination, b"previous bytes");
+    let file = File::from_bytes(writer.finish().unwrap()).unwrap();
+    let root = file.root();
+    assert_eq!(
+        root.attr_datatypes().unwrap(),
+        [("label".into(), datatype)].into()
+    );
+    assert_eq!(
+        root.attrs().unwrap(),
+        [("label".into(), AttrValue::U8(2))].into()
+    );
 }
 
 #[rstest]

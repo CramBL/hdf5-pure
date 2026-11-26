@@ -2320,21 +2320,10 @@ pub(super) fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> b
                             && overwrite_datatypes_match(&disk.datatype, &staged.datatype)
                     })
         }
-        (
-            Datatype::Enumeration {
-                size: disk_size,
-                base_type: disk_base,
-                members: disk_members,
-            },
-            Datatype::Enumeration {
-                size: staged_size,
-                base_type: staged_base,
-                members: staged_members,
-            },
-        ) => {
-            disk_size == staged_size
-                && disk_members == staged_members
-                && overwrite_datatypes_match(disk_base, staged_base)
+        (Datatype::Enumeration(disk), Datatype::Enumeration(staged)) => {
+            disk.size() == staged.size()
+                && disk.members() == staged.members()
+                && overwrite_datatypes_match(disk.base_type(), staged.base_type())
         }
         (
             Datatype::VariableLength(VariableLengthType::String(disk)),

@@ -1459,9 +1459,8 @@ pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
         Datatype::Time(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
         Datatype::BitField(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
         Datatype::String { .. } | Datatype::Opaque { .. } => true,
-        Datatype::Enumeration { base_type, .. } | Datatype::Array { base_type, .. } => {
-            datatype_is_raw_appendable(base_type)
-        }
+        Datatype::Array { base_type, .. } => datatype_is_raw_appendable(base_type),
+        Datatype::Enumeration(datatype) => datatype_is_raw_appendable(datatype.base_type()),
         Datatype::Compound { members, .. } => members
             .iter()
             .all(|m| datatype_is_raw_appendable(&m.datatype)),

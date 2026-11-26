@@ -206,9 +206,8 @@ impl ContentVersion {
     fn from_datatype(datatype: &Datatype) -> Self {
         match datatype {
             Datatype::Complex(_) => Self::V200,
-            Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
-                Self::from_datatype(base_type)
-            }
+            Datatype::Array { base_type, .. } => Self::from_datatype(base_type),
+            Datatype::Enumeration(datatype) => Self::from_datatype(datatype.base_type()),
             Datatype::Compound { members, .. } => members
                 .iter()
                 .map(|member| Self::from_datatype(&member.datatype))

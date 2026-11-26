@@ -141,8 +141,8 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
                 .collect();
             DType::Compound(fields)
         }
-        Datatype::Enumeration { members, .. } => {
-            let names = members.iter().map(|m| m.name.clone()).collect();
+        Datatype::Enumeration(datatype) => {
+            let names = datatype.members().iter().map(|m| m.name.clone()).collect();
             DType::Enum(names)
         }
         Datatype::Array {
@@ -210,7 +210,7 @@ enum DecodedAttrValue {
 /// The decoded value omits some encoding details:
 ///
 /// - byte order and numeric precision, which are rewritten at the variant's full width
-/// - enumeration member names, with values decoded through the integer base type
+/// - enumeration member names, with values decoded through the base type
 /// - array rank, with elements flattened into one-dimensional variants
 /// - fixed-string padding, which is rewritten as null padding
 /// - null dataspace identity, which has the same empty array value as an empty simple dataspace
@@ -247,7 +247,6 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
     // at length one.
     let scalar = attr.dataspace.space_type == DataspaceType::Scalar;
 
-    // Enumeration values decode through their integer base type.
     Ok(DecodedAttrValue::Value(
         match crate::data_read::effective_numeric(&attr.datatype) {
             Datatype::FixedPoint(numeric) if numeric.size().get() > 8 => {

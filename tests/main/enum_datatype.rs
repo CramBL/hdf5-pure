@@ -6,8 +6,17 @@
 //! through the typed integer readers (via the base type) while the datatype
 //! itself preserves the member name/value pairs. See issue #129.
 
-use hdf5_pure::{DType, Datatype, EnumTypeBuilder, Error, File, FileBuilder, FormatError};
+use hdf5_pure::{
+    DType, Datatype, DatatypeByteOrder, EnumMember, EnumTypeBuilder, EnumerationType, Error, File,
+    FileBuilder, FixedPointType, FloatingPointType, FormatError, MessageType, RepackOptions,
+};
+use hdf5_pure_format::__private::{AccessMode, ObjectHeader};
+use rstest::rstest;
+use test_util::datatype;
+use test_util::datatype::containers::{self, EnumValue};
+use test_util::datatype::leaf::{self, Version};
 use test_util_hdf5::file_builder;
+use test_util_hdf5::storage;
 
 #[test]
 fn i32_enum_dataset_preserves_members_and_values() {
@@ -27,17 +36,13 @@ fn i32_enum_dataset_preserves_members_and_values() {
     // The datatype round-trips as an Enumeration carrying its i32 base and the
     // full (name, value) member list.
     match ds.datatype().unwrap() {
-        Datatype::Enumeration {
-            base_type, members, ..
-        } => {
-            assert!(
-                matches!(
-                    *base_type,
-                    Datatype::FixedPoint(numeric) if numeric.size().get() == 4 && numeric.layout().signed()
-                ),
-                "expected i32 base, got {base_type:?}"
+        Datatype::Enumeration(datatype) => {
+            assert_eq!(
+                datatype.base_type(),
+                &Datatype::FixedPoint(FixedPointType::i32())
             );
-            let pairs: Vec<(&str, &[u8])> = members
+            let pairs: Vec<(&str, &[u8])> = datatype
+                .members()
                 .iter()
                 .map(|m| (m.name.as_str(), m.value.as_slice()))
                 .collect();
@@ -219,15 +224,13 @@ fn enum_over_u16_base_round_trips() {
         .unwrap();
 
     match &dt {
-        Datatype::Enumeration {
-            size,
-            base_type,
-            members,
-        } => {
-            assert_eq!(*size, 2, "element size comes from the base type");
-            assert!(
-                matches!(**base_type, Datatype::FixedPoint(numeric) if numeric.size().get() == 2)
+        Datatype::Enumeration(datatype) => {
+            assert_eq!(datatype.size().get(), 2);
+            assert_eq!(
+                datatype.base_type(),
+                &Datatype::FixedPoint(FixedPointType::u16())
             );
+            let members = datatype.members();
             assert_eq!(members[0].value, 1u16.to_le_bytes().to_vec());
             assert_eq!(members[1].value, 40_000u16.to_le_bytes().to_vec());
         }
@@ -242,8 +245,9 @@ fn enum_over_u16_base_round_trips() {
 
     let file = File::open(&path).unwrap();
     match file.dataset("e").unwrap().datatype().unwrap() {
-        Datatype::Enumeration { size, members, .. } => {
-            assert_eq!(size, 2);
+        Datatype::Enumeration(datatype) => {
+            assert_eq!(datatype.size().get(), 2);
+            let members = datatype.members();
             assert_eq!(members.len(), 2);
             assert_eq!(members[1].name, "high");
             assert_eq!(members[1].value, 40_000u16.to_le_bytes().to_vec());
@@ -260,11 +264,44 @@ fn raw_value_carries_bytes_verbatim() {
         .build()
         .unwrap();
     match &dt {
-        Datatype::Enumeration { members, .. } => {
-            assert_eq!(members[0].value, u64::MAX.to_le_bytes().to_vec());
+        Datatype::Enumeration(datatype) => {
+            assert_eq!(datatype.members()[0].value, u64::MAX.to_le_bytes().to_vec());
         }
         other => panic!("expected an Enumeration, got {other:?}"),
     }
+}
+
+#[test]
+fn integer_convenience_value_requires_a_base_at_most_eight_bytes_wide() {
+    let base = FixedPointType::new(16, DatatypeByteOrder::LittleEndian, true, 0, 128).unwrap();
+    let error = EnumTypeBuilder::with_base(Datatype::FixedPoint(base))
+        .i64_value("one", 1)
+        .build()
+        .unwrap_err();
+    assert_eq!(
+        error,
+        FormatError::EnumMemberValueRange("one".into(), 1, 16)
+    );
+}
+
+#[test]
+fn raw_value_preserves_the_full_width_of_a_wide_base() {
+    let base = FixedPointType::new(16, DatatypeByteOrder::LittleEndian, true, 0, 128).unwrap();
+    let value = (-1i128).to_le_bytes();
+    let datatype = EnumTypeBuilder::with_base(Datatype::FixedPoint(base))
+        .raw_value("negative", &value)
+        .build()
+        .unwrap();
+    assert_eq!(
+        datatype,
+        Datatype::Enumeration(
+            EnumerationType::new(
+                base,
+                vec![EnumMember::new("negative".into(), value.to_vec())]
+            )
+            .unwrap()
+        )
+    );
 }
 
 #[test]
@@ -323,9 +360,121 @@ fn signed_bases_keep_negative_values() {
         .build()
         .unwrap();
     match &dt {
-        Datatype::Enumeration { members, .. } => {
-            assert_eq!(members[0].value, (-2i16).to_le_bytes().to_vec());
+        Datatype::Enumeration(datatype) => {
+            assert_eq!(datatype.members()[0].value, (-2i16).to_le_bytes().to_vec());
         }
         other => panic!("expected an Enumeration, got {other:?}"),
     }
+}
+
+#[rstest]
+#[case::inline(false)]
+#[case::committed(true)]
+fn file_builder_writes_checked_enumeration_bytes(#[case] committed: bool) {
+    let datatype = Datatype::Enumeration(
+        EnumerationType::new(
+            FixedPointType::u8(),
+            vec![
+                EnumMember::new("first".into(), vec![1]),
+                EnumMember::new("last".into(), vec![2]),
+            ],
+        )
+        .unwrap(),
+    );
+    let expected = containers::enumeration(
+        Version::Three.get(),
+        [2, 0, 0],
+        1,
+        &leaf::unsigned_byte(Version::One),
+        &[
+            EnumValue {
+                name: b"first",
+                value: &[1],
+            },
+            EnumValue {
+                name: b"last",
+                value: &[2],
+            },
+        ],
+    );
+    let mut builder = FileBuilder::new();
+    let description_owner = if committed {
+        builder.commit_datatype("description", datatype.clone());
+        "description"
+    } else {
+        "data"
+    };
+    let dataset = builder.create_dataset("data");
+    dataset.with_enum_u8_data(datatype.clone(), &[1, 2]);
+    if committed {
+        dataset.with_committed_datatype(description_owner);
+    }
+    let bytes = builder.finish().unwrap();
+    let file = File::from_bytes(bytes.clone()).unwrap();
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.datatype().unwrap(), datatype);
+    assert_eq!(dataset.read_raw().unwrap(), [1, 2]);
+
+    let superblock = file.superblock();
+    let address = storage::root_object_address(&file, &bytes, description_owner);
+    let header = ObjectHeader::parse(
+        &bytes,
+        AccessMode::ReadOnly,
+        usize::try_from(address.get()).unwrap(),
+        superblock.offset_size.get(),
+        superblock.length_size.get(),
+    )
+    .unwrap();
+    let datatype_bodies = header
+        .messages
+        .iter()
+        .filter(|message| message.msg_type == MessageType::DATATYPE)
+        .map(|message| message.data.as_slice())
+        .collect::<Vec<_>>();
+    assert_eq!(datatype_bodies, [expected.as_slice()]);
+}
+
+#[test]
+fn repack_preserves_a_decoded_enumeration_with_a_floating_point_base() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("float_enum.h5");
+    let output = directory.path().join("repacked.h5");
+    std::fs::write(&source, datatype::float_enum_dataset(4)).unwrap();
+    hdf5_pure::repack(&source, &output, &RepackOptions::default()).unwrap();
+
+    for path in [&source, &output] {
+        let file = File::open(path).unwrap();
+        let dataset = file.dataset("values").unwrap();
+        let Datatype::Enumeration(enumeration) = dataset.datatype().unwrap() else {
+            panic!("expected an enumeration datatype");
+        };
+        assert_eq!(
+            enumeration.base_type(),
+            &Datatype::FloatingPoint(FloatingPointType::ieee754_binary32(
+                DatatypeByteOrder::LittleEndian
+            ))
+        );
+        assert_eq!(enumeration.size().get(), 4);
+        assert_eq!(
+            enumeration.members(),
+            [EnumMember::new("one".into(), 1.0f32.to_le_bytes().to_vec())]
+        );
+        assert_eq!(dataset.read_f32().unwrap(), [1.0]);
+    }
+}
+
+#[test]
+fn dataset_datatype_reports_a_floating_point_enumeration_size_mismatch() {
+    let file = File::from_bytes(datatype::float_enum_dataset(8)).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let Error::Format(error) = dataset.datatype().unwrap_err() else {
+        panic!("expected a format error");
+    };
+    assert_eq!(
+        error,
+        FormatError::EnumBaseSizeMismatch {
+            size: 8,
+            base_size: 4
+        }
+    );
 }

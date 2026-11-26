@@ -174,15 +174,11 @@ pub fn read_raw_data_cached_from_source(
 
 /// Returns the datatype that governs numeric decoding of `dt`.
 ///
-/// An HDF5 enumeration is stored as values of its integer base type, so
-/// the numeric readers decode enum data through that base type, inheriting its signedness,
-/// byte order, precision, and width. The unwrap is recursive for defensiveness (an
-/// enum's base is always a leaf integer in practice) and returns any non-enum
-/// datatype unchanged, so the value+name round-trip works: the readers surface
-/// the codes while [`crate::DType::Enum`] surfaces the member names.
+/// Follows enumeration bases until it finds a datatype that is not an enumeration.
+/// The numeric readers use that datatype's encoding to decode the stored values.
 pub(crate) fn effective_numeric(dt: &Datatype) -> &Datatype {
     match dt {
-        Datatype::Enumeration { base_type, .. } => effective_numeric(base_type),
+        Datatype::Enumeration(datatype) => effective_numeric(datatype.base_type()),
         other => other,
     }
 }
@@ -363,7 +359,6 @@ pub fn read_as_strings(src: &[u8], datatype: &Datatype) -> Result<Vec<String>, F
 /// # Errors
 ///
 /// Returns [`FormatError::TypeMismatch`] if the datatype or its enumeration base is not numeric.
-/// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's size differs from its base.
 /// Returns [`FormatError::NumericElementTooWide`] if the element size exceeds eight bytes, or
 /// [`FormatError::ValueTooLargeForPlatform`] if it exceeds the target's `usize` range.
 /// Returns [`FormatError::UnsupportedFloatingPointLayout`] if the floating-point encoding is
@@ -393,7 +388,6 @@ impl<T: NumericReadTarget> NumericDecoder<T> {
     /// # Errors
     ///
     /// Returns [`FormatError::TypeMismatch`] if the datatype or its enumeration base is not numeric.
-    /// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's size differs from its base.
     /// Returns [`FormatError::NumericElementTooWide`] if the element size exceeds eight bytes, or
     /// [`FormatError::ValueTooLargeForPlatform`] if it exceeds the target's [`usize`] range.
     /// Returns [`FormatError::UnsupportedFloatingPointLayout`] if the floating-point encoding is
