@@ -1,25 +1,7 @@
-//! Constructors and helpers that the workspace crates share.
-//!
-//! The non-exhaustive types of this crate cannot be built with a struct literal outside it, so the
-//! other workspace crates build them through the functions and the field structs here. The module
-//! also exports [`StoredAddressExt`], the [`BaseAddressExt`] conversions of a [`BaseAddress`], display
-//! helpers, and quantities such as [`ByteLength`], [`ElementCount`], and [`ChunkSlot`].
+//! Re-exports of constructors and helpers for the workspace crates.
 //!
 //! This module serves the workspace crates only. It is outside the crate's compatibility
 //! guarantee and may change in any release.
-
-use alloc::vec::Vec;
-
-use crate::BaseAddress;
-use crate::FileSpaceInfo;
-use crate::FileSpacePageSize;
-use crate::FileSpaceStrategy;
-use crate::LengthWidth;
-use crate::OffsetWidth;
-use crate::StoredAddress;
-use crate::Superblock;
-use crate::SuperblockStatus;
-use crate::SuperblockStatusFlags;
 
 pub use crate::address::Address;
 pub use crate::address::BaseAddressExt;
@@ -38,7 +20,7 @@ pub use crate::display::Dims;
 pub use crate::display::EscapedName;
 pub use crate::display::QuotedBytes;
 pub use crate::display::write_elided;
-pub use crate::file_space_info::FileSpaceSettingsExt;
+pub use crate::file_space_info::{FileSpaceInfoFields, FileSpaceSettingsExt};
 pub use crate::filter_mask::FILTER_COUNT_MAX;
 pub use crate::filter_mask::PipelineFilterMask;
 pub use crate::metadata_bytes::MetadataBytes;
@@ -53,100 +35,4 @@ pub use crate::quantity::NonZeroElementCount;
 pub use crate::quantity::SlotCount;
 pub use crate::region::FileRange;
 pub use crate::region::FileRegion;
-
-/// The fields of a [`FileSpaceInfo`], for the other workspace crates to build one.
-///
-/// Each field holds the value of the [`FileSpaceInfo`] field of the same name.
-pub struct FileSpaceInfoFields {
-    pub strategy: FileSpaceStrategy,
-    pub persist: bool,
-    pub threshold: u64,
-    pub page_size: FileSpacePageSize,
-    pub page_end_meta_threshold: u16,
-    pub eoa_pre_fsm: Option<DecodedStoredAddress>,
-    pub manager_addrs: Vec<DecodedStoredAddress>,
-}
-
-impl FileSpaceInfoFields {
-    /// Creates a [`FileSpaceInfo`] from these fields.
-    pub fn build(self) -> FileSpaceInfo {
-        let Self {
-            strategy,
-            persist,
-            threshold,
-            page_size,
-            page_end_meta_threshold,
-            eoa_pre_fsm,
-            manager_addrs,
-        } = self;
-        FileSpaceInfo {
-            strategy,
-            persist,
-            threshold,
-            page_size,
-            page_end_meta_threshold,
-            eoa_pre_fsm,
-            manager_addrs,
-        }
-    }
-}
-
-/// The fields of a [`Superblock`], for the other workspace crates to build one.
-///
-/// Each field holds the value of the [`Superblock`] field of the same name.
-pub struct SuperblockFields {
-    pub status: SuperblockStatus,
-    pub offset_size: OffsetWidth,
-    pub length_size: LengthWidth,
-    pub base_address: BaseAddress,
-    pub eof_address: u64,
-    pub root_group_address: StoredAddress,
-    pub group_leaf_node_k: Option<u16>,
-    pub group_internal_node_k: Option<u16>,
-    pub indexed_storage_internal_node_k: Option<u16>,
-    pub free_space_address: Option<StoredAddress>,
-    pub driver_info_address: Option<StoredAddress>,
-    pub superblock_extension_address: Option<StoredAddress>,
-    pub checksum: Option<u32>,
-}
-
-impl SuperblockFields {
-    /// Creates a [`Superblock`] from these fields.
-    pub fn build(self) -> Superblock {
-        let Self {
-            status,
-            offset_size,
-            length_size,
-            base_address,
-            eof_address,
-            root_group_address,
-            group_leaf_node_k,
-            group_internal_node_k,
-            indexed_storage_internal_node_k,
-            free_space_address,
-            driver_info_address,
-            superblock_extension_address,
-            checksum,
-        } = self;
-        Superblock {
-            status,
-            offset_size,
-            length_size,
-            base_address,
-            eof_address,
-            root_group_address,
-            group_leaf_node_k,
-            group_internal_node_k,
-            indexed_storage_internal_node_k,
-            free_space_address,
-            driver_info_address,
-            superblock_extension_address,
-            checksum,
-        }
-    }
-}
-
-/// Creates status flags from an encoded field, preserving every bit.
-pub const fn superblock_status_flags(bits: u32) -> SuperblockStatusFlags {
-    SuperblockStatusFlags::from_bits(bits)
-}
+pub use crate::superblock::{SuperblockFields, superblock_status_flags};
