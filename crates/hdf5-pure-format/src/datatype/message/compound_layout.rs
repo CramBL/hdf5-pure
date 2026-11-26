@@ -5,7 +5,6 @@ use hdf5_pure_core::{DatatypeMemberName, FormatError};
 
 use super::DatatypeVersion;
 use super::description::NameLayout;
-use crate::datatype;
 
 /// The layout of a compound member's name, offset, and optional dimension block.
 ///
@@ -26,7 +25,7 @@ impl CompoundFields {
             DatatypeVersion::One => Self::LegacyWithShape,
             DatatypeVersion::Two => Self::Legacy,
             DatatypeVersion::Three | DatatypeVersion::Four | DatatypeVersion::Five => {
-                Self::Packed(datatype::offset_bytes_for_size(size))
+                Self::Packed(offset_bytes_for_size(size))
             }
         }
     }
@@ -152,4 +151,18 @@ struct MemberExtent {
     end: u64,
     /// The member's index in the declaration slice.
     index: usize,
+}
+
+/// Returns the minimum number of bytes needed to store `compound_size`, with a minimum of one.
+///
+/// This is the member offset width for version 3 and later. "The Datatype Message" of the
+/// [format specification, version 4.0][spec] defines it in the version 3 layout.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(in crate::datatype) fn offset_bytes_for_size(compound_size: u32) -> usize {
+    compound_size
+        .to_le_bytes()
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(1, |index| index + 1)
 }

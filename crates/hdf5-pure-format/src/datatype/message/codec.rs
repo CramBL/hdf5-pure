@@ -15,13 +15,13 @@ use core::slice;
 use hdf5_pure_core::__private;
 use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{
-    CharacterSet, CompoundMember, Datatype, DatatypeByteOrder, DatatypeMemberName, EnumMember,
-    FloatingPointType, FormatError, ReferenceType, StringPadding, VariableLengthType,
+    CharacterSet, CompoundMember, Datatype, DatatypeMemberName, EnumMember, FloatingPointType,
+    FormatError, ReferenceType, StringPadding, VariableLengthType,
 };
 
 use super::atomic::{AtomicProperties, AtomicReservedFlagPolicy};
 use super::compound_layout::{CompoundFields, CompoundLayout};
-use super::decode::{self, Decoded, Layout, Member, Projection};
+use super::decode::{self, COMPLEX_HOMOGENEOUS_BIT, Decoded, Layout, Member, Projection};
 use super::description::{self, NAME_ALIGNMENT, NameLayout};
 use super::{
     CompoundV1Member, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
@@ -29,14 +29,17 @@ use super::{
 use crate::bytes::{self, ByteCursor};
 use crate::codec::{Decode, Encode};
 use crate::convert::Narrow;
-use crate::datatype::header::{Context, Header};
-use crate::datatype::legacy_member::{CompoundV1Shape, DIMENSION_BLOCK_SIZE};
-use crate::datatype::{
-    self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_HOMOGENEOUS_BIT, COMPOUND_CLASS,
-    DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, REFERENCE_CLASS,
-    VARIABLE_LENGTH_CLASS, VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE,
-    VARIABLE_LENGTH_STRING, VariableLengthMetadata,
+use crate::datatype::header::{
+    ARRAY_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, Context, DATATYPE_HEADER_SIZE,
+    DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, Header, REFERENCE_CLASS, VARIABLE_LENGTH_CLASS,
 };
+use crate::datatype::legacy_member::{CompoundV1Shape, DIMENSION_BLOCK_SIZE};
+use crate::datatype::references::{OBJECT_REFERENCE_KIND, REGION_REFERENCE_KIND};
+use crate::datatype::variable_length::{
+    VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING,
+    VariableLengthMetadata,
+};
+use crate::datatype::{stored_size, string};
 use crate::width::OffsetWidth;
 
 impl DatatypeMessage {
@@ -657,7 +660,7 @@ impl<'a> PreparedDatatype<'a> {
     /// The writer uses at least version 3 for compounds, enumerations, and arrays, and at least
     /// version 1 for variable-length descriptions. The writer raises each container's version
     /// to the highest child version when necessary.
-    /// See [`datatype::serialize_datatype`] for the canonical encoding rules.
+    /// See [`crate::datatype::serialize_datatype`] for the canonical encoding rules.
     ///
     /// # Errors
     ///
@@ -1228,8 +1231,8 @@ impl ContainerProperties<'_> {
                 let flags = match string {
                     Some((padding, charset)) => [
                         VARIABLE_LENGTH_STRING
-                            | (padding_code(padding) << VARIABLE_LENGTH_PADDING_SHIFT),
-                        charset_code(charset),
+                            | (string::padding_code(padding) << VARIABLE_LENGTH_PADDING_SHIFT),
+                        string::charset_code(charset),
                         0,
                     ],
                     None => [VARIABLE_LENGTH_SEQUENCE, 0, 0],
@@ -1332,7 +1335,8 @@ impl CompoundMembers<'_> {
                 Err(error) => {
                     // Check the canonical member's bounds before returning its preparation error.
                     if let Description::Canonical(datatype) = child {
-                        let size = datatype::stored_type_size(datatype, preparation.offset_width)?;
+                        let size =
+                            stored_size::stored_type_size(datatype, preparation.offset_width)?;
                         layout.member_end(offset, size, || Ok(name.clone()))?;
                     }
                     return Err(error);
@@ -1555,154 +1559,5 @@ fn member_flags(count: usize) -> [u8; 3] {
     [low, high, 0]
 }
 
-/// Encodes the padding code for fixed- and variable-length strings.
-///
-/// Returns 0, 1, or 2 for [`StringPadding::NullTerminate`], [`StringPadding::NullPad`],
-/// or [`StringPadding::SpacePad`], respectively. The fields are defined in "The Datatype
-/// Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) fn padding_code(padding: &StringPadding) -> u8 {
-    match padding {
-        StringPadding::NullTerminate => NULL_TERMINATE,
-        StringPadding::NullPad => NULL_PAD,
-        StringPadding::SpacePad => SPACE_PAD,
-    }
-}
-
-/// Encodes the character-set code for fixed- and variable-length strings.
-///
-/// Returns 0 for [`CharacterSet::Ascii`] and 1 for [`CharacterSet::Utf8`]. The fields
-/// are defined in "The Datatype Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) fn charset_code(charset: &CharacterSet) -> u8 {
-    match charset {
-        CharacterSet::Ascii => ASCII_CHARSET,
-        CharacterSet::Utf8 => UTF8_CHARSET,
-    }
-}
-
-/// Encodes bit 0 for fixed-point, time, and bitfield byte order.
-///
-/// Callers pass [`DatatypeByteOrder::LittleEndian`] or [`DatatypeByteOrder::BigEndian`]
-/// from checked metadata. The fields are defined in "The Datatype Message" of the
-/// [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) fn binary_order_bit(order: DatatypeByteOrder) -> u8 {
-    if order == DatatypeByteOrder::BigEndian {
-        BINARY_ORDER_BIT
-    } else {
-        0
-    }
-}
-
-/// The mask for reserved fixed-point class bits 4 through 23.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const FIXED_RESERVED: u32 = 0xff_fff0;
-/// The mask for reserved time class bits 1 through 23.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const TIME_RESERVED: u32 = 0xff_fffe;
-/// The mask for reserved string class bits 8 through 23.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const STRING_RESERVED: u32 = 0xff_ff00;
-/// The mask for reserved bitfield class bits 3 through 23.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const BITFIELD_RESERVED: u32 = 0xff_fff8;
-/// Bit 0, the byte-order bit for fixed-point, time, and bitfield descriptions.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const BINARY_ORDER_BIT: u8 = 0x01;
-/// Bit 3, the signed-integer flag for fixed-point descriptions.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const SIGNED_BIT: u8 = 0x08;
-/// The mask for string padding bits 0 through 3.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const STRING_PADDING_MASK: u8 = 0x0f;
-/// The position of the string character-set field at bit 4.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const STRING_CHARSET_SHIFT: u8 = 4;
-
-/// The string padding code for NUL termination.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const NULL_TERMINATE: u8 = 0;
-/// The string padding code for NUL padding.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const NULL_PAD: u8 = 1;
-/// The string padding code for space padding.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const SPACE_PAD: u8 = 2;
-/// The ASCII string character-set code.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const ASCII_CHARSET: u8 = 0;
-/// The UTF-8 string character-set code.
-///
-/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
-/// of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-const UTF8_CHARSET: u8 = 1;
-
 /// The maximum number of descriptions on a parsing or serialization path.
 const MAX_MESSAGE_DEPTH: u8 = 64;
-
-/// The object-reference kind for datatype message versions 1 through 3.
-///
-/// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const OBJECT_REFERENCE_KIND: u8 = 0;
-/// The dataset-region reference kind for datatype message versions 1 through 3.
-///
-/// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-pub(super) const REGION_REFERENCE_KIND: u8 = 1;

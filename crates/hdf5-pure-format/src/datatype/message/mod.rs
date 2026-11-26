@@ -6,9 +6,11 @@ pub use self::description::{
     CompoundV1Member, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     FloatingPointByteOrder,
 };
+#[cfg(test)]
+pub(super) use self::description::{FLOAT_BYTE_ORDER_HIGH_BIT, FLOAT_BYTE_ORDER_LOW_BIT};
 
 pub(super) mod atomic;
 mod codec;
-mod compound_layout;
+pub(super) mod compound_layout;
 pub(super) mod decode;
 mod description;

@@ -19,13 +19,11 @@ use super::description::{self, NameLayout};
 use super::{DatatypeVersion, MessageDepth};
 use crate::bytes::ByteCursor;
 use crate::convert::Narrow;
-use crate::datatype::header::{AtomicClass, Context, DatatypeClass, Header};
-use crate::datatype::legacy_member::CompoundV1Shape;
-use crate::datatype::{
-    self, ARRAY_CLASS, COMPLEX_CLASS, COMPLEX_FORM_MASK, COMPLEX_FORM_SHIFT,
-    COMPLEX_HOMOGENEOUS_BIT, COMPLEX_RECTANGULAR_FORM, COMPLEX_RESERVED_MASK,
-    VariableLengthMetadata,
+use crate::datatype::header::{
+    ARRAY_CLASS, AtomicClass, COMPLEX_CLASS, Context, DatatypeClass, Header,
 };
+use crate::datatype::legacy_member::CompoundV1Shape;
+use crate::datatype::variable_length::{self, VariableLengthMetadata};
 use crate::width::OffsetWidth;
 
 /// A parsed datatype paired with the nonzero element size from its message.
@@ -90,8 +88,8 @@ impl Layout {
                 NameLayout::for_version(version),
             )?)),
             DatatypeClass::VariableLength => {
-                let metadata = datatype::parse_variable_length_metadata(flags)?;
-                Self::VariableLength(metadata, descriptor_width(size)?)
+                let metadata = variable_length::parse_variable_length_metadata(flags)?;
+                Self::VariableLength(metadata, variable_length::descriptor_width(size)?)
             }
             DatatypeClass::Array => Self::Array(Array::from_header(header, projection)?),
             DatatypeClass::Complex => Self::Complex(Complex::from_header(header)?),
@@ -436,21 +434,44 @@ impl Complex {
     }
 }
 
-/// Derives the heap address width from the variable-length descriptor's declared size.
-///
-/// # Errors
-///
-/// Returns [`FormatError::InvalidVariableLengthSize`] if the descriptor size is not 10, 12,
-/// or 16 bytes.
-fn descriptor_width(size: u32) -> Result<OffsetWidth, FormatError> {
-    [OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight]
-        .into_iter()
-        .find(|&offsets| __private::variable_length_descriptor_size(offsets) == size)
-        .ok_or(FormatError::InvalidVariableLengthSize { size })
-}
-
 // "The Datatype Message" in format specification version 4.0 defines no array class bits.
 const ARRAY_RESERVED: u32 = 0xff_ffff;
 // "The Datatype Message" in format specification version 4.0 reserves bits 16 through 23
 // of compound and enumeration class bit fields.
 const MEMBER_COUNT_RESERVED: u32 = 0xff_0000;
+
+/// The homogeneous flag in a native complex datatype's class bit field.
+///
+/// The flag for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) const COMPLEX_HOMOGENEOUS_BIT: u8 = 0x01;
+/// The mask for the form in a native complex datatype's class bit field.
+///
+/// The field for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_FORM_MASK: u8 = 0x06;
+/// The bit position of the form in a native complex datatype's class bit field.
+///
+/// The field for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_FORM_SHIFT: u8 = 1;
+/// The rectangular form code of a native complex datatype.
+///
+/// The code for datatype message version 5 is defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_RECTANGULAR_FORM: u8 = 0;
+/// The mask for reserved bits 3 through 23 of a complex class bit field.
+///
+/// The bits for datatype message version 5 are defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const COMPLEX_RESERVED_MASK: u32 = 0xFF_FFF8;

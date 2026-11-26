@@ -5,13 +5,15 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 
+#[cfg(test)]
+use alloc::vec;
+#[cfg(test)]
+use alloc::vec::Vec;
+
+#[cfg(test)]
+use byteorder::{ByteOrder, LittleEndian};
+
 use super::message::DatatypeVersion;
-use super::{
-    ARRAY_CLASS, BIT_FIELD_CLASS, COMPLEX_CLASS, COMPOUND_CLASS, DATATYPE_CLASS_MASK,
-    DATATYPE_HEADER_SIZE, DATATYPE_VERSION_SHIFT, ENUMERATION_CLASS, FIXED_POINT_CLASS,
-    FLOATING_POINT_CLASS, OPAQUE_CLASS, REFERENCE_CLASS, STRING_CLASS, TIME_CLASS,
-    VARIABLE_LENGTH_CLASS,
-};
 use crate::bytes::ByteCursor;
 use crate::error::FormatError;
 
@@ -211,3 +213,68 @@ pub(super) enum AtomicClass {
     BitField = BIT_FIELD_CLASS,
     Opaque = OPAQUE_CLASS,
 }
+
+/// The byte length of the common datatype message header.
+///
+/// The header for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) const DATATYPE_HEADER_SIZE: usize = 8;
+/// The mask for the class code in the common datatype message header.
+///
+/// The class field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) const DATATYPE_CLASS_MASK: u8 = 0x0F;
+/// The bit position of the version in the common datatype message header.
+///
+/// The version field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) const DATATYPE_VERSION_SHIFT: u8 = 4;
+
+// The format specification, version 4.0, defines these class and version codes
+// in "The Datatype Message".
+pub(super) const FIXED_POINT_CLASS: u8 = 0;
+pub(super) const FLOATING_POINT_CLASS: u8 = 1;
+pub(super) const TIME_CLASS: u8 = 2;
+pub(super) const STRING_CLASS: u8 = 3;
+pub(super) const BIT_FIELD_CLASS: u8 = 4;
+pub(super) const OPAQUE_CLASS: u8 = 5;
+pub(super) const COMPOUND_CLASS: u8 = 6;
+pub(super) const REFERENCE_CLASS: u8 = 7;
+pub(super) const ENUMERATION_CLASS: u8 = 8;
+pub(super) const VARIABLE_LENGTH_CLASS: u8 = 9;
+pub(super) const ARRAY_CLASS: u8 = 10;
+pub(super) const COMPLEX_CLASS: u8 = 11;
+pub(super) const DATATYPE_VERSION_ONE: u8 = 1;
+pub(super) const DATATYPE_VERSION_TWO: u8 = 2;
+pub(super) const DATATYPE_VERSION_THREE: u8 = 3;
+/// Datatype message version 4, defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+pub(super) const DATATYPE_VERSION_FOUR: u8 = 4;
+pub(super) const DATATYPE_VERSION_FIVE: u8 = 5;
+
+/// Writes an eight-byte test header from its raw fields.
+#[cfg(test)]
+pub(super) fn build_datatype_header(class: u8, version: u8, flags: [u8; 3], size: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0] = (class & 0x0F) | ((version & 0x0F) << 4);
+    buf[1] = flags[0];
+    buf[2] = flags[1];
+    buf[3] = flags[2];
+    LittleEndian::write_u32(&mut buf[4..8], size);
+    buf
+}
+
+/// The four-byte Size field in "The Datatype Message" of the [format specification, version
+/// 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+#[cfg(test)]
+pub(super) const DATATYPE_SIZE_BYTES: u8 = 4;
