@@ -228,7 +228,7 @@ fn sealed_structs_keep_their_attribute() {
             "pub struct FileSpaceInfo {",
         ),
         (
-            "crates/hdf5-pure-core/src/datatype/mod.rs",
+            "crates/hdf5-pure-core/src/datatype/compound_member.rs",
             "pub struct CompoundMember {",
         ),
         (

@@ -1,10 +1,10 @@
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::num::NonZeroU32;
 
 use self::byte_order::DatatypeByteOrder;
+pub use self::compound_member::CompoundMember;
 use self::layout::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 pub use self::member_name::DatatypeMemberName;
 use crate::display;
@@ -15,6 +15,7 @@ use crate::display::QuotedBytes;
 use crate::{FormatError, OffsetWidth};
 
 pub mod byte_order;
+mod compound_member;
 pub mod layout;
 mod member_name;
 
@@ -51,20 +52,6 @@ pub enum ReferenceType {
     Object,
     /// Refers to a region of a dataset.
     DatasetRegion,
-}
-
-/// A member of a compound datatype.
-///
-/// The struct is non-exhaustive.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub struct CompoundMember {
-    /// Member name.
-    pub name: String,
-    /// Byte offset within the compound.
-    pub byte_offset: u64,
-    /// Member datatype.
-    pub datatype: Datatype,
 }
 
 /// A member of an enumeration datatype.
