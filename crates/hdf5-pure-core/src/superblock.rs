@@ -25,7 +25,7 @@ use crate::width::OffsetWidth;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Superblock {
     /// The encoding version and file consistency flags.
-    pub(crate) status: SuperblockStatus,
+    status: SuperblockStatus,
     /// The width of file addresses.
     pub offset_size: OffsetWidth,
     /// The width of object sizes and other lengths.
@@ -276,7 +276,7 @@ impl SuperblockStatus {
             Self::Zero(bits) | Self::One(bits) => bits,
             Self::Two(bits) | Self::Three(bits) => bits as u32,
         };
-        SuperblockStatusFlags::from_bits(bits)
+        superblock_status_flags(bits)
     }
 }
 
@@ -344,10 +344,6 @@ impl SuperblockStatusFlags {
             & !(SuperblockStatusFlag::WriteAccess.mask()
                 | SuperblockStatusFlag::SwmrWriteAccess.mask())
     }
-
-    pub(crate) const fn from_bits(bits: u32) -> Self {
-        Self { bits }
-    }
 }
 
 impl TryFrom<SuperblockStatusFlags> for u8 {
@@ -365,8 +361,10 @@ impl TryFrom<SuperblockStatusFlags> for u8 {
 }
 
 /// Creates status flags from an encoded field, preserving every bit.
+///
+/// Use [`SuperblockStatus::new`] to check that the flags fit the field for a particular version.
 pub const fn superblock_status_flags(bits: u32) -> SuperblockStatusFlags {
-    SuperblockStatusFlags::from_bits(bits)
+    SuperblockStatusFlags { bits }
 }
 
 /// An access flag in a version 3 superblock's [`SuperblockStatusFlags`].
@@ -467,7 +465,7 @@ mod tests {
         #[values(SuperblockVersion::Two, SuperblockVersion::Three)] modern: SuperblockVersion,
     ) {
         let mut superblock = superblock(
-            SuperblockStatus::new(legacy, SuperblockStatusFlags::from_bits(bits)).unwrap(),
+            SuperblockStatus::new(legacy, super::superblock_status_flags(bits)).unwrap(),
         );
         let before = superblock.clone();
         assert_eq!(
@@ -489,7 +487,7 @@ mod tests {
         let mut superblock = superblock(status);
         let before = superblock.clone();
         assert_eq!(
-            superblock.set_consistency_flags(SuperblockStatusFlags::from_bits(bits)),
+            superblock.set_consistency_flags(super::superblock_status_flags(bits)),
             Err(FormatError::SuperblockStatusFlagsTooWide { bits })
         );
         assert_eq!(superblock, before);
@@ -526,7 +524,7 @@ mod tests {
         #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
     ) {
         assert_eq!(
-            SuperblockStatus::new(version, SuperblockStatusFlags::from_bits(bits)),
+            SuperblockStatus::new(version, super::superblock_status_flags(bits)),
             Err(FormatError::SuperblockStatusFlagsTooWide { bits })
         );
     }
@@ -564,7 +562,7 @@ mod tests {
         #[case] bits: u32,
         #[case] expected: (bool, bool, bool, bool, u32),
     ) {
-        let flags = SuperblockStatusFlags::from_bits(bits);
+        let flags = super::superblock_status_flags(bits);
         assert_eq!(flags.bits(), bits);
         assert_eq!(
             (
