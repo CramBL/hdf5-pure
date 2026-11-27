@@ -1,6 +1,8 @@
+use alloc::format;
 use core::error::Error;
 use core::fmt;
 
+use crate::codec::ExactError;
 use crate::error::FormatError;
 use crate::width::UintWidth;
 
@@ -53,5 +55,18 @@ impl Error for LinkWireError {
 impl From<FormatError> for LinkWireError {
     fn from(error: FormatError) -> Self {
         Self::Format(error)
+    }
+}
+
+impl From<ExactError<FormatError>> for LinkWireError {
+    fn from(error: ExactError<FormatError>) -> Self {
+        match error {
+            ExactError::Decode(error) => Self::Format(error),
+            ExactError::TrailingBytes { .. } => Self::TrailingBytes,
+            ExactError::InvalidConsumption(error) => Self::Format(FormatError::Internal(format!(
+                "link decoder consumed {} bytes from a {}-byte frame",
+                error.reported, error.available
+            ))),
+        }
     }
 }
