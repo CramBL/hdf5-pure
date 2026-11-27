@@ -9,12 +9,11 @@ use test_util::object_header::v1;
 use test_util::object_header::v2;
 use test_util::widths::Widths;
 
-use crate::error::FormatError;
-
 use super::super::ObjectReferenceCount;
 use super::super::ObjectReferenceCountField;
 use super::super::ObjectReferenceCountUpdate;
 use super::super::ObjectReferenceCountUpdateError;
+use crate::error::FormatError;
 
 #[rstest]
 #[case::version_1(Form::Version1)]
@@ -212,7 +211,7 @@ fn fixture(form: Form, bias: u64) -> (ObjectReferenceCountField, Vec<u8>) {
     } else {
         v2::Header::new().flags(flags).messages(records).build()
     };
-    let observed = super::observe(&root, child.as_deref(), bias, 8).unwrap();
+    let observed = super::super::test_support::observe(&root, child.as_deref(), bias, 8).unwrap();
     let field = match observed {
         ObjectReferenceCount::Version1(field) | ObjectReferenceCount::Version2(field) => field,
         other => panic!("expected an explicit count field, got {other:?}"),
