@@ -848,12 +848,9 @@ impl Roles {
                     count.get_or_insert(operation);
                 }
             }
-            if Dataspace::parse_with_length_width(
-                bytes(&image, dataspace_body),
-                located.widths.lengths,
-            )
-            .unwrap()
-            .dimensions()
+            if Dataspace::from_record(bytes(&image, dataspace_body), located.widths.lengths)
+                .unwrap()
+                .dimensions()
                 == [u64::try_from(extents::ROUNDS * CHUNK).unwrap()]
             {
                 dataspace.get_or_insert(operation);

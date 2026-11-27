@@ -117,7 +117,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
         .iter()
         .find(|message| message.msg_type == MessageType::DATASPACE)
         .unwrap();
-    let space = Dataspace::parse_with_length_width(&space.data, widths.lengths).unwrap();
+    let space = Dataspace::from_record(&space.data, widths.lengths).unwrap();
     assert_eq!(space.dimensions(), [8192]);
     assert_eq!(
         space.max_dimensions(),

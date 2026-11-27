@@ -387,7 +387,7 @@ fn extract_dataset(
     let dt = DecodedDatatype::from_record(dt_data)
         .unwrap()
         .into_datatype();
-    let ds = Dataspace::parse_with_length_width(ds_data, widths.lengths).unwrap();
+    let ds = Dataspace::from_record(ds_data, widths.lengths).unwrap();
     let dl = DataLayout::parse_with_widths(dl_data, widths).unwrap();
     (dt, ds, dl)
 }

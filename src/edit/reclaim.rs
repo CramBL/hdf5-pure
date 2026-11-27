@@ -883,8 +883,7 @@ impl WriteEngine {
         if !matches!(layout, DataLayout::Chunked { .. }) {
             return None;
         }
-        let dataspace =
-            Dataspace::parse_with_length_width(&region[db..de], self.widths().lengths).ok()?;
+        let dataspace = Dataspace::from_record(&region[db..de], self.widths().lengths).ok()?;
 
         // Delegate the per-index-type enumeration to the chunked reader (the
         // single owner of chunk-storage layout knowledge), then validate: every
@@ -1216,8 +1215,7 @@ impl WriteEngine {
                 if space.flags.is_shared() {
                     return Ok(false);
                 }
-                let dataspace =
-                    Dataspace::parse_with_length_width(&space.data, self.widths().lengths)?;
+                let dataspace = Dataspace::from_record(&space.data, self.widths().lengths)?;
                 let storage = crate::chunked_read::collect_chunked_storage_spans(
                     &PhysicalSource::new(&self.opened_source()).stored(),
                     &layout,

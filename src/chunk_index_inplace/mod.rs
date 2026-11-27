@@ -19,6 +19,7 @@ use hdf5_pure_format::__private::ChunkIndexFields;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
+use hdf5_pure_format::__private::DataspaceRecord;
 use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::EA_CLIENT_ID_UNFILTERED;
 use hdf5_pure_format::__private::ExtensibleArray;
@@ -57,7 +58,7 @@ use crate::convert::Narrow;
 use crate::data_layout::ChunkIndexLayout;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::DataLayout;
-use crate::dataspace::{Dataspace, MaxExtent};
+use crate::dataspace::MaxExtent;
 use crate::datatype::Datatype;
 use crate::edit::LossyTailReencoding;
 use crate::edit::allocation::{
@@ -750,8 +751,9 @@ impl Located {
 
         // Read the rank-one current and maximum extents before selecting the index writer.
         let ds_bytes = file.read_metadata_at(dataspace_msg.data_off, dataspace_msg.size)?;
-        let (dataspace, dimension_fields) =
-            Dataspace::parse_with_dimension_fields(&ds_bytes, widths.lengths)?;
+        let record = DataspaceRecord::parse(&ds_bytes, widths.lengths)?;
+        let dimension_fields = record.dimension_fields();
+        let dataspace = record.into_shape();
         if dataspace.dimensions().len() != 1 {
             return Err(unsupported("only rank-1 datasets are supported"));
         }

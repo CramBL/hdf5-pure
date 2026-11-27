@@ -16,7 +16,7 @@ use hdf5_pure_core::__private::ElementSize;
 use crate::bytes;
 use crate::codec::{DecodeFrame, Encode};
 use crate::convert::Narrow;
-use crate::dataspace::{Dataspace, PreparedDataspace, StoredDataspace};
+use crate::dataspace::{Dataspace, PreparedDataspace};
 use crate::datatype::CharacterSet;
 use crate::datatype::message::PreparedDatatype;
 use crate::datatype::{Datatype, DecodedDatatype};
@@ -900,9 +900,9 @@ fn decode_dataspace(
 ) -> Result<Dataspace, FormatError> {
     if flags & FLAG_SHARED_DATASPACE != 0 {
         let body = resolver.resolve(field, MessageType::DATASPACE)?;
-        Dataspace::parse_with_length_width(&body, length_width)
+        Dataspace::from_record(&body, length_width)
     } else {
-        StoredDataspace::decode_frame(field, length_width)?.into_dataspace()
+        Dataspace::parse(field, length_width)
     }
 }
 

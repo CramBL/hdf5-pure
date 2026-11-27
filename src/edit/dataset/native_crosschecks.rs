@@ -333,10 +333,8 @@ fn dataset_layout(region: &super::OhRegion) -> (Dataspace, DataLayout) {
     let mut position = 0;
     while let Some((kind, start, end)) = region.next_message(position).unwrap() {
         if kind == MessageType::DATASPACE {
-            dataspace = Some(
-                Dataspace::parse_with_length_width(&region[start..end], region.widths().lengths)
-                    .unwrap(),
-            );
+            dataspace =
+                Some(Dataspace::from_record(&region[start..end], region.widths().lengths).unwrap());
         } else if kind == MessageType::DATA_LAYOUT {
             layout =
                 Some(DataLayout::parse_with_widths(&region[start..end], region.widths()).unwrap());

@@ -1354,7 +1354,7 @@ fn parse_chunked_header(
         dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
     let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
     let dt = DecodedDatatype::from_record(&region[dt_b..dt_e])?.into_datatype();
-    let ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
+    let ds = Dataspace::from_record(&region[ds_b..ds_e], widths.lengths)?;
     let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
     if !matches!(dl, DataLayout::Chunked { .. }) {
         return Err(Error::EditUnsupported("dataset is not chunked"));

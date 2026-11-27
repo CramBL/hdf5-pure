@@ -261,7 +261,7 @@ impl WriteEngine {
         if matches!(scope, DatasetReferenceScope::ValuesAndFill) {
             self.collect_fill_value_collections(messages, &slots, referenced)?;
         }
-        let dataspace = Dataspace::parse_with_length_width(&dataspace.data, self.widths().lengths)?;
+        let dataspace = Dataspace::from_record(&dataspace.data, self.widths().lengths)?;
         let pipeline = pipeline
             .map(|m| crate::filter_pipeline::parse_filter_pipeline(&m.data))
             .transpose()?;

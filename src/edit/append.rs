@@ -775,7 +775,7 @@ impl WriteEngine {
         };
         let disk_dt = disk_dt.into_datatype();
         let Ok(disk_ds) =
-            Dataspace::parse_with_length_width(&region[ds_b..ds_e], self.context.widths().lengths)
+            Dataspace::from_record(&region[ds_b..ds_e], self.context.widths().lengths)
         else {
             return false;
         };
