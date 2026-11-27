@@ -93,10 +93,10 @@ impl FixedArrayHeader {
             base: _,
             entry_size,
             page_bits,
-            geometry,
-            data_block: _,
+            storage,
         } = *self;
-        let elements = geometry.encoding;
+        let geometry = storage.geometry();
+        let elements = geometry.encoding();
         let encoding = ChunkElementEncoding {
             chunk_size_bytes: match elements.client() {
                 ArrayClient::Chunks => 0,
@@ -120,7 +120,7 @@ impl FixedArrayHeader {
 
     /// Returns the array's maximum entry count, including unallocated slots.
     pub const fn entries(&self) -> u64 {
-        self.geometry.entries
+        self.storage.geometry().entries()
     }
 
     /// Returns the base 2 logarithm of the maximum entries per page.
@@ -165,12 +165,12 @@ impl FixedArrayDataBlockRef {
     /// Returns [`FormatError::InvalidFixedArrayGeometry`] if a page offset or length overflows,
     /// or [`FormatError::OffsetOverflow`] if its physical range ends past [`u64::MAX`].
     pub fn page_for_slot(&self, slot: u64) -> Result<Option<FixedArrayPageRef>, FormatError> {
-        if slot >= self.geometry.entries {
+        if slot >= self.geometry.entries() {
             return Ok(None);
         }
         self.geometry
-            .paging
-            .map(|paging| self.page(paging, slot / paging.page_entries))
+            .paging()
+            .map(|paging| self.page(paging, slot / paging.page_entries()))
             .transpose()
     }
 
@@ -190,12 +190,12 @@ impl FixedArrayDataBlockRef {
         let Self {
             range, geometry, ..
         } = *self;
-        let Some(paging) = geometry.paging.filter(|_| slot < geometry.entries) else {
+        let Some(paging) = geometry.paging().filter(|_| slot < geometry.entries()) else {
             return Ok(None);
         };
-        let page = slot / paging.page_entries;
+        let page = slot / paging.page_entries();
         let address = range.start().checked_add(super::sum([
-            super::data_block_prefix_len(geometry.encoding.offsets()),
+            super::data_block_prefix_len(geometry.encoding().offsets()),
             page / u64::from(u8::BITS),
         ])?)?;
         let mask = NonZeroU8::new(PAGE_ZERO_MASK >> (page % u64::from(u8::BITS)))
@@ -225,7 +225,7 @@ impl FixedArrayPageBitmap<'_> {
         Ok(block.page_for_slot(slot)?.map(|page| {
             (
                 page,
-                crate::chunk_record::page_initialized(bitmap, slot / paging.page_entries),
+                crate::chunk_record::page_initialized(bitmap, slot / paging.page_entries()),
             )
         }))
     }
@@ -322,16 +322,16 @@ impl FixedArrayPageRef {
         records: &[Option<ChunkRecord>],
         mut write: impl FnMut(&[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        if records.len().to_u64() != window.entries {
+        if records.len().to_u64() != window.entries() {
             return Err(FormatError::FixedArrayEntryCount {
-                expected: window.entries,
+                expected: window.entries(),
                 actual: records.len().to_u64(),
             }
             .into());
         }
         let maximum =
             NonZeroUsize::new(records.len()).ok_or(FormatError::InvalidFixedArrayGeometry)?;
-        if self.window(window.first_slot, maximum)? != Some(*window) {
+        if self.window(window.first_slot(), maximum)? != Some(*window) {
             return Err(FormatError::InvalidFixedArrayGeometry.into());
         }
         for &record in records {
@@ -345,7 +345,7 @@ impl FixedArrayPageRef {
             &mut write,
             Some(&mut checksum),
             empty.as_bytes(),
-            super::product(window.first_slot - slots.start, stride)?,
+            super::product(window.first_slot() - slots.start, stride)?,
         )?;
         emit_records(&mut write, &mut checksum, self.encoding, records)?;
         emit_repeated(
@@ -413,15 +413,12 @@ impl FixedArrayPageRef {
         }
         let entries = (slots.end - first).min(maximum.get().to_u64());
         let offset = super::product(first - first_slot, u64::from(encoding.stride().get()))?;
-        Ok(Some(FixedArrayEntryWindow {
-            range: FileRange::new(
-                range.start().checked_add(offset)?,
-                super::product(entries, u64::from(encoding.stride().get()))?,
-            )?,
-            first_slot: first,
+        Ok(Some(FixedArrayEntryWindow::new(
+            range.start().checked_add(offset)?,
+            first,
             entries,
             encoding,
-        }))
+        )?))
     }
 
     /// Returns the page's array-wide slot range, excluding its checksum.
@@ -560,7 +557,7 @@ impl FixedArrayPlan {
     /// length or their sum overflows.
     pub fn with_page_bits(mut self, page_bits: u8) -> Result<Self, FormatError> {
         self.geometry =
-            super::Geometry::new(self.geometry.encoding, self.geometry.entries, page_bits)?;
+            super::Geometry::new(self.geometry.encoding(), self.geometry.entries(), page_bits)?;
         self.page_bits = page_bits;
         self.data_block_length = self.geometry.data_block_len()?;
         self.total_length = super::sum([super::header_len(self.widths), self.data_block_length])?;
@@ -603,7 +600,7 @@ impl FixedArrayPlan {
         output: &mut [u8],
         record: Option<ChunkRecord>,
     ) -> Result<usize, FormatError> {
-        let element = self.geometry.encoding.encode(record)?;
+        let element = self.geometry.encoding().encode(record)?;
         let bytes = element.as_bytes();
         bytes::ensure_len(output, 0, bytes.len())?;
         output[..bytes.len()].copy_from_slice(bytes);
@@ -675,12 +672,12 @@ impl FixedArrayPlacement {
         let mut prefix = super::output_buffer(super::data_block_prefix_len(widths.offsets))?;
         prefix.extend_from_slice(&DATA_BLOCK_SIGNATURE);
         prefix.push(VERSION);
-        prefix.push(geometry.encoding.client().id());
+        prefix.push(geometry.encoding().client().id());
         bytes::try_write_defined_offset(&mut prefix, header.start().get(), widths.offsets)?;
-        let body_length = match geometry.paging {
+        let body_length = match geometry.paging() {
             Some(paging) => super::sum([
                 prefix.len().to_u64(),
-                paging.pages.div_ceil(u64::from(u8::BITS)),
+                paging.pages().div_ceil(u64::from(u8::BITS)),
             ])?,
             None => data_block
                 .length()
@@ -690,22 +687,22 @@ impl FixedArrayPlacement {
         let mut checksum = JenkinsLookup3::new(body_length);
         checksum.update(&prefix)?;
         write(&prefix)?;
-        match geometry.paging {
+        match geometry.paging() {
             Some(paging) => emit_repeated(
                 &mut write,
                 Some(&mut checksum),
                 &[0],
-                paging.pages.div_ceil(u64::from(u8::BITS)),
+                paging.pages().div_ceil(u64::from(u8::BITS)),
             )?,
             None => {
-                let element = geometry.encoding.encode(None)?;
+                let element = geometry.encoding().encode(None)?;
                 emit_repeated(
                     &mut write,
                     Some(&mut checksum),
                     element.as_bytes(),
                     super::product(
-                        geometry.entries,
-                        u64::from(geometry.encoding.stride().get()),
+                        geometry.entries(),
+                        u64::from(geometry.encoding().stride().get()),
                     )?,
                 )?;
             }
