@@ -32,7 +32,8 @@ pub struct HeaderMessage {
     pub flags: MessageFlags,
     /// Creation order (v2 only, when tracking is enabled).
     pub creation_order: Option<u16>,
-    /// Raw message data bytes.
+    /// The record's body, including any bytes after the encoded message, such as the alignment
+    /// padding of a version 1 object header.
     pub data: Vec<u8>,
 }
 

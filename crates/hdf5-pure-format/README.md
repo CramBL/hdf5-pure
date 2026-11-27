@@ -3,36 +3,40 @@
 Implements HDF5 wire layouts, parsers, and encoders for [hdf5-pure][facade].
 Shared definitions come from [hdf5-pure-core][core]. File access belongs to the facade.
 
-## Shared foundations
+## Choosing a codec interface
 
-Use these foundations when adding or extending parsers and encoders:
+Choose the interface by the input or output boundary and the result the caller needs.
 
-| Interface                                       | Purpose                                                                                                    |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| [`ByteCursor` and bounded-array helpers][bytes] | Acquire complete byte regions and arrays before interpreting them.                                         |
-| [`Decode<'input>`][codec]                       | Decode using supplied context. Results may borrow input. Each implementation defines framing.              |
-| [`Encode`][codec]                               | Exact, infallible length and bounded writing. Errors leave output unchanged. Success preserves its suffix. |
-| [`MessageBody`][message-body]                   | Associates a checked inline body with its object-header message type.                                      |
-| [`MetadataSource`][source]                      | Read metadata through a caller-supplied byte source.                                                       |
+| Responsibility | Interface |
+| --- | --- |
+| Read one complete wire unit at the start of a slice | `DecodePrefix`, returning the value and its byte count in `Parsed<T>` |
+| Interpret a complete region supplied by the caller | `DecodeFrame` |
+| Read the same representation at either boundary | Both traits over one parser or shared framing step |
+| Write a complete encoding into a bounded slice | `Encode` on a checked value or immutable prepared encoding |
+| Write a typed object header message body | [`MessageBody`][message-body] on its checked encoder |
+| Acquire a scalar or an array, or interpret a width or an address | [Byte helpers][bytes], [widths][widths], and [addresses][addresses] |
+| Inspect fields, convert values, resolve references, traverse a file, place blocks, or edit bytes in place | Concrete operations, reading any file bytes through [`MetadataSource`][source] |
 
-`Decode` and `Encode` are crate-private. Workspace-facing operations use [`__private`][private].
+The [codec traits][codec] are crate-private. Expose concrete checked operations through
+[`__private`][private] for workspace callers. Use `Decode` only for existing implementations
+awaiting migration. Remove it with its last implementation. See [`src/codec.rs`][codec] for
+the prefix, frame, and encoding contracts.
 
-- **Checked state:** apply **parse, don't validate**. Retain format invariants in checked values
-  or immutable preparation so subsequent operations can use them directly.
-- **Shared implementation:** concrete entry points and trait implementations use one codec path.
+## Checked state and bounded output
+
+Apply **parse, don't validate**. Establish versions, widths, counts, and geometry during
+parsing or construction, and keep them in private checked state. Prepare every fallible
+choice before writing. An encoder that returns an error leaves the entire output unchanged.
+
+## Borrowing, performance, and errors
+
+- **Lifetimes:** convert a borrowed result to an owned value before releasing its source buffer.
 - **Portability:** keep implementations usable with `no_std` and `alloc`.
-  Import from `core` or `alloc` where available.
-
-## Performance and errors
-
-- **Code size:** minimize generic code. Keep shared framing, diagnostics, and result construction
-  in concrete helpers. Select widths outside element loops.
-- **Allocation:** avoid unnecessary copies and intermediate buffers. Reuse prepared state and
-  caller-provided output where useful.
-- **Representation:** keep memory usage compact. Semantic interfaces need not dictate how
-  their state is stored.
-- **Errors:** return typed errors for malformed input and failed preparation.
-  Preserve useful context and causes. Build diagnostic-only context on failure.
+- **Code size:** keep generic adapters small. Select widths outside element loops.
+- **Memory:** avoid unnecessary copies and intermediate buffers. Keep stored state compact.
+- **Errors:** preserve typed causes. Build diagnostic-only context on failure.
+- **Boundaries:** distinguish a parent failing to acquire a declared child, a child rejecting
+  its input, and trailing bytes in an exact frame.
 
 For workspace-wide guidance, see [ARCHITECTURE.md][architecture], [CODE_STYLE.md][style],
 and [TESTING.md][testing].
@@ -40,10 +44,12 @@ and [TESTING.md][testing].
 [facade]: ../../README.md
 [core]: ../hdf5-pure-core/README.md
 [bytes]: src/bytes.rs
+[widths]: src/width.rs
+[addresses]: src/address.rs
 [codec]: src/codec.rs
 [source]: src/metadata_source.rs
 [private]: src/__private.rs
-[message-body]: src/object_header/v2/record.rs#L30-L34
+[message-body]: src/object_header/v2/prepared_record.rs
 [architecture]: ../../ARCHITECTURE.md
 [style]: ../../CODE_STYLE.md
 [testing]: ../../TESTING.md

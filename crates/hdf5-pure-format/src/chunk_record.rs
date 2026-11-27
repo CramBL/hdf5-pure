@@ -411,8 +411,9 @@ impl ElementEncoding {
     /// Returns the slot and the record of each element in `bytes` that stores a chunk address,
     /// with the first element in `first_slot`.
     ///
-    /// A record of an unfiltered chunk has `chunk_byte_size` as its stored size and a filter mask
-    /// of 0.
+    /// Every element occupies [`Self::stride`] bytes, including one that stores the undefined
+    /// address. A record of an unfiltered chunk has `chunk_byte_size` as its stored size and a
+    /// filter mask of 0.
     pub(crate) fn records<'a>(
         self,
         bytes: &'a [u8],
