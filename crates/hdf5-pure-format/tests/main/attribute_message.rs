@@ -36,6 +36,23 @@ fn rejects_bytes_after_the_inline_datatype_in_its_declared_field(#[case] suffix:
     );
 }
 
+#[rstest]
+#[case::zero(0)]
+#[case::nonzero(0xff)]
+fn rejects_bytes_after_the_inline_dataspace_in_its_declared_field(#[case] suffix: u8) {
+    let mut field = dataspace::scalar();
+    let consumed = field.len();
+    field.push(suffix);
+    let bytes = Attribute::new("x", &datatype::f64_le(), &field, &[0; 8]).build();
+    assert_eq!(
+        AttributeMessage::parse(&bytes, 8).unwrap_err(),
+        FormatError::TrailingMetadataBytes {
+            consumed,
+            frame_len: field.len()
+        }
+    );
+}
+
 #[test]
 fn version_one_field_alignment_follows_the_inline_datatype() {
     let field = datatype::f64_le();

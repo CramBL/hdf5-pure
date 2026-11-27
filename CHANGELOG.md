@@ -48,6 +48,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::shape` and related reads ignoring version 1 dataspace permutation indices,
+  including truncated lists. Attribute reads also reject trailing bytes in an inline dataspace
+  field ([#1432](https://github.com/CramBL/hdf5-pure/pull/1432)).
 - Fixed `Group::attrs` and related attribute reads accepting trailing bytes in an inline
   datatype field ([#1431](https://github.com/CramBL/hdf5-pure/pull/1431)).
 - Fixed `Dataset::fill_time` reporting field errors for truncated version 1 fill value

@@ -14,9 +14,9 @@ use core::num::NonZeroU64;
 use hdf5_pure_core::__private::ElementSize;
 
 use crate::bytes;
-use crate::codec::{Decode, DecodeFrame, Encode};
+use crate::codec::{DecodeFrame, Encode};
 use crate::convert::Narrow;
-use crate::dataspace::{Dataspace, PreparedDataspace};
+use crate::dataspace::{Dataspace, PreparedDataspace, StoredDataspace};
 use crate::datatype::CharacterSet;
 use crate::datatype::message::PreparedDatatype;
 use crate::datatype::{Datatype, DecodedDatatype};
@@ -373,8 +373,8 @@ impl AttributeMessage {
     /// [`FormatError::UnexpectedEof`] if a field is truncated. Returns
     /// [`FormatError::OffsetOverflow`] if the element count times its stored size exceeds
     /// [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if it exceeds [`usize::MAX`].
-    /// Returns [`FormatError::TrailingMetadataBytes`] if an inline datatype ends before its
-    /// declared field does. Version 1 alignment padding follows the field. Propagates datatype,
+    /// Returns [`FormatError::TrailingMetadataBytes`] if an inline datatype or dataspace ends
+    /// before its declared field does. Version 1 alignment padding follows the field. Propagates datatype,
     /// dataspace, stored-element-size, and resolver errors.
     pub fn parse_resolving_at_with_widths(
         data: &[u8],
@@ -915,9 +915,9 @@ fn decode_dataspace(
 ) -> Result<Dataspace, FormatError> {
     if flags & FLAG_SHARED_DATASPACE != 0 {
         let body = resolver.resolve(field, MessageType::DATASPACE)?;
-        Dataspace::decode(&body, length_width)
+        Dataspace::parse_with_length_width(&body, length_width)
     } else {
-        Dataspace::decode(field, length_width)
+        StoredDataspace::decode_frame(field, length_width)?.into_dataspace()
     }
 }
 
