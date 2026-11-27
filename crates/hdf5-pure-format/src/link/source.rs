@@ -16,5 +16,5 @@ mod sealed {
     pub(crate) trait Sealed {}
 
     impl Sealed for super::super::wire::LinkMessageV1 {}
-    impl Sealed for crate::link_storage::OwnedLink {}
+    impl Sealed for crate::link::storage::OwnedLink {}
 }

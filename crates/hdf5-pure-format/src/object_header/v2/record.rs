@@ -18,7 +18,7 @@ use crate::error::FormatError;
 use crate::filter_pipeline::PreparedFilterPipeline;
 use crate::group_info::GroupInfo;
 use crate::link::PreparedLink;
-use crate::link_info::LinkInfoMessage;
+use crate::link::info::LinkInfoMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::v2::MessageRecordLayout;

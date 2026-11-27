@@ -6,8 +6,8 @@ use rstest::rstest;
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::btree::v2::write::{BTREE_V2_NODE_SIZE, BTreeV2Plan, BTreeV2WriteDialect};
 use crate::btree::v2::{self as btree_v2, BTreeV2Header};
-use crate::dense_link_write::NAME_RECORD_LEN;
 use crate::error::FormatError;
+use crate::link::dense::NAME_RECORD_LEN;
 use crate::width::{LengthWidth, OffsetWidth};
 
 const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
