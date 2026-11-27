@@ -211,7 +211,7 @@ impl DenseAttrPlan {
     /// # Errors
     ///
     /// Returns the start and exclusive-end errors of [`Self::block_end`].
-    pub(super) fn extent(&self, base: StoredAddress) -> Result<(), FormatError> {
+    fn extent(&self, base: StoredAddress) -> Result<(), FormatError> {
         self.block_end(base, self.geometry().offsets().total_len)
             .map(|_| ())
     }

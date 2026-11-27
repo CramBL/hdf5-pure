@@ -7,8 +7,8 @@ use crate::btree::v2::write::BTreeV2Placement;
 use crate::btree::v2::{HugeObjectDirectRecord, HugeObjectRecord};
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap::write::ManagedHeapPlacement;
+use crate::fractal_heap::{FractalHeapHeader, FractalHeapIdLayout};
 
 use super::DenseAttrPlan;
 use super::encode::AttributeIndexRecords;
@@ -23,6 +23,7 @@ pub struct DenseAttrPlacement<'a> {
     addresses: Vec<StoredAddress>,
     managed: Vec<&'a [u8]>,
     heap: ManagedHeapPlacement<'a>,
+    header: FractalHeapHeader,
     indexes: Vec<PlacedIndex<'a>>,
     huge: Vec<&'a [u8]>,
     info: AttributeInfoMessage,
@@ -123,6 +124,7 @@ impl<'a> DenseAttrPlacement<'a> {
             addresses: addresses.to_vec(),
             managed,
             heap,
+            header,
             indexes,
             huge,
             info,
@@ -166,20 +168,14 @@ impl<'a> DenseAttrPlacement<'a> {
             addresses,
             managed,
             heap,
+            header,
             indexes,
             huge,
             info: _,
         } = self;
         let widths = plan.geometry().widths();
         let heap_address = addresses[0];
-        let huge_index = if plan.geometry().huge_plan().is_some() {
-            indexes[1 + usize::from(plan.geometry().indexes().indexed())].address
-        } else {
-            StoredAddress::undefined(widths.offsets)
-        };
-        let header = plan
-            .heap_header(heap.root_address(), huge_index)
-            .serialize(widths.offsets, widths.lengths)?;
+        let header = header.serialize(widths.offsets, widths.lengths)?;
         let heap = heap.serialize_blocks(managed, heap_address)?;
         let indexes = indexes
             .iter()
