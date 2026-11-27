@@ -247,7 +247,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
     // disk (v1 carries rank 0, v2 a type byte), and the write side picks
     // between them per variant, so this is what makes the round trip faithful
     // at length one.
-    let scalar = attr.dataspace.space_type == DataspaceType::Scalar;
+    let scalar = attr.dataspace.space_type() == DataspaceType::Scalar;
 
     Ok(DecodedAttrValue::Value(
         match crate::data_read::effective_numeric(&attr.datatype) {
@@ -302,7 +302,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
                 let strings = crate::vl_data::read_vl_strings_from_source(
                     source,
                     &attr.raw_data,
-                    attr.dataspace.num_elements(),
+                    attr.dataspace.num_elements()?,
                     widths,
                     addresses,
                     crate::vl_data::VlenStringReadOptions::default(),

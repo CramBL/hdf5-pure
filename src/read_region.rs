@@ -50,7 +50,7 @@ impl<'a> ReadRegion<'a> {
         start: &[u64],
         count: &[u64],
     ) -> Result<Self, FormatError> {
-        let dimensions = &spec.dataspace().dimensions;
+        let dimensions = spec.dataspace().dimensions();
         let rank = dimensions.len();
         if start.len() != rank || count.len() != rank {
             return Err(FormatError::RegionRankMismatch {
@@ -72,7 +72,7 @@ impl<'a> ReadRegion<'a> {
             }
         }
         let element_size = spec.element_size_usize()?;
-        if count.contains(&0) || spec.dataspace().space_type == DataspaceType::Null {
+        if count.contains(&0) || spec.dataspace().space_type() == DataspaceType::Null {
             return Ok(Self {
                 spec,
                 selection: Selection::Empty,
@@ -117,14 +117,14 @@ impl<'a> ReadRegion<'a> {
     /// [`FormatError::ValueTooLargeForPlatform`] if the result exceeds the platform's buffer limit.
     /// Returns errors from reading the datatype's element size.
     pub(crate) fn rows(spec: RawReadSpec<'a>, start: u64, count: u64) -> Result<Self, FormatError> {
-        let dimensions = &spec.dataspace().dimensions;
+        let dimensions = spec.dataspace().dimensions();
         let extent = dimensions.first().copied().unwrap_or(1);
         let start = start.min(extent);
         let count = count.min(extent - start);
         let element_size = spec.element_size_usize()?;
         if count == 0
             || dimensions.contains(&0)
-            || spec.dataspace().space_type == DataspaceType::Null
+            || spec.dataspace().space_type() == DataspaceType::Null
         {
             return Ok(Self {
                 spec,
@@ -161,7 +161,7 @@ impl<'a> ReadRegion<'a> {
             Selection::Elements { axes, .. } => axes.iter(),
             _ => [].iter(),
         };
-        let mut dimensions = self.spec.dataspace().dimensions.iter().enumerate();
+        let mut dimensions = self.spec.dataspace().dimensions().iter().enumerate();
         let mut stride = self.row_band().map_or(0, |rows| rows.row_bytes as u64);
         core::iter::from_fn(move || match &self.selection {
             Selection::Empty => None,
@@ -201,7 +201,7 @@ impl<'a> ReadRegion<'a> {
             Selection::Empty => false,
             Selection::Elements { axes, .. } => axes
                 .iter()
-                .zip(&self.spec.dataspace().dimensions)
+                .zip(self.spec.dataspace().dimensions())
                 .all(|(axis, &extent)| axis.start == 0 && axis.count == extent),
             Selection::Rows(rows) => {
                 rows.start == 0
@@ -209,7 +209,7 @@ impl<'a> ReadRegion<'a> {
                         == self
                             .spec
                             .dataspace()
-                            .dimensions
+                            .dimensions()
                             .first()
                             .copied()
                             .unwrap_or(1)
@@ -241,7 +241,7 @@ impl<'a> ReadRegion<'a> {
     }
 
     pub(crate) fn overlaps(&self, offsets: &[u64], dimensions: &[u64]) -> bool {
-        let rank = self.spec.dataspace().dimensions.len();
+        let rank = self.spec.dataspace().dimensions().len();
         !self.is_empty()
             && offsets.len() >= rank
             && dimensions.len() == rank
@@ -395,7 +395,7 @@ mod tests {
 
     use super::ReadRegion;
     use crate::data_layout::DataLayout;
-    use crate::dataspace::{Dataspace, DataspaceType};
+    use crate::dataspace::Dataspace;
     use crate::error::FormatError;
     use crate::fill_value::FillPattern;
     use crate::read_spec::RawReadSpec;
@@ -407,8 +407,7 @@ mod tests {
     #[case::start_beyond_extent(&[3, 4], &[4, 1], &[0, 1], FormatError::RegionOutOfBounds { dimension: 0, start: 4, count: 0, extent: 3 })]
     #[case::count_beyond_extent(&[3, 4], &[1, 3], &[0, 2], FormatError::RegionOutOfBounds { dimension: 1, start: 3, count: 2, extent: 4 })]
     #[case::maximum_start(&[3, 4], &[1, u64::MAX], &[0, 1], FormatError::RegionOutOfBounds { dimension: 1, start: u64::MAX, count: 1, extent: 4 })]
-    #[case::stride_product_overflow(&[u64::MAX, 2], &[0, 0], &[1, 1], FormatError::OffsetOverflow { offset: 2, length: u64::MAX })]
-    fn regions_reject_rank_bounds_and_stride_errors(
+    fn regions_reject_rank_and_bounds_errors(
         #[case] shape: &[u64],
         #[case] start: &[u64],
         #[case] count: &[u64],
@@ -418,12 +417,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: shape.to_vec(),
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(shape.to_vec(), None).unwrap();
         let datatype = type_builders::make_u8_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
@@ -433,11 +427,33 @@ mod tests {
         assert_eq!(error, expected);
     }
 
+    #[test]
+    fn raw_read_spec_rejects_an_overflowing_element_count() {
+        let layout = DataLayout::Contiguous {
+            address: None,
+            size: 0,
+        };
+        let dataspace = Dataspace::simple(vec![u64::MAX - 1, 2], None).unwrap();
+        let datatype = type_builders::make_u8_type();
+        let Err(error) =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO)
+        else {
+            panic!("overflowing element count accepted")
+        };
+        assert_eq!(
+            error,
+            FormatError::DataspaceElementCountOverflow {
+                count: u64::MAX - 1,
+                dimension: 2
+            }
+        );
+    }
+
     #[rstest]
     #[case::partial_rows(&[3, 4], &[1, 1], &[2, 2], &[(5, 2), (9, 2)])]
     #[case::complete_rows(&[3, 4], &[1, 0], &[2, 4], &[(4, 8)])]
     #[case::three_dimensional(&[3, 4, 5], &[1, 1, 2], &[2, 2, 2], &[(27, 2), (32, 2), (47, 2), (52, 2)])]
-    #[case::maximum_row_offsets(&[u64::MAX, 1], &[u64::MAX - 2, 0], &[2, 1], &[(u64::MAX - 2, 2)])]
+    #[case::maximum_row_offsets(&[u64::MAX - 1, 1], &[u64::MAX - 3, 0], &[2, 1], &[(u64::MAX - 3, 2)])]
     #[case::zero_columns(&[4_294_967_424, 0], &[4_294_967_360, 0], &[1, 0], &[])]
     fn regions_visit_contiguous_runs(
         #[case] shape: &[u64],
@@ -449,12 +465,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: u8::try_from(shape.len()).unwrap(),
-            dimensions: shape.to_vec(),
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(shape.to_vec(), None).unwrap();
         let datatype = type_builders::make_u8_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();

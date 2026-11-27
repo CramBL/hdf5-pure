@@ -11,8 +11,8 @@ use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::HugeObjectRecordContext;
 use hdf5_pure_format::__private::HugeObjectTrackerRecord;
 use hdf5_pure_format::__private::{
-    AttributeMessage, Dataspace, DataspaceType, DatatypeLocation, DenseAttrBlockKind,
-    DenseAttrCreationOrder, DenseAttrFixup, DenseAttrPlan, FormatWidths, PreparedDenseAttrs,
+    AttributeMessage, Dataspace, DatatypeLocation, DenseAttrBlockKind, DenseAttrCreationOrder,
+    DenseAttrFixup, DenseAttrPlan, FormatWidths, PreparedDenseAttrs,
 };
 use hdf5_pure_format::{CharacterSet, Datatype, StringPadding};
 use rstest::rstest;
@@ -523,12 +523,7 @@ fn attribute(index: usize, size: u32) -> AttributeMessage {
             padding: StringPadding::NullPad,
             charset: CharacterSet::Ascii,
         },
-        dataspace: Dataspace {
-            space_type: DataspaceType::Scalar,
-            rank: 0,
-            dimensions: vec![],
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::scalar(),
         raw_data: vec![b'y'; size as usize],
         datatype_location: DatatypeLocation::Inline,
     }

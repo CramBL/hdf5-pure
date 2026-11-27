@@ -36,7 +36,7 @@ use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use crate::data_layout::DataLayout;
-use crate::dataspace::{Extent, MaxExtent};
+use crate::dataspace::{Dataspace, MaxExtent};
 use crate::error::FormatError;
 use crate::file_emission::EmissionError;
 use crate::fill_value::FillPattern;
@@ -533,8 +533,8 @@ impl ChunkOptions {
     /// own error type: a scalar shape, chunk dimensions of another rank than the
     /// shape, a zero chunk dimension, a zero-element shape with no explicit chunk
     /// dimensions, or more than one unlimited dimension.
-    pub(crate) fn validate_geometry(&self, extent: Extent<'_>) -> Result<(), &'static str> {
-        let shape = extent.dims();
+    pub(crate) fn validate_geometry(&self, extent: &Dataspace) -> Result<(), &'static str> {
+        let shape = extent.dimensions();
         if shape.is_empty() {
             return Err("a scalar dataset cannot be chunked, filtered, or extensible");
         }

@@ -13,7 +13,7 @@ use hdf5_pure::LengthWidth;
 use hdf5_pure::MetadataCacheStats;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure_format::__private as format;
-use hdf5_pure_format::__private::{Dataspace, DataspaceType};
+use hdf5_pure_format::__private::Dataspace;
 use serde::Serialize;
 use test_util_hdf5::__private::width_workload::{Case, Index, Observation, Phase};
 use test_util_hdf5::file_space::persisted::PersistedStrategy;
@@ -423,15 +423,7 @@ impl Wire {
             for link_name in group.datasets()? {
                 let dataset = group.dataset(&link_name)?;
                 let dimensions = dataset.shape()?;
-                let rank = u8::try_from(dimensions.len()).map_err(|_error| {
-                    Error::EditUnsupported("benchmark dataspace rank exceeds u8")
-                })?;
-                let dataspace = Dataspace {
-                    space_type: DataspaceType::Simple,
-                    rank,
-                    dimensions,
-                    max_dimensions: dataset.maxshape()?,
-                };
+                let dataspace = Dataspace::simple(dimensions, dataset.maxshape()?)?;
                 let length = u64::try_from(dataspace.serialize(case.lengths().get())?.len())
                     .map_err(|_error| Error::EditUnsupported("dataspace length exceeds u64"))?;
                 dataset_dataspace_bytes = dataset_dataspace_bytes

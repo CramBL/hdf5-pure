@@ -9,7 +9,6 @@ use crate::FileBuilder;
 use crate::FixedPointType;
 use crate::attribute::AttributeMessage;
 use crate::dataspace::Dataspace;
-use crate::dataspace::DataspaceType;
 use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
 use crate::datatype::StringPadding;
@@ -31,12 +30,7 @@ impl ExoticAttributes {
                     padding: StringPadding::NullTerminate,
                     charset: CharacterSet::Ascii,
                 },
-                dataspace: Dataspace {
-                    space_type: DataspaceType::Scalar,
-                    rank: 0,
-                    dimensions: vec![],
-                    max_dimensions: None,
-                },
+                dataspace: Dataspace::scalar(),
                 raw_data: {
                     let mut v = b"m/s".to_vec();
                     v.resize(16, 0);
@@ -51,24 +45,14 @@ impl ExoticAttributes {
                     padding: StringPadding::SpacePad,
                     charset: CharacterSet::Utf8,
                 },
-                dataspace: Dataspace {
-                    space_type: DataspaceType::Scalar,
-                    rank: 0,
-                    dimensions: vec![],
-                    max_dimensions: None,
-                },
+                dataspace: Dataspace::scalar(),
                 raw_data: b"ab      ".to_vec(),
                 datatype_location: crate::shared_message::DatatypeLocation::Inline,
             },
             AttributeMessage {
                 name: "nothing".into(),
                 datatype: crate::make_i32_type(),
-                dataspace: Dataspace {
-                    space_type: DataspaceType::Null,
-                    rank: 0,
-                    dimensions: vec![],
-                    max_dimensions: None,
-                },
+                dataspace: Dataspace::null(),
                 raw_data: vec![],
                 datatype_location: crate::shared_message::DatatypeLocation::Inline,
             },
@@ -77,24 +61,14 @@ impl ExoticAttributes {
                 datatype: Datatype::FixedPoint(
                     FixedPointType::new(4, DatatypeByteOrder::BigEndian, true, 0, 32).unwrap(),
                 ),
-                dataspace: Dataspace {
-                    space_type: DataspaceType::Scalar,
-                    rank: 0,
-                    dimensions: vec![],
-                    max_dimensions: None,
-                },
+                dataspace: Dataspace::scalar(),
                 raw_data: (-7i32).to_be_bytes().to_vec(),
                 datatype_location: crate::shared_message::DatatypeLocation::Inline,
             },
             AttributeMessage {
                 name: "grid".into(),
                 datatype: crate::make_i32_type(),
-                dataspace: Dataspace {
-                    space_type: DataspaceType::Simple,
-                    rank: 2,
-                    dimensions: vec![2, 3],
-                    max_dimensions: None,
-                },
+                dataspace: Dataspace::simple(vec![2, 3], None).unwrap(),
                 raw_data: (1i32..=6).flat_map(i32::to_le_bytes).collect(),
                 datatype_location: crate::shared_message::DatatypeLocation::Inline,
             },

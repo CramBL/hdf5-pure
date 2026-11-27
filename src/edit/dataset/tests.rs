@@ -534,12 +534,12 @@ fn staged_declarations_store_an_unlimited_maximum_as_the_length_width_maximum(
         LinkNameBuf::new("values").unwrap(),
     )
     .unwrap();
-    assert_eq!(staged.ds.dimensions, [3, 4]);
+    assert_eq!(staged.ds.dimensions(), [3, 4]);
     assert_eq!(
-        staged.ds.max_dimensions,
-        Some(vec![stored, MaxExtent::Fixed(4)])
+        staged.ds.max_dimensions(),
+        Some([stored, MaxExtent::Fixed(4)].as_slice())
     );
-    assert_eq!(staged.maxshape, staged.ds.max_dimensions);
+    assert_eq!(staged.maxshape.as_deref(), staged.ds.max_dimensions());
 }
 
 #[rstest]

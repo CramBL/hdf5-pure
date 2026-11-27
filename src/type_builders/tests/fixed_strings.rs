@@ -1,6 +1,6 @@
-use super::super::{
-    AttrValue, CharacterSet, DatasetBuilder, DataspaceType, Datatype, FormatError, StringPadding,
-};
+use crate::dataspace::DataspaceType;
+
+use super::super::{AttrValue, CharacterSet, DatasetBuilder, Datatype, FormatError, StringPadding};
 
 /// One fixed-width string entry point as a value, so a case table can name
 /// all four without repeating the body under each.
@@ -236,7 +236,7 @@ fn a_declared_attribute_width_reaches_the_message_and_the_bytes() {
         assert_eq!(size, 64, "{value:?}");
         assert_eq!(charset, expected_charset, "{value:?}");
         assert_eq!(padding, StringPadding::NullPad, "{value:?}");
-        assert_eq!(message.dataspace.space_type, expected_space, "{value:?}");
+        assert_eq!(message.dataspace.space_type(), expected_space, "{value:?}");
         assert_eq!(message.raw_data.len(), 64 * count, "{value:?}");
         assert_eq!(&message.raw_data[..2], b"ok", "{value:?}");
         assert!(

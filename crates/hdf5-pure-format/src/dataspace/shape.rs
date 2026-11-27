@@ -2,7 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use hdf5_pure_core::__private::ElementCount;
+use hdf5_pure_core::__private::{ByteLength, ElementCount, ElementSize};
 
 use crate::bytes;
 use crate::codec::DecodePrefix;
@@ -17,7 +17,7 @@ use super::stored::{
 };
 
 /// Type of dataspace.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataspaceType {
     /// Scalar (single element).
     Scalar,
@@ -27,20 +27,179 @@ pub enum DataspaceType {
     Null,
 }
 
-/// Parsed HDF5 dataspace message.
+impl DataspaceType {
+    fn type_byte(self) -> u8 {
+        match self {
+            DataspaceType::Scalar => TYPE_SCALAR,
+            DataspaceType::Simple => TYPE_SIMPLE,
+            DataspaceType::Null => TYPE_NULL,
+        }
+    }
+}
+
+/// The shape of a dataset or attribute.
+///
+/// A simple dataspace has one to 255 dimensions. Each current dimension is finite
+/// and at most its maximum. Scalar and null dataspaces have rank zero.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dataspace {
     /// The type of this dataspace.
-    pub space_type: DataspaceType,
-    /// The declared number of dimensions.
-    pub rank: u8,
+    space_type: DataspaceType,
     /// Current dimension sizes.
-    pub dimensions: Vec<u64>,
+    dimensions: Vec<u64>,
     /// The maximum size of each dimension, when the dataspace message stores them.
-    pub max_dimensions: Option<Vec<MaxExtent>>,
+    max_dimensions: Option<Vec<MaxExtent>>,
 }
 
 impl Dataspace {
+    /// Creates a rank-zero dataspace containing one element.
+    pub const fn scalar() -> Self {
+        Self {
+            space_type: DataspaceType::Scalar,
+            dimensions: Vec::new(),
+            max_dimensions: None,
+        }
+    }
+
+    /// Creates a rank-zero dataspace containing no elements.
+    pub const fn null() -> Self {
+        Self {
+            space_type: DataspaceType::Null,
+            dimensions: Vec::new(),
+            max_dimensions: None,
+        }
+    }
+
+    /// Creates a simple dataspace from a nonempty list of dimensions and optional maxima.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::new`] when the rank or extents are invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private::Dataspace, FormatError, MaxExtent};
+    ///
+    /// let maxima = vec![MaxExtent::Unlimited, MaxExtent::Fixed(3)];
+    /// let mut space = Dataspace::simple(vec![0, 3], Some(maxima))?;
+    /// assert!(space.is_empty());
+    /// space.set_first_dimension(2)?;
+    /// assert_eq!(space.num_elements()?.get(), 6);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn simple(
+        dimensions: Vec<u64>,
+        maxima: Option<Vec<MaxExtent>>,
+    ) -> Result<Self, FormatError> {
+        Self::new(DataspaceType::Simple, dimensions, maxima)
+    }
+
+    /// Creates a dataspace of `space_type` from its current dimensions and optional maxima.
+    ///
+    /// Omitting the maxima describes a fixed shape. A current dimension can be zero.
+    /// The element count is computed on request by [`Self::num_elements`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DatasetRankUnsupported`] if the rank exceeds 255, or
+    /// [`FormatError::InvalidDataspaceRank`] if the rank is invalid for the kind.
+    /// Returns [`FormatError::InvalidDataspaceDimensionCount`] if the two lists differ in length.
+    /// Returns [`FormatError::DatasetDimensionUnlimited`] for a current dimension of [`u64::MAX`],
+    /// [`FormatError::InvalidDataspaceMaximum`] for a finite maximum of [`u64::MAX`], or
+    /// [`FormatError::DataspaceMaximumTooSmall`] for a maximum below its current dimension.
+    pub fn new(
+        space_type: DataspaceType,
+        dimensions: Vec<u64>,
+        max_dimensions: Option<Vec<MaxExtent>>,
+    ) -> Result<Self, FormatError> {
+        let rank = u8::try_from(dimensions.len()).map_err(|_error| {
+            FormatError::DatasetRankUnsupported {
+                rank: dimensions.len(),
+                maximum: u8::MAX,
+            }
+        })?;
+        if matches!(space_type, DataspaceType::Simple) != (rank != 0) {
+            return Err(FormatError::InvalidDataspaceRank {
+                space_type: space_type.type_byte(),
+                rank,
+            });
+        }
+        if let Some(maxima) = max_dimensions.as_deref()
+            && maxima.len() != dimensions.len()
+        {
+            return Err(FormatError::InvalidDataspaceDimensionCount {
+                rank,
+                dimensions: dimensions.len(),
+                maximum_dimensions: Some(maxima.len()),
+            });
+        }
+        for (dimension, &current) in dimensions.iter().enumerate() {
+            Self::require_dimension(
+                dimension,
+                current,
+                max_dimensions
+                    .as_deref()
+                    .and_then(|maxima| maxima.get(dimension))
+                    .copied(),
+            )?;
+        }
+        Ok(Self {
+            space_type,
+            dimensions,
+            max_dimensions,
+        })
+    }
+
+    /// Sets the current size of the first dimension, preserving any explicit maximum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataspaceHasNoDimensions`] for a scalar or null dataspace,
+    /// [`FormatError::DatasetDimensionUnlimited`] if `current` is [`u64::MAX`], or
+    /// [`FormatError::DataspaceMaximumTooSmall`] if `current` exceeds the explicit maximum.
+    /// Leaves the shape unchanged on error.
+    pub fn set_first_dimension(&mut self, current: u64) -> Result<(), FormatError> {
+        let maximum = self
+            .max_dimensions
+            .as_ref()
+            .and_then(|maxima| maxima.first())
+            .copied();
+        let first =
+            self.dimensions
+                .first_mut()
+                .ok_or_else(|| FormatError::DataspaceHasNoDimensions {
+                    space_type: self.space_type.type_byte(),
+                })?;
+        Self::require_dimension(0, current, maximum)?;
+        *first = current;
+        Ok(())
+    }
+
+    /// Returns the scalar, simple, or null kind of this dataspace.
+    pub const fn space_type(&self) -> DataspaceType {
+        self.space_type
+    }
+
+    /// Returns the current size of each dimension in storage order.
+    pub fn dimensions(&self) -> &[u64] {
+        &self.dimensions
+    }
+
+    /// Returns the explicit maximum sizes, or [`None`] if the shape omits them.
+    pub fn max_dimensions(&self) -> Option<&[MaxExtent]> {
+        self.max_dimensions.as_deref()
+    }
+
+    /// Returns the number of dimensions with an unlimited maximum.
+    pub fn unlimited_dimensions(&self) -> usize {
+        self.max_dimensions()
+            .unwrap_or_default()
+            .iter()
+            .filter(|max| matches!(max, MaxExtent::Unlimited))
+            .count()
+    }
+
     /// Parses a dataspace message body from raw bytes.
     ///
     /// # Errors
@@ -62,7 +221,7 @@ impl Dataspace {
     /// [`FormatError::InvalidDataspaceType`] if a version 2 type byte is invalid, or
     /// [`FormatError::UnexpectedEof`] if the message ends within a field. Returns
     /// [`FormatError::UnsupportedDataspacePermutation`] if a version 1 permutation index
-    /// differs from its zero-based dimension number.
+    /// differs from its zero-based dimension number. Propagates the shape errors of [`Self::new`].
     #[inline]
     pub fn parse_with_length_width(
         data: &[u8],
@@ -89,12 +248,7 @@ impl Dataspace {
     /// ```
     /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth, MaxExtent};
     ///
-    /// let dataspace = format::Dataspace {
-    ///     space_type: format::DataspaceType::Simple,
-    ///     rank: 1,
-    ///     dimensions: vec![3],
-    ///     max_dimensions: Some(vec![MaxExtent::Fixed(7)]),
-    /// };
+    /// let dataspace = format::Dataspace::simple(vec![3], Some(vec![MaxExtent::Fixed(7)]))?;
     /// let mut body = dataspace.serialize(2)?;
     /// let (parsed, dimensions) = format::Dataspace::parse_with_dimension_fields(
     ///     &body, LengthWidth::Two,
@@ -103,8 +257,8 @@ impl Dataspace {
     /// assert_eq!(dimensions, 4..6);
     /// format::write_length_at(&mut body, dimensions.start, 6, LengthWidth::Two)?;
     /// let grown = format::Dataspace::parse_with_length_width(&body, LengthWidth::Two)?;
-    /// assert_eq!(grown.dimensions, [6]);
-    /// assert_eq!(grown.max_dimensions, Some(vec![MaxExtent::Fixed(7)]));
+    /// assert_eq!(grown.dimensions(), [6]);
+    /// assert_eq!(grown.max_dimensions(), Some([MaxExtent::Fixed(7)].as_slice()));
     /// # Ok::<(), FormatError>(())
     /// ```
     ///
@@ -139,32 +293,9 @@ impl Dataspace {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidDataspaceRank`] if a simple dataspace has rank zero or a
-    /// scalar or null dataspace has a positive rank. Returns
-    /// [`FormatError::InvalidDataspaceDimensionCount`] if either supplied dimension list has a
-    /// length different from the rank. Returns [`FormatError::LengthTooLarge`] for the first
-    /// value that exceeds `length_width`, in current dimension order followed by maximum dimension
-    /// order.
-    ///
-    /// Checks the rank before the counts and the counts before the dimension values.
+    /// Returns [`FormatError::LengthTooLarge`] for the first dimension or maximum that
+    /// exceeds `length_width`. Checks current dimensions first, then maximum dimensions.
     pub fn prepare(&self, length_width: LengthWidth) -> Result<PreparedDataspace<'_>, FormatError> {
-        let expected_rank = usize::from(self.rank);
-        if matches!(self.space_type, DataspaceType::Simple) != (self.rank != 0) {
-            return Err(FormatError::InvalidDataspaceRank {
-                space_type: self.type_byte(),
-                rank: self.rank,
-            });
-        }
-        let dimensions = self.dimensions.len();
-        let maximum_dimensions = self.max_dimensions.as_ref().map(Vec::len);
-        if dimensions != expected_rank || maximum_dimensions.is_some_and(|len| len != expected_rank)
-        {
-            return Err(FormatError::InvalidDataspaceDimensionCount {
-                rank: self.rank,
-                dimensions,
-                maximum_dimensions,
-            });
-        }
         for length in self.lengths() {
             bytes::require_length(length, length_width)?;
         }
@@ -174,24 +305,50 @@ impl Dataspace {
         })
     }
 
-    /// Returns the element count, saturating dimension products at [`u64::MAX`].
+    /// Returns the number of elements in the dataspace.
     ///
-    /// Returns zero for a null dataspace or a simple dataspace with no dimensions or a zero
-    /// dimension. Returns one for a scalar dataspace.
-    pub fn num_elements(&self) -> ElementCount {
-        ElementCount::new(match self.space_type {
-            DataspaceType::Null => 0,
-            DataspaceType::Scalar => 1,
-            DataspaceType::Simple => {
-                if self.dimensions.is_empty() {
-                    0
-                } else {
-                    self.dimensions
-                        .iter()
-                        .fold(1u64, |acc, &dim| acc.saturating_mul(dim))
-                }
-            }
-        })
+    /// A scalar contains one element. A null dataspace or a simple dataspace with a zero
+    /// dimension contains none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataspaceElementCountOverflow`] if the product of the current
+    /// dimensions exceeds [`u64::MAX`].
+    pub fn num_elements(&self) -> Result<ElementCount, FormatError> {
+        if self.is_empty() {
+            return Ok(ElementCount::new(0));
+        }
+        self.dimensions
+            .iter()
+            .try_fold(ElementCount::new(1), |count, &dimension| {
+                count.checked_mul(ElementCount::new(dimension)).ok_or(
+                    FormatError::DataspaceElementCountOverflow {
+                        count: count.get(),
+                        dimension,
+                    },
+                )
+            })
+    }
+
+    /// Returns the size in bytes of all elements stored at `element_size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::num_elements`], or [`FormatError::OffsetOverflow`] if the
+    /// element count times the element size exceeds [`u64::MAX`].
+    pub fn byte_length(&self, element_size: ElementSize) -> Result<ByteLength, FormatError> {
+        let count = self.num_elements()?;
+        element_size
+            .byte_length(count)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: count.get(),
+                length: element_size.get(),
+            })
+    }
+
+    /// Returns `true` for a null dataspace or a simple dataspace with a zero dimension.
+    pub fn is_empty(&self) -> bool {
+        self.space_type == DataspaceType::Null || self.dimensions.contains(&0)
     }
 
     /// Returns the maximum dimensions, when some maximum exceeds its current dimension.
@@ -200,12 +357,42 @@ impl Dataspace {
     /// does one whose every maximum is fixed at the current dimension: both give `None`.
     pub fn extensible_max_dimensions(&self) -> Option<&[MaxExtent]> {
         let max_dims = self.max_dimensions.as_deref()?;
-        let fixed_at_current = max_dims.len() == self.dimensions.len()
-            && max_dims
-                .iter()
-                .zip(&self.dimensions)
-                .all(|(max, &dim)| max.size() == Some(dim));
+        let fixed_at_current = max_dims
+            .iter()
+            .zip(&self.dimensions)
+            .all(|(max, &dim)| max.size() == Some(dim));
         (!fixed_at_current).then_some(max_dims)
+    }
+
+    fn require_dimension(
+        dimension: usize,
+        current: u64,
+        maximum: Option<MaxExtent>,
+    ) -> Result<(), FormatError> {
+        if current == UNLIMITED_LENGTH {
+            return Err(FormatError::DatasetDimensionUnlimited { dimension });
+        }
+        match maximum {
+            Some(MaxExtent::Fixed(UNLIMITED_LENGTH)) => {
+                Err(FormatError::InvalidDataspaceMaximum { dimension })
+            }
+            Some(MaxExtent::Fixed(maximum)) if maximum < current => {
+                Err(FormatError::DataspaceMaximumTooSmall {
+                    dimension,
+                    current,
+                    maximum,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "construction bounds the number of dimensions to one byte and resizing preserves it"
+    )]
+    fn rank(&self) -> u8 {
+        self.dimensions.len() as u8
     }
 
     fn lengths(&self) -> impl Iterator<Item = u64> + '_ {
@@ -218,21 +405,12 @@ impl Dataspace {
                 .map(max_extent_to_length),
         )
     }
-
-    fn type_byte(&self) -> u8 {
-        match self.space_type {
-            DataspaceType::Scalar => TYPE_SCALAR,
-            DataspaceType::Simple => TYPE_SIMPLE,
-            DataspaceType::Null => TYPE_NULL,
-        }
-    }
 }
 
 /// A version 2 dataspace body ready to write at the selected length width.
 ///
-/// [`Dataspace::prepare`] checks the rank, dimension counts, and the width of each dimension
-/// field. The writer borrows the checked dataspace and can write the same body to multiple
-/// destinations.
+/// [`Dataspace::prepare`] checks that each current and maximum dimension fits the selected
+/// width. The writer can write the same body to multiple destinations.
 #[derive(Debug)]
 pub struct PreparedDataspace<'a> {
     dataspace: &'a Dataspace,
@@ -259,12 +437,7 @@ impl PreparedDataspace<'_> {
     /// ```
     /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth, MaxExtent};
     ///
-    /// let dataspace = format::Dataspace {
-    ///     space_type: format::DataspaceType::Simple,
-    ///     rank: 1,
-    ///     dimensions: vec![258],
-    ///     max_dimensions: Some(vec![MaxExtent::Fixed(513)]),
-    /// };
+    /// let dataspace = format::Dataspace::simple(vec![258], Some(vec![MaxExtent::Fixed(513)]))?;
     /// let prepared = dataspace.prepare(LengthWidth::Two)?;
     /// let mut output = [0xff; 9];
     /// let written = prepared.write_into(&mut output)?;
@@ -298,9 +471,9 @@ impl PreparedDataspace<'_> {
         };
         header.copy_from_slice(&[
             VERSION_TWO,
-            self.dataspace.rank,
+            self.dataspace.rank(),
             flags,
-            self.dataspace.type_byte(),
+            self.dataspace.space_type.type_byte(),
         ]);
         match self.length_width {
             LengthWidth::Two => self.write_lengths::<2>(fields),
@@ -324,7 +497,7 @@ impl Encode for PreparedDataspace<'_> {
     fn encoded_len(&self) -> usize {
         V2_HEADER_SIZE
             + usize::from(self.length_width.get())
-                * usize::from(self.dataspace.rank)
+                * usize::from(self.dataspace.rank())
                 * (1 + usize::from(self.dataspace.max_dimensions.is_some()))
     }
 
@@ -340,67 +513,6 @@ impl Encode for PreparedDataspace<'_> {
 }
 
 pub(crate) use hdf5_pure_core::MaxExtent;
-
-/// A dataset's shape beside the maximum shape that bounds it.
-///
-/// [`Extent::new`] checks the two against each other, so a writer that takes an `Extent` has a
-/// maximum shape of the shape's own rank, with every dimension inside its maximum.
-#[derive(Clone, Copy, Debug)]
-pub struct Extent<'a> {
-    /// The current size of each dimension.
-    dims: &'a [u64],
-    /// The maximum size of each dimension, `None` for a dataset of a fixed shape.
-    max_dims: Option<&'a [MaxExtent]>,
-}
-
-impl<'a> Extent<'a> {
-    /// Pairs a shape with the maximum shape that bounds it.
-    ///
-    /// # Errors
-    ///
-    /// Returns a reason for the caller to report if `max_dims` and `dims` differ in rank, if a
-    /// maximum is smaller than the dimension it bounds, or if a maximum is
-    /// [`MaxExtent::Fixed`] at the unlimited size, which [`Dataspace::serialize`] writes as
-    /// [`MaxExtent::Unlimited`].
-    pub fn new(dims: &'a [u64], max_dims: Option<&'a [MaxExtent]>) -> Result<Self, &'static str> {
-        if let Some(max_dims) = max_dims {
-            if max_dims.len() != dims.len() {
-                return Err("maxshape must have the same rank as the dataset shape");
-            }
-            if max_dims
-                .iter()
-                .zip(dims)
-                .any(|(max, &dim)| !max_extent_admits(*max, dim))
-            {
-                return Err("maxshape must be at least the current shape in every dimension");
-            }
-            if max_dims.contains(&MaxExtent::Fixed(UNLIMITED_LENGTH)) {
-                return Err(
-                    "a fixed maximum of u64::MAX is the format's unlimited marker; \
-                     name MaxExtent::Unlimited for a dimension that grows without bound",
-                );
-            }
-        }
-        Ok(Self { dims, max_dims })
-    }
-
-    /// Returns the current size of each dimension.
-    pub const fn dims(self) -> &'a [u64] {
-        self.dims
-    }
-
-    /// Returns how many dimensions grow without bound.
-    ///
-    /// A dataset of a fixed shape has none.
-    pub fn unlimited_dimensions(self) -> usize {
-        self.max_dims.map_or(0, |max_dims| {
-            max_dims
-                .iter()
-                .filter(|max| matches!(max, MaxExtent::Unlimited))
-                .count()
-        })
-    }
-}
 
 /// Returns the maxima a dataspace message with `length_width`-byte lengths stores for
 /// `max_dims`, each as [`stored_max_extent`] returns it.
@@ -477,13 +589,6 @@ fn max_extent_to_length(max: MaxExtent) -> u64 {
     }
 }
 
-fn max_extent_admits(max: MaxExtent, dim: u64) -> bool {
-    match max {
-        MaxExtent::Fixed(size) => size >= dim,
-        MaxExtent::Unlimited => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use test_util::dataspace;
@@ -508,15 +613,14 @@ mod tests {
             raw[3..8].fill(0xa5);
         }
         raw[2] |= 0xfc;
-        let expected = Dataspace {
-            space_type: if matches!(version, Version::One) && dimensions.is_empty() {
+        let expected = Dataspace::new(
+            if dimensions.is_empty() {
                 DataspaceType::Scalar
             } else {
                 DataspaceType::Simple
             },
-            rank: u8::try_from(dimensions.len()).unwrap(),
-            dimensions: dimensions.to_vec(),
-            max_dimensions: maxima.then(|| {
+            dimensions.to_vec(),
+            maxima.then(|| {
                 vec![
                     if maximum == u64::MAX {
                         MaxExtent::Unlimited
@@ -526,7 +630,8 @@ mod tests {
                     dimensions.len()
                 ]
             }),
-        };
+        )
+        .unwrap();
         let range = version.header_size()
             ..version.header_size() + dimensions.len() * usize::from(width.get());
         assert_eq!(
@@ -585,23 +690,19 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::scalar(0, DataspaceType::Scalar)]
-    #[case::simple(1, DataspaceType::Simple)]
-    #[case::null(2, DataspaceType::Null)]
-    fn version_two_types_retain_the_stored_dimensions(
+    #[case::scalar(0)]
+    #[case::null(2)]
+    fn version_two_ranked_scalar_and_null_are_rejected(
         #[case] type_byte: u8,
-        #[case] space_type: DataspaceType,
         #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] width: LengthWidth,
     ) {
         let mut raw = Version::Two.body(&[3, 5], None, width);
         raw[3] = type_byte;
         assert_eq!(
-            Dataspace::parse_with_length_width(&raw, width).unwrap(),
-            Dataspace {
-                space_type,
-                rank: 2,
-                dimensions: vec![3, 5],
-                max_dimensions: None,
+            Dataspace::parse_with_length_width(&raw, width).unwrap_err(),
+            FormatError::InvalidDataspaceRank {
+                space_type: type_byte,
+                rank: 2
             }
         );
     }
@@ -663,7 +764,11 @@ mod tests {
                 Self::Two => dataspace::v2_with_widths(
                     rank,
                     flags,
-                    dataspace::Kind::SIMPLE,
+                    if dimensions.is_empty() {
+                        dataspace::Kind::SCALAR
+                    } else {
+                        dataspace::Kind::SIMPLE
+                    },
                     dimensions,
                     maxima,
                     widths,
@@ -744,10 +849,10 @@ mod tests {
         let data = build_v1_dataspace(0, 0, &[], None);
         let ds = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Scalar);
-        assert_eq!(ds.rank, 0);
+        assert_eq!(ds.rank(), 0);
         assert!(ds.dimensions.is_empty());
         assert!(ds.max_dimensions.is_none());
-        assert_eq!(ds.num_elements(), ElementCount::new(1));
+        assert_eq!(ds.num_elements().unwrap(), ElementCount::new(1));
     }
 
     #[test]
@@ -755,7 +860,7 @@ mod tests {
         let data = build_v2_dataspace(0, 0, 2, &[], None);
         let ds = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Null);
-        assert_eq!(ds.num_elements(), ElementCount::new(0));
+        assert_eq!(ds.num_elements().unwrap(), ElementCount::new(0));
     }
 
     #[test]
@@ -763,26 +868,26 @@ mod tests {
         let data = build_v1_dataspace(1, 0, &[5], None);
         let ds = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Simple);
-        assert_eq!(ds.rank, 1);
+        assert_eq!(ds.rank(), 1);
         assert_eq!(ds.dimensions, vec![5]);
         assert!(ds.max_dimensions.is_none());
-        assert_eq!(ds.num_elements(), ElementCount::new(5));
+        assert_eq!(ds.num_elements().unwrap(), ElementCount::new(5));
     }
 
     #[test]
     fn simple_2d() {
         let data = build_v1_dataspace(2, 0, &[3, 4], None);
         let ds = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
-        assert_eq!(ds.rank, 2);
+        assert_eq!(ds.rank(), 2);
         assert_eq!(ds.dimensions, vec![3, 4]);
-        assert_eq!(ds.num_elements(), ElementCount::new(12));
+        assert_eq!(ds.num_elements().unwrap(), ElementCount::new(12));
     }
 
     #[test]
     fn simple_3d_with_max_dims_unlimited() {
         let data = build_v1_dataspace(3, 0x01, &[2, 3, 4], Some(&[10, u64::MAX, 100]));
         let ds = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
-        assert_eq!(ds.rank, 3);
+        assert_eq!(ds.rank(), 3);
         assert_eq!(ds.dimensions, vec![2, 3, 4]);
         let md = ds.max_dimensions.clone().unwrap();
         assert_eq!(
@@ -793,18 +898,16 @@ mod tests {
                 MaxExtent::Fixed(100)
             ]
         );
-        assert_eq!(ds.num_elements(), ElementCount::new(24));
+        assert_eq!(ds.num_elements().unwrap(), ElementCount::new(24));
     }
 
     #[rstest::rstest]
-    #[case::empty_simple(&[], 0)]
     #[case::zero(&[0], 0)]
     #[case::finite(&[3, 5], 15)]
-    #[case::exact_limit(&[u64::MAX, 1], u64::MAX)]
-    #[case::overflow(&[u64::MAX, 2], u64::MAX)]
-    #[case::zero_after_overflow(&[u64::MAX, 2, 0], 0)]
-    #[case::zero_before_overflow(&[0, u64::MAX, 2], 0)]
-    fn cardinality_preserves_empty_and_saturated_products(
+    #[case::exact_limit(&[u64::MAX / 3, 3], u64::MAX)]
+    #[case::zero_after_overflow(&[u64::MAX - 1, 2, 0], 0)]
+    #[case::zero_before_overflow(&[0, u64::MAX - 1, 2], 0)]
+    fn cardinality_preserves_zero_and_exact_products(
         #[case] dimensions: &[u64],
         #[case] expected: u64,
     ) {
@@ -817,17 +920,23 @@ mod tests {
         );
         let dataspace = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
         assert_eq!(dataspace.space_type, DataspaceType::Simple);
-        assert_eq!(dataspace.num_elements(), ElementCount::new(expected));
+        assert_eq!(
+            dataspace.num_elements().unwrap(),
+            ElementCount::new(expected)
+        );
     }
 
     #[test]
-    fn num_elements_saturates_on_overflow() {
-        // A malformed dataspace can declare dimensions whose product exceeds
-        // u64::MAX. `num_elements()` must saturate on overflow, so the
-        // callers can reject the impossibly large count as an error.
+    fn num_elements_reports_the_first_overflow() {
         let data = build_v1_dataspace(3, 0, &[1 << 40, 1 << 40, 1 << 40], None);
         let ds = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
-        assert_eq!(ds.num_elements(), ElementCount::new(u64::MAX));
+        assert_eq!(
+            ds.num_elements().unwrap_err(),
+            FormatError::DataspaceElementCountOverflow {
+                count: 1 << 40,
+                dimension: 1 << 40
+            }
+        );
     }
 
     #[test]
@@ -843,7 +952,7 @@ mod tests {
         let data = build_v2_dataspace(0, 0, 0, &[], None);
         let ds = Dataspace::parse_with_length_width(&data, LengthWidth::Eight).unwrap();
         assert_eq!(ds.space_type, DataspaceType::Scalar);
-        assert_eq!(ds.num_elements(), ElementCount::new(1));
+        assert_eq!(ds.num_elements().unwrap(), ElementCount::new(1));
     }
 
     #[test]
@@ -915,12 +1024,11 @@ mod tests {
 
     #[test]
     fn serialize_writes_all_ones_for_an_unlimited_maximum() {
-        let ds = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![4, 6],
-            max_dimensions: Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(6)]),
-        };
+        let ds = Dataspace::simple(
+            vec![4, 6],
+            Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(6)]),
+        )
+        .unwrap();
         let bytes = ds.serialize(8).unwrap();
         assert_eq!(bytes[..4], [2, 2, 0x01, 1]);
         assert_eq!(bytes[20..28], u64::MAX.to_le_bytes());
@@ -933,61 +1041,104 @@ mod tests {
 
     #[test]
     fn extensible_max_dimensions_skips_a_maximum_at_the_current_shape() {
-        let fixed = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![4, 6],
-            max_dimensions: Some(vec![MaxExtent::Fixed(4), MaxExtent::Fixed(6)]),
-        };
+        let fixed = Dataspace::simple(
+            vec![4, 6],
+            Some(vec![MaxExtent::Fixed(4), MaxExtent::Fixed(6)]),
+        )
+        .unwrap();
         assert_eq!(fixed.extensible_max_dimensions(), None);
 
-        let none = Dataspace {
-            max_dimensions: None,
-            ..fixed.clone()
-        };
+        let none = Dataspace::simple(vec![4, 6], None).unwrap();
         assert_eq!(none.extensible_max_dimensions(), None);
 
-        let grown = Dataspace {
-            max_dimensions: Some(vec![MaxExtent::Fixed(4), MaxExtent::Unlimited]),
-            ..fixed
-        };
+        let grown = Dataspace::simple(
+            vec![4, 6],
+            Some(vec![MaxExtent::Fixed(4), MaxExtent::Unlimited]),
+        )
+        .unwrap();
         assert_eq!(
             grown.extensible_max_dimensions(),
             Some(&[MaxExtent::Fixed(4), MaxExtent::Unlimited][..])
         );
     }
 
-    #[test]
-    fn an_extent_joins_a_shape_with_a_maximum_that_bounds_it() {
-        let extent = Extent::new(&[4, 6], Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(6)]))
-            .expect("an unlimited dimension bounds anything, and 6 bounds 6");
-        assert_eq!(extent.dims(), &[4, 6]);
-        assert_eq!(extent.unlimited_dimensions(), 1);
-
-        let bounded = Extent::new(&[4, 6], None).unwrap();
-        assert_eq!(bounded.unlimited_dimensions(), 0);
+    #[rstest::rstest]
+    #[case::empty_simple(&[], None, FormatError::InvalidDataspaceRank { space_type: TYPE_SIMPLE, rank: 0 })]
+    #[case::unlimited_current(&[3, u64::MAX], None, FormatError::DatasetDimensionUnlimited { dimension: 1 })]
+    #[case::small_maximum(&[3, 5], Some([4, 2].as_slice()), FormatError::DataspaceMaximumTooSmall { dimension: 1, current: 5, maximum: 2 })]
+    fn semantic_conversion_rejects_invalid_simple_extents(
+        #[case] dimensions: &[u64],
+        #[case] maxima: Option<&[u64]>,
+        #[case] expected: FormatError,
+    ) {
+        let flags = if maxima.is_some() {
+            dataspace::Flags::MAX_DIMS
+        } else {
+            dataspace::Flags::NONE
+        };
+        let bytes = dataspace::v2(
+            u8::try_from(dimensions.len()).unwrap(),
+            flags,
+            dataspace::Kind::SIMPLE,
+            dimensions,
+            maxima,
+        );
+        let stored = StoredDataspace::decode_prefix(&bytes, LengthWidth::Eight).unwrap();
+        assert_eq!(stored.consumed(), bytes.len());
+        assert_eq!(stored.into_value().into_dataspace().unwrap_err(), expected);
     }
 
     #[test]
-    fn an_extent_rejects_a_maximum_shape_that_disagrees_with_its_shape() {
+    fn finite_maximum_rejects_the_unlimited_marker() {
         assert_eq!(
-            Extent::new(&[4], Some(&[MaxExtent::Fixed(4), MaxExtent::Fixed(4)])).unwrap_err(),
-            "maxshape must have the same rank as the dataset shape"
-        );
-        assert_eq!(
-            Extent::new(&[4], Some(&[MaxExtent::Fixed(3)])).unwrap_err(),
-            "maxshape must be at least the current shape in every dimension"
+            Dataspace::simple(vec![0], Some(vec![MaxExtent::Fixed(u64::MAX)])).unwrap_err(),
+            FormatError::InvalidDataspaceMaximum { dimension: 0 }
         );
     }
 
     #[test]
-    fn an_extent_rejects_a_fixed_maximum_at_the_unlimited_size() {
-        let err = Extent::new(&[4], Some(&[MaxExtent::Fixed(u64::MAX)])).unwrap_err();
+    fn simple_dataspace_accepts_rank_255_and_rejects_rank_256() {
+        assert_eq!(Dataspace::simple(vec![1; 255], None).unwrap().rank(), 255);
         assert_eq!(
-            err,
-            "a fixed maximum of u64::MAX is the format's unlimited marker; \
-                     name MaxExtent::Unlimited for a dimension that grows without bound"
+            Dataspace::simple(vec![1; 256], None).unwrap_err(),
+            FormatError::DatasetRankUnsupported {
+                rank: 256,
+                maximum: 255
+            }
         );
+    }
+
+    #[rstest::rstest]
+    #[case::scalar(Dataspace::scalar(), TYPE_SCALAR)]
+    #[case::null(Dataspace::null(), TYPE_NULL)]
+    fn updating_a_missing_dimension_reports_the_dataspace_kind(
+        #[case] mut dataspace: Dataspace,
+        #[case] space_type: u8,
+    ) {
+        assert_eq!(
+            dataspace.set_first_dimension(1).unwrap_err(),
+            FormatError::DataspaceHasNoDimensions { space_type }
+        );
+    }
+
+    #[test]
+    fn updating_the_first_dimension_preserves_the_shape_on_error() {
+        let mut shape = Dataspace::simple(
+            vec![3, 4],
+            Some(vec![MaxExtent::Fixed(5), MaxExtent::Unlimited]),
+        )
+        .unwrap();
+        assert_eq!(
+            shape.set_first_dimension(6).unwrap_err(),
+            FormatError::DataspaceMaximumTooSmall {
+                dimension: 0,
+                current: 6,
+                maximum: 5
+            }
+        );
+        assert_eq!(shape.dimensions(), [3, 4]);
+        shape.set_first_dimension(5).unwrap();
+        assert_eq!(shape.dimensions(), [5, 4]);
     }
 
     #[test]
@@ -996,8 +1147,5 @@ mod tests {
         assert_eq!(MaxExtent::Unlimited.size(), None);
         assert!(!matches!(MaxExtent::Fixed(7), MaxExtent::Unlimited));
         assert!(matches!(MaxExtent::Unlimited, MaxExtent::Unlimited));
-        assert!(max_extent_admits(MaxExtent::Fixed(7), 7));
-        assert!(!max_extent_admits(MaxExtent::Fixed(7), 8));
-        assert!(max_extent_admits(MaxExtent::Unlimited, u64::MAX));
     }
 }

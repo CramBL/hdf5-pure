@@ -175,22 +175,16 @@ fn a_width_the_content_implies_reads_back_as_the_plain_variant() {
 ///
 /// Panics if decoding fails.
 fn decode_raw(datatype: Datatype, raw_data: Vec<u8>, dimensions: Vec<u64>) -> Option<AttrValue> {
-    use crate::dataspace::{Dataspace, DataspaceType};
+    use crate::dataspace::Dataspace;
 
     let scalar = dimensions.is_empty();
     let attr = crate::attribute::AttributeMessage {
         name: "a".into(),
         datatype,
-        dataspace: Dataspace {
-            space_type: if scalar {
-                DataspaceType::Scalar
-            } else {
-                DataspaceType::Simple
-            },
-            #[expect(clippy::cast_possible_truncation)]
-            rank: dimensions.len() as u8,
-            dimensions,
-            max_dimensions: None,
+        dataspace: if scalar {
+            Dataspace::scalar()
+        } else {
+            Dataspace::simple(dimensions, None).unwrap()
         },
         raw_data,
         datatype_location: crate::shared_message::DatatypeLocation::Inline,

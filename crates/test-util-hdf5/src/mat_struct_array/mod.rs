@@ -346,7 +346,7 @@ impl<'a> Observation<'a> {
             match value {
                 AttrValue::AsciiString(value) => {
                     assert_eq!(attr.datatype, ascii(value.len() as u32));
-                    assert!(attr.dataspace.dimensions.is_empty());
+                    assert!(attr.dataspace.dimensions().is_empty());
                     assert_eq!(attr.raw_data, value.as_bytes());
                 }
                 AttrValue::VarLenAsciiCharArray(fields) => {
@@ -354,7 +354,7 @@ impl<'a> Observation<'a> {
                         attr.datatype,
                         Datatype::VariableLength(VariableLengthType::sequence(ascii(1)))
                     );
-                    assert_eq!(attr.dataspace.dimensions, [fields.len() as u64]);
+                    assert_eq!(attr.dataspace.dimensions(), [fields.len() as u64]);
                 }
                 AttrValue::I32(value) => {
                     assert_eq!(
@@ -364,7 +364,7 @@ impl<'a> Observation<'a> {
                                 .unwrap()
                         )
                     );
-                    assert!(attr.dataspace.dimensions.is_empty());
+                    assert!(attr.dataspace.dimensions().is_empty());
                     assert_eq!(attr.raw_data, value.to_le_bytes());
                 }
                 other => panic!("unsupported expected attribute {other:?}"),

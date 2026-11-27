@@ -29,12 +29,11 @@ fn metadata_fields_use_independent_file_widths(
 ) {
     let widths = FormatWidths { offsets, lengths };
     let wire = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
-    let space = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 2,
-        dimensions: vec![3, 5],
-        max_dimensions: Some(vec![MaxExtent::Fixed(7), MaxExtent::Fixed(9)]),
-    };
+    let space = Dataspace::simple(
+        vec![3, 5],
+        Some(vec![MaxExtent::Fixed(7), MaxExtent::Fixed(9)]),
+    )
+    .unwrap();
     assert_eq!(
         space.serialize(lengths.get()).unwrap(),
         dataspace::v2_with_widths(
@@ -190,12 +189,7 @@ fn dataspace_dimensions_preserve_the_selected_length_width(
     #[case] width: LengthWidth,
     #[case] value: u64,
 ) {
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![value],
-        max_dimensions: Some(vec![MaxExtent::Fixed(value)]),
-    };
+    let dataspace = Dataspace::simple(vec![value], Some(vec![MaxExtent::Fixed(value)])).unwrap();
     let expected = dataspace::VersionTwo::simple(
         Widths::new(8, usize::from(width.get())),
         &[value],
@@ -215,12 +209,7 @@ fn prepared_scalar_and_null_dataspaces_encode_their_type_codes(
     #[case] fixture: dataspace::VersionTwo<'_>,
     #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] width: LengthWidth,
 ) {
-    let dataspace = Dataspace {
-        space_type,
-        rank: 0,
-        dimensions: vec![],
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::new(space_type, vec![], None).unwrap();
     assert_eq!(
         dataspace.prepare(width).unwrap().to_bytes(),
         fixture.build()
@@ -234,12 +223,11 @@ fn bounded_dataspace_encoding_checks_capacity_before_writing(
 ) {
     let dimensions = [0x1234, 0];
     let maxima = [0x2345, 3];
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 2,
-        dimensions: dimensions.to_vec(),
-        max_dimensions: store_maxima.then(|| maxima.map(MaxExtent::Fixed).to_vec()),
-    };
+    let dataspace = Dataspace::simple(
+        dimensions.to_vec(),
+        store_maxima.then(|| maxima.map(MaxExtent::Fixed).to_vec()),
+    )
+    .unwrap();
     let expected = dataspace::VersionTwo::simple(
         Widths::new(8, usize::from(width.get())),
         &dimensions,
@@ -281,19 +269,14 @@ fn bounded_dataspace_encoding_checks_capacity_before_writing(
 #[case::simple(DataspaceType::Simple, dataspace::Kind::SIMPLE, 0)]
 #[case::scalar(DataspaceType::Scalar, dataspace::Kind::SCALAR, 1)]
 #[case::null(DataspaceType::Null, dataspace::Kind::NULL, 1)]
-fn preparation_rejects_rank_inconsistent_with_dataspace_type(
+fn construction_rejects_rank_inconsistent_with_dataspace_type(
     #[case] space_type: DataspaceType,
     #[case] kind: dataspace::Kind,
     #[case] rank: u8,
 ) {
-    let dataspace = Dataspace {
-        space_type,
-        rank,
-        dimensions: vec![0; usize::from(rank)],
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::new(space_type, vec![0; usize::from(rank)], None);
     assert_eq!(
-        dataspace.prepare(LengthWidth::Two).unwrap_err(),
+        dataspace.unwrap_err(),
         FormatError::InvalidDataspaceRank {
             space_type: kind.0,
             rank
@@ -302,22 +285,15 @@ fn preparation_rejects_rank_inconsistent_with_dataspace_type(
 }
 
 #[rstest]
-#[case::missing_current(&[], None)]
-#[case::extra_current(&[0, 1], None)]
 #[case::missing_maximum(&[0], Some([].as_slice()))]
 #[case::extra_maximum(&[0], Some([MaxExtent::Fixed(1), MaxExtent::Fixed(2)].as_slice()))]
-fn preparation_rejects_dimension_counts_that_differ_from_rank(
+fn construction_rejects_maximum_dimensions_with_a_different_rank(
     #[case] dimensions: &[u64],
     #[case] maxima: Option<&[MaxExtent]>,
 ) {
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: dimensions.to_vec(),
-        max_dimensions: maxima.map(<[MaxExtent]>::to_vec),
-    };
+    let dataspace = Dataspace::simple(dimensions.to_vec(), maxima.map(<[MaxExtent]>::to_vec));
     assert_eq!(
-        dataspace.prepare(LengthWidth::Two).unwrap_err(),
+        dataspace.unwrap_err(),
         FormatError::InvalidDataspaceDimensionCount {
             rank: 1,
             dimensions: dimensions.len(),
@@ -326,16 +302,10 @@ fn preparation_rejects_dimension_counts_that_differ_from_rank(
     );
 }
 
-#[rstest]
-#[case::unlimited(MaxExtent::Unlimited)]
-#[case::fixed_all_ones(MaxExtent::Fixed(u64::MAX))]
-fn unlimited_and_fixed_u64_max_encode_the_same_eight_byte_maximum(#[case] maximum: MaxExtent) {
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![0],
-        max_dimensions: Some(vec![maximum]),
-    };
+#[test]
+fn unlimited_encodes_an_eight_byte_all_ones_maximum() {
+    let maximum = MaxExtent::Unlimited;
+    let dataspace = Dataspace::simple(vec![0], Some(vec![maximum])).unwrap();
     let expected = dataspace::VersionTwo::simple(Widths::EIGHT, &[0], Some(&[u64::MAX])).build();
     assert_eq!(
         dataspace.prepare(LengthWidth::Eight).unwrap().to_bytes(),
@@ -344,8 +314,8 @@ fn unlimited_and_fixed_u64_max_encode_the_same_eight_byte_maximum(#[case] maximu
     assert_eq!(
         Dataspace::parse_with_length_width(&expected, LengthWidth::Eight)
             .unwrap()
-            .max_dimensions,
-        Some(vec![MaxExtent::Unlimited]),
+            .max_dimensions(),
+        Some([MaxExtent::Unlimited].as_slice()),
     );
 }
 
@@ -368,12 +338,7 @@ fn dataspace_fields_outside_the_length_width_are_rejected(
     #[case] maximum: Option<MaxExtent>,
     #[case] length: u64,
 ) {
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![dimension],
-        max_dimensions: maximum.map(|value| vec![value]),
-    };
+    let dataspace = Dataspace::simple(vec![dimension], maximum.map(|value| vec![value])).unwrap();
     assert_eq!(
         dataspace.prepare(width).unwrap_err(),
         FormatError::LengthTooLarge {
@@ -406,12 +371,7 @@ fn unlimited_maxima_are_stored_as_the_value_an_all_ones_field_reads(
     all_ones.extend_from_slice(&vec![0xff; usize::from(width.get())]);
     assert_eq!(
         Dataspace::parse(&all_ones, width.get()).unwrap(),
-        Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![0],
-            max_dimensions: Some(vec![stored]),
-        }
+        Dataspace::simple(vec![0], Some(vec![stored])).unwrap()
     );
 }
 
@@ -437,12 +397,7 @@ fn stored_maxima_reject_a_dimension_outside_the_length_width(
 #[case::one(1)]
 #[case::sixteen(16)]
 fn dataspace_serialization_rejects_unsupported_length_sizes(#[case] size: u8) {
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Scalar,
-        rank: 0,
-        dimensions: vec![],
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::scalar();
     assert_eq!(
         dataspace.serialize(size).unwrap_err(),
         FormatError::InvalidLengthSize(size)

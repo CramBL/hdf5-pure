@@ -141,12 +141,7 @@ fn attribute(datatype: Datatype, raw_data: Vec<u8>, space_type: DataspaceType) -
     AttributeMessage {
         name: "value".into(),
         datatype,
-        dataspace: Dataspace {
-            space_type,
-            rank: u8::from(simple),
-            dimensions: if simple { vec![0] } else { vec![] },
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::new(space_type, if simple { vec![0] } else { vec![] }, None).unwrap(),
         raw_data,
         datatype_location: DatatypeLocation::Inline,
     }

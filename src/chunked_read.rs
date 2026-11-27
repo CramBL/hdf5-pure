@@ -636,7 +636,7 @@ fn chunked_dims<'a>(
         .checked_sub(1)
         .ok_or_else(|| FormatError::ChunkedReadError("chunked layout has no dimensions".into()))?;
     let chunk_dims = &chunk_dimensions[..rank];
-    let ds_dims = dataspace.dimensions.as_slice();
+    let ds_dims = dataspace.dimensions();
     if ds_dims.len() != rank {
         return Err(FormatError::ChunkedReadError(format!(
             "rank mismatch: dataspace has {} dims, layout has {} chunk dims (rank={})",
@@ -722,7 +722,7 @@ pub fn read_chunked_data_from_source(
             &mut scratch,
             flags,
             chunk_dims_u64,
-            &dataspace.dimensions,
+            dataspace.dimensions(),
             pipeline,
             ctx,
             info,
@@ -855,7 +855,7 @@ pub(crate) fn read_chunked_rows_from_source(
     row_start: u64,
     num_rows: u64,
 ) -> Result<Option<Vec<u8>>, FormatError> {
-    if spec.dataspace().dimensions.is_empty() {
+    if spec.dataspace().dimensions().is_empty() {
         return Ok(None);
     }
     let region = ReadRegion::rows(spec, row_start, num_rows)?;
@@ -1003,7 +1003,7 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
                         widths,
                     )?,
                     chunk_dims_u64,
-                    &dataspace.dimensions,
+                    dataspace.dimensions(),
                 )
             })?),
         };
@@ -1039,7 +1039,7 @@ impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
                 None => Cow::Owned(source.read_exact_at(chunk.address, len)?),
             };
             let filtering =
-                ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk);
+                ChunkFiltering::for_chunk(flags, chunk_dims_u64, dataspace.dimensions(), chunk);
             let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
             assembly.place(&dec)?;
             match dec {
@@ -1100,7 +1100,7 @@ impl<'a, 'spec> SelectedAssembly<'a, 'spec> {
                     && chunk_dims.iter().skip(1).eq(region
                         .spec()
                         .dataspace()
-                        .dimensions
+                        .dimensions()
                         .iter()
                         .skip(1)) =>
             {
@@ -1211,7 +1211,7 @@ impl RegionCopy<'_> {
                 let offset = region
                     .spec()
                     .dataspace()
-                    .dimensions
+                    .dimensions()
                     .first()
                     .and_then(|_| chunk.offsets.first())
                     .copied()
@@ -1477,7 +1477,7 @@ pub fn read_chunked_data_cached_from_source(
                 widths,
             )?,
             chunk_dims_u64,
-            &dataspace.dimensions,
+            dataspace.dimensions(),
         )
     })?;
 
@@ -1514,7 +1514,7 @@ pub fn read_chunked_data_cached_from_source(
         // own it moves into the cache, and borrowed from a coalesced span it is
         // copied out of the span only if the cache admits it.
         let filtering =
-            ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk_info);
+            ChunkFiltering::for_chunk(flags, chunk_dims_u64, dataspace.dimensions(), chunk_info);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
         assembly.place(&dec)?;
         match dec {
@@ -1540,8 +1540,8 @@ fn index_grid(
 ) -> Result<ChunkGrid, FormatError> {
     ChunkGrid::new(
         spatial_chunk_dims,
-        &dataspace.dimensions,
-        dataspace.max_dimensions.as_deref(),
+        dataspace.dimensions(),
+        dataspace.max_dimensions(),
         order,
     )
 }
@@ -1646,10 +1646,10 @@ fn collect_btree_v2_chunks(
     elem_size: u64,
     widths: FormatWidths,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
-    if dataspace.dimensions.len() != chunk_dims.len() {
+    if dataspace.dimensions().len() != chunk_dims.len() {
         return Err(FormatError::ChunkedReadError(format!(
             "rank mismatch: dataspace has {} dims, layout has {} chunk dims",
-            dataspace.dimensions.len(),
+            dataspace.dimensions().len(),
             chunk_dims.len()
         )));
     }
@@ -1699,7 +1699,7 @@ fn collect_btree_v2_chunks(
         }
         if offsets
             .iter()
-            .zip(&dataspace.dimensions)
+            .zip(dataspace.dimensions())
             .any(|(offset, dimension)| offset >= dimension)
         {
             continue;
@@ -1798,7 +1798,7 @@ pub(crate) fn visit_decoded_chunks_from_source(
             &mut scratch,
             flags,
             chunk_dims_u64,
-            &spec.dataspace().dimensions,
+            spec.dataspace().dimensions(),
             spec.pipeline(),
             ctx,
             chunk,
@@ -2221,7 +2221,7 @@ pub(crate) fn read_chunked_data_cached_framed(
                 widths,
             )?,
             chunk_dims_u64,
-            &dataspace.dimensions,
+            dataspace.dimensions(),
         )
     })?;
 
@@ -2250,7 +2250,7 @@ pub(crate) fn read_chunked_data_cached_framed(
             chunk_info.chunk_size.get(),
         )?)?;
         let filtering =
-            ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk_info);
+            ChunkFiltering::for_chunk(flags, chunk_dims_u64, dataspace.dimensions(), chunk_info);
         // A chunk that skipped the pipeline scatters straight from the file
         // buffer, and is copied into the cache only if it would be retained.
         let dec = decode_chunk(
@@ -3025,12 +3025,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![if raw_edge { 1 } else { 2 }],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![if raw_edge { 1 } else { 2 }], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let pipeline = shuffle_pipeline();
         let spec = RawReadSpec::parse(
@@ -3146,12 +3141,7 @@ mod tests {
                 address: Some(StoredAddress::new(0x100)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: crate::dataspace::DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![3, 5],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![3, 5], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let fill_bytes = fill_value.to_le_bytes();
         let fill = if unknown {
@@ -3252,12 +3242,7 @@ mod tests {
                 address: Some(StoredAddress::new(0x100)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![3, 5],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![3, 5], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let fill_bytes = 17i32.to_le_bytes();
         let fill = if unknown {
@@ -3425,12 +3410,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![4],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
@@ -3493,12 +3473,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![4],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let pipeline = decoding.then(|| {
             FilterPipeline::new(
@@ -3583,12 +3558,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: u8::try_from(ds_dims.len()).unwrap(),
-            dimensions: ds_dims.to_vec(),
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(ds_dims.to_vec(), None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
@@ -3634,12 +3604,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![4],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
@@ -3686,12 +3651,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![4],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
@@ -3739,12 +3699,7 @@ mod tests {
                 address: allocated.then_some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![4],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4], None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
@@ -3813,12 +3768,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: u8::try_from(ds_dims.len()).unwrap(),
-            dimensions: ds_dims.to_vec(),
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(ds_dims.to_vec(), None).unwrap();
         let datatype = crate::type_builders::make_i32_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
@@ -4044,12 +3994,7 @@ mod tests {
                 address: Some(StoredAddress::new(btree_addr as u64)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![8],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![8], None).unwrap();
 
         let fill = 5.5f64;
         let fill_bytes = fill.to_le_bytes();
@@ -4100,12 +4045,7 @@ mod tests {
             FixedPointType::new(8, byte_order::DatatypeByteOrder::LittleEndian, true, 0, 64)
                 .unwrap(),
         );
-        let simple = |dims: Vec<u64>| Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: dims.len() as u8,
-            dimensions: dims,
-            max_dimensions: None,
-        };
+        let simple = |dims: Vec<u64>| Dataspace::simple(dims, None).unwrap();
         let file_data: Vec<u8> = Vec::new();
         let seven = 7i64.to_le_bytes();
 
@@ -4208,12 +4148,11 @@ mod tests {
     }
 
     fn btree_v2_dataspace(dimensions: &[u64]) -> Dataspace {
-        Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: u8::try_from(dimensions.len()).unwrap(),
-            dimensions: dimensions.to_vec(),
-            max_dimensions: Some(vec![MaxExtent::Unlimited; dimensions.len()]),
-        }
+        Dataspace::simple(
+            dimensions.to_vec(),
+            Some(vec![MaxExtent::Unlimited; dimensions.len()]),
+        )
+        .unwrap()
     }
 
     #[rstest]
@@ -5244,12 +5183,7 @@ mod tests {
                 address: Some(StoredAddress::ZERO),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![payloads.len().to_u64()],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![payloads.len().to_u64()], None).unwrap();
         let actual =
             collect_chunked_storage_spans(&source.framed(), &layout, &dataspace, FORMAT_WIDTHS);
         let walks = match shape {
@@ -5514,7 +5448,7 @@ mod tests {
     // --- Chunked read tests (synthetic) ---
 
     use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
-    use crate::dataspace::{Dataspace, DataspaceType};
+    use crate::dataspace::Dataspace;
     use crate::datatype::byte_order;
     use crate::datatype::layout::FloatingPointLayout;
     use crate::datatype::{Datatype, byte_order::DatatypeByteOrder};
@@ -5591,12 +5525,7 @@ mod tests {
             },
         };
 
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![total as u64],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![total as u64], None).unwrap();
 
         (file_data, layout, dataspace)
     }
@@ -5726,12 +5655,7 @@ mod tests {
         let mut file_data = vec![0u8; 0x1000];
         file_data.extend_from_slice(&built.data_bytes);
         let layout = DataLayout::parse(&built.layout_message, 8, 8).unwrap();
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![elements],
-            max_dimensions: maxshape,
-        };
+        let dataspace = Dataspace::simple(vec![elements], maxshape).unwrap();
         assert_eq!(
             assert_chunked_streams_match(&file_data, &layout, &dataspace, &make_f64_type(), None),
             raw
@@ -5862,15 +5786,14 @@ mod tests {
             requests: RefCell::new(Vec::new()),
         };
         let stored = source::PhysicalSource::for_test(&observed, context.addresses()).stored();
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![2],
-            max_dimensions: Some(vec![match kind {
+        let dataspace = Dataspace::simple(
+            vec![2],
+            Some(vec![match kind {
                 ChunkArrayKind::FixedArray => MaxExtent::Fixed(2),
                 ChunkArrayKind::ExtensibleArray => MaxExtent::Unlimited,
             }]),
-        };
+        )
+        .unwrap();
         let expected = records
             .iter()
             .enumerate()
@@ -5974,12 +5897,7 @@ mod tests {
         ];
         let chunk_bytes = chunk_dims.iter().product::<u64>() * 4;
         let (index, file) = array_index(kind, &chunks, slot_of, slots, chunk_bytes);
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: dims.len() as u8,
-            dimensions: dims.to_vec(),
-            max_dimensions: Some(max_dims.to_vec()),
-        };
+        let dataspace = Dataspace::simple(dims.to_vec(), Some(max_dims.to_vec())).unwrap();
         let chunk_dimensions: Vec<u64> = chunk_dims.iter().copied().chain([4]).collect();
 
         let read = collect_chunks_for_layout_from_source(
@@ -6014,13 +5932,11 @@ mod tests {
             1,
             16,
         );
-        // Maximum extent 0 in the trailing dimension, current extent 4.
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![3, 4],
-            max_dimensions: Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(0)]),
-        };
+        let dataspace = Dataspace::simple(
+            vec![3, 0],
+            Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(0)]),
+        )
+        .unwrap();
 
         let err = collect_chunks_for_layout_from_source(
             &source::zero_base_source(&BytesSource::new(&file)),
@@ -6101,12 +6017,7 @@ mod tests {
                 address: Some(StoredAddress::new(btree_addr as u64)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![total as u64],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![total as u64], None).unwrap();
         let datatype = make_f64_type();
 
         let raw = read_chunked_data_cached(
@@ -6310,12 +6221,7 @@ mod tests {
         else {
             panic!("the chunked writer emitted {written_layout:?}");
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: shape.to_vec(),
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(shape.to_vec(), None).unwrap();
 
         for chunk in collect_chunks_for_layout_from_source(
             &source::zero_base_source(&BytesSource::new(&file_data)),
@@ -6526,12 +6432,8 @@ mod tests {
                 address: Some(StoredAddress::new(btree_addr as u64)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![ds_dims[0] as u64, ds_dims[1] as u64],
-            max_dimensions: None,
-        };
+        let dataspace =
+            Dataspace::simple(vec![ds_dims[0] as u64, ds_dims[1] as u64], None).unwrap();
         let datatype = make_f32_type();
 
         let raw = read_chunked_data_cached(
@@ -6674,12 +6576,7 @@ mod tests {
                 address: Some(StoredAddress::new(data_addr as u64)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![3],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![3], None).unwrap();
         let datatype = make_f64_type();
 
         let raw = read_chunked_data_cached(
@@ -6802,17 +6699,16 @@ mod tests {
     /// The chunks are stored in the reverse of index order, except under the implicit index, whose
     /// order fixes their addresses.
     fn indexed_grid_file(kind: GridIndex) -> (Vec<u8>, DataLayout, Dataspace) {
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: GRID_DIMS.to_vec(),
-            max_dimensions: match kind {
+        let dataspace = Dataspace::simple(
+            GRID_DIMS.to_vec(),
+            match kind {
                 GridIndex::ExtensibleArray => {
                     Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(GRID_DIMS[1])])
                 }
                 GridIndex::BTreeV1 | GridIndex::FixedArray | GridIndex::Implicit => None,
             },
-        };
+        )
+        .unwrap();
         let order = match kind {
             GridIndex::ExtensibleArray => GridOrder::UnlimitedFirst,
             GridIndex::BTreeV1 | GridIndex::FixedArray | GridIndex::Implicit => GridOrder::RowMajor,
@@ -7116,12 +7012,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Scalar,
-            rank: 0,
-            dimensions: vec![],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::scalar();
         let cache = ChunkCache::new();
         let out = read_chunked_rows_from_source(
             &source::zero_base_source(&BytesSource::new(b"")),
@@ -7149,12 +7040,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 4,
-            dimensions: vec![1, big, big, big],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![1, big, big, big], None).unwrap();
         let cache = ChunkCache::new();
         let err = read_chunked_rows_from_source(
             &source::zero_base_source(&BytesSource::new(b"")),
@@ -7186,12 +7072,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 4,
-            dimensions: vec![4, 2, 2, 2],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4, 2, 2, 2], None).unwrap();
         let cache = ChunkCache::new();
         let err = read_chunked_rows_from_source(
             &source::zero_base_source(&BytesSource::new(b"")),
@@ -7218,12 +7099,7 @@ mod tests {
             chunk_dimensions: vec![4, 8],
             index: ChunkIndexLayout::BTreeV1 { address: None },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![10],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![10], None).unwrap();
         let seven = 7.0f64.to_le_bytes();
         let datatype = make_f64_type();
         for fill in [
@@ -7284,12 +7160,7 @@ mod tests {
             chunk_dimensions: vec![4, 1, 8],
             index: ChunkIndexLayout::BTreeV1 { address: None },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![rows, columns],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![rows, columns], None).unwrap();
         let seven = 7.0f64.to_le_bytes();
         let datatype = make_f64_type();
         let fill = FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8));
@@ -7328,12 +7199,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![4_294_967_424, 1],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4_294_967_424, 1], None).unwrap();
         let datatype = make_f64_type();
         let result = read_chunked_rows_from_source(
             &source::zero_base_source(&BytesSource::new(&bytes)),
@@ -7351,7 +7217,7 @@ mod tests {
 
     #[rstest]
     #[case::above_u32_max(4_294_967_424, 4_294_967_360)]
-    #[case::overflowing_chunk_end(u64::MAX, u64::MAX - 3)]
+    #[case::overflowing_chunk_end(u64::MAX - 1, u64::MAX - 3)]
     fn windowed_rows_clip_high_chunk_coordinates(#[case] extent: u64, #[case] chunk_start: u64) {
         let chunk = ChunkInfo {
             chunk_size: StoredChunkSize::BTreeV1(4),
@@ -7369,12 +7235,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![extent, 1],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![extent, 1], None).unwrap();
         let datatype = Datatype::FixedPoint(
             FixedPointType::new(1, byte_order::DatatypeByteOrder::LittleEndian, false, 0, 8)
                 .unwrap(),
@@ -7386,12 +7247,12 @@ mod tests {
             FORMAT_WIDTHS,
             &cache,
             CachePass::LRU,
-            chunk_start + 1,
+            chunk_start,
             2,
         )
         .unwrap()
         .unwrap();
-        assert_eq!(output, [12, 13]);
+        assert_eq!(output, [11, 12]);
     }
 
     #[rstest]
@@ -7409,12 +7270,7 @@ mod tests {
                 address: allocated.then_some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![4_294_967_297, 0],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4_294_967_297, 0], None).unwrap();
         let datatype = make_f64_type();
         let fill = if unreadable_fill {
             FillPattern::UNKNOWN
@@ -7466,12 +7322,7 @@ mod tests {
                 address: allocated.then_some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![0, 0],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![0, 0], None).unwrap();
         let datatype = make_f64_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
@@ -7514,12 +7365,7 @@ mod tests {
                 address: allocated.then_some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![0, 0],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![0, 0], None).unwrap();
         let datatype = Datatype::Array {
             base_type: Box::new(make_f64_type()),
             dimensions: vec![0],
@@ -7568,12 +7414,7 @@ mod tests {
                 address: Some(StoredAddress::new(0)),
             },
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![4_294_967_424, 1],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4_294_967_424, 1], None).unwrap();
         let datatype = make_f64_type();
         let spec = RawReadSpec::plain(&layout, &dataspace, &datatype);
         let source = BytesSource::new(b"");

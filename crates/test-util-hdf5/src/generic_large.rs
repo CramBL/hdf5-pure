@@ -201,7 +201,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
         .collect::<Vec<_>>();
     assert_eq!(attributes.len(), 1);
     assert_eq!(attributes[0].name, "big_attr");
-    assert_eq!(attributes[0].dataspace.dimensions, [512]);
+    assert_eq!(attributes[0].dataspace.dimensions(), [512]);
     let report = file.persisted_free_sections().unwrap().unwrap();
     let manager = report
         .managers()

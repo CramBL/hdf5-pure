@@ -2610,9 +2610,7 @@ fn prepared_attribute_body_allocates_only_for_owned_output(
     #[case] region: &str,
 ) {
     use hdf5_pure_core::StoredAddress;
-    use hdf5_pure_format::__private::{
-        AttributeMessage, Dataspace, DataspaceType, DatatypeLocation,
-    };
+    use hdf5_pure_format::__private::{AttributeMessage, Dataspace, DatatypeLocation};
     use hdf5_pure_format::LengthWidth;
     use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
     use test_util::datatype::leaf::{Leaf, Version};
@@ -2626,12 +2624,7 @@ fn prepared_attribute_body_allocates_only_for_owned_output(
     let message = AttributeMessage {
         name: "array".into(),
         datatype,
-        dataspace: Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: dimensions.to_vec(),
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::simple(dimensions.to_vec(), None).unwrap(),
         raw_data,
         datatype_location: address.map_or(DatatypeLocation::Inline, |address| {
             DatatypeLocation::Committed(StoredAddress::new(address))
@@ -2927,19 +2920,18 @@ fn named_filter_pipeline() -> (
 
 #[test]
 fn prepared_dataspace_uses_only_the_destination_allocation() {
-    use hdf5_pure_format::__private::{Dataspace, DataspaceType};
+    use hdf5_pure_format::__private::Dataspace;
     use hdf5_pure_format::{LengthWidth, MaxExtent};
     use test_util::dataspace;
     use test_util::widths::Widths;
 
     let dimensions = [3, 5];
     let maximum_dimensions = [7, u64::MAX];
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 2,
-        dimensions: dimensions.to_vec(),
-        max_dimensions: Some(vec![MaxExtent::Fixed(7), MaxExtent::Unlimited]),
-    };
+    let dataspace = Dataspace::simple(
+        dimensions.to_vec(),
+        Some(vec![MaxExtent::Fixed(7), MaxExtent::Unlimited]),
+    )
+    .unwrap();
     let expected =
         dataspace::VersionTwo::simple(Widths::EIGHT, &dimensions, Some(&maximum_dimensions))
             .build();

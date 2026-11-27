@@ -103,15 +103,15 @@ fn dataspace_dimension_arrays_preserve_native_values_and_ranges(
     assert_eq!(
         Dataspace::parse_with_dimension_fields(body, width).unwrap(),
         (
-            Dataspace {
-                space_type: match shape {
+            Dataspace::new(
+                match shape {
                     Shape::Scalar => DataspaceType::Scalar,
                     Shape::Fixed | Shape::Bounded => DataspaceType::Simple,
                 },
-                rank: u8::try_from(dimensions.len()).unwrap(),
                 dimensions,
-                max_dimensions: (body[2] & dataspace::Flags::MAX_DIMS.0 != 0).then_some(maxima),
-            },
+                (body[2] & dataspace::Flags::MAX_DIMS.0 != 0).then_some(maxima)
+            )
+            .unwrap(),
             expected_range,
         )
     );

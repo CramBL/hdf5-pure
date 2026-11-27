@@ -4,9 +4,8 @@ use hdf5_pure::{Datatype, DatatypeByteOrder, File, FixedPointType};
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::{
-    AttributeMessage, Dataspace, DataspaceType, DatatypeLocation, DenseAttrCreationOrder,
-    GroupInfo, LinkInfoMessage, MessageFlags, ObjectHeaderPrefix, ObjectHeaderWriter,
-    PreparedDenseAttrs,
+    AttributeMessage, Dataspace, DatatypeLocation, DenseAttrCreationOrder, GroupInfo,
+    LinkInfoMessage, MessageFlags, ObjectHeaderPrefix, ObjectHeaderWriter, PreparedDenseAttrs,
 };
 use libhdf5::file::LibraryVersion;
 use libhdf5::plist::group_create::AttrCreationOrder;
@@ -72,12 +71,7 @@ fn libhdf5_reads_independently_placed_dense_attributes(
             datatype: Datatype::FixedPoint(
                 FixedPointType::new(8, DatatypeByteOrder::LittleEndian, true, 0, 64).unwrap(),
             ),
-            dataspace: Dataspace {
-                space_type: DataspaceType::Simple,
-                rank: 1,
-                dimensions: vec![values.len() as u64],
-                max_dimensions: None,
-            },
+            dataspace: Dataspace::simple(vec![values.len() as u64], None).unwrap(),
             raw_data: values
                 .iter()
                 .flat_map(|value| value.to_le_bytes())

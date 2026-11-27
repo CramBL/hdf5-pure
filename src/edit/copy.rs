@@ -1142,7 +1142,7 @@ impl CopyReader<'_> {
                 let source = PhysicalSource::new(&src).stored();
                 let infos =
                     chunked_read::enumerate_chunks_from_source(&source, &layout, &ds, widths)?;
-                let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, geometry.spatial)
+                let grid = chunked_read::plan_dense_grid(infos, ds.dimensions(), geometry.spatial)
                     .ok_or(Error::EditUnsupported(
                         "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
                     ))?;

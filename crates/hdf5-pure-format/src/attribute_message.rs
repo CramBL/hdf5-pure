@@ -198,12 +198,7 @@ impl AttributeMessage {
     /// let attribute = format::AttributeMessage {
     ///     name: "target".into(),
     ///     datatype: datatype.clone(),
-    ///     dataspace: format::Dataspace {
-    ///         space_type: format::DataspaceType::Scalar,
-    ///         rank: 0,
-    ///         dimensions: vec![],
-    ///         max_dimensions: None,
-    ///     },
+    ///     dataspace: format::Dataspace::scalar(),
     ///     raw_data: vec![],
     ///     datatype_location: format::DatatypeLocation::Inline,
     /// };
@@ -531,12 +526,7 @@ impl AttributeMessage {
     ///         size: 1,
     ///         tag: vec![],
     ///     })),
-    ///     dataspace: format::Dataspace {
-    ///         space_type: format::DataspaceType::Scalar,
-    ///         rank: 0,
-    ///         dimensions: vec![],
-    ///         max_dimensions: None,
-    ///     },
+    ///     dataspace: format::Dataspace::scalar(),
     ///     raw_data: vec![0; 10],
     ///     datatype_location: format::DatatypeLocation::Inline,
     /// };
@@ -689,12 +679,7 @@ impl PreparedAttributeBody<'_> {
     /// let message = format::AttributeMessage {
     ///     name: "é".into(),
     ///     datatype: Datatype::Opaque { size: 1, tag: vec![] },
-    ///     dataspace: format::Dataspace {
-    ///         space_type: format::DataspaceType::Scalar,
-    ///         rank: 0,
-    ///         dimensions: vec![],
-    ///         max_dimensions: None,
-    ///     },
+    ///     dataspace: format::Dataspace::scalar(),
     ///     raw_data: vec![7],
     ///     datatype_location: format::DatatypeLocation::Inline,
     /// };
@@ -991,14 +976,7 @@ fn compute_raw_data(
     dataspace: &Dataspace,
     element_size: ElementSize,
 ) -> Result<Vec<u8>, FormatError> {
-    let count = dataspace.num_elements();
-    let expected_size = element_size
-        .byte_length(count)
-        .ok_or(FormatError::OffsetOverflow {
-            offset: count.get(),
-            length: element_size.get(),
-        })?
-        .to_usize()?;
+    let expected_size = dataspace.byte_length(element_size)?.to_usize()?;
     bytes::ensure_len(data, pos, expected_size)?;
     Ok(if expected_size > 0 {
         data.get(pos..pos + expected_size)
@@ -1062,7 +1040,6 @@ mod tests {
     use super::*;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
-    use crate::dataspace::DataspaceType;
     use crate::datatype::byte_order::DatatypeByteOrder;
     use crate::shared_message;
 
@@ -1227,12 +1204,7 @@ mod tests {
         let message = AttributeMessage {
             name: name.into(),
             datatype: i32_datatype(),
-            dataspace: Dataspace {
-                space_type: DataspaceType::Scalar,
-                rank: 0,
-                dimensions: Vec::new(),
-                max_dimensions: None,
-            },
+            dataspace: Dataspace::scalar(),
             raw_data: 7i32.to_le_bytes().to_vec(),
             datatype_location: DatatypeLocation::Inline,
         };
@@ -1552,12 +1524,7 @@ mod tests {
         let attribute = AttributeMessage {
             name: "scale".into(),
             datatype: i32_datatype(),
-            dataspace: Dataspace {
-                space_type: DataspaceType::Scalar,
-                rank: 0,
-                dimensions: Vec::new(),
-                max_dimensions: None,
-            },
+            dataspace: Dataspace::scalar(),
             raw_data: 7i32.to_le_bytes().to_vec(),
             datatype_location,
         };
@@ -1709,15 +1676,7 @@ mod tests {
                 parsed.datatype_location,
                 DatatypeLocation::Committed(StoredAddress::new(0x320))
             );
-            assert_eq!(
-                parsed.dataspace,
-                Dataspace {
-                    space_type: DataspaceType::Scalar,
-                    rank: 0,
-                    dimensions: Vec::new(),
-                    max_dimensions: None,
-                }
-            );
+            assert_eq!(parsed.dataspace, Dataspace::scalar());
         }
     }
 

@@ -263,12 +263,7 @@ fn inline_opaque_attributes_propagate_encoding_errors(#[case] version_three: boo
             size: 4,
             tag: vec![b'x'; 248],
         },
-        dataspace: format::Dataspace {
-            rank: 0,
-            space_type: format::DataspaceType::Scalar,
-            dimensions: Vec::new(),
-            max_dimensions: None,
-        },
+        dataspace: format::Dataspace::scalar(),
         raw_data: vec![1, 2, 3, 4],
         datatype_location: format::DatatypeLocation::Inline,
     };

@@ -8,7 +8,7 @@ use crate::FillTime;
 use crate::attribute_request::PreparedAttributes;
 use crate::chunked_write::{ChunkOptions, StorageAllocation};
 use crate::convert::Narrow;
-use crate::dataspace::{Dataspace, DataspaceType, Extent};
+use crate::dataspace::{Dataspace, DataspaceType};
 use crate::datatype::Datatype;
 #[cfg(feature = "std")]
 use crate::error::Error;
@@ -103,15 +103,12 @@ impl PreparedDataset {
         )?;
         let width = dt.element_size()?;
         let element_size = width.narrow::<NonZeroUsize>()?;
-        let rank = match u8::try_from(shape.len()) {
-            Ok(rank) if rank <= MAX_DATASET_RANK => rank,
-            _ => {
-                return Err(FormatError::DatasetRankUnsupported {
-                    rank: shape.len(),
-                    maximum: MAX_DATASET_RANK,
-                });
-            }
-        };
+        if shape.len() > usize::from(MAX_DATASET_RANK) {
+            return Err(FormatError::DatasetRankUnsupported {
+                rank: shape.len(),
+                maximum: MAX_DATASET_RANK,
+            });
+        }
         if let Some(dimension) = shape.iter().position(|&size| size == UNLIMITED_DIMENSION) {
             return Err(FormatError::DatasetDimensionUnlimited { dimension });
         }
@@ -141,9 +138,20 @@ impl PreparedDataset {
                 hdf5_pure_format::__private::stored_max_dimensions(length_width, &shape, maxshape)
             })
             .transpose()?;
-        if chunk_options.is_chunked() || maxshape.is_some() {
-            Extent::new(&shape, maxshape.as_deref())
-                .and_then(|geometry| chunk_options.validate_geometry(geometry))
+        let space_type = if shape.is_empty() {
+            DataspaceType::Scalar
+        } else {
+            DataspaceType::Simple
+        };
+        let ds = Dataspace::new(space_type, shape, maxshape).map_err(|error| match error {
+            FormatError::InvalidDataspaceDimensionCount { .. } => FormatError::InvalidChunkGeometry("maxshape must have the same rank as the dataset shape"),
+            FormatError::DataspaceMaximumTooSmall { .. } => FormatError::InvalidChunkGeometry("maxshape must be at least the current shape in every dimension"),
+            FormatError::InvalidDataspaceMaximum { .. } => FormatError::InvalidChunkGeometry("a fixed maximum of u64::MAX is the format's unlimited marker; name MaxExtent::Unlimited for a dimension that grows without bound"),
+            error => error,
+        })?;
+        if chunk_options.is_chunked() || ds.max_dimensions().is_some() {
+            chunk_options
+                .validate_geometry(&ds)
                 .map_err(FormatError::InvalidChunkGeometry)?;
         }
         let fill = fill
@@ -158,16 +166,7 @@ impl PreparedDataset {
             metadata: DatasetMetadata {
                 dt,
                 element_size,
-                ds: Dataspace {
-                    space_type: if shape.is_empty() {
-                        DataspaceType::Scalar
-                    } else {
-                        DataspaceType::Simple
-                    },
-                    rank,
-                    dimensions: shape,
-                    max_dimensions: maxshape,
-                },
+                ds,
                 extent,
                 attrs: prepared_attrs,
                 chunk_options,
@@ -195,7 +194,7 @@ impl PreparedDataset {
     pub(crate) fn into_whole_file(self) -> Result<WholeFileDataset, FormatError> {
         self.metadata
             .chunk_options
-            .validate_partial_edge_filtering(self.metadata.ds.max_dimensions.as_deref())?;
+            .validate_partial_edge_filtering(self.metadata.ds.max_dimensions())?;
         Ok(WholeFileDataset {
             metadata: self.metadata,
             storage: self.storage,
@@ -215,7 +214,7 @@ impl PreparedDataset {
     pub(crate) fn into_in_place(self) -> Result<InPlaceDataset, Error> {
         self.metadata
             .chunk_options
-            .validate_partial_edge_filtering(self.metadata.ds.max_dimensions.as_deref())?;
+            .validate_partial_edge_filtering(self.metadata.ds.max_dimensions())?;
         self.into_editor()
     }
 
@@ -243,7 +242,7 @@ impl PreparedDataset {
                 "write_dataset requires element data, not unallocated storage",
             ));
         }
-        if metadata.chunk_options.is_chunked() || metadata.ds.max_dimensions.is_some() {
+        if metadata.chunk_options.is_chunked() || metadata.ds.max_dimensions().is_some() {
             return Err(Error::EditUnsupported(
                 "write_dataset overwrites values only; it cannot make a dataset chunked, filtered, or extensible",
             ));
@@ -316,7 +315,7 @@ impl PreparedDataset {
                 ));
             }
         };
-        let chunked = metadata.chunk_options.is_chunked() || metadata.ds.max_dimensions.is_some();
+        let chunked = metadata.chunk_options.is_chunked() || metadata.ds.max_dimensions().is_some();
         if storage.vl_string_staging().is_some() && chunked {
             return Err(Error::EditUnsupported(
                 "chunked or extensible variable-length-string datasets cannot be added in place yet",

@@ -9,6 +9,6 @@ mod shape;
 mod stored;
 
 pub use self::shape::{
-    Dataspace, DataspaceType, Extent, PreparedDataspace, stored_max_dimensions, stored_max_extent,
+    Dataspace, DataspaceType, PreparedDataspace, stored_max_dimensions, stored_max_extent,
 };
 pub(crate) use self::stored::StoredDataspace;

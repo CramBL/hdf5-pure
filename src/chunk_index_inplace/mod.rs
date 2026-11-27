@@ -752,13 +752,12 @@ impl Located {
         let ds_bytes = file.read_metadata_at(dataspace_msg.data_off, dataspace_msg.size)?;
         let (dataspace, dimension_fields) =
             Dataspace::parse_with_dimension_fields(&ds_bytes, widths.lengths)?;
-        if dataspace.rank != 1 {
+        if dataspace.dimensions().len() != 1 {
             return Err(unsupported("only rank-1 datasets are supported"));
         }
-        let current_dim = dataspace.dimensions[0];
+        let current_dim = dataspace.dimensions()[0];
         let maximum = dataspace
-            .max_dimensions
-            .as_deref()
+            .max_dimensions()
             .map_or(MaxExtent::Fixed(current_dim), |maximum| maximum[0]);
         let dimension = ObjectHeaderField::new(dataspace_msg, dimension_fields)?;
         metadata::require_range(file, dimension.chunk)?;

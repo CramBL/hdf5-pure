@@ -6,8 +6,8 @@ use hdf5_pure_core::{
     VariableLengthType,
 };
 use hdf5_pure_format::__private::{
-    AttributeMessage, Dataspace, DataspaceType, DatatypeLocation, FormatWidths, MessageFlags,
-    MessageRecordLayout, PreparedAttributeBody,
+    AttributeMessage, Dataspace, DatatypeLocation, FormatWidths, MessageFlags, MessageRecordLayout,
+    PreparedAttributeBody,
 };
 use hdf5_pure_format::{Datatype, MessageType};
 use rstest::rstest;
@@ -85,12 +85,7 @@ fn prepared_inline_attribute_matches_independent_bytes(
     let message = AttributeMessage {
         name: name.into(),
         datatype: Datatype::VariableLength(VariableLengthType::sequence(one_byte_string())),
-        dataspace: Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![2],
-            max_dimensions: Some(vec![MaxExtent::Fixed(0x1234)]),
-        },
+        dataspace: Dataspace::simple(vec![2], Some(vec![MaxExtent::Fixed(0x1234)])).unwrap(),
         raw_data: data,
         datatype_location: DatatypeLocation::Inline,
     };
@@ -214,12 +209,7 @@ fn attribute_checks_datatype_before_raw_length_width(
 fn attribute_dataspace_error_precedes_an_overlong_name() {
     let mut message = inline_attribute();
     message.name = "x".repeat(usize::from(u16::MAX));
-    message.dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![0x1_0000],
-        max_dimensions: None,
-    };
+    message.dataspace = Dataspace::simple(vec![0x1_0000], None).unwrap();
     let widths = FormatWidths {
         offsets: OffsetWidth::Eight,
         lengths: LengthWidth::Two,
@@ -287,12 +277,7 @@ fn attribute_body_length_is_independent_of_the_compact_record_limit() {
     let count = usize::from(u16::MAX) + 1;
     let mut message = inline_attribute();
     let dimensions = [u64::try_from(count).unwrap()];
-    message.dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: dimensions.to_vec(),
-        max_dimensions: None,
-    };
+    message.dataspace = Dataspace::simple(dimensions.to_vec(), None).unwrap();
     message.raw_data = vec![7; count];
     let widths = FormatWidths {
         offsets: OffsetWidth::Eight,
@@ -351,12 +336,7 @@ fn inline_attribute() -> AttributeMessage {
     AttributeMessage {
         name: "a".into(),
         datatype: one_byte_string(),
-        dataspace: Dataspace {
-            space_type: DataspaceType::Scalar,
-            rank: 0,
-            dimensions: Vec::new(),
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::scalar(),
         raw_data: vec![7],
         datatype_location: DatatypeLocation::Inline,
     }

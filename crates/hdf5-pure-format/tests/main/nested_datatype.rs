@@ -208,7 +208,7 @@ fn nested_datatype_retains_attribute_field_length_checks(#[case] count: usize) {
             .collect(),
     };
     let mut attribute = attribute(datatype);
-    attribute.dataspace.space_type = format::DataspaceType::Null;
+    attribute.dataspace = format::Dataspace::null();
     attribute.raw_data.clear();
     let length = 8 + count * (6 + 2 + 13 + 12);
     let result = serialize(&attribute, 2);
@@ -243,12 +243,7 @@ fn attribute(datatype: Datatype) -> format::AttributeMessage {
     format::AttributeMessage {
         name: "a".into(),
         datatype,
-        dataspace: format::Dataspace {
-            rank: 0,
-            space_type: format::DataspaceType::Scalar,
-            dimensions: Vec::new(),
-            max_dimensions: None,
-        },
+        dataspace: format::Dataspace::scalar(),
         raw_data: vec![7, 9],
         datatype_location: format::DatatypeLocation::Inline,
     }
