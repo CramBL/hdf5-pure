@@ -105,7 +105,7 @@ impl ExtensibleArrayPlacement<'_> {
         let plan = self.plan;
         HeaderEncoding {
             fields: HeaderFields {
-                elements: plan.layout.encoding,
+                elements: plan.layout.encoding(),
                 creation: plan.creation,
                 lengths: plan.widths.lengths,
             },

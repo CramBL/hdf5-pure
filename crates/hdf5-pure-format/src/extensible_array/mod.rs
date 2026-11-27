@@ -208,7 +208,7 @@ impl ExtensibleArrayBlockFraming {
     pub fn prefix_range(&self) -> Result<FileRange, FormatError> {
         FileRange::new(
             self.range.start(),
-            self.owner.layout.prefix_len() + u64::from(self.owner.layout.block_offset_len),
+            self.owner.layout.prefix_len() + u64::from(self.owner.layout.block_offset_len()),
         )
     }
 
@@ -310,7 +310,7 @@ impl ExtensibleArrayIndexBlockRef {
         let (elements, addresses) = body(bytes, cursor.position())?
             .split_at_checked(
                 layout
-                    .elements_len(u64::from(layout.inline_elements))?
+                    .elements_len(u64::from(layout.inline_elements()))?
                     .to_usize()?,
             )
             .ok_or_else(|| internal("index block ends inside its elements"))?;
@@ -395,7 +395,7 @@ impl<'a> ExtensibleArrayIndexBlock<'a> {
         owner
             .addresses(super_blocks)
             .zip(
-                (layout.first_super_block..layout.super_blocks)
+                (layout.first_super_block()..layout.super_blocks())
                     .map(move |index| layout.super_block(index)),
             )
             .filter_map(move |(address, super_block)| {
@@ -791,7 +791,7 @@ impl<'a> ExtensibleArrayPages<'a> {
             bitmap,
         } = *self;
         let layout = owner.layout;
-        let page_elements = layout.page_nelmts.get();
+        let page_elements = layout.page_nelmts().get();
         (0..bitmap.pages)
             .take_while(move |&page| {
                 page.checked_mul(page_elements)
@@ -864,7 +864,7 @@ impl ExtensibleArrayPageRef {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range ends past
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
-        let elements = self.owner.layout.page_nelmts.get();
+        let elements = self.owner.layout.page_nelmts().get();
         let end = sum([self.first_slot, elements])?;
         Ok(self.first_slot..end)
     }
@@ -883,7 +883,7 @@ pub struct ExtensibleArrayElements<'a> {
 
 impl<'a> ExtensibleArrayElements<'a> {
     fn below_max_index_set(owner: Owner, bytes: &'a [u8], first_slot: u64) -> Self {
-        let encoding = owner.layout.encoding;
+        let encoding = owner.layout.encoding();
         let len = owner
             .max_index_set
             .saturating_sub(first_slot)
@@ -938,7 +938,7 @@ impl Owner {
         self,
         addresses: &'a [u8],
     ) -> impl Iterator<Item = Result<Option<PhysicalAddress>, FormatError>> + 'a {
-        let offsets = self.layout.encoding.offsets();
+        let offsets = self.layout.encoding().offsets();
         addresses
             .chunks_exact(usize::from(offsets.get()))
             .map(move |field| {
@@ -967,14 +967,14 @@ impl Owner {
             return Err(FormatError::InvalidExtensibleArrayVersion(version));
         }
         let client_id = cursor.u8()?;
-        let expected = self.layout.encoding.client().id();
+        let expected = self.layout.encoding().client().id();
         if client_id != expected {
             return Err(FormatError::InvalidExtensibleArrayBlockClient {
                 expected,
                 actual: client_id,
             });
         }
-        let owner = self.resolve(cursor.address(self.layout.encoding.offsets())?)?;
+        let owner = self.resolve(cursor.address(self.layout.encoding().offsets())?)?;
         if owner != self.header {
             return Err(FormatError::InvalidExtensibleArrayBlockOwner {
                 expected: self.header.get(),
@@ -998,7 +998,7 @@ impl Owner {
         expected: u64,
         libhdf5: Option<u64>,
     ) -> Result<(), FormatError> {
-        let actual = cursor.uint(usize::from(self.layout.block_offset_len))?;
+        let actual = cursor.uint(usize::from(self.layout.block_offset_len()))?;
         if actual != expected && Some(actual) != libhdf5 {
             return Err(FormatError::InvalidExtensibleArrayBlockOffset { expected, actual });
         }
@@ -1024,6 +1024,45 @@ struct Layout {
 }
 
 impl Layout {
+    // `H5EA_SBLK_FIRST_IDX` and `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`, HDF5 2.2.0)
+    // determine the first super block and block-offset width.
+    fn new(creation: ExtensibleArrayCreationParameters, encoding: ElementEncoding) -> Self {
+        Self {
+            encoding,
+            inline_elements: creation.inline_elements(),
+            min_elements_bits: creation.min_elements().get().trailing_zeros(),
+            page_nelmts: creation.bit_geometry().page_nelmts(),
+            block_offset_len: creation.bit_geometry().max_index_bits().get().div_ceil(8),
+            first_super_block: 2 * creation.min_data_blocks().get().trailing_zeros(),
+            super_blocks: u32::from(creation.bit_geometry().max_index_bits().get()) + 1
+                - creation.min_elements().get().trailing_zeros(),
+        }
+    }
+
+    fn encoding(self) -> ElementEncoding {
+        self.encoding
+    }
+
+    fn inline_elements(self) -> u8 {
+        self.inline_elements
+    }
+
+    fn page_nelmts(self) -> PageElementCount {
+        self.page_nelmts
+    }
+
+    fn block_offset_len(self) -> u8 {
+        self.block_offset_len
+    }
+
+    fn first_super_block(self) -> u32 {
+        self.first_super_block
+    }
+
+    fn super_blocks(self) -> u32 {
+        self.super_blocks
+    }
+
     fn direct_blocks(self) -> impl Iterator<Item = Result<DataBlock, FormatError>> {
         (0..self.first_super_block)
             .map(move |index| self.super_block(index))
@@ -1303,7 +1342,7 @@ impl ExtensibleArrayCreationParameters {
     }
 
     /// Returns the maximum element bit count and data block page geometry.
-    pub fn bit_geometry(self) -> ExtensibleArrayBitGeometry {
+    pub const fn bit_geometry(self) -> ExtensibleArrayBitGeometry {
         self.bits
     }
 
@@ -1381,19 +1420,8 @@ impl ExtensibleArrayCreationParameters {
         })
     }
 
-    // `H5EA_SBLK_FIRST_IDX` and `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`, HDF5 2.2.0)
-    // determine the first super block and block-offset width.
     fn layout(self, encoding: ElementEncoding) -> Layout {
-        Layout {
-            encoding,
-            inline_elements: self.inline_elements,
-            min_elements_bits: self.min_elements.get().trailing_zeros(),
-            page_nelmts: self.bits.page_nelmts(),
-            block_offset_len: self.bits.max_index_bits().get().div_ceil(8),
-            first_super_block: 2 * self.min_data_blocks.get().trailing_zeros(),
-            super_blocks: u32::from(self.bits.max_index_bits().get()) + 1
-                - self.min_elements.get().trailing_zeros(),
-        }
+        Layout::new(self, encoding)
     }
 }
 
@@ -1630,7 +1658,7 @@ impl ExtensibleArrayHeader {
 
     /// Returns the number of elements in a data block page, a nonzero power of two.
     pub const fn page_nelmts(&self) -> PageElementCount {
-        self.creation.bits.page_nelmts()
+        self.creation.bit_geometry().page_nelmts()
     }
 
     /// Returns the width in bytes of a block offset, in `1..=8`.
@@ -1990,8 +2018,8 @@ impl ExtensibleArrayGeometry {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a derived block offset
     /// exceeds [`u64::MAX`].
     fn from_layout(layout: Layout) -> Result<Self, FormatError> {
-        let mut sblks = Vec::with_capacity(layout.super_blocks.to_usize()?);
-        for index in 0..layout.super_blocks {
+        let mut sblks = Vec::with_capacity(layout.super_blocks().to_usize()?);
+        for index in 0..layout.super_blocks() {
             let block = layout.super_block(index)?;
             sblks.push((block.blocks, block.block_elements));
         }
@@ -2002,8 +2030,8 @@ impl ExtensibleArrayGeometry {
         Ok(Self {
             sblks,
             direct_dblk_nelmts,
-            nsblk_addrs: (layout.super_blocks - layout.first_super_block).to_usize()?,
-            first_indirect_sblk: layout.first_super_block.to_usize()?,
+            nsblk_addrs: (layout.super_blocks() - layout.first_super_block()).to_usize()?,
+            first_indirect_sblk: layout.first_super_block().to_usize()?,
         })
     }
 }
@@ -3924,7 +3952,7 @@ mod tests {
             .unwrap()
         );
         for ordinal in 0..geometry.nsblk_addrs() {
-            let writer = geometry.super_block_at(ordinal, layout.page_nelmts);
+            let writer = geometry.super_block_at(ordinal, layout.page_nelmts());
             let reader = layout
                 .super_block(u32::try_from(geometry.first_indirect_sblk() + ordinal).unwrap())
                 .unwrap();
@@ -3998,11 +4026,11 @@ mod tests {
             geometry.direct_dblk_nelmts()
         );
         assert_eq!(
-            usize::try_from(layout.first_super_block).unwrap(),
+            usize::try_from(layout.first_super_block()).unwrap(),
             geometry.first_indirect_sblk()
         );
         assert_eq!(
-            usize::try_from(layout.super_blocks - layout.first_super_block).unwrap(),
+            usize::try_from(layout.super_blocks() - layout.first_super_block()).unwrap(),
             geometry.nsblk_addrs()
         );
         for (index, &(blocks, elements)) in geometry.sblks().iter().enumerate() {
@@ -4206,7 +4234,7 @@ mod tests {
     ) {
         let encoding = ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap();
         let layout = layout_from_fields(encoding, [32, 4, min_data_blocks, 16, 10]);
-        assert_eq!(layout.first_super_block, first_super_block);
+        assert_eq!(layout.first_super_block(), first_super_block);
         assert_eq!(
             layout
                 .direct_blocks()
@@ -4266,7 +4294,7 @@ mod tests {
     fn the_block_offset_is_the_index_bits_in_whole_bytes(#[case] bits: u8, #[case] len: u8) {
         let encoding = ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap();
         assert_eq!(
-            layout_from_fields(encoding, [bits, 0, 2, 1, 1]).block_offset_len,
+            layout_from_fields(encoding, [bits, 0, 2, 1, 1]).block_offset_len(),
             len
         );
     }
