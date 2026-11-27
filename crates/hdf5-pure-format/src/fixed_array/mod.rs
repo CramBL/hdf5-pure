@@ -118,13 +118,8 @@ impl FixedArrayHeaderLocator {
             return Err(FormatError::InvalidFixedArrayGeometry);
         }
         let geometry = Geometry::new(encoding, entries, page_bits)?;
-        let data_block = match data_block {
-            DecodedStoredAddress::Defined(address) => Some(FixedArrayDataBlockRef::new(
-                base,
-                range.start(),
-                base.resolve(address)?,
-                geometry,
-            )?),
+        let address = match data_block {
+            DecodedStoredAddress::Defined(address) => Some(base.resolve(address)?),
             DecodedStoredAddress::Undefined => None,
         };
         Ok(FixedArrayHeader {
@@ -133,8 +128,7 @@ impl FixedArrayHeaderLocator {
             base,
             entry_size,
             page_bits,
-            geometry,
-            data_block: data_block.map(|block| block.range),
+            storage: BlockStorage::new(geometry, address)?,
         })
     }
 
@@ -166,15 +160,14 @@ pub struct FixedArrayHeader {
     base: BaseAddress,
     entry_size: u8,
     page_bits: u8,
-    geometry: Geometry,
-    data_block: Option<FileRange>,
+    storage: BlockStorage,
 }
 
 impl FixedArrayHeader {
     /// Returns whether the array's client format stores filtered chunk sizes and masks.
     pub const fn is_filtered(&self) -> bool {
         matches!(
-            self.geometry.encoding.client(),
+            self.storage.geometry().encoding().client(),
             ArrayClient::FilteredChunks { .. }
         )
     }
@@ -187,10 +180,39 @@ impl FixedArrayHeader {
     /// Returns the reference to the data block, or `None` if the header stores the undefined
     /// address, in an array without chunks.
     pub const fn data_block(&self) -> Option<FixedArrayDataBlockRef> {
-        match self.data_block {
+        self.storage.at(self.base, self.range.start())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BlockStorage {
+    geometry: Geometry,
+    range: Option<FileRange>,
+}
+
+impl BlockStorage {
+    fn new(geometry: Geometry, address: Option<PhysicalAddress>) -> Result<Self, FormatError> {
+        Ok(Self {
+            geometry,
+            range: address
+                .map(|address| FileRange::new(address, geometry.data_block_len()?))
+                .transpose()?,
+        })
+    }
+
+    const fn geometry(&self) -> Geometry {
+        self.geometry
+    }
+
+    const fn at(
+        &self,
+        base: BaseAddress,
+        header: PhysicalAddress,
+    ) -> Option<FixedArrayDataBlockRef> {
+        match self.range {
             Some(range) => Some(FixedArrayDataBlockRef {
-                base: self.base,
-                header: self.range.start(),
+                base,
+                header,
                 range,
                 geometry: self.geometry,
             }),
@@ -215,20 +237,6 @@ pub struct FixedArrayDataBlockRef {
 }
 
 impl FixedArrayDataBlockRef {
-    fn new(
-        base: BaseAddress,
-        header: PhysicalAddress,
-        address: PhysicalAddress,
-        geometry: Geometry,
-    ) -> Result<Self, FormatError> {
-        Ok(Self {
-            base,
-            header,
-            range: FileRange::new(address, geometry.data_block_len()?)?,
-            geometry,
-        })
-    }
-
     /// Parses the data block in `region`, and returns its elements or, in a paged block, its
     /// page-init bitmap.
     ///
@@ -252,21 +260,17 @@ impl FixedArrayDataBlockRef {
         checksum::verify_trailing(bytes)?;
 
         let body = without_checksum(bytes)?
-            .get(data_block_prefix_len(geometry.encoding.offsets()).to_usize()?..)
+            .get(data_block_prefix_len(geometry.encoding().offsets()).to_usize()?..)
             .ok_or_else(|| {
                 FormatError::Internal("a Fixed Array data block ends inside its prefix".into())
             })?;
-        Ok(match geometry.paging {
-            Some(paging) => FixedArrayDataBlock::PageBitmap(FixedArrayPageBitmap {
-                block: *self,
-                paging,
-                bitmap: body,
-            }),
-            None => FixedArrayDataBlock::Elements(FixedArrayElements {
-                bytes: body,
-                first_slot: 0,
-                encoding: geometry.encoding,
-            }),
+        Ok(match geometry.paging() {
+            Some(paging) => {
+                FixedArrayDataBlock::PageBitmap(FixedArrayPageBitmap::new(*self, paging, body))
+            }
+            None => {
+                FixedArrayDataBlock::Elements(FixedArrayElements::new(body, 0, geometry.encoding()))
+            }
         })
     }
 
@@ -281,10 +285,10 @@ impl FixedArrayDataBlockRef {
         let Self {
             range, geometry, ..
         } = *self;
-        match geometry.paging {
+        match geometry.paging() {
             Some(paging) => FileRange::new(
                 range.start(),
-                paging.pages_offset(geometry.encoding.offsets())?,
+                paging.pages_offset(geometry.encoding().offsets())?,
             ),
             None => Ok(range),
         }
@@ -303,7 +307,7 @@ impl FixedArrayDataBlockRef {
     /// is contained in the block's validated range.
     pub fn unpaged_prefix_range(&self) -> Result<Option<FileRange>, FormatError> {
         self.geometry
-            .paging
+            .paging()
             .is_none()
             .then(|| self.prefix_range())
             .transpose()
@@ -328,7 +332,7 @@ impl FixedArrayDataBlockRef {
         &self,
         region: FileRegion<'_>,
     ) -> Result<FixedArrayUnpaged, FormatError> {
-        if self.geometry.paging.is_some() {
+        if self.geometry.paging().is_some() {
             return Err(FormatError::InvalidFixedArrayGeometry);
         }
         self.parse_prefix(region)?;
@@ -348,7 +352,7 @@ impl FixedArrayDataBlockRef {
     pub fn prefix_range(&self) -> Result<FileRange, FormatError> {
         FileRange::new(
             self.range.start(),
-            data_block_prefix_len(self.geometry.encoding.offsets()),
+            data_block_prefix_len(self.geometry.encoding().offsets()),
         )
     }
 
@@ -381,14 +385,14 @@ impl FixedArrayDataBlockRef {
             return Err(FormatError::InvalidFixedArrayVersion(version));
         }
         let client_id = cursor.u8()?;
-        let expected_client = geometry.encoding.client().id();
+        let expected_client = geometry.encoding().client().id();
         if client_id != expected_client {
             return Err(FormatError::InvalidFixedArrayBlockClient {
                 expected: expected_client,
                 actual: client_id,
             });
         }
-        let owner = base.resolve(cursor.address(geometry.encoding.offsets())?)?;
+        let owner = base.resolve(cursor.address(geometry.encoding().offsets())?)?;
         if owner != header {
             return Err(FormatError::InvalidFixedArrayBlockOwner {
                 expected: header.get(),
@@ -399,26 +403,34 @@ impl FixedArrayDataBlockRef {
     }
 
     fn page(&self, paging: Paging, index: u64) -> Result<FixedArrayPageRef, FormatError> {
-        let Self {
-            range, geometry, ..
-        } = *self;
-        let first_slot = product(index, paging.page_entries)?;
+        FixedArrayPageRef::at(self.range, self.geometry, paging, index)
+    }
+}
+
+impl FixedArrayPageRef {
+    fn at(
+        range: FileRange,
+        geometry: Geometry,
+        paging: Paging,
+        index: u64,
+    ) -> Result<Self, FormatError> {
+        let first_slot = product(index, paging.page_entries())?;
         let entries = geometry
-            .entries
+            .entries()
             .checked_sub(first_slot)
             .ok_or(FormatError::InvalidFixedArrayGeometry)?
-            .min(paging.page_entries);
+            .min(paging.page_entries());
         let offset = sum([
-            paging.pages_offset(geometry.encoding.offsets())?,
-            product(index, geometry.page_len(paging.page_entries)?)?,
+            paging.pages_offset(geometry.encoding().offsets())?,
+            product(index, geometry.page_len(paging.page_entries())?)?,
         ])?;
-        Ok(FixedArrayPageRef {
+        Ok(Self {
             range: FileRange::new(
                 range.start().checked_add(offset)?,
                 geometry.page_len(entries)?,
             )?,
             first_slot,
-            encoding: geometry.encoding,
+            encoding: geometry.encoding(),
         })
     }
 }
@@ -451,23 +463,20 @@ impl FixedArrayUnpaged {
         let FixedArrayDataBlockRef {
             range, geometry, ..
         } = self.block;
-        if first_slot >= geometry.entries {
+        if first_slot >= geometry.entries() {
             return Ok(None);
         }
-        let entries = (geometry.entries - first_slot).min(max_entries.get() as u64);
+        let entries = (geometry.entries() - first_slot).min(max_entries.get() as u64);
         let offset = sum([
-            data_block_prefix_len(geometry.encoding.offsets()),
-            product(first_slot, u64::from(geometry.encoding.stride().get()))?,
+            data_block_prefix_len(geometry.encoding().offsets()),
+            product(first_slot, u64::from(geometry.encoding().stride().get()))?,
         ])?;
-        Ok(Some(FixedArrayEntryWindow {
-            range: FileRange::new(
-                range.start().checked_add(offset)?,
-                product(entries, u64::from(geometry.encoding.stride().get()))?,
-            )?,
+        Ok(Some(FixedArrayEntryWindow::new(
+            range.start().checked_add(offset)?,
             first_slot,
             entries,
-            encoding: geometry.encoding,
-        }))
+            geometry.encoding(),
+        )?))
     }
 
     /// Returns the range of the prefix and entries covered by the block's checksum.
@@ -502,6 +511,31 @@ pub struct FixedArrayEntryWindow {
 }
 
 impl FixedArrayEntryWindow {
+    fn new(
+        address: PhysicalAddress,
+        first_slot: u64,
+        entries: u64,
+        encoding: ElementEncoding,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            range: FileRange::new(
+                address,
+                product(entries, u64::from(encoding.stride().get()))?,
+            )?,
+            first_slot,
+            entries,
+            encoding,
+        })
+    }
+
+    const fn first_slot(&self) -> u64 {
+        self.first_slot
+    }
+
+    const fn entries(&self) -> u64 {
+        self.entries
+    }
+
     /// Borrows the window's entry bytes from `region`.
     ///
     /// The caller verifies the containing block's or page's checksum separately before reading
@@ -511,11 +545,11 @@ impl FixedArrayEntryWindow {
     ///
     /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain the window.
     pub fn parse<'a>(&self, region: FileRegion<'a>) -> Result<FixedArrayElements<'a>, FormatError> {
-        Ok(FixedArrayElements {
-            bytes: region.subregion(self.range)?.bytes(),
-            first_slot: self.first_slot,
-            encoding: self.encoding,
-        })
+        Ok(FixedArrayElements::new(
+            region.subregion(self.range)?.bytes(),
+            self.first_slot,
+            self.encoding,
+        ))
     }
 
     /// Returns the range the caller reads for [`parse`](Self::parse).
@@ -548,6 +582,14 @@ pub struct FixedArrayPageBitmap<'a> {
 }
 
 impl<'a> FixedArrayPageBitmap<'a> {
+    const fn new(block: FixedArrayDataBlockRef, paging: Paging, bitmap: &'a [u8]) -> Self {
+        Self {
+            block,
+            paging,
+            bitmap,
+        }
+    }
+
     /// Returns the reference to each page the bitmap marks initialized, in page order.
     ///
     /// Page 0 is the most significant bit of the first byte. A page the bitmap does not mark is
@@ -558,7 +600,7 @@ impl<'a> FixedArrayPageBitmap<'a> {
             paging,
             bitmap,
         } = *self;
-        (0..paging.pages)
+        (0..paging.pages())
             .filter(move |&index| chunk_record::page_initialized(bitmap, index))
             .map(move |index| block.page(paging, index))
     }
@@ -595,11 +637,11 @@ impl FixedArrayPageRef {
         } = *self;
         let bytes = region.subregion(range)?.bytes();
         checksum::verify_trailing(bytes)?;
-        Ok(FixedArrayElements {
-            bytes: without_checksum(bytes)?,
+        Ok(FixedArrayElements::new(
+            without_checksum(bytes)?,
             first_slot,
             encoding,
-        })
+        ))
     }
 
     /// Returns the range a caller reads for [`parse`](Self::parse), the page's elements and its
@@ -618,6 +660,14 @@ pub struct FixedArrayElements<'a> {
 }
 
 impl<'a> FixedArrayElements<'a> {
+    const fn new(bytes: &'a [u8], first_slot: u64, encoding: ElementEncoding) -> Self {
+        Self {
+            bytes,
+            first_slot,
+            encoding,
+        }
+    }
+
     /// Returns the slot and the record of each element that stores a chunk address.
     ///
     /// The slot is the element's index in the whole array. A record of an unfiltered chunk has
@@ -659,6 +709,18 @@ impl Geometry {
                 pages: entries.div_ceil(page_entries),
             }),
         })
+    }
+
+    const fn encoding(&self) -> ElementEncoding {
+        self.encoding
+    }
+
+    const fn entries(&self) -> u64 {
+        self.entries
+    }
+
+    const fn paging(&self) -> Option<Paging> {
+        self.paging
     }
 
     fn data_block_len(&self) -> Result<u64, FormatError> {
@@ -712,6 +774,14 @@ struct Paging {
 }
 
 impl Paging {
+    const fn pages(self) -> u64 {
+        self.pages
+    }
+
+    const fn page_entries(self) -> u64 {
+        self.page_entries
+    }
+
     /// Returns the offset of the first page from the start of the data block, past the prefix,
     /// the page-init bitmap, and its checksum.
     fn pages_offset(self, offsets: OffsetWidth) -> Result<u64, FormatError> {
@@ -982,9 +1052,9 @@ impl FixedArrayPlacement {
             total_length: _,
         } = plan;
         let actual = slots.len().to_u64();
-        if actual != geometry.entries {
+        if actual != geometry.entries() {
             return Err(FormatError::FixedArrayEntryCount {
-                expected: geometry.entries,
+                expected: geometry.entries(),
                 actual,
             });
         }
@@ -1019,18 +1089,13 @@ impl FixedArrayPlacement {
             data_block_length: _,
             total_length: _,
         } = plan;
-        let Geometry {
-            encoding: _,
-            entries,
-            paging: _,
-        } = geometry;
         let mut bytes = output_buffer(header.length())?;
         bytes.extend_from_slice(&HEADER_SIGNATURE);
         bytes.push(VERSION);
         bytes.push(encoding.client_id);
         bytes.push(entry_size);
         bytes.push(page_bits);
-        bytes::try_write_length(&mut bytes, entries, widths.lengths)?;
+        bytes::try_write_length(&mut bytes, geometry.entries(), widths.lengths)?;
         bytes::try_write_decoded_address(
             &mut bytes,
             DecodedStoredAddress::Defined(data_block.start()),
@@ -1066,7 +1131,7 @@ impl FixedArrayPlacement {
             DecodedStoredAddress::Defined(header.start()),
             widths.offsets,
         )?;
-        match geometry.paging {
+        match geometry.paging() {
             None => {
                 for slot in 0..slots.len() {
                     self.write_element(&mut bytes, slots.at(slot))?;
@@ -1075,8 +1140,8 @@ impl FixedArrayPlacement {
                 bytes.extend_from_slice(&checksum.to_le_bytes());
             }
             Some(paging) => {
-                let pages = paging.pages.to_usize()?;
-                let mut bitmap = vec![0; paging.pages.div_ceil(8).to_usize()?];
+                let pages = paging.pages().to_usize()?;
+                let mut bitmap = vec![0; paging.pages().div_ceil(8).to_usize()?];
                 for page in 0..pages {
                     // Page 0 occupies the most significant bit. H5VM_bit_set uses this order
                     // in H5VMprivate.h, HDF5 2.2.0.
@@ -1085,7 +1150,7 @@ impl FixedArrayPlacement {
                 bytes.extend_from_slice(&bitmap);
                 let checksum = checksum::jenkins_lookup3(&bytes);
                 bytes.extend_from_slice(&checksum.to_le_bytes());
-                let page_size = paging.page_entries.to_usize()?;
+                let page_size = paging.page_entries().to_usize()?;
                 for page in 0..pages {
                     let start = page * page_size;
                     let end = start.saturating_add(page_size).min(slots.len());
@@ -1123,7 +1188,7 @@ impl FixedArrayPlacement {
             total_length: _,
         } = plan;
         let filtered = matches!(
-            geometry.encoding.client(),
+            geometry.encoding().client(),
             ArrayClient::FilteredChunks { .. }
         );
         match chunk {
@@ -1443,13 +1508,10 @@ mod tests {
             33,
         )
         .unwrap();
-        let block = FixedArrayDataBlockRef::new(
-            BaseAddress::ZERO,
-            PhysicalAddress::new(0),
-            PhysicalAddress::new(28),
-            geometry,
-        )
-        .unwrap();
+        let block = BlockStorage::new(geometry, Some(PhysicalAddress::new(28)))
+            .unwrap()
+            .at(BaseAddress::ZERO, PhysicalAddress::new(0))
+            .unwrap();
         let mut prefix = Vec::from(DATA_BLOCK_SIGNATURE);
         prefix.extend_from_slice(&[VERSION, chunk_record::ArrayClient::Chunks.id()]);
         prefix.extend_from_slice(&0u64.to_le_bytes());
@@ -1524,7 +1586,11 @@ mod tests {
             .into_iter()
             .map(|page| {
                 let range = page.parse_range();
-                (range.start().get(), range.length(), page.first_slot)
+                (
+                    range.start().get(),
+                    range.length(),
+                    page.slots().unwrap().start,
+                )
             })
             .collect();
         let start = prefix.end().get();
