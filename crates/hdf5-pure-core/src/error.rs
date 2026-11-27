@@ -1647,6 +1647,13 @@ pub enum FormatError {
     ///
     /// Contains the raw permutation field.
     UnsupportedCompoundV1Permutation(u32),
+    /// A version 1 dataspace stores a permutation index different from its dimension number.
+    UnsupportedDataspacePermutation {
+        /// The first zero-based dimension whose stored index differs from its position.
+        dimension: u8,
+        /// The permutation index stored for that dimension.
+        index: u64,
+    },
     /// A dataset's element bytes live in files outside this one
     /// (`H5Pset_external`, the External Data Files header message). Its layout
     /// message is contiguous with an undefined data address, the same encoding
@@ -2264,6 +2271,10 @@ impl fmt::Display for FormatError {
             Self::InvalidCompoundV1ReservedByte { offset, byte } => write!(
                 f,
                 "version 1 compound member has reserved byte {byte:#04x} at byte {offset}"
+            ),
+            Self::UnsupportedDataspacePermutation { dimension, index } => write!(
+                f,
+                "unsupported dataspace permutation index {index} for dimension {dimension}"
             ),
             Self::UnsupportedCompoundV1Permutation(permutation) => write!(
                 f,
