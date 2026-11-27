@@ -4,9 +4,10 @@ use hdf5_pure_core::{
 };
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
-    ChunkIndexInfo, ChunkedLayoutFlags, DataLayout, Dataspace, DataspaceType, DatatypeLocation,
-    EA_CLIENT_ID_UNFILTERED, ExtensibleArrayBlockWriter, ExtensibleArrayCreationParameters,
-    FilteredSingleChunk, FormatWidths, FractalHeapHeader, LayoutVersion, LinkMessage, LinkTarget,
+    ChunkIndexInfo, ChunkedLayoutFlags, DataLayout, Dataspace, DataspaceRecord, DataspaceType,
+    DatatypeLocation, EA_CLIENT_ID_UNFILTERED, ExtensibleArrayBlockWriter,
+    ExtensibleArrayCreationParameters, FilteredSingleChunk, FormatWidths, FractalHeapHeader,
+    LayoutVersion, LinkMessage, LinkTarget,
 };
 use rstest::rstest;
 use test_util::bytes::push_uint;
@@ -198,6 +199,45 @@ fn dataspace_dimensions_preserve_the_selected_length_width(
     .build();
     assert_eq!(dataspace.prepare(width).unwrap().to_bytes(), expected);
     assert_eq!(Dataspace::parse(&expected, width).unwrap(), dataspace);
+}
+
+#[rstest]
+fn resizing_a_version_one_dataspace_preserves_other_fields_and_the_record_tail(
+    #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] width: LengthWidth,
+) {
+    let size = usize::from(width.get());
+    let description = |first| {
+        let mut body = dataspace::v1_with_widths(
+            2,
+            dataspace::Flags(dataspace::Flags::MAX_DIMS.0 | dataspace::Flags::PERMUTATION.0),
+            &[first, 3],
+            Some(&[7, 8]),
+            Widths::new(8, size),
+        );
+        body[3..8].copy_from_slice(&[1, 2, 3, 4, 5]);
+        body.extend_from_slice(&0_u64.to_le_bytes()[..size]);
+        body.extend_from_slice(&1_u64.to_le_bytes()[..size]);
+        body.extend_from_slice(&[0xaa, 0, 0xbb]);
+        body
+    };
+    let body = description(2);
+    let record = DataspaceRecord::parse(&body, width).unwrap();
+    assert_eq!(record.tail(), &[0xaa, 0, 0xbb]);
+    assert_eq!(record.with_first_dimension(6).unwrap(), description(6));
+}
+
+#[test]
+fn a_dataspace_record_without_maxima_cannot_grow() {
+    let body = dataspace::VersionTwo::simple(Widths::EIGHT, &[2], None).build();
+    let record = DataspaceRecord::parse(&body, LengthWidth::Eight).unwrap();
+    assert_eq!(
+        record.with_first_dimension(3).unwrap_err(),
+        FormatError::DataspaceMaximumTooSmall {
+            dimension: 0,
+            current: 3,
+            maximum: 2
+        },
+    );
 }
 
 #[rstest]

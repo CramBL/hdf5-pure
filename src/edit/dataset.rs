@@ -12,6 +12,7 @@ use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
+use hdf5_pure_format::__private::DataspaceRecord;
 use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
@@ -555,7 +556,8 @@ impl WriteEngine {
         ))?;
 
         let decoded = DecodedDatatype::from_record(&region[dt_b..dt_e])?;
-        let disk_ds = Dataspace::from_record(&region[ds_b..ds_e], widths.lengths)?;
+        let record = DataspaceRecord::parse(&region[ds_b..ds_e], widths.lengths)?;
+        let disk_ds = record.shape();
         let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
 
         let DataLayout::Chunked { index, flags, .. } = &dl else {
@@ -586,7 +588,7 @@ impl WriteEngine {
             element_size,
             raw_size,
             ..
-        } = ChunkedGeometry::with_offset_width(widths.offsets, disk_dt, &disk_ds, &dl)?;
+        } = ChunkedGeometry::with_offset_width(widths.offsets, disk_dt, disk_ds, &dl)?;
         let chunk_elems = spatial[0];
         if ab.raw().len() % element_size != 0 {
             return Err(Error::AppendUnsupported(
@@ -673,7 +675,7 @@ impl WriteEngine {
             ));
         }
 
-        let infos = chunked_read::enumerate_chunks_from_source(&indexes, &dl, &disk_ds, widths)?;
+        let infos = chunked_read::enumerate_chunks_from_source(&indexes, &dl, disk_ds, widths)?;
         let grid = chunked_read::plan_dense_grid(infos, disk_ds.dimensions(), spatial).ok_or(
             Error::AppendUnsupported(
                 "dataset has a sparse or inconsistent chunk grid; cannot append",
@@ -747,15 +749,11 @@ impl WriteEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut grown = disk_ds.clone();
-        grown.set_first_dimension(new_dim0)?;
-        let new_dataspace_body = grown.prepare(widths.lengths)?.to_bytes();
-
         let (kind, slot_of_chunk, index_slots) = chunked_write::plan_index_slots(
             widths,
-            grown.dimensions(),
+            &[new_dim0],
             spatial,
-            grown.max_dimensions(),
+            disk_ds.max_dimensions(),
             raw_size,
             has_filters,
             StorageAllocation::Allocated,
@@ -769,6 +767,8 @@ impl WriteEngine {
             .iter()
             .map(|&dim| dim.narrow::<u32>())
             .collect::<Result<_, _>>()?;
+
+        let new_dataspace_body = record.with_first_dimension(new_dim0)?;
 
         Ok(MovingWrite::AppendedChunks {
             region,

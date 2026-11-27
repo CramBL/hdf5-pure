@@ -48,6 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::append` replacing a version 1 dataspace with version 2 and dropping trailing
+  record bytes when relocating a chunked dataset ([#1432](https://github.com/CramBL/hdf5-pure/pull/1432)).
 - Fixed `Dataset::shape` and related reads accepting a rank inconsistent with the dataspace
   kind, an unlimited current dimension, or a maximum smaller than its current dimension ([#1432](https://github.com/CramBL/hdf5-pure/pull/1432)).
 - Fixed `Dataset::shape` and related reads ignoring version 1 dataspace permutation indices,

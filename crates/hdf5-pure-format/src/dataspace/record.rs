@@ -1,5 +1,7 @@
+use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::bytes;
 use crate::codec::DecodePrefix;
 use crate::error::FormatError;
 use crate::width::LengthWidth;
@@ -14,6 +16,7 @@ pub struct DataspaceRecord<'a> {
     consumed: usize,
     dimension_fields: Range<usize>,
     shape: Dataspace,
+    width: LengthWidth,
 }
 
 impl<'a> DataspaceRecord<'a> {
@@ -50,9 +53,45 @@ impl<'a> DataspaceRecord<'a> {
             consumed,
             dimension_fields: stored.dimension_range(),
             shape: stored.into_dataspace()?,
+            width,
         })
     }
 
+    /// Copies the record body with its first dimension set to `current`.
+    ///
+    /// Preserves every byte outside the first dimension field, including the record tail.
+    /// If the dataspace omits maximum dimensions, its original dimensions are the maxima.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataspaceMaximumTooSmall`] if `current` exceeds the maximum,
+    /// or [`FormatError::LengthTooLarge`] if it exceeds the file's length width.
+    /// Propagates the dimension errors of [`Dataspace::set_first_dimension`].
+    pub fn with_first_dimension(self, current: u64) -> Result<Vec<u8>, FormatError> {
+        let Self {
+            body,
+            consumed: _,
+            dimension_fields,
+            mut shape,
+            width,
+        } = self;
+        if shape.max_dimensions().is_none()
+            && let Some(&maximum) = shape.dimensions().first()
+            && current > maximum
+        {
+            return Err(FormatError::DataspaceMaximumTooSmall {
+                dimension: 0,
+                current,
+                maximum,
+            });
+        }
+        shape.set_first_dimension(current)?;
+        let mut updated = body.to_vec();
+        bytes::write_length_at(&mut updated, dimension_fields.start, current, width)?;
+        Ok(updated)
+    }
+
+    /// Returns the owned shape.
     pub fn into_shape(self) -> Dataspace {
         self.shape
     }
