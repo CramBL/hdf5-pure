@@ -58,7 +58,6 @@ mod message_flags;
 mod message_type;
 mod metadata_source;
 mod object_header;
-mod object_header_writer;
 mod shared_message;
 mod signature;
 mod sohm;

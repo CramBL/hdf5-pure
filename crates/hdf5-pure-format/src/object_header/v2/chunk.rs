@@ -18,7 +18,6 @@ use crate::message_type::MessageType;
 use crate::object_header::ObjectHeaderChunk;
 use crate::object_header::context::ParseContext;
 use crate::object_header::v2;
-use crate::object_header::v2::CHECKSUM_LEN;
 use crate::object_header::v2::MessageRecord;
 use crate::object_header::v2::MessageRecordLayout;
 use crate::object_header::v2::ObjectHeaderContinuation;
@@ -203,3 +202,6 @@ fn checksummed(image: &[u8]) -> Result<&[u8], FormatError> {
             available: image.len(),
         })
 }
+
+/// The length in bytes of the checksum that ends a chunk.
+pub(in crate::object_header) const CHECKSUM_LEN: usize = 4;
