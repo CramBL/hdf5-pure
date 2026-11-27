@@ -122,7 +122,7 @@ impl<'a> ObjectHeaderAllocation<'a> {
     /// buffer at its returned stored address.
     pub fn encode_chunks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, Vec<u8>)> + '_ {
         self.chunks.iter().enumerate().map(|(index, chunk)| {
-            let mut out = Vec::with_capacity(chunk.len);
+            let mut out = Vec::with_capacity(chunk.len());
             self.encode_chunk(index, chunk, &mut out);
             (chunk.address, out)
         })
@@ -135,52 +135,47 @@ impl<'a> ObjectHeaderAllocation<'a> {
     pub fn chunks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, u64)> + '_ {
         self.chunks
             .iter()
-            .map(|chunk| (chunk.address, chunk.len.to_u64()))
+            .map(|chunk| (chunk.address, chunk.len().to_u64()))
     }
 
     /// Appends one complete chunk encoding and its checksum to `out`.
     fn encode_chunk(&self, index: usize, chunk: &Chunk, out: &mut Vec<u8>) {
         let start = out.len();
         if index == 0 {
-            let fixed = OHDR_SIGNATURE.len()
-                + 2
-                + self.geometry.prefix.optional_len()
-                + usize::from(self.root_width.get())
-                + CHECKSUM_LEN;
+            let fixed = self.geometry.root_fixed(self.root_width);
             self.geometry
-                .prefix
-                .write_prefix(out, self.root_width, chunk.len - fixed);
-            for record in &self.geometry.records {
-                out.extend_from_slice(&self.geometry.messages[record.clone()]);
-            }
+                .prefix()
+                .write_prefix(out, self.root_width, chunk.len() - fixed);
+            self.geometry.append_records(out);
         } else {
             out.extend_from_slice(&OCHK_SIGNATURE);
         }
-        let trailing_gap = chunk.next.is_some() && matches!(chunk.padding, ChunkPadding::Gap(_));
+        let trailing_gap =
+            chunk.next.is_some() && matches!(chunk.space.padding(), ChunkPadding::Gap(_));
         if !trailing_gap {
-            self.write_padding(out, chunk.padding);
+            self.write_padding(out, chunk.space.padding());
         }
         if let Some((address, len)) = chunk.next {
             RecordPrefix::from_fields(
-                self.geometry.prefix.layout,
+                self.geometry.prefix().layout,
                 const { RecordPrefix::type_byte(MessageType::OBJECT_HEADER_CONTINUATION) },
                 MessageFlags::NONE,
                 0,
-                u16::from(self.geometry.widths.offsets.get())
-                    + u16::from(self.geometry.widths.lengths.get()),
+                u16::from(self.geometry.widths().offsets.get())
+                    + u16::from(self.geometry.widths().lengths.get()),
             )
             .append(out);
-            bytes::write_offset(out, address.get(), self.geometry.widths.offsets);
-            bytes::write_length(out, len.to_u64(), self.geometry.widths.lengths);
+            bytes::write_offset(out, address.get(), self.geometry.widths().offsets);
+            bytes::write_length(out, len.to_u64(), self.geometry.widths().lengths);
         }
         if trailing_gap {
-            self.write_padding(out, chunk.padding);
+            self.write_padding(out, chunk.space.padding());
         }
         let checksum = checksum::jenkins_lookup3(&out[start..]);
         out.extend_from_slice(&checksum.to_le_bytes());
         assert_eq!(
             out.len() - start,
-            chunk.len,
+            chunk.len(),
             "a planned header chunk has its exact owned length"
         );
     }
@@ -192,7 +187,7 @@ impl<'a> ObjectHeaderAllocation<'a> {
             ChunkPadding::Gap(len) => len,
             ChunkPadding::Nil(body) => {
                 RecordPrefix::from_fields(
-                    self.geometry.prefix.layout,
+                    self.geometry.prefix().layout,
                     const { RecordPrefix::type_byte(MessageType::NIL) },
                     MessageFlags::NONE,
                     0,
@@ -260,6 +255,20 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         })
     }
 
+    fn append_records(&self, out: &mut Vec<u8>) {
+        for record in &self.records {
+            out.extend_from_slice(&self.messages[record.clone()]);
+        }
+    }
+
+    fn prefix(&self) -> ObjectHeaderPrefix {
+        self.prefix
+    }
+
+    fn records_len(&self) -> usize {
+        self.records_len
+    }
+
     /// Plans contiguous chunks that cover the complete supplied allocation.
     ///
     /// The caller establishes ownership and availability of the allocation and passes a stored,
@@ -280,7 +289,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         address: StoredAddress,
         allocation_len: u64,
     ) -> Result<ObjectHeaderAllocation<'a>, FormatError> {
-        let allocation_len = Self::allocation_len(self.widths, address, allocation_len)?;
+        let allocation_len = Self::allocation_len(self.widths(), address, allocation_len)?;
         self.plan_allocation(address, allocation_len)
     }
 
@@ -338,7 +347,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         allocation_len: u64,
         lengths: &[u64],
     ) -> Result<ObjectHeaderAllocation<'a>, FormatError> {
-        let allocation_len = Self::allocation_len(self.widths, address, allocation_len)?;
+        let allocation_len = Self::allocation_len(self.widths(), address, allocation_len)?;
         if lengths.len() > worklist::MAX_CONTINUATIONS {
             return Err(FormatError::NestingDepthExceeded);
         }
@@ -443,7 +452,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         let mut chunks = Vec::with_capacity(allocations.len());
         let mut allocation_len = 0_usize;
         while let Some(range) = allocations.next() {
-            let len = Self::allocation_len(self.widths, range.start(), range.length())?;
+            let len = Self::allocation_len(self.widths(), range.start(), range.length())?;
             allocation_len = allocation_len
                 .checked_add(len)
                 .filter(|&len| len <= isize::MAX as usize)
@@ -470,7 +479,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
             let second = pair[1];
             if chunks[first]
                 .address
-                .checked_add(chunks[first].len.to_u64())?
+                .checked_add(chunks[first].len().to_u64())?
                 > chunks[second].address
             {
                 return Err(FormatError::ObjectHeaderChunkOverlap { first, second });
@@ -527,11 +536,11 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         address: StoredAddress,
         allocation_len: u64,
     ) -> Result<Vec<AddressRange<StoredAddress>>, FormatError> {
-        let allocation_len = Self::allocation_len(self.widths, address, allocation_len)?;
+        let allocation_len = Self::allocation_len(self.widths(), address, allocation_len)?;
         let (_, chunks) = self.plan_chunks(address, allocation_len)?;
         chunks
             .into_iter()
-            .map(|chunk| AddressRange::new(chunk.address, chunk.len.to_u64()))
+            .map(|chunk| AddressRange::new(chunk.address, chunk.len().to_u64()))
             .collect()
     }
 
@@ -586,25 +595,25 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         address: StoredAddress,
         allocation_len: usize,
     ) -> Result<(UintWidth, Vec<Chunk>), FormatError> {
-        let prefix = self.prefix;
-        let widths = self.widths;
-        let records_len = self.records_len;
+        let prefix = self.prefix();
+        let widths = self.widths();
+        let records_len = self.records_len();
         for root_width in [
             UintWidth::One,
             UintWidth::Two,
             UintWidth::Four,
             UintWidth::Eight,
         ] {
-            let fixed = OHDR_SIGNATURE.len()
-                + 2
-                + prefix.optional_len()
-                + usize::from(root_width.get())
-                + CHECKSUM_LEN;
+            let fixed = self.root_fixed(root_width);
             let Some(padding) = allocation_len.checked_sub(fixed + records_len) else {
                 continue;
             };
-            let first = Chunk::new(prefix, widths, address, fixed + records_len, padding, true)?;
-            let root_body = first.len - fixed;
+            let first = Chunk {
+                address,
+                space: ChunkSpace::new(prefix, widths, fixed + records_len, padding, true)?,
+                next: None,
+            };
+            let root_body = first.len() - fixed;
             if (root_body > 0 && root_body < prefix.layout.prefix_len())
                 || UintWidth::smallest_for_len(root_body).get() > root_width.get()
             {
@@ -612,20 +621,23 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
             }
             let mut chunks = Vec::new();
             let mut chunk = first;
-            while let Some(remaining) = chunk.remaining {
+            while let Some(remaining) = chunk.space.remaining() {
                 if chunks.len() + 1 >= worklist::MAX_CONTINUATIONS {
                     return Err(FormatError::NestingDepthExceeded);
                 }
-                let next_address = chunk.address.checked_add(chunk.len.to_u64())?;
-                let next = Chunk::new(
-                    prefix,
-                    widths,
-                    next_address,
-                    OCHK_SIGNATURE.len() + CHECKSUM_LEN,
-                    remaining - OCHK_SIGNATURE.len() - CHECKSUM_LEN,
-                    false,
-                )?;
-                chunk.next = Some((next.address, next.len));
+                let next_address = chunk.address.checked_add(chunk.len().to_u64())?;
+                let next = Chunk {
+                    address: next_address,
+                    next: None,
+                    space: ChunkSpace::new(
+                        prefix,
+                        widths,
+                        OCHK_SIGNATURE.len() + CHECKSUM_LEN,
+                        remaining - OCHK_SIGNATURE.len() - CHECKSUM_LEN,
+                        false,
+                    )?,
+                };
+                chunk.next = Some((next.address, next.len()));
                 chunks.push(chunk);
                 chunk = next;
             }
@@ -659,7 +671,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
             return Err(FormatError::InvalidObjectHeaderChunkLength { index, length });
         }
         let fixed = if index == 0 {
-            self.root_fixed(root_width) + self.records_len
+            self.root_fixed(root_width) + self.records_len()
         } else {
             OCHK_SIGNATURE.len() + CHECKSUM_LEN
         };
@@ -673,9 +685,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
             };
         Ok(Chunk {
             address,
-            len,
-            padding: ChunkPadding::new(self.prefix.layout, padding)?,
-            remaining: None,
+            space: ChunkSpace::with_padding(self.prefix().layout, len, padding)?,
             next,
         })
     }
@@ -767,19 +777,50 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
 #[derive(Debug)]
 struct Chunk {
     address: StoredAddress,
-    len: usize,
-    padding: ChunkPadding,
-    /// The complete length reserved for subsequent chunks, in bytes.
-    remaining: Option<usize>,
+    space: ChunkSpace,
     /// The address and complete length of the next chunk, once planned.
     next: Option<(StoredAddress, usize)>,
 }
 
 impl Chunk {
+    fn len(&self) -> usize {
+        self.space.len()
+    }
+}
+
+#[derive(Debug)]
+struct ChunkSpace {
+    len: usize,
+    padding: ChunkPadding,
+    remaining: Option<usize>,
+}
+
+impl ChunkSpace {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn padding(&self) -> ChunkPadding {
+        self.padding
+    }
+    fn remaining(&self) -> Option<usize> {
+        self.remaining
+    }
+
+    fn with_padding(
+        layout: MessageRecordLayout,
+        len: usize,
+        padding: usize,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            len,
+            padding: ChunkPadding::new(layout, padding)?,
+            remaining: None,
+        })
+    }
+
     fn new(
         prefix: ObjectHeaderPrefix,
         widths: FormatWidths,
-        address: StoredAddress,
         fixed: usize,
         available: usize,
         root: bool,
@@ -794,11 +835,9 @@ impl Chunk {
         };
         if available <= maximum && fixed + available <= limit {
             return Ok(Self {
-                address,
                 len: fixed + available,
                 padding: ChunkPadding::new(prefix.layout, available)?,
                 remaining: None,
-                next: None,
             });
         }
         let continuation = prefix.layout.prefix_len()
@@ -811,11 +850,9 @@ impl Chunk {
         let len = fixed + padding + continuation;
         let remaining = available - padding - continuation;
         Ok(Self {
-            address,
             len,
             padding: ChunkPadding::new(prefix.layout, padding)?,
             remaining: Some(remaining),
-            next: None,
         })
     }
 }
