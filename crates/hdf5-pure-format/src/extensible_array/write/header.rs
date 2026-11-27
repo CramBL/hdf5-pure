@@ -102,17 +102,17 @@ impl ExtensibleArrayHeaderWithoutIndexBlock {
 impl ExtensibleArrayPlacement<'_> {
     /// Prepares the header using the placed index address and a borrow of the checked statistics.
     pub(super) fn header_encoding(&self) -> HeaderEncoding<'_> {
-        let plan = self.plan;
+        let plan = self.plan();
         HeaderEncoding {
             fields: HeaderFields {
-                elements: plan.layout.encoding(),
-                creation: plan.creation,
-                lengths: plan.widths.lengths,
+                elements: plan.layout().encoding(),
+                creation: plan.creation(),
+                lengths: plan.widths().lengths,
             },
             // Planning checks the statistics and placement checks the index address at these widths.
             index_block: Some(AllocatedIndexBlock {
-                stats: &plan.stats,
-                address: self.ranges[INDEX_BLOCK].start(),
+                stats: plan.statistics(),
+                address: self.ranges()[INDEX_BLOCK].start(),
             }),
         }
     }
