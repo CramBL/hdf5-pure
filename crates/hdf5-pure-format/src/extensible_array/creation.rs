@@ -316,6 +316,20 @@ impl BlockOffsetWidth {
     }
 }
 
+/// Returns the maximum logical span in slots of the canonical Extensible Array geometry.
+///
+/// The span is 8,589,934,580 slots, with 4 in the index block, 240 in six direct data blocks,
+/// and 8,589,934,336 in 25 super blocks. Each allocated data block's offset must also fit its
+/// four-byte field.
+pub fn extensible_array_capacity() -> u64 {
+    // Each super block holds twice as many slots as the previous one. The sum starts at
+    // `EA_MIN_DBLK_NELMTS` and includes a final block of `2^EA_MAX_NELMTS_BITS` slots.
+    const {
+        assert!((EA_MAX_NELMTS_BITS as u32) < u64::BITS - 1);
+        (1u64 << (EA_MAX_NELMTS_BITS + 1)) - EA_MIN_DBLK_NELMTS as u64 + EA_IDX_BLK_ELMTS as u64
+    }
+}
+
 // The creation parameters the writer stores and `extensible_array_capacity` derives the capacity
 // from, the C library's defaults (`H5Dpkg.h`, HDF5 2.2.0).
 
@@ -341,6 +355,15 @@ const _: () = {
     assert!(MAX_INDEX_BITS as u32 == u64::BITS);
     assert!(MAX_PAGE_BITS as u32 + 1 == u64::BITS);
 };
+
+/// The client ID of an array that indexes unfiltered chunks, whose elements each store a chunk
+/// address alone.
+///
+/// The ID is defined in the Client ID table of "The Extensible Array Index" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+pub const EA_CLIENT_ID_UNFILTERED: u8 = 0;
 
 #[cfg(test)]
 #[path = "tests/creation.rs"]

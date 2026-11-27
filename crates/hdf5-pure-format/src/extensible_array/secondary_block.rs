@@ -96,7 +96,7 @@ impl ExtensibleArraySuperBlockRef {
         checksum::verify_trailing(bytes)?;
         let (bitmap, data_blocks) = block::body(bytes, cursor.position())?
             .split_at_checked(owner.layout().bitmap_len(super_block)?.to_usize()?)
-            .ok_or_else(|| super::internal("super block ends inside its page-init bitmap"))?;
+            .ok_or_else(|| block::internal("super block ends inside its page-init bitmap"))?;
         Ok(ExtensibleArraySuperBlock {
             owner,
             super_block,

@@ -1,9 +1,10 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use super::block::{BLOCK_BYTE_FIELDS, CHECKSUM_LEN};
 use super::creation::{ExtensibleArrayCreationParameters, PageElementCount};
 use super::header::ExtensibleArrayHeader;
-use super::{BLOCK_BYTE_FIELDS, CHECKSUM_LEN, INDEX_BLOCK_SIGNATURE};
+use super::index_block::INDEX_BLOCK_SIGNATURE;
 use crate::chunk_record::ElementEncoding;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -101,7 +102,7 @@ impl Layout {
         // `2^index - 1`.
         let before = u64::MAX.checked_shr(u64::BITS - index).unwrap_or(0);
         Ok(SuperBlock {
-            offset: super::product(min_elements, before)?,
+            offset: product(min_elements, before)?,
             blocks: 1 << (index / 2),
             block_elements: min_elements << index.div_ceil(2),
         })
@@ -120,26 +121,26 @@ impl Layout {
 
     /// Returns the slot of the first element of the block at `offset`.
     pub(super) fn first_slot(self, offset: u64) -> Result<u64, FormatError> {
-        super::sum([u64::from(self.inline_elements), offset])
+        sum([u64::from(self.inline_elements), offset])
     }
 
     pub(super) fn slots(self, offset: u64, elements: u64) -> Result<Range<u64>, FormatError> {
         let start = self.first_slot(offset)?;
-        Ok(start..super::sum([start, elements])?)
+        Ok(start..sum([start, elements])?)
     }
 
     pub(super) fn elements_len(self, elements: u64) -> Result<u64, FormatError> {
-        super::product(elements, u64::from(self.encoding.stride().get()))
+        product(elements, u64::from(self.encoding.stride().get()))
     }
 
     pub(super) fn addresses_len(self, addresses: u64) -> Result<u64, FormatError> {
-        super::product(addresses, u64::from(self.encoding.offsets().get()))
+        product(addresses, u64::from(self.encoding.offsets().get()))
     }
 
     pub(super) fn index_block_len(self) -> Result<u64, FormatError> {
         // `ExtensibleArrayCreationParameters::from_bit_geometry` checks that `first_super_block`
         // is at most `super_blocks`.
-        super::sum([
+        sum([
             self.prefix_len(),
             self.elements_len(u64::from(self.inline_elements))?,
             self.addresses_len(self.direct_data_blocks())?,
@@ -153,12 +154,12 @@ impl Layout {
     pub(super) fn bitmap_len(self, super_block: SuperBlock) -> Result<u64, FormatError> {
         self.pages(super_block.block_elements)
             .map_or(Ok(0), |pages| {
-                super::product(super_block.blocks, pages.div_ceil(8))
+                product(super_block.blocks, pages.div_ceil(8))
             })
     }
 
     pub(super) fn super_block_len(self, super_block: SuperBlock) -> Result<u64, FormatError> {
-        super::sum([
+        sum([
             self.prefix_len(),
             u64::from(self.block_offset_len),
             self.bitmap_len(super_block)?,
@@ -169,11 +170,8 @@ impl Layout {
 
     pub(super) fn data_block_len(self, block: DataBlock) -> Result<u64, FormatError> {
         match self.pages(block.elements) {
-            Some(pages) => super::sum([
-                self.pages_offset(),
-                super::product(pages, self.page_len()?)?,
-            ]),
-            None => super::sum([
+            Some(pages) => sum([self.pages_offset(), product(pages, self.page_len()?)?]),
+            None => sum([
                 self.prefix_len(),
                 u64::from(self.block_offset_len),
                 self.elements_len(block.elements)?,
@@ -187,7 +185,7 @@ impl Layout {
     }
 
     pub(super) fn page_len(self) -> Result<u64, FormatError> {
-        super::sum([
+        sum([
             self.elements_len(self.page_nelmts.get())?,
             CHECKSUM_LEN.to_u64(),
         ])
@@ -233,15 +231,12 @@ impl SuperBlock {
     ///
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range exceeds [`u64::MAX`].
     pub(super) fn slots(self, layout: Layout) -> Result<Range<u64>, FormatError> {
-        layout.slots(
-            self.offset,
-            super::product(self.blocks, self.block_elements)?,
-        )
+        layout.slots(self.offset, product(self.blocks, self.block_elements)?)
     }
 
     pub(super) fn data_block(self, local: u64) -> Result<DataBlock, FormatError> {
         Ok(DataBlock {
-            offset: super::sum([self.offset, super::product(local, self.block_elements)?])?,
+            offset: sum([self.offset, product(local, self.block_elements)?])?,
             elements: self.block_elements,
             libhdf5_offset: None,
         })
@@ -250,10 +245,7 @@ impl SuperBlock {
     // `ordinal` counts the data blocks the index block holds the addresses of, from the first.
     fn direct_data_block(self, local: u64, ordinal: u64) -> Result<DataBlock, FormatError> {
         Ok(DataBlock {
-            libhdf5_offset: Some(super::sum([
-                self.offset,
-                super::product(ordinal, self.block_elements)?,
-            ])?),
+            libhdf5_offset: Some(sum([self.offset, product(ordinal, self.block_elements)?])?),
             ..self.data_block(local)?
         })
     }
@@ -449,6 +441,18 @@ impl SuperBlockGeometry {
     pub const fn bitmap_size(self) -> u64 {
         self.ndblks * self.blocks.npages().div_ceil(8)
     }
+}
+
+pub(super) fn product(a: u64, b: u64) -> Result<u64, FormatError> {
+    a.checked_mul(b)
+        .ok_or(FormatError::InvalidExtensibleArrayGeometry)
+}
+
+pub(super) fn sum<const N: usize>(terms: [u64; N]) -> Result<u64, FormatError> {
+    terms
+        .into_iter()
+        .try_fold(0, u64::checked_add)
+        .ok_or(FormatError::InvalidExtensibleArrayGeometry)
 }
 
 #[cfg(test)]

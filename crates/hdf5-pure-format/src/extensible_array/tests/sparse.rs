@@ -9,9 +9,10 @@ use super::support::WIDTHS;
 use crate::address::{BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt};
 use crate::chunk_record::{ChunkRecord, IndexSlots};
 use crate::error::FormatError;
+use crate::extensible_array::header::HEADER_SIGNATURE;
 use crate::extensible_array::{
     self, ExtensibleArrayDataBlock, ExtensibleArrayDataBlockRef, ExtensibleArrayHeaderLocator,
-    ExtensibleArrayPageRef, ExtensibleArraySuperBlockRef, HEADER_SIGNATURE,
+    ExtensibleArrayPageRef, ExtensibleArraySuperBlockRef,
 };
 use crate::width::{LengthWidth, OffsetWidth};
 

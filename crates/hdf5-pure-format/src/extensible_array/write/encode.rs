@@ -2,12 +2,9 @@
 
 use alloc::vec::Vec;
 
-use super::BlockLocation;
-use super::ExtensibleArrayBlock;
-use super::ExtensibleArrayPlacement;
-
-use super::HEADER_BLOCK;
 use super::block::{self, Addresses, Bitmap, ExtensibleArrayBlockWriter};
+use super::plan::{BlockLocation, HEADER_BLOCK, INDEX_BLOCK};
+use super::{ExtensibleArrayBlock, ExtensibleArrayPlacement};
 use crate::address::StoredAddress;
 use crate::bytes::UnexpectedEof;
 use crate::chunk_record::IndexSlots;
@@ -132,9 +129,7 @@ impl<'a> ExtensibleArrayEncoding<'a> {
         for (descriptor, block) in blocks.iter().enumerate() {
             let (parent, slot) = match block.location() {
                 BlockLocation::Header | BlockLocation::Index { .. } => continue,
-                BlockLocation::Secondary(block) => {
-                    (super::INDEX_BLOCK, direct_blocks + block.pointer())
-                }
+                BlockLocation::Secondary(block) => (INDEX_BLOCK, direct_blocks + block.pointer()),
                 BlockLocation::Data(block) => block.parent(),
             };
             pointers.push(Pointer {

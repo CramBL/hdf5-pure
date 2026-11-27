@@ -56,14 +56,14 @@ impl ExtensibleArrayIndexBlockRef {
                     .elements_len(u64::from(layout.inline_elements()))?
                     .to_usize()?,
             )
-            .ok_or_else(|| super::internal("index block ends inside its elements"))?;
+            .ok_or_else(|| block::internal("index block ends inside its elements"))?;
         let (data_blocks, super_blocks) = addresses
             .split_at_checked(
                 layout
                     .addresses_len(layout.direct_data_blocks())?
                     .to_usize()?,
             )
-            .ok_or_else(|| super::internal("index block ends inside its data block addresses"))?;
+            .ok_or_else(|| block::internal("index block ends inside its data block addresses"))?;
         Ok(ExtensibleArrayIndexBlock {
             owner,
             elements,

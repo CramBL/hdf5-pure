@@ -216,9 +216,9 @@ impl ExtensibleArrayStats {
         }
         let length = layout.data_block_len(block)?;
         let slots = block.slots(layout)?;
-        self.ndata_blks = super::sum([self.ndata_blks, 1])?;
-        self.data_blk_size = super::sum([self.data_blk_size, length])?;
-        self.nelmts = super::sum([self.nelmts, block.elements()])?;
+        self.ndata_blks = super::geometry::sum([self.ndata_blks, 1])?;
+        self.data_blk_size = super::geometry::sum([self.data_blk_size, length])?;
+        self.nelmts = super::geometry::sum([self.nelmts, block.elements()])?;
         Ok((length, slots))
     }
 
@@ -235,8 +235,8 @@ impl ExtensibleArrayStats {
     ) -> Result<(u64, Range<u64>), FormatError> {
         let length = layout.super_block_len(block)?;
         let slots = block.slots(layout)?;
-        self.nsuper_blks = super::sum([self.nsuper_blks, 1])?;
-        self.super_blk_size = super::sum([self.super_blk_size, length])?;
+        self.nsuper_blks = super::geometry::sum([self.nsuper_blks, 1])?;
+        self.super_blk_size = super::geometry::sum([self.super_blk_size, length])?;
         Ok((length, slots))
     }
 
@@ -260,7 +260,7 @@ impl ExtensibleArrayStats {
         layout: Layout,
         widths: FormatWidths,
     ) -> Result<u64, FormatError> {
-        super::sum([
+        super::geometry::sum([
             super::header::header_len(widths),
             layout.index_block_len()?,
             self.super_blk_size,

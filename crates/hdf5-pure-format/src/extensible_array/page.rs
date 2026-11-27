@@ -61,10 +61,13 @@ impl<'a> ExtensibleArrayPages<'a> {
                 Ok(ExtensibleArrayPageRef {
                     owner,
                     range: FileRange::new(
-                        first_page.checked_add(super::product(page, page_len)?)?,
+                        first_page.checked_add(super::geometry::product(page, page_len)?)?,
                         page_len,
                     )?,
-                    first_slot: super::sum([first_slot, super::product(page, page_elements)?])?,
+                    first_slot: super::geometry::sum([
+                        first_slot,
+                        super::geometry::product(page, page_elements)?,
+                    ])?,
                 })
             })
     }
@@ -122,7 +125,7 @@ impl ExtensibleArrayPageRef {
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
         let elements = self.owner.layout().page_nelmts().get();
-        let end = super::sum([self.first_slot, elements])?;
+        let end = super::geometry::sum([self.first_slot, elements])?;
         Ok(self.first_slot..end)
     }
 }
@@ -142,7 +145,7 @@ impl<'a> PageBitmap<'a> {
     pub(super) fn for_block(bitmap: &'a [u8], local: u64, pages: u64) -> Result<Self, FormatError> {
         Ok(Self {
             bitmap,
-            first_page: super::product(local, pages)?,
+            first_page: super::geometry::product(local, pages)?,
             pages,
         })
     }
