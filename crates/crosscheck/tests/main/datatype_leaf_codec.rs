@@ -79,7 +79,7 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     if !latest {
         assert_eq!(version, if matches!(leaf, Leaf::Vax) { 3 } else { 1 });
     }
-    let (message, consumed) = DatatypeMessage::parse(body).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(body).unwrap();
     assert_eq!(message.version().get(), version);
     assert_eq!(message.properties(), &leaf.properties());
     let canonical = message.serialize(OffsetWidth::Eight).unwrap();
@@ -124,7 +124,7 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     });
     let decoded = encode(&reference);
     assert_eq!(
-        DatatypeMessage::parse(&decoded[NATIVE_PREFIX_LEN..])
+        DatatypeMessage::parse_prefix(&decoded[NATIVE_PREFIX_LEN..])
             .unwrap()
             .0
             .to_datatype()

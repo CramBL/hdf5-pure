@@ -28,7 +28,7 @@ fn datatype_array_complex_codecs_preserve_array_properties(
     let expected = DatatypeMessage::new(
         version,
         DatatypeProperties::Array {
-            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap().0),
+            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap()),
             dimensions: vec![2, 3],
         },
     )
@@ -53,7 +53,7 @@ fn datatype_array_complex_codecs_preserve_nested_versions(
     let expected_array = DatatypeMessage::new(
         DatatypeVersion::try_from(version).unwrap(),
         DatatypeProperties::Array {
-            base_type: Box::new(DatatypeMessage::parse(&leaf).unwrap().0),
+            base_type: Box::new(DatatypeMessage::parse(&leaf).unwrap()),
             dimensions: vec![2],
         },
     )
@@ -76,7 +76,7 @@ fn datatype_array_complex_codecs_derive_nested_array_sizes_from_selected_width(
     let sequence = datatype::variable_length(3, [0; 3], 10, &leaf);
     let inner = datatype::array(4, [0; 3], 20, 1, &[2], &sequence);
     let bytes = datatype::array(5, [0; 3], 60, 1, &[3], &inner);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     let size = 8 + u32::from(width.get());
     let sequence = datatype::variable_length(3, [0; 3], size, &leaf);
@@ -144,7 +144,6 @@ fn datatype_array_complex_codecs_preserve_vax_parent_versions(
     assert_eq!(
         DatatypeMessage::parse(&bytes)
             .unwrap()
-            .0
             .serialize(OffsetWidth::Eight)
             .unwrap(),
         bytes
@@ -300,7 +299,6 @@ fn datatype_array_complex_parser_applies_float_order_in_each_context(
         assert_eq!(
             DatatypeMessage::parse(&complex)
                 .unwrap()
-                .0
                 .serialize(OffsetWidth::Eight)
                 .unwrap(),
             complex
@@ -308,7 +306,6 @@ fn datatype_array_complex_parser_applies_float_order_in_each_context(
         assert_eq!(
             DatatypeMessage::parse(&array)
                 .unwrap()
-                .0
                 .serialize(OffsetWidth::Eight)
                 .unwrap(),
             array
@@ -399,7 +396,7 @@ fn datatype_array_complex_codecs_bound_array_recursion() {
     let bytes = (1..NESTING_LIMIT).fold(Leaf::Integer.bytes(Version::One), |parent, _| {
         array_of_one(Version::Three, 4, &parent)
     });
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
     assert_eq!(
@@ -463,7 +460,7 @@ fn datatype_parsers_bound_mixed_container_recursion(#[case] base: Vec<u8>, #[cas
                 size,
             ),
         });
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
     assert_eq!(
@@ -506,9 +503,7 @@ fn datatype_array_complex_encoder_rejects_sizes_that_overflow_at_selected_width(
         DatatypeVersion::One,
         DatatypeProperties::VariableLengthSequence {
             base_type: Box::new(
-                DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One))
-                    .unwrap()
-                    .0,
+                DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap(),
             ),
         },
     )
@@ -535,7 +530,7 @@ fn assert_complex(parent: &[u8]) {
     let complex = DatatypeMessage::new(
         DatatypeVersion::Five,
         DatatypeProperties::Complex {
-            component: Box::new(DatatypeMessage::parse(parent).unwrap().0),
+            component: Box::new(DatatypeMessage::parse(parent).unwrap()),
         },
     )
     .unwrap();
@@ -558,7 +553,7 @@ fn assert_complex(parent: &[u8]) {
 fn assert_encoding(bytes: &[u8], expected: DatatypeMessage, width: OffsetWidth) {
     let mut input = bytes.to_vec();
     input.push(0xff);
-    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message, expected);
     assert_eq!(message.serialize(width).unwrap(), bytes);

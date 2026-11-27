@@ -1,6 +1,9 @@
 //! Metadata decoding and bounded encoding.
 
+use alloc::format;
 use core::cmp::Ordering;
+
+use hdf5_pure_core::FormatError;
 
 use crate::bytes::ByteCursor;
 
@@ -93,6 +96,25 @@ pub(crate) enum ExactError<E> {
     Decode(E),
     InvalidConsumption(InvalidConsumption),
     TrailingBytes { consumed: usize, frame_len: usize },
+}
+
+impl From<ExactError<FormatError>> for FormatError {
+    fn from(error: ExactError<FormatError>) -> Self {
+        match error {
+            ExactError::Decode(error) => error,
+            ExactError::TrailingBytes {
+                consumed,
+                frame_len,
+            } => Self::TrailingMetadataBytes {
+                consumed,
+                frame_len,
+            },
+            ExactError::InvalidConsumption(error) => Self::Internal(format!(
+                "metadata decoder consumed {} bytes from a {}-byte frame",
+                error.reported, error.available
+            )),
+        }
+    }
 }
 
 /// A decoder reported consuming more bytes than its input contained.

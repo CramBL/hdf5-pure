@@ -122,7 +122,7 @@ fn compound_layout_preserves_disjoint_members_and_record_order(#[case] spans: &[
         (semantic, bytes.len())
     );
     assert_eq!(
-        DatatypeMessage::parse(&bytes).unwrap(),
+        DatatypeMessage::parse_prefix(&bytes).unwrap(),
         (expected, bytes.len())
     );
 }
@@ -204,7 +204,7 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
             },
         ],
     );
-    let (message, consumed) = DatatypeMessage::parse(&low).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&low).unwrap();
     assert_eq!(consumed, low.len());
     assert_eq!(
         format::parse_datatype(&low).unwrap(),

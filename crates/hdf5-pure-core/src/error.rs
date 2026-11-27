@@ -1558,6 +1558,13 @@ pub enum FormatError {
     },
     /// The declared heap ID width is less than two bytes, the minimum for a tiny object.
     TinyHeapIdWidthTooSmall(u16),
+    /// A complete metadata value occupies only the first part of its frame.
+    TrailingMetadataBytes {
+        /// The number of bytes read for the value.
+        consumed: usize,
+        /// The length of the supplied frame in bytes.
+        frame_len: usize,
+    },
     /// The physical file is shorter than its recorded end-of-file position after relocation.
     TruncatedFile {
         /// The physical end-of-file position derived from the superblock and signature location.
@@ -1857,6 +1864,15 @@ impl fmt::Display for FormatError {
             }
             Self::UnsupportedVersion(v) => {
                 write!(f, "unsupported superblock version: {v}")
+            }
+            Self::TrailingMetadataBytes {
+                consumed,
+                frame_len,
+            } => {
+                write!(
+                    f,
+                    "metadata occupies {consumed} bytes of a {frame_len}-byte frame"
+                )
             }
             Self::TruncatedFile {
                 expected_eof,

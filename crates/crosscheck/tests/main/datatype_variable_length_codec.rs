@@ -92,7 +92,7 @@ fn datatype_variable_length_codecs_preserve_native_file_metadata(
         u32::from_le_bytes(body[4..8].try_into().unwrap()),
         8 + u32::from(width.get())
     );
-    let (message, consumed) = DatatypeMessage::parse(body).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(body).unwrap();
     assert_eq!(message.to_datatype().unwrap(), kind.semantic());
     assert_eq!(message.version().get(), body[0] >> 4);
     if !latest {
@@ -104,7 +104,7 @@ fn datatype_variable_length_codecs_preserve_native_file_metadata(
     assert_eq!(message.serialize(width).unwrap(), body[..consumed]);
     assert_eq!(&body[consumed..], vec![0; body.len() - consumed]);
     let canonical = format::serialize_datatype_with_offset_width(&kind.semantic(), width).unwrap();
-    let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse_prefix(&canonical).unwrap();
     assert_eq!(consumed, canonical.len());
     assert_eq!(parsed.to_datatype().unwrap(), kind.semantic());
     assert_eq!(

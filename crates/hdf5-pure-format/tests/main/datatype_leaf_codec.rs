@@ -408,7 +408,7 @@ fn datatype_leaf_parser_retains_versions_in_full_opaque_properties(
     version: Version,
 ) {
     let bytes = property.bytes(version);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.version().get(), version.get());
     assert_eq!(
@@ -447,7 +447,7 @@ fn assert_leaf_bytes(expected: Vec<u8>, properties: DatatypeProperties, offsets:
     assert_eq!(message.serialize(offsets).unwrap(), expected);
     let mut input = expected.clone();
     input.extend_from_slice(b"next");
-    let (parsed, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, expected.len());
     assert_eq!(parsed, message);
     assert_eq!(parsed.properties(), &properties);

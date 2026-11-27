@@ -35,7 +35,6 @@ fn datatype_canonical_atomic_uses_version_one_with_complete_properties(#[case] l
     let source = leaf.bytes(Version::Five);
     let datatype = DatatypeMessage::parse(&source)
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     assert_eq!(
@@ -51,7 +50,6 @@ fn datatype_canonical_atomic_uses_version_three_for_vax(
     let source = leaf::vax_bytes(version);
     let datatype = DatatypeMessage::parse(&source)
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     assert_eq!(
@@ -74,7 +72,6 @@ fn datatype_canonical_atomic_preserves_offset_width_independence(
     let source = leaf.bytes(Version::Five);
     let datatype = DatatypeMessage::parse(&source)
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     assert_eq!(

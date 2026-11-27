@@ -130,7 +130,7 @@ fn retained_compound_encoding_matches_fixture_and_retains_only_output() {
         .map(|member| member.name.as_str().unwrap())
         .collect::<Vec<_>>();
     let (expected, _) = encode_with_child_buffers(shape, &names);
-    let (datatype, consumed) = format::DatatypeMessage::parse(&expected).unwrap();
+    let (datatype, consumed) = format::DatatypeMessage::parse_prefix(&expected).unwrap();
     assert_eq!(consumed, expected.len());
 
     let region = "datatype_metadata_retained_compound";
@@ -158,7 +158,7 @@ fn unterminated_first_enum_name_does_not_allocate_members() {
     );
     let ((message, consumed), control) =
         allocation::measure("valid_enum_allocates_members", || {
-            format::DatatypeMessage::parse(&valid).unwrap()
+            format::DatatypeMessage::parse_prefix(&valid).unwrap()
         });
     assert!(control.blocks > 0, "{control}");
     assert_eq!(consumed, valid.len());
@@ -214,7 +214,8 @@ fn parsers_reject_compound_headers_and_nested_prefixes_without_allocating(
     );
     let semantic: fn(&[u8]) -> Result<usize, FormatError> =
         |bytes| format::parse_datatype(bytes).map(|(_, consumed)| consumed);
-    let retained = |bytes: &[u8]| DatatypeMessage::parse(bytes).map(|(_, consumed)| consumed);
+    let retained =
+        |bytes: &[u8]| DatatypeMessage::parse_prefix(bytes).map(|(_, consumed)| consumed);
     for (projection, parse) in [("semantic", semantic), ("retained", retained)] {
         let region = format!("compound_member_{projection}_{length}_bytes");
         let (result, control) = allocation::measure(&format!("{region}_valid"), || parse(&valid));
@@ -353,7 +354,7 @@ fn wide_compound_decoding_has_bounded_allocations(#[case] count: usize) {
     assert_eq!(semantic, (expected, bytes.len()));
     let (retained, retained_metrics) =
         allocation::measure(&format!("wide_compound_retained_{count}"), || {
-            DatatypeMessage::parse(&bytes).unwrap()
+            DatatypeMessage::parse_prefix(&bytes).unwrap()
         });
     assert_eq!(retained, (expected_retained, bytes.len()));
     assert_eq!(

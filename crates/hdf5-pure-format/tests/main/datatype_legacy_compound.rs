@@ -27,7 +27,7 @@ fn retained_version_one_compound_preserves_all_inline_array_extent_slots(
     let consumed = bytes.len();
     bytes.extend_from_slice(&[0xff, 0xfe]);
 
-    let (message, length) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, length) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(length, consumed);
     assert_eq!(message.version(), DatatypeVersion::One);
     let DatatypeProperties::CompoundV1 {
@@ -88,7 +88,7 @@ fn retained_version_one_scalar_preserves_inactive_extents() {
     let size = MEMBER_OFFSET + 1;
     let byte = leaf::unsigned_byte(Version::One);
     let bytes = legacy_compound::raw_member(size, MEMBER_OFFSET, 0, 0, extents, &byte);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     let properties = DatatypeProperties::CompoundV1 {
         size,
@@ -141,7 +141,7 @@ fn retained_version_two_compound_preserves_name_bytes_and_nested_versions() {
     );
     let length = bytes.len();
     bytes.extend_from_slice(&[0xff, 0xfe]);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     let expected = DatatypeMessage::new(
         DatatypeVersion::Two,
         DatatypeProperties::Compound {
@@ -155,7 +155,7 @@ fn retained_version_two_compound_preserves_name_bytes_and_nested_versions() {
                 DatatypeMessageMember::new(
                     c"abcdefgh".into(),
                     0,
-                    DatatypeMessage::parse(&nested).unwrap().0,
+                    DatatypeMessage::parse(&nested).unwrap(),
                 ),
             ],
         },
@@ -351,7 +351,7 @@ fn retained_inline_array_uses_the_declared_source_descriptor_size(
     let offset = 4;
     let size = offset + 2 * descriptor_size;
     let bytes = legacy_compound::sequence_member(width, offset, SequenceMemberShape::ImplicitArray);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(
         message.to_datatype().unwrap(),
@@ -452,7 +452,7 @@ fn retained_version_two_compound_preserves_the_largest_member_count() {
         MemberOffset::Four,
         &fields,
     );
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     let DatatypeProperties::Compound { size, members } = message.properties() else {
         panic!("expected a version 2 compound");
@@ -529,7 +529,7 @@ fn retained_version_two_compound_encodes_padded_names_and_nested_versions() {
                 DatatypeMessageMember::new(
                     c"abcdefgh".into(),
                     0,
-                    DatatypeMessage::parse(&nested).unwrap().0,
+                    DatatypeMessage::parse(&nested).unwrap(),
                 ),
             ],
         },
@@ -560,7 +560,7 @@ fn retained_version_two_compound_encodes_padded_names_and_nested_versions() {
 #[case::v1(legacy_compound::array_member())]
 #[case::v2(containers::legacy_compound_v2())]
 fn retained_legacy_compound_encoding_preserves_the_output_suffix(#[case] bytes: Vec<u8>) {
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     let prepared = message.prepare(OffsetWidth::Eight).unwrap();
     assert_eq!(prepared.encoded_size(), bytes.len());
@@ -577,7 +577,7 @@ fn retained_legacy_compound_encoding_preserves_the_output_suffix(#[case] bytes: 
 #[case::v1(legacy_compound::array_member())]
 #[case::v2(containers::legacy_compound_v2())]
 fn retained_legacy_compound_encoding_leaves_short_output_unchanged(#[case] bytes: Vec<u8>) {
-    let (message, _) = DatatypeMessage::parse(&bytes).unwrap();
+    let message = DatatypeMessage::parse(&bytes).unwrap();
     let prepared = message.prepare(OffsetWidth::Eight).unwrap();
     let mut output = vec![0xa5; bytes.len() - 1];
     assert_eq!(
@@ -604,7 +604,7 @@ fn retained_inline_array_encoding_uses_the_destination_descriptor_size(
     let base = leaf::unsigned_byte(Version::One);
     let source_child = VariableLengthSequence::new(Version::One, 8, &base).build();
     let source = legacy_compound::raw_member(size, offset, 1, 0, shape, &source_child);
-    let (message, _) = DatatypeMessage::parse(&source).unwrap();
+    let message = DatatypeMessage::parse(&source).unwrap();
     let child = VariableLengthSequence::new(Version::One, fixture_width, &base).build();
     let expected = legacy_compound::raw_member(size, offset, 1, 0, shape, &child);
     assert_eq!(message.serialize(width).unwrap(), expected);
@@ -619,7 +619,7 @@ fn retained_inline_array_encoding_checks_bounds_at_selected_width(
 ) {
     let offset = 4;
     let source = legacy_compound::sequence_member(2, offset, SequenceMemberShape::ImplicitArray);
-    let (message, _) = DatatypeMessage::parse(&source).unwrap();
+    let message = DatatypeMessage::parse(&source).unwrap();
     assert_eq!(
         message.prepare(width).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
@@ -644,7 +644,7 @@ fn retained_inline_array_encoding_checks_overlap_at_selected_width() {
                     DatatypeMessageMember::new(
                         c"arr".into(),
                         0,
-                        DatatypeMessage::parse(&sequence).unwrap().0,
+                        DatatypeMessage::parse(&sequence).unwrap(),
                     ),
                     CompoundV1Shape::new(1, [2, 0, 0, 0]).unwrap(),
                 ),
@@ -669,7 +669,7 @@ fn retained_inline_array_encoding_rejects_footprint_overflow_at_selected_width()
     let extent = u32::MAX / child.descriptor_size();
     let child = child.build();
     let source = legacy_compound::raw_member(u32::MAX, 0, 1, 0, [extent, 0, 0, 0], &child);
-    let (message, _) = DatatypeMessage::parse(&source).unwrap();
+    let message = DatatypeMessage::parse(&source).unwrap();
     assert_eq!(
         message.prepare(OffsetWidth::Eight).unwrap_err(),
         FormatError::CompoundArraySizeOverflow { size: 16, extent },

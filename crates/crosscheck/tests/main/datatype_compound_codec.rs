@@ -113,7 +113,7 @@ fn assert_native(
         .find(|message| message.msg_type == MessageType::DATATYPE)
         .unwrap()
         .data;
-    let (message, consumed) = DatatypeMessage::parse(bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(bytes).unwrap();
     assert_eq!(
         format::parse_datatype(bytes).unwrap(),
         (message.to_datatype().unwrap(), consumed)
@@ -126,7 +126,7 @@ fn assert_native(
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
     let semantic = shape.semantic(width, placement, big_endian);
     let canonical = format::serialize_datatype_with_offset_width(&semantic, width).unwrap();
-    let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse_prefix(&canonical).unwrap();
     assert_eq!(consumed, canonical.len());
     assert_eq!(parsed.to_datatype().unwrap(), semantic);
     assert_eq!(

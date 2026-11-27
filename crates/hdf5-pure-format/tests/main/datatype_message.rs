@@ -367,8 +367,8 @@ fn complex_components_must_be_floating_point() {
 
 #[rstest]
 #[case::two_byte_short(integer(DatatypeVersion::One), "value", vec![1], 2, 1)]
-#[case::four_byte_short(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap().0, "x", vec![0; 3], 4, 3)]
-#[case::four_byte_long(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap().0, "x", vec![0; 5], 4, 5)]
+#[case::four_byte_short(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap(), "x", vec![0; 3], 4, 3)]
+#[case::four_byte_long(DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap(), "x", vec![0; 5], 4, 5)]
 fn enum_values_have_the_integer_base_width(
     #[case] base_type: DatatypeMessage,
     #[case] name: &str,
@@ -722,10 +722,27 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
         format::parse_datatype(&input).unwrap(),
         (expected.clone(), bytes.len()),
     );
-    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.to_datatype().unwrap(), expected);
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+}
+
+#[test]
+fn retained_frame_rejects_bytes_after_the_description() {
+    let bytes = Leaf::Integer.bytes(Version::One);
+    let mut frame = bytes.clone();
+    frame.extend_from_slice(&[0, 0xff]);
+    let (prefix, consumed) = DatatypeMessage::parse_prefix(&frame).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(prefix, DatatypeMessage::parse(&bytes).unwrap());
+    assert_eq!(
+        DatatypeMessage::parse(&frame).unwrap_err(),
+        FormatError::TrailingMetadataBytes {
+            consumed: bytes.len(),
+            frame_len: frame.len(),
+        }
+    );
 }
 
 #[test]
