@@ -1334,7 +1334,7 @@ impl FileWriter {
             target.with_datatypes(
                 all_ds
                     .iter()
-                    .map(|dataset| &dataset.dt)
+                    .map(PreparedDataset::datatype)
                     .chain(committed.iter().map(|datatype| &datatype.dt))
                     .chain(root_attrs.iter().map(|attribute| &attribute.datatype))
                     .chain(
@@ -1456,7 +1456,7 @@ impl FileWriter {
                     &mut committed_bodies,
                     &committed_by_path,
                     target,
-                    &d.dt,
+                    d.datatype(),
                     || format!("dataset {:?}", d.name.as_str()),
                 )?;
             }

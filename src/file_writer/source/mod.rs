@@ -245,7 +245,7 @@ impl Object {
     fn datatypes(&self) -> impl Iterator<Item = &Datatype> {
         let datatype = match &self.kind {
             Kind::Committed(datatype) => Some(datatype),
-            Kind::Dataset(dataset) => Some(&dataset.dt),
+            Kind::Dataset(dataset) => Some(dataset.datatype()),
             Kind::Group { .. } => None,
         };
         datatype.into_iter().chain(
@@ -300,7 +300,7 @@ impl Object {
         }
         if let Kind::Dataset(dataset) = &self.kind {
             if let Some(target) = &dataset.committed_datatype_target {
-                use_type(target, &dataset.dt)?;
+                use_type(target, dataset.datatype())?;
             }
         }
         Ok(())
