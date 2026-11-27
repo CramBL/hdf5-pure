@@ -11,9 +11,9 @@ use super::framing::SIGNATURE_LEN;
 use super::framing::VERSION;
 use super::geometry;
 use super::geometry::Geometry;
-use super::geometry::Paging;
 use super::page::FixedArrayPageBitmap;
 use super::page::FixedArrayPageRef;
+use super::page::PagedBlock;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::bytes;
@@ -69,10 +69,8 @@ impl FixedArrayDataBlockRef {
             .ok_or_else(|| {
                 FormatError::Internal("a Fixed Array data block ends inside its prefix".into())
             })?;
-        Ok(match geometry.paging() {
-            Some(paging) => {
-                FixedArrayDataBlock::PageBitmap(FixedArrayPageBitmap::new(*self, paging, body))
-            }
+        Ok(match PagedBlock::new(self) {
+            Some(block) => FixedArrayDataBlock::PageBitmap(block.bitmap(body)),
             None => {
                 FixedArrayDataBlock::Elements(FixedArrayElements::new(body, 0, geometry.encoding()))
             }
@@ -206,13 +204,10 @@ impl FixedArrayDataBlockRef {
         Ok(())
     }
 
-    pub(super) fn page(
-        &self,
-        paging: Paging,
-        index: u64,
-    ) -> Result<FixedArrayPageRef, FormatError> {
-        FixedArrayPageRef::at(self.range, self.geometry, paging, index)
+    pub(super) const fn geometry(&self) -> Geometry {
+        self.geometry
     }
+
     /// Returns the data-block bytes covered by its checksum, excluding the checksum field.
     ///
     /// For a paged version 0 block, includes only the prefix and initialization bitmap. The
@@ -248,13 +243,10 @@ impl FixedArrayDataBlockRef {
     /// Returns [`FormatError::InvalidFixedArrayGeometry`] if a page offset or length overflows,
     /// or [`FormatError::OffsetOverflow`] if its physical range ends past [`u64::MAX`].
     pub fn page_for_slot(&self, slot: u64) -> Result<Option<FixedArrayPageRef>, FormatError> {
-        if slot >= self.geometry.entries() {
-            return Ok(None);
+        match PagedBlock::new(self) {
+            Some(block) => block.page_for_slot(slot),
+            None => Ok(None),
         }
-        self.geometry
-            .paging()
-            .map(|paging| self.page(paging, slot / paging.page_entries()))
-            .transpose()
     }
 
     /// Returns the physical bitmap-byte range and bit mask for the page containing `slot`.
@@ -270,20 +262,10 @@ impl FixedArrayDataBlockRef {
         &self,
         slot: u64,
     ) -> Result<Option<(FileRange, NonZeroU8)>, FormatError> {
-        let Self {
-            range, geometry, ..
-        } = *self;
-        let Some(paging) = geometry.paging().filter(|_| slot < geometry.entries()) else {
-            return Ok(None);
-        };
-        let page = slot / paging.page_entries();
-        let address = range.start().checked_add(geometry::sum([
-            data_block_prefix_len(geometry.encoding().offsets()),
-            page / u64::from(u8::BITS),
-        ])?)?;
-        let mask = NonZeroU8::new(PAGE_ZERO_MASK >> (page % u64::from(u8::BITS)))
-            .ok_or(FormatError::InvalidFixedArrayGeometry)?;
-        Ok(Some((FileRange::new(address, 1)?, mask)))
+        match PagedBlock::new(self) {
+            Some(block) => block.bitmap_byte(slot),
+            None => Ok(None),
+        }
     }
 }
 
@@ -613,5 +595,3 @@ pub(super) fn data_block_prefix_len(offsets: OffsetWidth) -> u64 {
 pub(super) const DATA_BLOCK_SIGNATURE: [u8; 4] = *b"FADB";
 /// The version and client ID bytes of a data block.
 const DATA_BLOCK_BYTE_FIELDS: u64 = 2;
-// H5VM_bit_set stores page zero in the high bit (H5VMprivate.h, HDF5 2.2.0).
-const PAGE_ZERO_MASK: u8 = 0x80;

@@ -1,11 +1,23 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::FileRegion;
 use rstest::rstest;
 
 use super::support::Fixture;
+use super::support::WIDTHS;
+use crate::address::BaseAddress;
+use crate::address::BaseAddressExt;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::chunk_record;
 use crate::chunk_record::ChunkRecord;
+use crate::chunk_record::IndexSlots;
+use crate::fixed_array::FixedArrayDataBlock;
+use crate::fixed_array::FixedArrayDataBlockRef;
+use crate::fixed_array::FixedArrayHeaderLocator;
+use crate::fixed_array::FixedArrayPageBitmap;
+use crate::fixed_array::FixedArrayPlan;
 
 #[test]
 fn the_pages_of_a_paged_data_block_are_contiguous_with_an_unpadded_last_page() {
@@ -76,4 +88,37 @@ fn a_page_parses_from_a_region_holding_only_that_page() {
             .take(1_024)
             .collect();
     assert_eq!(read, expected);
+}
+
+#[test]
+fn page_bitmap_equality_includes_the_owning_header() {
+    let prepare = |header_address| {
+        let header_address = StoredAddress::new(header_address);
+        let locator = FixedArrayHeaderLocator::new(WIDTHS, BaseAddress::ZERO, header_address);
+        let [(_, header), (_, block)] = FixedArrayPlan::new(3, 8, WIDTHS, false)
+            .unwrap()
+            .with_page_bits(1)
+            .unwrap()
+            .place(header_address, StoredAddress::new(256))
+            .unwrap()
+            .serialize_blocks(&IndexSlots::new(&[], &[], 3).unwrap())
+            .unwrap();
+        let header = locator
+            .parse(FileRegion::new(locator.parse_range().unwrap(), &header).unwrap())
+            .unwrap();
+        (header.data_block().unwrap(), block)
+    };
+    let (first, first_bytes) = prepare(32);
+    let (second, second_bytes) = prepare(64);
+    assert_eq!(first.range(), second.range());
+    assert_eq!(bitmap(&first, &first_bytes), bitmap(&first, &first_bytes));
+    assert_ne!(bitmap(&first, &first_bytes), bitmap(&second, &second_bytes));
+}
+
+fn bitmap<'a>(block: &FixedArrayDataBlockRef, bytes: &'a [u8]) -> FixedArrayPageBitmap<'a> {
+    let region = FileRegion::new(block.range(), bytes).unwrap();
+    let FixedArrayDataBlock::PageBitmap(bitmap) = block.parse(region).unwrap() else {
+        panic!("expected a paged block");
+    };
+    bitmap
 }
