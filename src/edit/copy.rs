@@ -4,6 +4,7 @@ use core::num::NonZeroU32;
 
 use hdf5_pure_core::{AddressRange, PhysicalAddress};
 use hdf5_pure_format::__private::ChunkedGeometry;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use hdf5_pure_space::__private::AllocationClass;
@@ -456,7 +457,7 @@ impl CopyTree {
                         } else {
                             record.body
                         };
-                        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
+                        let datatype = DecodedDatatype::from_record(encoded)?.into_datatype();
                         target.with_datatypes([&datatype])?;
                     }
                     MessageType::ATTRIBUTE => {
@@ -873,7 +874,7 @@ impl CopyNode {
                     } else {
                         &region[body..body_end]
                     };
-                    let (dt, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
+                    let dt = DecodedDatatype::from_record(encoded)?.into_datatype();
                     element_dt = Some(dt);
                 }
                 MessageType::DATA_LAYOUT => {
@@ -1352,7 +1353,7 @@ fn parse_chunked_header(
     let (ds_b, ds_e) =
         dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
     let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
-    let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
+    let dt = DecodedDatatype::from_record(&region[dt_b..dt_e])?.into_datatype();
     let ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
     let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
     if !matches!(dl, DataLayout::Chunked { .. }) {
@@ -1415,7 +1416,7 @@ fn require_copy_reference_widths(
                 } else {
                     record.body
                 };
-                let (datatype, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
+                let datatype = DecodedDatatype::from_record(encoded)?.into_datatype();
                 file_writer::require_reference_width(widths, &datatype)?;
             }
             MessageType::ATTRIBUTE => {
@@ -1485,7 +1486,7 @@ pub(super) fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
         }
         match msg_type {
             MessageType::DATATYPE => {
-                let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[body..body_end])?;
+                let dt = DecodedDatatype::from_record(&region[body..body_end])?.into_datatype();
                 if datatype::datatype_holds_file_address(&dt) {
                     return Err(Error::EditUnsupported(
                         "variable-length or reference datasets cannot be copied to another file yet",

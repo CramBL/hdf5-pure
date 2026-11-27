@@ -4,7 +4,7 @@ use hdf5_pure_core::{
     EnumMember, EnumerationType, FixedPointType, FloatingPointType, FormatError, StringPadding,
     TimeType, VariableLengthType,
 };
-use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     FloatingPointByteOrder, OffsetWidth,
@@ -110,7 +110,7 @@ fn complex_parent_header_checks_class_before_version(
 }
 
 fn assert_decode_error(bytes: &[u8], expected: FormatError) {
-    assert_eq!(format::parse_datatype(bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(bytes).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(bytes).unwrap_err(), expected);
 }
 
@@ -718,8 +718,9 @@ fn nested_containers_preserve_datatype_values_and_wire_versions() {
     );
     let mut input = bytes.clone();
     input.extend_from_slice(&[0xff; 8]);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&input).unwrap();
     assert_eq!(
-        format::parse_datatype(&input).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected.clone(), bytes.len()),
     );
     let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
@@ -750,8 +751,9 @@ fn semantic_parser_accepts_and_retained_parser_rejects_version_two_arrays() {
     let mut bytes = containers::legacy_array();
     let consumed = bytes.len();
     bytes.extend_from_slice(&[0xff; 4]);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (
             Datatype::Array {
                 base_type: Box::new(integer_datatype()),
@@ -817,7 +819,7 @@ fn retained_array_flag_error_precedes_dimension_list_eof() {
         },
     );
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::UnexpectedEof {
             expected,
             available: bytes.len()
@@ -883,7 +885,7 @@ fn semantic_parser_reports_nested_version_two_array_eof_from_the_outer_descripti
     child.truncate(child.len() - 1);
     let body = VariableLengthSequence::new(Version::Five, 8, &child).build();
     assert_eq!(
-        format::parse_datatype(&body).unwrap_err(),
+        DecodedDatatype::parse_prefix(&body).unwrap_err(),
         FormatError::UnexpectedEof {
             expected: body.len() + 1,
             available: body.len(),

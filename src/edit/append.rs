@@ -9,6 +9,7 @@ use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::ChunkedGeometry;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::ExtensibleArrayInitialization;
 use hdf5_pure_format::__private::FixedArrayHeader;
 use hdf5_pure_format::__private::FixedArrayPlan;
@@ -769,10 +770,10 @@ impl WriteEngine {
         if super::pipeline_lossless(&pipeline) {
             return false;
         }
-        let Ok((disk_dt, _)) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])
-        else {
+        let Ok(disk_dt) = DecodedDatatype::from_record(&region[dt_b..dt_e]) else {
             return false;
         };
+        let disk_dt = disk_dt.into_datatype();
         let Ok(disk_ds) =
             Dataspace::parse_with_length_width(&region[ds_b..ds_e], self.context.widths().lengths)
         else {

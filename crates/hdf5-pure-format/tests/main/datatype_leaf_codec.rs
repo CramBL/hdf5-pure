@@ -2,7 +2,7 @@ use hdf5_pure_core::{
     BitFieldType, CharacterSet, Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType,
     FormatError, MantissaNormalization, ReferenceType, StringPadding, TimeType,
 };
-use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
@@ -77,7 +77,7 @@ fn datatype_leaf_parser_rejects_unsupported_versions(#[case] version: u8) {
     bytes[0] = version << 4;
     let expected = FormatError::InvalidDatatypeMessageVersion(version);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -212,9 +212,13 @@ fn retained_parser_rejects_reserved_bits_accepted_by_semantic_parser(
 ) {
     let version = Version::One;
     let mut bytes = leaf.bytes(version);
-    let expected = format::parse_datatype(&bytes).unwrap();
+    let (expected, expected_len) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     bytes[3] = 0x01;
-    assert_eq!(format::parse_datatype(&bytes).unwrap(), expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    assert_eq!(
+        (decoded.datatype(), bytes_read),
+        (expected.datatype(), expected_len)
+    );
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap_err(),
         FormatError::InvalidDatatypeFlags {
@@ -320,8 +324,9 @@ fn semantic_parser_accepts_and_retained_parser_rejects_legacy_references(
         DatatypeMessage::parse(&bytes).unwrap_err(),
         FormatError::InvalidDatatypeClass(Class::REFERENCE.0),
     );
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (
             Datatype::Reference {
                 size: fixture.size(),
@@ -340,7 +345,7 @@ fn semantic_reference_kind_error_precedes_zero_size(#[case] flags: u8, #[case] k
     bytes[1] = flags;
     bytes[4..8].fill(0);
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::InvalidReferenceType(kind)
     );
     assert_eq!(
@@ -368,7 +373,7 @@ fn zero_size_reference_reports_semantic_size_and_retained_class_errors() {
     let mut bytes = LegacyReference::Object.bytes(Version::One);
     bytes[4..8].fill(0);
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::ZeroSizedDatatype {
             class: Class::REFERENCE.0
         },
@@ -389,7 +394,7 @@ const REVISED_OBJECT_REFERENCE_FLAGS: u8 = (REVISED_REFERENCE_ENCODING_VERSION
     | REVISED_OBJECT_REFERENCE_KIND;
 
 fn assert_leaf_errors(bytes: &[u8], expected: FormatError) {
-    assert_eq!(format::parse_datatype(bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(bytes).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(bytes).unwrap_err(), expected);
 }
 
@@ -452,8 +457,9 @@ fn assert_leaf_bytes(expected: Vec<u8>, properties: DatatypeProperties, offsets:
     assert_eq!(parsed, message);
     assert_eq!(parsed.properties(), &properties);
     assert_eq!(parsed.serialize(offsets).unwrap(), expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&input).unwrap();
     assert_eq!(
-        format::parse_datatype(&input).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), expected.len())
     );
 }

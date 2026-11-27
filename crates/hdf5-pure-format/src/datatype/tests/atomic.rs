@@ -18,6 +18,7 @@ use super::super::message::atomic::{
 };
 use super::super::message::version::DATATYPE_VERSION_ONE;
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 use super::fixtures;
 
 #[rstest]
@@ -32,7 +33,8 @@ fn preserves_low_and_high_padding(
     let mut bytes = fixtures::build_fixed_point(2, big_endian, false, 3, 9);
     bytes[0] = class | (DATATYPE_VERSION_ONE << 4);
     bytes[1] |= atomic::padding_bits(low, high);
-    let (datatype, consumed) = semantic::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, bytes.len());
     match &datatype {
         Datatype::FixedPoint(numeric) => {
@@ -58,7 +60,8 @@ fn preserves_floating_point_padding(
     if internal {
         bytes[1] |= FLOAT_INTERNAL_PADDING_BIT;
     }
-    let (datatype, consumed) = semantic::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, bytes.len());
     let Datatype::FloatingPoint(numeric) = &datatype else {
         panic!("expected a floating-point datatype, got {datatype:?}");
@@ -78,7 +81,8 @@ fn preserves_floating_point_padding(
 #[test]
 fn test_fixed_point_u8() {
     let data = fixtures::build_fixed_point(1, false, false, 0, 8);
-    let (dt, consumed) = semantic::parse_datatype(&data).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&data).unwrap();
+    let dt = decoded.into_datatype();
     assert_eq!(consumed, 12);
     assert_eq!(
         dt,
@@ -91,7 +95,7 @@ fn test_fixed_point_u8() {
 #[test]
 fn test_fixed_point_i16_le() {
     let data = fixtures::build_fixed_point(2, false, true, 0, 16);
-    let (dt, _) = semantic::parse_datatype(&data).unwrap();
+    let dt = DecodedDatatype::from_record(&data).unwrap().into_datatype();
     assert_eq!(
         dt,
         Datatype::FixedPoint(
@@ -103,7 +107,7 @@ fn test_fixed_point_i16_le() {
 #[test]
 fn test_fixed_point_u32_be() {
     let data = fixtures::build_fixed_point(4, true, false, 0, 32);
-    let (dt, _) = semantic::parse_datatype(&data).unwrap();
+    let dt = DecodedDatatype::from_record(&data).unwrap().into_datatype();
     match &dt {
         Datatype::FixedPoint(numeric) => {
             assert_eq!(numeric.byte_order(), DatatypeByteOrder::BigEndian);
@@ -117,7 +121,7 @@ fn test_fixed_point_u32_be() {
 #[test]
 fn test_fixed_point_i64_le() {
     let data = fixtures::build_fixed_point(8, false, true, 0, 64);
-    let (dt, _) = semantic::parse_datatype(&data).unwrap();
+    let dt = DecodedDatatype::from_record(&data).unwrap().into_datatype();
     assert_eq!(
         dt,
         Datatype::FixedPoint(
@@ -172,8 +176,9 @@ fn preserves_floating_point_class_fields(
         normalization_bits
     );
     assert_eq!(bytes[2], sign_location);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, bytes.len())
     );
 }
@@ -181,7 +186,8 @@ fn preserves_floating_point_class_fields(
 #[test]
 fn test_float_f32_le() {
     let data = fixtures::build_float(4, 23, 8, 0, 23, 127);
-    let (dt, consumed) = semantic::parse_datatype(&data).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&data).unwrap();
+    let dt = decoded.into_datatype();
     assert_eq!(consumed, 20);
     assert_eq!(
         dt,
@@ -199,7 +205,7 @@ fn test_float_f32_le() {
 #[test]
 fn test_float_f64_le() {
     let data = fixtures::build_float(8, 52, 11, 0, 52, 1023);
-    let (dt, _) = semantic::parse_datatype(&data).unwrap();
+    let dt = DecodedDatatype::from_record(&data).unwrap().into_datatype();
     assert_eq!(
         dt,
         Datatype::FloatingPoint(
@@ -216,7 +222,8 @@ fn test_float_f64_le() {
 #[test]
 fn test_string_null_terminated_ascii() {
     let buf = header::build_datatype_header(3, DATATYPE_VERSION_ONE, [0x00, 0, 0], 10);
-    let (dt, consumed) = semantic::parse_datatype(&buf).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&buf).unwrap();
+    let dt = decoded.into_datatype();
     assert_eq!(consumed, 8);
     assert_eq!(
         dt,
@@ -231,7 +238,7 @@ fn test_string_null_terminated_ascii() {
 #[test]
 fn test_string_space_padded_utf8() {
     let buf = header::build_datatype_header(3, DATATYPE_VERSION_ONE, [0x12, 0, 0], 32);
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     assert_eq!(
         dt,
         Datatype::String {
@@ -247,7 +254,8 @@ fn parses_an_opaque_tag_without_padding() {
     let mut buf = header::build_datatype_header(5, DATATYPE_VERSION_ONE, [8, 0, 0], 64);
     buf.extend_from_slice(b"BLOB");
     buf.extend_from_slice(&[0, 0, 0, 0]);
-    let (dt, consumed) = semantic::parse_datatype(&buf).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&buf).unwrap();
+    let dt = decoded.into_datatype();
     assert_eq!(consumed, 16);
     assert_eq!(
         dt,
@@ -266,7 +274,7 @@ fn parses_a_little_endian_bit_field() {
     LittleEndian::write_u16(&mut props[2..4], 16);
     buf.extend_from_slice(&props);
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     assert_eq!(
         dt,
         Datatype::BitField(BitFieldType::new(2, DatatypeByteOrder::LittleEndian, 0, 16).unwrap())
@@ -280,7 +288,8 @@ fn parses_little_endian_time_precision() {
     LittleEndian::write_u16(&mut props[0..2], 64);
     buf.extend_from_slice(&props);
 
-    let (dt, consumed) = semantic::parse_datatype(&buf).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&buf).unwrap();
+    let dt = decoded.into_datatype();
     assert_eq!(consumed, 10);
     assert_eq!(
         dt,
@@ -296,10 +305,11 @@ fn test_time_byte_order_roundtrips() {
     ] {
         let mut buf = header::build_datatype_header(2, DATATYPE_VERSION_ONE, [be, 0, 0], 4);
         buf.extend_from_slice(&32u16.to_le_bytes());
-        let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+        let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
         assert_eq!(dt, Datatype::Time(TimeType::new(4, order, 32).unwrap()));
-        let (reparsed, _) =
-            semantic::parse_datatype(&semantic::serialize_datatype(&dt).unwrap()).unwrap();
+        let reparsed = DecodedDatatype::from_record(&semantic::serialize_datatype(&dt).unwrap())
+            .unwrap()
+            .into_datatype();
         assert_eq!(reparsed, dt);
     }
 }
@@ -307,14 +317,14 @@ fn test_time_byte_order_roundtrips() {
 #[test]
 fn test_error_invalid_string_padding() {
     let buf = header::build_datatype_header(3, DATATYPE_VERSION_ONE, [0x03, 0, 0], 10);
-    let err = semantic::parse_datatype(&buf).unwrap_err();
+    let err = DecodedDatatype::parse_prefix(&buf).unwrap_err();
     assert_eq!(err, FormatError::InvalidStringPadding(3));
 }
 
 #[test]
 fn test_error_invalid_charset() {
     let buf = header::build_datatype_header(3, DATATYPE_VERSION_ONE, [0x20, 0, 0], 10);
-    let err = semantic::parse_datatype(&buf).unwrap_err();
+    let err = DecodedDatatype::parse_prefix(&buf).unwrap_err();
     assert_eq!(err, FormatError::InvalidCharacterSet(2));
 }
 
@@ -322,7 +332,8 @@ fn test_error_invalid_charset() {
 fn serialize_parse_time_roundtrip() {
     let dt = Datatype::Time(TimeType::new(8, DatatypeByteOrder::LittleEndian, 64).unwrap());
     let bytes = semantic::serialize_datatype(&dt).unwrap();
-    let (parsed, consumed) = semantic::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let parsed = decoded.into_datatype();
     assert_eq!(parsed, dt);
     assert_eq!(consumed, bytes.len());
 }
@@ -335,7 +346,8 @@ fn serialize_parse_bitfield_roundtrip() {
     ] {
         let dt = Datatype::BitField(BitFieldType::new(4, byte_order, 3, 17).unwrap());
         let bytes = semantic::serialize_datatype(&dt).unwrap();
-        let (parsed, consumed) = semantic::parse_datatype(&bytes).unwrap();
+        let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+        let parsed = decoded.into_datatype();
         assert_eq!(parsed, dt);
         assert_eq!(consumed, bytes.len());
     }
@@ -354,7 +366,7 @@ fn rejects_invalid_fixed_point_metadata(
     #[case] expected: FormatError,
 ) {
     assert_eq!(
-        semantic::parse_datatype(&fixtures::build_fixed_point(
+        DecodedDatatype::parse_prefix(&fixtures::build_fixed_point(
             size, false, false, offset, precision
         ))
         .unwrap_err(),
@@ -379,7 +391,7 @@ fn rejects_invalid_floating_point_metadata(
 ) {
     let mut bytes = fixtures::build_float(4, 23, 8, 0, 23, 127);
     bytes[index] = value;
-    assert_eq!(semantic::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[test]
@@ -387,7 +399,7 @@ fn rejects_reserved_mantissa_normalization() {
     let mut bytes = fixtures::build_float(4, 23, 8, 0, 23, 127);
     bytes[1] = FLOAT_NORMALIZATION_RESERVED << FLOAT_NORMALIZATION_SHIFT;
     assert_eq!(
-        semantic::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::InvalidMantissaNormalization(FLOAT_NORMALIZATION_RESERVED)
     );
 }
@@ -436,7 +448,7 @@ fn rejects_overlapping_floating_point_metadata(
     let mut bytes = fixtures::build_float(4, 23, 8, 0, 23, 127);
     bytes[index] = value;
     assert_eq!(
-        semantic::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::OverlappingFloatingPointFields {
             first,
             first_location,
@@ -461,8 +473,9 @@ fn preserves_ieee_bytes(#[case] numeric: FloatingPointType, #[case] expected: Ve
     let datatype = Datatype::FloatingPoint(numeric);
     let encoded = semantic::serialize_datatype(&datatype).unwrap();
     assert_eq!(encoded, expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&encoded).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, encoded.len())
     );
 }
@@ -475,7 +488,12 @@ fn parses_wide_numeric_metadata(#[case] size: u32) {
         FixedPointType::new(size, DatatypeByteOrder::BigEndian, true, 1, 127).unwrap(),
     );
     let encoded = semantic::serialize_datatype(&fixed).unwrap();
-    assert_eq!(semantic::parse_datatype(&encoded).unwrap().0, fixed);
+    assert_eq!(
+        DecodedDatatype::from_record(&encoded)
+            .unwrap()
+            .into_datatype(),
+        fixed
+    );
     let floating = Datatype::FloatingPoint(
         FloatingPointType::from_layout(
             size,
@@ -485,7 +503,12 @@ fn parses_wide_numeric_metadata(#[case] size: u32) {
         .unwrap(),
     );
     let encoded = semantic::serialize_datatype(&floating).unwrap();
-    assert_eq!(semantic::parse_datatype(&encoded).unwrap().0, floating);
+    assert_eq!(
+        DecodedDatatype::from_record(&encoded)
+            .unwrap()
+            .into_datatype(),
+        floating
+    );
 }
 
 #[rstest]
@@ -500,7 +523,7 @@ fn rejects_invalid_time_metadata(
     let mut bytes =
         header::build_datatype_header(TIME_CLASS, DATATYPE_VERSION_ONE, [0, 0, 0], size);
     bytes.extend_from_slice(&precision.to_le_bytes());
-    assert_eq!(semantic::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -517,5 +540,5 @@ fn rejects_invalid_bit_field_metadata(
         header::build_datatype_header(BIT_FIELD_CLASS, DATATYPE_VERSION_ONE, [0, 0, 0], size);
     bytes.extend_from_slice(&offset.to_le_bytes());
     bytes.extend_from_slice(&precision.to_le_bytes());
-    assert_eq!(semantic::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }

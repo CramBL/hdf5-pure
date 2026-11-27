@@ -8,6 +8,7 @@ use hdf5_pure_core::{
 use super::super::header;
 use super::super::message::version::DATATYPE_VERSION_THREE;
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 use super::fixtures;
 
 #[test]
@@ -20,8 +21,10 @@ fn a_version_5_array_parses_like_version_3() {
         buf.extend_from_slice(&fixtures::build_fixed_point(4, false, true, 0, 32));
         buf
     };
-    let (expected, expected_len) = semantic::parse_datatype(&array(3)).unwrap();
-    let (parsed, len) = semantic::parse_datatype(&array(5)).unwrap();
+    let (decoded, expected_len) = DecodedDatatype::parse_prefix(&array(3)).unwrap();
+    let expected = decoded.into_datatype();
+    let (decoded, len) = DecodedDatatype::parse_prefix(&array(5)).unwrap();
+    let parsed = decoded.into_datatype();
     assert_eq!((parsed, len), (expected, expected_len));
 }
 
@@ -33,7 +36,7 @@ fn parses_array_dimensions_and_base_type() {
     buf.extend_from_slice(&4u32.to_le_bytes());
     buf.extend_from_slice(&fixtures::build_fixed_point(4, false, true, 0, 32));
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     match dt {
         Datatype::Array {
             base_type,
@@ -59,7 +62,7 @@ fn rejects_a_zero_dimension_with_a_nonzero_declared_size() {
     buf.extend_from_slice(&fixtures::build_fixed_point(4, false, true, 0, 32));
 
     assert_eq!(
-        semantic::parse_datatype(&buf).unwrap_err(),
+        DecodedDatatype::parse_prefix(&buf).unwrap_err(),
         FormatError::ZeroSizedDatatype { class: 10 }
     );
 }
@@ -78,6 +81,8 @@ fn serialize_parse_array_roundtrip() {
         dimensions: vec![3],
     };
     let bytes = semantic::serialize_datatype(&dt).unwrap();
-    let (parsed, _) = semantic::parse_datatype(&bytes).unwrap();
+    let parsed = DecodedDatatype::from_record(&bytes)
+        .unwrap()
+        .into_datatype();
     assert_eq!(parsed, dt);
 }

@@ -7,6 +7,7 @@ use hdf5_pure_core::{
 use super::super::header;
 use super::super::message::version::DATATYPE_VERSION_THREE;
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 use super::fixtures;
 
 #[test]
@@ -21,7 +22,7 @@ fn parses_enumeration_base_names_and_values() {
     buf.extend_from_slice(&1i32.to_le_bytes());
     buf.extend_from_slice(&2i32.to_le_bytes());
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     match dt {
         Datatype::Enumeration(datatype) => {
             assert_eq!(
@@ -49,7 +50,9 @@ fn serialize_parse_enum_roundtrip() {
         &[("RED", 0), ("GREEN", 1), ("BLUE", 2)],
     );
     let bytes = semantic::serialize_datatype(&dt).unwrap();
-    let (parsed, _) = semantic::parse_datatype(&bytes).unwrap();
+    let parsed = DecodedDatatype::from_record(&bytes)
+        .unwrap()
+        .into_datatype();
     assert_eq!(parsed, dt);
 }
 
@@ -62,7 +65,8 @@ fn serialize_parse_enum_base_type_variety() {
     ] {
         let dt = make_enum(base, &[("A", 0), ("B", 1), ("NEG", -1)]);
         let bytes = semantic::serialize_datatype(&dt).unwrap();
-        let (parsed, consumed) = semantic::parse_datatype(&bytes).unwrap();
+        let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+        let parsed = decoded.into_datatype();
         assert_eq!(parsed, dt, "round-trip failed for base {base:?}");
         assert_eq!(consumed, bytes.len());
     }
@@ -75,7 +79,9 @@ fn serialize_parse_enum_large_member_count() {
     let members: Vec<(&str, i64)> = owned.iter().map(|(n, v)| (n.as_str(), *v)).collect();
     let dt = make_enum(fixed_point_enum_base(4, false, true), &members);
     let bytes = semantic::serialize_datatype(&dt).unwrap();
-    let (parsed, _) = semantic::parse_datatype(&bytes).unwrap();
+    let parsed = DecodedDatatype::from_record(&bytes)
+        .unwrap()
+        .into_datatype();
     assert_eq!(parsed, dt);
     match parsed {
         Datatype::Enumeration(datatype) => {

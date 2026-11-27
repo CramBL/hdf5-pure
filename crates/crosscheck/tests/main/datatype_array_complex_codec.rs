@@ -7,6 +7,7 @@ use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, FloatingPointType, MessageType, VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeProperties, DatatypeVersion, FormatWidths, ObjectHeader,
     OffsetWidth,
@@ -135,8 +136,9 @@ fn assert_native(
         .unwrap()
         .data;
     let (message, consumed) = DatatypeMessage::parse_prefix(bytes).unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), consumed)
     );
     assert_eq!(message.to_datatype().unwrap(), semantic);

@@ -1,4 +1,5 @@
 use hdf5_pure_core::__private::ByteLength;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::LinkCreationOrderIndex;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 
@@ -383,7 +384,9 @@ fn extract_dataset(
         .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
         .unwrap()
         .data;
-    let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
+    let dt = DecodedDatatype::from_record(dt_data)
+        .unwrap()
+        .into_datatype();
     let ds = Dataspace::parse_with_length_width(ds_data, widths.lengths).unwrap();
     let dl = DataLayout::parse_with_widths(dl_data, widths).unwrap();
     (dt, ds, dl)

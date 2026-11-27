@@ -6,9 +6,8 @@ pub use self::legacy_member::CompoundV1Shape;
 pub use self::references::{
     class_may_hold_object_address, datatype_holds_file_address, datatype_holds_object_address,
 };
-pub(crate) use self::semantic::DecodedDatatype;
 pub use self::semantic::{
-    parse_datatype, serialize_datatype, serialize_datatype_with_offset_width,
+    DecodedDatatype, serialize_datatype, serialize_datatype_with_offset_width,
 };
 pub use self::slots::{EmbeddedReferenceSlots, embedded_reference_slots};
 pub use self::stored_size::{

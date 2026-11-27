@@ -14,6 +14,7 @@ use super::super::message::version::{
     DATATYPE_VERSION_FIVE, DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE, DATATYPE_VERSION_TWO,
 };
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 use super::fixtures;
 
 #[rstest]
@@ -44,8 +45,9 @@ fn compound_offsets_use_the_minimum_byte_width(#[case] size: u32, #[case] width:
 
     assert_eq!(compound_layout::offset_bytes_for_size(size), width);
     assert_eq!(semantic::serialize_datatype(&datatype).unwrap(), expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&expected).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&expected).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, expected.len())
     );
 }
@@ -61,8 +63,9 @@ fn three_byte_member_offsets_preserve_the_next_datatype(#[case] class: u8, #[cas
     encoded.extend_from_slice(&semantic::serialize_datatype(&member).unwrap());
     encoded.extend_from_slice(b"last\0\x6f\x11\x01");
     encoded.extend_from_slice(&semantic::serialize_datatype(&member).unwrap());
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&encoded).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (
             Datatype::Compound {
                 size: 70_000,
@@ -87,7 +90,7 @@ fn parses_version_three_compound_member_names_offsets_and_types() {
     buf.push(4);
     buf.extend_from_slice(&fixtures::build_float(8, 52, 11, 0, 52, 1023));
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     match dt {
         Datatype::Compound { size, members } => {
             assert_eq!(size, 12);
@@ -123,7 +126,7 @@ fn parses_version_one_compound_with_real_and_imaginary_members() {
         buf.extend_from_slice(&fixtures::build_float(8, 52, 11, 0, 52, 1023));
     }
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     match dt {
         Datatype::Compound { size, members } => {
             assert_eq!(size, 16);
@@ -166,7 +169,8 @@ fn compound_v1_array_dimensions(
         dimensions,
         &base,
     );
-    let (datatype, consumed) = semantic::parse_datatype(&buf).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&buf).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, buf.len());
     let Datatype::Compound { size, members } = &datatype else {
         panic!("expected compound, got {datatype:?}");
@@ -191,7 +195,8 @@ fn compound_v1_array_dimensions(
         )
     );
     let encoded = semantic::serialize_datatype(&datatype).unwrap();
-    let (reparsed, consumed) = semantic::parse_datatype(&encoded).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&encoded).unwrap();
+    let reparsed = decoded.into_datatype();
     assert_eq!(consumed, encoded.len());
     assert_eq!(reparsed, datatype);
 }
@@ -200,7 +205,8 @@ fn compound_v1_array_dimensions(
 fn compound_v1_scalar_ignores_dimension_slots() {
     let base = fixtures::build_fixed_point(4, false, true, 0, 32);
     let buf = test_util::legacy_compound::raw_member(8, 4, 0, 0, [9, 0, 7, 6], &base);
-    let (datatype, consumed) = semantic::parse_datatype(&buf).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&buf).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, buf.len());
     assert_eq!(
         datatype,
@@ -209,7 +215,7 @@ fn compound_v1_scalar_ignores_dimension_slots() {
             members: vec![CompoundMember::new(
                 DatatypeMemberName::from(c"arr"),
                 4,
-                semantic::parse_datatype(&base).unwrap().0
+                DecodedDatatype::from_record(&base).unwrap().into_datatype()
             )],
         }
     );
@@ -236,7 +242,7 @@ fn compound_v1_rejects_invalid_dimensions(
         dimensions,
         &fixtures::build_fixed_point(4, false, true, 0, 32),
     );
-    assert_eq!(semantic::parse_datatype(&buf).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&buf).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -259,7 +265,7 @@ fn compound_v1_rejects_member_outside_declared_size(
         &fixtures::build_fixed_point(4, false, true, 0, 32),
     );
     assert_eq!(
-        semantic::parse_datatype(&buf).unwrap_err(),
+        DecodedDatatype::parse_prefix(&buf).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
             name: DatatypeMemberName::from(c"arr"),
             offset: u64::from(offset),
@@ -279,7 +285,7 @@ fn compound_v1_rejects_truncated_dimensions(#[case] available: usize) {
     let block_start = 20;
     buf.truncate(block_start + available);
     assert_eq!(
-        semantic::parse_datatype(&buf).unwrap_err(),
+        DecodedDatatype::parse_prefix(&buf).unwrap_err(),
         FormatError::UnexpectedEof {
             expected: block_start + 28,
             available: buf.len(),
@@ -291,7 +297,8 @@ fn compound_v1_rejects_truncated_dimensions(#[case] available: usize) {
 fn compound_v1_retains_nested_array_shape() {
     let inner = test_util::legacy_compound::array_member();
     let buf = test_util::legacy_compound::raw_member(32, 0, 1, 0, [2, 0, 0, 0], &inner);
-    let (datatype, consumed) = semantic::parse_datatype(&buf).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&buf).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, buf.len());
     let expected = Datatype::Compound {
         size: 32,
@@ -299,16 +306,20 @@ fn compound_v1_retains_nested_array_shape() {
             DatatypeMemberName::from(c"arr"),
             0,
             Datatype::Array {
-                base_type: Box::new(semantic::parse_datatype(&inner).unwrap().0),
+                base_type: Box::new(
+                    DecodedDatatype::from_record(&inner)
+                        .unwrap()
+                        .into_datatype(),
+                ),
                 dimensions: vec![2],
             },
         )],
     };
     assert_eq!(datatype, expected);
     assert_eq!(
-        semantic::parse_datatype(&semantic::serialize_datatype(&datatype).unwrap())
+        DecodedDatatype::from_record(&semantic::serialize_datatype(&datatype).unwrap())
             .unwrap()
-            .0,
+            .into_datatype(),
         expected
     );
 }
@@ -322,7 +333,7 @@ fn compound_v1_rejects_overflow_in_base_array() {
     base.extend_from_slice(&fixtures::build_fixed_point(4, false, true, 0, 32));
     let buf = test_util::legacy_compound::raw_member(u32::MAX, 0, 1, 0, [1, 0, 0, 0], &base);
     assert_eq!(
-        semantic::parse_datatype(&buf).unwrap_err(),
+        DecodedDatatype::parse_prefix(&buf).unwrap_err(),
         FormatError::LengthTooLarge {
             length: u64::from(u32::MAX) * 4,
             length_size: DATATYPE_SIZE_BYTES,
@@ -337,9 +348,9 @@ fn compound_v1_rejects_overflow_in_base_array() {
 fn parses_explicit_arrays_in_compound_members(#[case] version: u8) {
     let array = Datatype::Array {
         base_type: Box::new(
-            semantic::parse_datatype(&fixtures::build_fixed_point(4, false, true, 0, 32))
+            DecodedDatatype::from_record(&fixtures::build_fixed_point(4, false, true, 0, 32))
                 .unwrap()
-                .0,
+                .into_datatype(),
         ),
         dimensions: vec![2, 3],
     };
@@ -352,8 +363,9 @@ fn parses_explicit_arrays_in_compound_members(#[case] version: u8) {
         buf.push(4);
     }
     buf.extend_from_slice(&semantic::serialize_datatype(&array).unwrap());
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&buf).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&buf).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (
             Datatype::Compound {
                 size: 28,
@@ -381,8 +393,10 @@ fn a_version_5_compound_parses_like_version_3() {
         buf.extend_from_slice(&fixtures::build_float(8, 52, 11, 0, 52, 1023));
         buf
     };
-    let (expected, expected_len) = semantic::parse_datatype(&members(3)).unwrap();
-    let (parsed, len) = semantic::parse_datatype(&members(5)).unwrap();
+    let (decoded, expected_len) = DecodedDatatype::parse_prefix(&members(3)).unwrap();
+    let expected = decoded.into_datatype();
+    let (decoded, len) = DecodedDatatype::parse_prefix(&members(5)).unwrap();
+    let parsed = decoded.into_datatype();
     assert_eq!((parsed, len), (expected, expected_len));
 }
 
@@ -395,7 +409,7 @@ fn rejects_a_zero_sized_compound_member() {
     buf.extend_from_slice(&member);
 
     assert_eq!(
-        semantic::parse_datatype(&buf).unwrap_err(),
+        DecodedDatatype::parse_prefix(&buf).unwrap_err(),
         FormatError::ZeroSizedDatatype { class: 3 }
     );
 }
@@ -419,7 +433,7 @@ fn parses_an_array_of_enumerations_in_a_compound_member() {
     buf.push(0);
     buf.extend_from_slice(&array_bytes);
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     match dt {
         Datatype::Compound { members, .. } => {
             assert_eq!(members.len(), 1);
@@ -486,7 +500,9 @@ fn serialize_parse_compound_roundtrip() {
         ],
     };
     let bytes = semantic::serialize_datatype(&dt).unwrap();
-    let (parsed, _) = semantic::parse_datatype(&bytes).unwrap();
+    let parsed = DecodedDatatype::from_record(&bytes)
+        .unwrap()
+        .into_datatype();
     assert_eq!(parsed, dt);
 }
 

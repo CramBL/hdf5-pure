@@ -8,6 +8,7 @@ use hdf5_pure::RepackOptions;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
 };
@@ -213,7 +214,7 @@ fn parsers_reject_compound_headers_and_nested_prefixes_without_allocating(
         }],
     );
     let semantic: fn(&[u8]) -> Result<usize, FormatError> =
-        |bytes| format::parse_datatype(bytes).map(|(_, consumed)| consumed);
+        |bytes| DecodedDatatype::parse_prefix(bytes).map(|(_, consumed)| consumed);
     let retained =
         |bytes: &[u8]| DatatypeMessage::parse_prefix(bytes).map(|(_, consumed)| consumed);
     for (projection, parse) in [("semantic", semantic), ("retained", retained)] {
@@ -231,7 +232,7 @@ fn parsers_reject_compound_headers_and_nested_prefixes_without_allocating(
 }
 
 #[rstest]
-#[case::semantic(|bytes: &[u8]| format::parse_datatype(bytes).map(|_| ()))]
+#[case::semantic(|bytes: &[u8]| DecodedDatatype::parse_prefix(bytes).map(|_| ()))]
 #[case::retained(|bytes: &[u8]| DatatypeMessage::parse(bytes).map(|_| ()))]
 fn compound_bounds_errors_copy_the_rejected_name_once(
     #[case] parse: fn(&[u8]) -> Result<(), FormatError>,
@@ -347,11 +348,14 @@ fn wide_compound_decoding_has_bounded_allocations(#[case] count: usize) {
     )
     .unwrap();
 
-    let (semantic, semantic_metrics) =
+    let ((semantic, consumed), semantic_metrics) =
         allocation::measure(&format!("wide_compound_semantic_{count}"), || {
-            format::parse_datatype(&bytes).unwrap()
+            DecodedDatatype::parse_prefix(&bytes).unwrap()
         });
-    assert_eq!(semantic, (expected, bytes.len()));
+    assert_eq!(
+        (semantic.into_datatype(), consumed),
+        (expected, bytes.len())
+    );
     let (retained, retained_metrics) =
         allocation::measure(&format!("wide_compound_retained_{count}"), || {
             DatatypeMessage::parse_prefix(&bytes).unwrap()
@@ -486,7 +490,8 @@ fn object_reference_planning_has_bounded_allocations(#[case] count: u32) {
         &[count],
         &datatype::object_reference(8),
     );
-    let (datatype, length) = format::parse_datatype(&body).unwrap();
+    let (decoded, length) = DecodedDatatype::parse_prefix(&body).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(length, 21);
     assert_eq!(length, body.len());
     let (slots, measured) = allocation::measure("object_reference_slot_geometry", || {
@@ -524,7 +529,8 @@ fn repack_reference_planning_is_bounded_without_payload(
     #[values(Storage::Unallocated, Storage::EmptyCompact)] storage: Storage,
 ) {
     let body = datatype::array(3, [0; 3], count * stride, 1, &[count], &parent);
-    let (datatype, length) = format::parse_datatype(&body).unwrap();
+    let (decoded, length) = DecodedDatatype::parse_prefix(&body).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(length, body.len());
     let (layout, shape, layout_body) = match storage {
         Storage::Unallocated => (

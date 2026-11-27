@@ -6,6 +6,7 @@ use hdf5_pure_core::FixedPointType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::ReferenceType;
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use rstest::rstest;
 use test_util::dataspace;
 use test_util::datatype;
@@ -70,7 +71,8 @@ fn nested_reference_slots_preserve_member_and_array_order() {
     );
     let inner = datatype::array(3, [0; 3], 48, 1, &[2], &pair);
     let outer = datatype::array(3, [0; 3], 96, 1, &[2], &inner);
-    let (datatype, consumed) = format::parse_datatype(&outer).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&outer).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, outer.len());
 
     let slots = format::embedded_reference_slots(&datatype).unwrap();

@@ -1,6 +1,7 @@
 use hdf5_pure_core::{Datatype, FixedPointType, FormatError, VariableLengthType};
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
-    self as format, DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
 use rstest::rstest;
 use test_util::datatype::containers::{self, CompoundField, EnumValue, MemberOffset};
@@ -111,8 +112,9 @@ fn semantic_parser_accepts_nested_arrays_with_two_byte_heap_addresses() {
         dimensions: vec![3],
     };
 
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&body).unwrap();
     assert_eq!(
-        format::parse_datatype(&body).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected, body.len())
     );
 }
@@ -202,7 +204,7 @@ fn datatype_parsers_reject_invalid_array_geometry(
         dimensions,
         &leaf::unsigned_byte(Version::One),
     );
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
 }
 
@@ -217,7 +219,7 @@ fn datatype_parsers_reject_array_size_based_on_a_wider_descriptor() {
         size: 32,
         expected: expected_size,
     };
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
 }
 
@@ -399,8 +401,9 @@ fn datatype_array_complex_codecs_bound_array_recursion() {
     let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), consumed)
     );
     let too_deep = array_of_one(Version::Three, 4, &bytes);
@@ -409,7 +412,7 @@ fn datatype_array_complex_codecs_bound_array_recursion() {
         FormatError::NestingDepthExceeded
     );
     assert_eq!(
-        format::parse_datatype(&too_deep).unwrap_err(),
+        DecodedDatatype::parse_prefix(&too_deep).unwrap_err(),
         FormatError::NestingDepthExceeded
     );
     let too_deep = DatatypeMessage::new(
@@ -463,8 +466,9 @@ fn datatype_parsers_bound_mixed_container_recursion(#[case] base: Vec<u8>, #[cas
     let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), consumed)
     );
     let too_deep = array_of_one(version, size, &bytes);
@@ -473,7 +477,7 @@ fn datatype_parsers_bound_mixed_container_recursion(#[case] base: Vec<u8>, #[cas
         FormatError::NestingDepthExceeded
     );
     assert_eq!(
-        format::parse_datatype(&too_deep).unwrap_err(),
+        DecodedDatatype::parse_prefix(&too_deep).unwrap_err(),
         FormatError::NestingDepthExceeded
     );
 }
