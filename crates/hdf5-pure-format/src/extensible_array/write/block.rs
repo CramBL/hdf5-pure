@@ -127,7 +127,7 @@ impl ExtensibleArrayBlockWriter {
         let block = layout.super_block(index)?;
         let length = layout.super_block_len(block)?.to_usize()?;
         let bitmap_len = layout.bitmap_len(block)?.to_usize()?;
-        let count = block.blocks.to_usize()?;
+        let count = block.blocks().to_usize()?;
         if let Some(bitmap) = bitmap {
             require_len(bitmap_len, bitmap.len())?;
         }
@@ -136,14 +136,14 @@ impl ExtensibleArrayBlockWriter {
             for (local, address) in children.iter().enumerate() {
                 if let Some(address) = address {
                     let data = block.data_block(local.to_u64())?;
-                    self.require_block_offset(data.offset)?;
+                    self.require_block_offset(data.offset())?;
                     let (length, _) = self.data_extent(data)?;
                     stored_block_range(layout.encoding().offsets(), *address, length)?;
                 }
             }
         }
-        if let (Some(bitmap), Some(pages)) = (bitmap, layout.pages(block.block_elements)) {
-            require_page_owners(bitmap, children.unwrap_or_default(), block.blocks, pages)?;
+        if let (Some(bitmap), Some(pages)) = (bitmap, layout.pages(block.block_elements())) {
+            require_page_owners(bitmap, children.unwrap_or_default(), block.blocks(), pages)?;
         }
         Ok(self.secondary(
             length,
@@ -218,11 +218,11 @@ impl ExtensibleArrayBlockWriter {
         let layout = self.layout;
         for index in 0..layout.super_blocks() {
             let block = layout.super_block(index)?;
-            let Some(relative) = offset.checked_sub(block.offset) else {
+            let Some(relative) = offset.checked_sub(block.offset()) else {
                 break;
             };
-            let local = relative / block.block_elements;
-            if local < block.blocks && relative % block.block_elements == 0 {
+            let local = relative / block.block_elements();
+            if local < block.blocks() && relative % block.block_elements() == 0 {
                 return block.data_block(local);
             }
         }
@@ -244,7 +244,7 @@ impl ExtensibleArrayBlockWriter {
 
     fn data_extent(self, block: DataBlock) -> Result<(u64, core::ops::Range<u64>), FormatError> {
         let length = self.layout.data_block_len(block)?;
-        Ok((length, self.layout.slots(block.offset, block.elements)?))
+        Ok((length, block.slots(self.layout)?))
     }
 
     /// Uses the layout and checked header address of a placement.
@@ -449,7 +449,7 @@ impl<'a> ExtensibleArrayBlockEncoding<'a> {
                     let body = writer.write_prefix(
                         body,
                         extensible_array::SUPER_BLOCK_SIGNATURE,
-                        Some(block.offset),
+                        Some(block.offset()),
                     );
                     let (bits, pointers) = body.split_at_mut(*bitmap_len);
                     bitmap.write(bits, writer.layout, *block);
@@ -658,13 +658,13 @@ impl Bitmap<'_> {
                 first_slot,
             } => {
                 output.fill(0);
-                if let Some(pages) = layout.pages(block.block_elements) {
+                if let Some(pages) = layout.pages(block.block_elements()) {
                     write_page_bits(
                         output,
                         slots,
                         children,
                         *first_slot,
-                        block.block_elements,
+                        block.block_elements(),
                         layout.page_nelmts().get(),
                         pages,
                     );

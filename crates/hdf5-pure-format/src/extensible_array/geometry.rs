@@ -209,12 +209,36 @@ impl Layout {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SuperBlock {
     /// The block offset of the super block and of its first data block.
-    pub(super) offset: u64,
-    pub(super) blocks: u64,
-    pub(super) block_elements: u64,
+    offset: u64,
+    blocks: u64,
+    block_elements: u64,
 }
 
 impl SuperBlock {
+    pub(super) fn offset(self) -> u64 {
+        self.offset
+    }
+
+    pub(super) fn blocks(self) -> u64 {
+        self.blocks
+    }
+
+    pub(super) fn block_elements(self) -> u64 {
+        self.block_elements
+    }
+
+    /// Returns the logical slot range covered by all data blocks of this super block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range exceeds [`u64::MAX`].
+    pub(super) fn slots(self, layout: Layout) -> Result<Range<u64>, FormatError> {
+        layout.slots(
+            self.offset,
+            super::product(self.blocks, self.block_elements)?,
+        )
+    }
+
     pub(super) fn data_block(self, local: u64) -> Result<DataBlock, FormatError> {
         Ok(DataBlock {
             offset: super::sum([self.offset, super::product(local, self.block_elements)?])?,
@@ -237,11 +261,34 @@ impl SuperBlock {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DataBlock {
-    pub(super) offset: u64,
-    pub(super) elements: u64,
+    offset: u64,
+    elements: u64,
     /// The block offset the C library stores in a data block whose address the index block holds,
     /// or `None` in one whose address a super block holds.
-    pub(super) libhdf5_offset: Option<u64>,
+    libhdf5_offset: Option<u64>,
+}
+
+impl DataBlock {
+    pub(super) fn offset(self) -> u64 {
+        self.offset
+    }
+
+    pub(super) fn elements(self) -> u64 {
+        self.elements
+    }
+
+    pub(super) fn libhdf5_offset(self) -> Option<u64> {
+        self.libhdf5_offset
+    }
+
+    /// Returns the logical slot range covered by this data block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range exceeds [`u64::MAX`].
+    pub(super) fn slots(self, layout: Layout) -> Result<Range<u64>, FormatError> {
+        layout.slots(self.offset, self.elements)
+    }
 }
 
 /// The number and the size of the data blocks of each super block of an Extensible Array, from

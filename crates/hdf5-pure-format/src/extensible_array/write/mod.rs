@@ -388,7 +388,7 @@ impl ExtensibleArrayBlock {
     pub fn offset(&self) -> Option<u64> {
         match &self.location {
             BlockLocation::Header | BlockLocation::Index { .. } => None,
-            BlockLocation::Secondary(block) => Some(block.geometry.offset),
+            BlockLocation::Secondary(block) => Some(block.geometry.offset()),
             BlockLocation::Data(block) => Some(block.offset),
         }
     }
@@ -427,7 +427,7 @@ struct SecondaryBlock {
 impl SecondaryBlock {
     fn slots(&self) -> Range<u64> {
         // Planning checks the range of every secondary block before building the descriptor.
-        self.first_slot..self.first_slot + self.geometry.blocks * self.geometry.block_elements
+        self.first_slot..self.first_slot + self.geometry.blocks() * self.geometry.block_elements()
     }
 }
 
@@ -582,12 +582,7 @@ fn visit_regions(
     let mut covered = num_slots <= u64::from(layout.inline_elements());
     for (pointer, block) in layout.direct_blocks().enumerate() {
         let block = block?;
-        let DataBlock {
-            offset,
-            elements,
-            libhdf5_offset: _,
-        } = block;
-        let slots = layout.slots(offset, elements)?;
+        let slots = block.slots(layout)?;
         covered |= num_slots <= slots.end;
         if occupancy
             .next(slots.start)
@@ -604,13 +599,9 @@ fn visit_regions(
             break;
         }
         let block = layout.super_block(index)?;
-        let SuperBlock {
-            offset,
-            blocks,
-            block_elements,
-        } = block;
-        let first = layout.first_slot(offset)?;
-        covered = num_slots > first && (num_slots - 1 - first) / block_elements < blocks;
+        let first = layout.first_slot(block.offset())?;
+        covered =
+            num_slots > first && (num_slots - 1 - first) / block.block_elements() < block.blocks();
         visit(Region::Secondary {
             block,
             pointer: u64::from(index - layout.first_super_block()),
@@ -669,7 +660,7 @@ impl<'a> SelectedData<'a> {
         layout: Layout,
         block: SuperBlock,
     ) -> Result<Self, FormatError> {
-        let first = layout.first_slot(block.offset)?;
+        let first = layout.first_slot(block.offset())?;
         Ok(Self {
             occupancy,
             layout,
@@ -692,23 +683,13 @@ impl Iterator for SelectedData<'_> {
             next,
         } = self;
         let slot = next.take()?;
-        let SuperBlock {
-            offset: _,
-            blocks,
-            block_elements,
-        } = *block;
-        let local = (slot - *first) / block_elements;
-        if local >= blocks {
+        let local = (slot - *first) / block.block_elements();
+        if local >= block.blocks() {
             return None;
         }
         Some((|| {
             let data = block.data_block(local)?;
-            let DataBlock {
-                offset,
-                elements,
-                libhdf5_offset: _,
-            } = data;
-            *next = occupancy.next(layout.slots(offset, elements)?.end);
+            *next = occupancy.next(data.slots(*layout)?.end);
             Ok((data, local))
         })())
     }
@@ -728,7 +709,7 @@ fn push_data(
             length,
             location: BlockLocation::Data(ChildBlock {
                 slots,
-                offset: block.offset,
+                offset: block.offset(),
                 parent,
             }),
         },
@@ -861,11 +842,11 @@ mod tests {
         )
         .unwrap();
         let block = layout.super_block(20).unwrap();
-        assert_eq!(block.blocks, 1_024);
-        let first = layout.first_slot(block.offset).unwrap();
+        assert_eq!(block.blocks(), 1_024);
+        let first = layout.first_slot(block.offset()).unwrap();
         let slots: Vec<_> = local
             .iter()
-            .map(|&local| first + local * block.block_elements)
+            .map(|&local| first + local * block.block_elements())
             .collect();
         let occupancy =
             Occupancy::new(SlotOccupancy::Slots(&slots), slots.last().unwrap() + 1).unwrap();
@@ -876,11 +857,11 @@ mod tests {
         assert_eq!(
             selected
                 .iter()
-                .map(|&(data, local)| (data.offset, local))
+                .map(|&(data, local)| (data.offset(), local))
                 .collect::<Vec<_>>(),
             local
                 .iter()
-                .map(|&local| (block.offset + local * block.block_elements, local))
+                .map(|&local| (block.offset() + local * block.block_elements(), local))
                 .collect::<Vec<_>>()
         );
         let mut regions = 0;

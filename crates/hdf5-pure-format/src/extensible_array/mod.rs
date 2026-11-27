@@ -87,13 +87,13 @@ impl ExtensibleArrayBlockFraming {
         Ok(Self {
             owner,
             range,
-            parse_range: if layout.pages(block.elements).is_some() {
+            parse_range: if layout.pages(block.elements()).is_some() {
                 FileRange::new(address, layout.pages_offset())?
             } else {
                 range
             },
             signature: DATA_BLOCK_SIGNATURE,
-            offset: (block.offset, block.libhdf5_offset),
+            offset: (block.offset(), block.libhdf5_offset()),
         })
     }
 
@@ -325,7 +325,7 @@ impl ExtensibleArraySuperBlockRef {
             range,
             parse_range: range,
             signature: SUPER_BLOCK_SIGNATURE,
-            offset: (super_block.offset, None),
+            offset: (super_block.offset(), None),
         }
     }
 
@@ -349,7 +349,7 @@ impl ExtensibleArraySuperBlockRef {
             range: _,
             super_block,
         } = *self;
-        if local >= super_block.blocks {
+        if local >= super_block.blocks() {
             return Err(FormatError::InvalidExtensibleArrayGeometry);
         }
         ExtensibleArrayBlockFraming::data(owner, address, super_block.data_block(local)?)
@@ -380,7 +380,7 @@ impl ExtensibleArraySuperBlockRef {
         } = *self;
         let bytes = region.subregion(range)?.bytes();
         let mut cursor = owner.parse_prefix(bytes, SUPER_BLOCK_SIGNATURE)?;
-        owner.parse_block_offset(&mut cursor, super_block.offset, None)?;
+        owner.parse_block_offset(&mut cursor, super_block.offset(), None)?;
         checksum::verify_trailing(bytes)?;
         let (bitmap, data_blocks) = body(bytes, cursor.position())?
             .split_at_checked(owner.layout.bitmap_len(super_block)?.to_usize()?)
@@ -403,7 +403,7 @@ impl ExtensibleArraySuperBlockRef {
     /// The array has set none of the slots of a super block that does not, and a caller need not
     /// read it.
     pub fn holds_set_slots(&self) -> bool {
-        self.owner.holds_set_slots(self.super_block.offset)
+        self.owner.holds_set_slots(self.super_block.offset())
     }
 
     /// Returns the slots of the data blocks whose addresses the super block holds.
@@ -413,14 +413,7 @@ impl ExtensibleArraySuperBlockRef {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range ends past
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
-        let SuperBlock {
-            offset,
-            blocks,
-            block_elements,
-        } = self.super_block;
-        self.owner
-            .layout
-            .slots(offset, product(blocks, block_elements)?)
+        self.super_block.slots(self.owner.layout)
     }
 }
 
@@ -451,11 +444,11 @@ impl<'a> ExtensibleArraySuperBlock<'a> {
         } = *self;
         owner
             .addresses(data_blocks)
-            .zip((0..super_block.blocks).map(move |local| (local, super_block.data_block(local))))
+            .zip((0..super_block.blocks()).map(move |local| (local, super_block.data_block(local))))
             .filter_map(move |(address, (local, block))| {
                 address.transpose().map(|address| {
                     let block = block?;
-                    let pages = match owner.layout.pages(block.elements) {
+                    let pages = match owner.layout.pages(block.elements()) {
                         Some(pages) => Some(PageBitmap {
                             bitmap,
                             first_page: product(local, pages)?,
@@ -561,7 +554,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
         // HDF5 1.10.11 to 2.2.0) stores the offset of its super block plus its ordinal among those
         // data blocks times its element count, which differs from its position from super block 1
         // on.
-        owner.parse_block_offset(&mut cursor, block.offset, block.libhdf5_offset)?;
+        owner.parse_block_offset(&mut cursor, block.offset(), block.libhdf5_offset())?;
         checksum::verify_trailing(bytes)?;
         Ok(match self.pages()? {
             Some(pages) => ExtensibleArrayDataBlock::Pages(pages),
@@ -569,7 +562,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
                 ExtensibleArrayDataBlock::Elements(ExtensibleArrayElements::below_max_index_set(
                     owner,
                     body(bytes, cursor.position())?,
-                    owner.layout.first_slot(block.offset)?,
+                    owner.layout.first_slot(block.offset())?,
                 ))
             }
         })
@@ -598,7 +591,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
                 Ok(ExtensibleArrayPages {
                     owner,
                     first_page: range.start().checked_add(owner.layout.pages_offset())?,
-                    first_slot: owner.layout.first_slot(block.offset)?,
+                    first_slot: owner.layout.first_slot(block.offset())?,
                     bitmap,
                 })
             })
@@ -621,7 +614,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
     /// The array has set none of the slots of a data block that does not, and a caller need not
     /// read it.
     pub fn holds_set_slots(&self) -> bool {
-        self.owner.holds_set_slots(self.block.offset)
+        self.owner.holds_set_slots(self.block.offset())
     }
 
     /// Returns the slots of the data block.
@@ -631,9 +624,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range ends past
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
-        self.owner
-            .layout
-            .slots(self.block.offset, self.block.elements)
+        self.block.slots(self.owner.layout)
     }
 }
 

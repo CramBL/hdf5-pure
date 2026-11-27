@@ -252,7 +252,7 @@ impl ExtensibleArrayEmission<'_> {
                         reason = "the checked block length fits usize and includes at least one byte per pointer"
                     )
                 )]
-                let pointer_count = block.geometry.blocks as usize;
+                let pointer_count = block.geometry.blocks() as usize;
                 let bitmap_len = length - layout.pages_offset_usize() - pointer_count * offsets;
                 let bitmap = Bitmap::Occupied {
                     slots,
