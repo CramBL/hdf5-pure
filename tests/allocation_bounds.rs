@@ -59,7 +59,9 @@ use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use hdf5_pure_format::__private::PreparedSuperblock;
-use hdf5_pure_format::__private::{LinkMessage, LinkMessageView, LinkTargetView};
+use hdf5_pure_format::__private::{
+    LinkMessage, LinkMessageV1, LinkMessageView, LinkStorageError, LinkTargetView, LinkWireError,
+};
 use rstest::rstest;
 use test_util::allocation;
 use test_util::data_layout;
@@ -2796,6 +2798,27 @@ fn borrowed_external_link_decoding_allocates_nothing() {
         },
     );
     assert_eq!(view.consumed(), bytes.len());
+}
+
+#[test]
+fn exact_owned_link_decoding_rejects_trailing_bytes_before_allocating() {
+    let mut bytes = SymbolicLink::external("x", "source.h5", "/target").build();
+    let (link, control) = allocation::measure("owned_link_exact_control", || {
+        LinkMessageV1::parse(&bytes, OffsetWidth::Eight).unwrap()
+    });
+    assert!(control.blocks > 0, "{control}");
+    assert_eq!(link.name().as_bytes(), b"x");
+    bytes.push(0xa5);
+    let ((wire, storage), measured) = allocation::measure("owned_link_trailing_bytes", || {
+        (
+            LinkMessageV1::parse(&bytes, OffsetWidth::Eight),
+            OwnedLink::parse(&bytes, OffsetWidth::Eight),
+        )
+    });
+    assert_eq!(wire.unwrap_err(), LinkWireError::TrailingBytes);
+    assert_eq!(storage.unwrap_err(), LinkStorageError::TrailingBytes);
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
 }
 
 #[test]
