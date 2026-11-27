@@ -1,16 +1,17 @@
+use core::num::NonZeroU8;
 use core::num::NonZeroUsize;
 use core::ops::Range;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 
+use super::data_block;
 use super::data_block::FixedArrayDataBlockRef;
 use super::data_block::FixedArrayElements;
 use super::data_block::FixedArrayEntryWindow;
 use super::framing;
 use super::framing::CHECKSUM_LEN;
 use super::geometry;
-use super::geometry::Geometry;
 use super::geometry::Paging;
 use super::mutation;
 use crate::bytes;
@@ -26,36 +27,19 @@ use crate::error::FormatError;
 /// elements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedArrayPageBitmap<'a> {
-    block: FixedArrayDataBlockRef,
-    paging: Paging,
+    block: PagedBlock,
     bitmap: &'a [u8],
 }
 
 impl<'a> FixedArrayPageBitmap<'a> {
-    pub(super) const fn new(
-        block: FixedArrayDataBlockRef,
-        paging: Paging,
-        bitmap: &'a [u8],
-    ) -> Self {
-        Self {
-            block,
-            paging,
-            bitmap,
-        }
-    }
-
     /// Returns the reference to each page the bitmap marks initialized, in page order.
     ///
     /// Page 0 is the most significant bit of the first byte.
     pub fn pages(&self) -> impl Iterator<Item = Result<FixedArrayPageRef, FormatError>> + 'a {
-        let Self {
-            block,
-            paging,
-            bitmap,
-        } = *self;
-        (0..paging.pages())
+        let Self { block, bitmap } = *self;
+        (0..block.paging.pages())
             .filter(move |&index| chunk_record::page_initialized(bitmap, index))
-            .map(move |index| block.page(paging, index))
+            .map(move |index| block.page(index))
     }
 }
 
@@ -72,17 +56,16 @@ impl FixedArrayPageBitmap<'_> {
         &self,
         slot: u64,
     ) -> Result<Option<(FixedArrayPageRef, bool)>, FormatError> {
-        let Self {
-            block,
-            paging,
-            bitmap,
-        } = *self;
-        Ok(block.page_for_slot(slot)?.map(|page| {
-            (
-                page,
-                crate::chunk_record::page_initialized(bitmap, slot / paging.page_entries()),
-            )
-        }))
+        let Self { block, bitmap } = *self;
+        block
+            .index(slot)
+            .map(|index| {
+                Ok((
+                    block.page(index)?,
+                    chunk_record::page_initialized(bitmap, index),
+                ))
+            })
+            .transpose()
     }
 }
 
@@ -128,31 +111,6 @@ impl FixedArrayPageRef {
     /// checksum.
     pub const fn parse_range(&self) -> FileRange {
         self.range
-    }
-    pub(super) fn at(
-        range: FileRange,
-        geometry: Geometry,
-        paging: Paging,
-        index: u64,
-    ) -> Result<Self, FormatError> {
-        let first_slot = geometry::product(index, paging.page_entries())?;
-        let entries = geometry
-            .entries()
-            .checked_sub(first_slot)
-            .ok_or(FormatError::InvalidFixedArrayGeometry)?
-            .min(paging.page_entries());
-        let offset = geometry::sum([
-            paging.pages_offset(geometry.encoding().offsets())?,
-            geometry::product(index, geometry.page_len(paging.page_entries())?)?,
-        ])?;
-        Ok(Self {
-            range: FileRange::new(
-                range.start().checked_add(offset)?,
-                geometry.page_len(entries)?,
-            )?,
-            first_slot,
-            encoding: geometry.encoding(),
-        })
     }
     /// Returns the page's entry bytes, excluding its trailing checksum.
     ///
@@ -363,3 +321,90 @@ impl FixedArrayPageRef {
         Ok(first_slot..geometry::sum([first_slot, entries])?)
     }
 }
+
+/// A data block with the page geometry derived from its header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PagedBlock {
+    block: FixedArrayDataBlockRef,
+    paging: Paging,
+}
+
+impl PagedBlock {
+    pub(super) fn new(block: &FixedArrayDataBlockRef) -> Option<Self> {
+        Some(Self {
+            block: *block,
+            paging: block.geometry().paging()?,
+        })
+    }
+
+    pub(super) const fn bitmap(self, bitmap: &[u8]) -> FixedArrayPageBitmap<'_> {
+        FixedArrayPageBitmap {
+            block: self,
+            bitmap,
+        }
+    }
+
+    pub(super) fn page_for_slot(
+        &self,
+        slot: u64,
+    ) -> Result<Option<FixedArrayPageRef>, FormatError> {
+        self.index(slot).map(|index| self.page(index)).transpose()
+    }
+
+    pub(super) fn bitmap_byte(
+        &self,
+        slot: u64,
+    ) -> Result<Option<(FileRange, NonZeroU8)>, FormatError> {
+        let Some(index) = self.index(slot) else {
+            return Ok(None);
+        };
+        let address = self.block.range().start().checked_add(geometry::sum([
+            data_block::data_block_prefix_len(self.block.geometry().encoding().offsets()),
+            index / u64::from(u8::BITS),
+        ])?)?;
+        let mask = NonZeroU8::new(PAGE_ZERO_MASK >> (index % u64::from(u8::BITS)))
+            .ok_or(FormatError::InvalidFixedArrayGeometry)?;
+        Ok(Some((FileRange::new(address, 1)?, mask)))
+    }
+
+    fn index(&self, slot: u64) -> Option<u64> {
+        (slot < self.block.geometry().entries()).then(|| slot / self.paging.page_entries())
+    }
+
+    fn page(&self, index: u64) -> Result<FixedArrayPageRef, FormatError> {
+        let Self { block, paging } = *self;
+        let geometry = block.geometry();
+        let first_slot = geometry::product(index, paging.page_entries())?;
+        let entries = geometry
+            .entries()
+            .checked_sub(first_slot)
+            .ok_or(FormatError::InvalidFixedArrayGeometry)?
+            .min(paging.page_entries());
+        let offset = geometry::sum([
+            paging.pages_offset(geometry.encoding().offsets())?,
+            geometry::product(index, self.page_len(paging.page_entries())?)?,
+        ])?;
+        Ok(FixedArrayPageRef {
+            range: FileRange::new(
+                block.range().start().checked_add(offset)?,
+                self.page_len(entries)?,
+            )?,
+            first_slot,
+            encoding: geometry.encoding(),
+        })
+    }
+
+    /// Returns the length in bytes of a page of `entries` elements, with its checksum.
+    fn page_len(&self, entries: u64) -> Result<u64, FormatError> {
+        geometry::sum([
+            geometry::product(
+                entries,
+                u64::from(self.block.geometry().encoding().stride().get()),
+            )?,
+            CHECKSUM_LEN,
+        ])
+    }
+}
+
+// H5VM_bit_set stores page zero in the high bit (H5VMprivate.h, HDF5 2.2.0).
+const PAGE_ZERO_MASK: u8 = 0x80;

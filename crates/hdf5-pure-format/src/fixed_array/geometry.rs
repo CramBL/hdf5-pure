@@ -66,14 +66,6 @@ impl Geometry {
             ]),
         }
     }
-
-    /// Returns the length in bytes of a page of `entries` elements, with its checksum.
-    pub(super) fn page_len(&self, entries: u64) -> Result<u64, FormatError> {
-        sum([
-            product(entries, u64::from(self.encoding.stride().get()))?,
-            CHECKSUM_LEN,
-        ])
-    }
 }
 
 pub(super) fn element_encoding(
