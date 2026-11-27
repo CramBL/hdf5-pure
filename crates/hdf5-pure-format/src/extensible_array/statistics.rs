@@ -207,23 +207,18 @@ impl ExtensibleArrayStats {
         layout: Layout,
         block: DataBlock,
     ) -> Result<(u64, Range<u64>), FormatError> {
-        let DataBlock {
-            offset,
-            elements,
-            libhdf5_offset: _,
-        } = block;
         let offset_len = usize::from(layout.block_offset_len());
-        if offset.to_le_bytes()[offset_len..]
+        if block.offset().to_le_bytes()[offset_len..]
             .iter()
             .any(|&byte| byte != 0)
         {
             return Err(FormatError::InvalidExtensibleArrayGeometry);
         }
         let length = layout.data_block_len(block)?;
-        let slots = layout.slots(offset, elements)?;
+        let slots = block.slots(layout)?;
         self.ndata_blks = super::sum([self.ndata_blks, 1])?;
         self.data_blk_size = super::sum([self.data_blk_size, length])?;
-        self.nelmts = super::sum([self.nelmts, elements])?;
+        self.nelmts = super::sum([self.nelmts, block.elements()])?;
         Ok((length, slots))
     }
 
@@ -238,13 +233,8 @@ impl ExtensibleArrayStats {
         layout: Layout,
         block: SuperBlock,
     ) -> Result<(u64, Range<u64>), FormatError> {
-        let SuperBlock {
-            offset,
-            blocks,
-            block_elements,
-        } = block;
         let length = layout.super_block_len(block)?;
-        let slots = layout.slots(offset, super::product(blocks, block_elements)?)?;
+        let slots = block.slots(layout)?;
         self.nsuper_blks = super::sum([self.nsuper_blks, 1])?;
         self.super_blk_size = super::sum([self.super_blk_size, length])?;
         Ok((length, slots))
