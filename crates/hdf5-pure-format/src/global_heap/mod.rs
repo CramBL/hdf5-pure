@@ -123,7 +123,7 @@ impl GlobalHeapCollectionLocator {
         Ok(GlobalHeapCollection {
             range: FileRange::new(address, size)?,
             lengths,
-            first: FileRange::new(address.checked_add(header_len)?, header_len)?,
+            first: GlobalHeapObjectHeader::at(address.checked_add(header_len)?, lengths)?,
         })
     }
 
@@ -150,7 +150,7 @@ impl GlobalHeapCollectionLocator {
 pub struct GlobalHeapCollection {
     range: FileRange,
     lengths: LengthWidth,
-    first: FileRange,
+    first: GlobalHeapObjectHeader,
 }
 
 impl GlobalHeapCollection {
@@ -163,25 +163,25 @@ impl GlobalHeapCollection {
 
     /// Starts a lookup of the object at `index`, at the first object header.
     pub fn lookup(&self, index: NonZeroU16) -> GlobalHeapLookup {
-        GlobalHeapLookup {
-            walk: self.walk(),
-            index,
-            found: None,
-        }
+        GlobalHeapLookup::new(self.walk(), index)
     }
 
     /// Starts a walk over the objects of the collection, at the first object header.
     pub fn walk(&self) -> GlobalHeapWalk {
-        GlobalHeapWalk {
-            collection: *self,
-            next: GlobalHeapSpan::Header(GlobalHeapObjectHeader { range: self.first }),
-            seen: IndexSet::new(),
-        }
+        GlobalHeapWalk::new(*self, self.first)
     }
 
     /// Returns the range of the collection, from its address over the size its header stores.
     pub const fn range(&self) -> FileRange {
         self.range
+    }
+
+    const fn members_start(&self) -> PhysicalAddress {
+        self.first.range().start()
+    }
+
+    const fn lengths(&self) -> LengthWidth {
+        self.lengths
     }
 
     /// Classifies the span at `start` from the declared collection boundary.
@@ -201,9 +201,7 @@ impl GlobalHeapCollection {
         } else if remaining < header_len(self.lengths) {
             GlobalHeapSpan::ImpliedFree(FileRange::new(start, remaining)?)
         } else {
-            GlobalHeapSpan::Header(GlobalHeapObjectHeader {
-                range: FileRange::new(start, header_len(self.lengths))?,
-            })
+            GlobalHeapSpan::Header(GlobalHeapObjectHeader::at(start, self.lengths)?)
         })
     }
 
@@ -246,6 +244,16 @@ struct GlobalHeapObjectHeader {
 }
 
 impl GlobalHeapObjectHeader {
+    fn at(start: PhysicalAddress, lengths: LengthWidth) -> Result<Self, FormatError> {
+        Ok(Self {
+            range: FileRange::new(start, header_len(lengths))?,
+        })
+    }
+
+    const fn range(&self) -> FileRange {
+        self.range
+    }
+
     /// Parses the complete header from `region`, returning `None` for an explicit free-space record.
     ///
     /// # Errors
@@ -261,18 +269,18 @@ impl GlobalHeapObjectHeader {
     ) -> Result<Option<GlobalHeapObject>, FormatError> {
         let header = region.subregion(self.range)?;
         let range = self.range;
-        let collection_end = collection.range.end().get();
+        let collection_end = collection.range().end().get();
         let outside = |index| FormatError::GlobalHeapObjectOutsideCollection {
             address: range.start().get(),
             index,
             collection_end,
         };
-        let header_len = header_len(collection.lengths);
+        let header_len = header_len(collection.lengths());
         let mut cursor = bytes::ByteCursor::new(header.bytes());
         let index = cursor.u16()?;
         let reference_count = cursor.u16()?;
         cursor.array::<OBJECT_RESERVED_LEN>()?;
-        let size = cursor.length(collection.lengths)?;
+        let size = cursor.length(collection.lengths())?;
         let remaining = collection.remaining(range.start())?;
         let Some(index) = NonZeroU16::new(index) else {
             if size != remaining {
@@ -337,6 +345,14 @@ pub struct GlobalHeapLookup {
 }
 
 impl GlobalHeapLookup {
+    fn new(walk: GlobalHeapWalk, index: NonZeroU16) -> Self {
+        Self {
+            walk,
+            index,
+            found: None,
+        }
+    }
+
     /// Parses the next object header or implied free tail from `region`.
     ///
     /// Returns the object at the index once the walk ends, and `None` at earlier steps.
@@ -353,7 +369,7 @@ impl GlobalHeapLookup {
         region: FileRegion<'_>,
     ) -> Result<Option<GlobalHeapObject>, FormatError> {
         if let Some(object) = self.walk.parse(region)?
-            && object.index == self.index
+            && object.index() == self.index
         {
             self.found = Some(object);
         }
@@ -363,7 +379,7 @@ impl GlobalHeapLookup {
         self.found
             .map(Some)
             .ok_or(FormatError::GlobalHeapObjectNotFound {
-                collection_address: self.walk.collection.range.start().get(),
+                collection_address: self.walk.collection.range().start().get(),
                 index: self.index.get(),
             })
     }
@@ -390,6 +406,18 @@ pub struct GlobalHeapWalk {
 }
 
 impl GlobalHeapWalk {
+    fn new(collection: GlobalHeapCollection, first: GlobalHeapObjectHeader) -> Self {
+        Self {
+            collection,
+            next: GlobalHeapSpan::Header(first),
+            seen: IndexSet::new(),
+        }
+    }
+
+    fn into_complete_collection(self) -> Option<GlobalHeapCollection> {
+        self.parse_range().is_none().then_some(self.collection)
+    }
+
     /// Parses the next object header or implied free tail from `region`.
     ///
     /// Returns the object for a member header, or `None` for free space. The parser ignores the
@@ -418,14 +446,14 @@ impl GlobalHeapWalk {
             }
         };
         let next = object.map_or(Ok(GlobalHeapSpan::End), |object| {
-            self.collection.next_span(object.range.end())
+            self.collection.next_span(object.range().end())
         })?;
         if let Some(object) = object
-            && !self.seen.insert(object.index)
+            && !self.seen.insert(object.index())
         {
             return Err(FormatError::DuplicateGlobalHeapObjectIndex {
-                collection_address: self.collection.range.start().get(),
-                index: object.index.get(),
+                collection_address: self.collection.range().start().get(),
+                index: object.index().get(),
             });
         }
         self.next = next;

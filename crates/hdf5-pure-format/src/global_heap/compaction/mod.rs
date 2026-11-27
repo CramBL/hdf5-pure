@@ -16,7 +16,8 @@ use crate::error::FormatError;
 ///
 /// The caller reads the range [`parse_range`](Self::parse_range) returns and passes it to
 /// [`parse`](Self::parse). After parsing the complete collection, [`finish`](Self::finish)
-/// returns the members in physical order. Only object headers are needed.
+/// returns the members in physical order. The caller supplies each object header and any implied
+/// free tail. Member payloads can be skipped.
 ///
 /// See [`GlobalHeapMembers::compact`] for an example.
 pub struct GlobalHeapMemberCollector {
@@ -47,19 +48,16 @@ impl GlobalHeapMemberCollector {
         Ok(())
     }
 
-    /// Returns the next object-header range, or `None` after complete framing.
+    /// Returns the range of the next object header or implied free tail, or `None` at the end.
     pub const fn parse_range(&self) -> Option<FileRange> {
         self.walk.parse_range()
     }
 
-    /// Returns the collected members, or `None` if an object header remains to be parsed.
+    /// Returns the collected members, or `None` if the walk has not reached the collection end.
     pub fn finish(self) -> Option<GlobalHeapMembers> {
         let Self { walk, members } = self;
-        if walk.parse_range().is_some() {
-            return None;
-        }
         Some(GlobalHeapMembers {
-            collection: walk.collection,
+            collection: walk.into_complete_collection()?,
             members,
         })
     }
@@ -138,7 +136,7 @@ impl GlobalHeapMembers {
             collection,
             members,
         } = self;
-        let mut destination = collection.first.start();
+        let mut destination = collection.members_start();
         let mut moves = Vec::new();
         let mut removed = 0;
         for &object in members {
@@ -167,7 +165,7 @@ impl GlobalHeapMembers {
                 &mut bytes,
                 super::FIXED_HEADER_LEN.to_usize()?,
                 length,
-                collection.lengths,
+                collection.lengths(),
             )?;
             Some(GlobalHeapFreeSpace {
                 range,
