@@ -48,6 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::attrs` and related attribute reads accepting trailing bytes in an inline
+  datatype field ([#1431](https://github.com/CramBL/hdf5-pure/pull/1431)).
 - Fixed `Dataset::fill_time` reporting field errors for truncated version 1 fill value
   message prefixes ([#1373](https://github.com/CramBL/hdf5-pure/pull/1373)).
 - Fixed `Group::groups` reserving space for decoded messages while reading a truncated version 1
