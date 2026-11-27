@@ -198,12 +198,7 @@ impl PreparedDenseAttrs {
     ///         padding: StringPadding::NullPad,
     ///         charset: CharacterSet::Ascii,
     ///     },
-    ///     dataspace: Dataspace {
-    ///         space_type: DataspaceType::Scalar,
-    ///         rank: 0,
-    ///         dimensions: vec![],
-    ///         max_dimensions: None,
-    ///     },
+    ///     dataspace: Dataspace::scalar(),
     ///     raw_data: b"a".to_vec(),
     ///     datatype_location: DatatypeLocation::Inline,
     /// };

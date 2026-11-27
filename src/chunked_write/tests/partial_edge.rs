@@ -662,12 +662,7 @@ fn read_back(assembled: &ChunkedDataResult, shape: &[u64], fill: FillPattern<'_>
     let mut file = vec![0; usize::try_from(BASE).unwrap()];
     file.extend_from_slice(&assembled.data_bytes);
     let layout = DataLayout::parse(&assembled.layout_message, 8, 8).unwrap();
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: shape.len().try_into().unwrap(),
-        dimensions: shape.to_vec(),
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::simple(shape.to_vec(), None).unwrap();
     let datatype = Datatype::FixedPoint(
         FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
     );

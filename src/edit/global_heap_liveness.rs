@@ -196,7 +196,7 @@ impl WriteEngine {
                 HeapReferences::Located(slots) => {
                     self.collect_element_collections(
                         &attribute.raw_data,
-                        attribute.dataspace.num_elements(),
+                        attribute.dataspace.num_elements()?,
                         &slots,
                         referenced,
                     )?;
@@ -309,7 +309,7 @@ impl WriteEngine {
             RawReadStorage::Compact { data } => {
                 self.collect_element_collections(
                     data,
-                    spec.dataspace().num_elements(),
+                    spec.dataspace().num_elements()?,
                     slots,
                     referenced,
                 )?;

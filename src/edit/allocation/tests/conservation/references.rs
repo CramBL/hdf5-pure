@@ -853,7 +853,7 @@ impl Roles {
                 located.widths.lengths,
             )
             .unwrap()
-            .dimensions
+            .dimensions()
                 == [u64::try_from(extents::ROUNDS * CHUNK).unwrap()]
             {
                 dataspace.get_or_insert(operation);

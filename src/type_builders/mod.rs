@@ -27,7 +27,7 @@ use crate::compound::CompoundType;
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::dataset_request::StagedFill;
-use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
+use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::CharacterSet;
 use crate::datatype::CompoundMember;
 use crate::datatype::Datatype;
@@ -843,16 +843,16 @@ fn numeric_array_attr<T: PrimitiveBytes>(
     name: &str,
     datatype: Datatype,
     values: &[T],
-) -> AttributeMessage {
+) -> Result<AttributeMessage, FormatError> {
     let mut raw_data = Vec::with_capacity(core::mem::size_of_val(values));
     T::append_le(values, &mut raw_data);
-    AttributeMessage {
+    Ok(AttributeMessage {
         name: name.to_string(),
         datatype,
-        dataspace: simple_1d(values.len() as u64),
+        dataspace: simple_1d(values.len() as u64)?,
         raw_data,
         datatype_location: DatatypeLocation::Inline,
-    }
+    })
 }
 
 /// A fixed-width string attribute message: `values` laid out at one shared
@@ -908,9 +908,9 @@ fn fixed_string_array_attr<S: AsRef<str>>(
     values: &[S],
     width: Option<NonZeroU32>,
     charset: CharacterSet,
-) -> AttributeMessage {
-    let dataspace = simple_1d(values.len() as u64);
-    fixed_string_attr(name, values, width, charset, dataspace)
+) -> Result<AttributeMessage, FormatError> {
+    let dataspace = simple_1d(values.len() as u64)?;
+    Ok(fixed_string_attr(name, values, width, charset, dataspace))
 }
 
 /// Encodes an attribute value with its datatype and dataspace.
@@ -925,42 +925,44 @@ pub(crate) fn build_attr_message(
 ) -> Result<AttributeMessage, FormatError> {
     Ok(match value {
         AttrValue::F32(v) => numeric_scalar_attr(name, make_f32_type(), &v.to_le_bytes()),
-        AttrValue::F32Array(a) => numeric_array_attr(name, make_f32_type(), a),
+        AttrValue::F32Array(a) => numeric_array_attr(name, make_f32_type(), a)?,
         AttrValue::F64(v) => numeric_scalar_attr(name, make_f64_type(), &v.to_le_bytes()),
-        AttrValue::F64Array(a) => numeric_array_attr(name, make_f64_type(), a),
+        AttrValue::F64Array(a) => numeric_array_attr(name, make_f64_type(), a)?,
         AttrValue::I8(v) => numeric_scalar_attr(name, make_i8_type(), &v.to_le_bytes()),
-        AttrValue::I8Array(a) => numeric_array_attr(name, make_i8_type(), a),
+        AttrValue::I8Array(a) => numeric_array_attr(name, make_i8_type(), a)?,
         AttrValue::I16(v) => numeric_scalar_attr(name, make_i16_type(), &v.to_le_bytes()),
-        AttrValue::I16Array(a) => numeric_array_attr(name, make_i16_type(), a),
+        AttrValue::I16Array(a) => numeric_array_attr(name, make_i16_type(), a)?,
         AttrValue::I32(v) => numeric_scalar_attr(name, make_i32_type(), &v.to_le_bytes()),
-        AttrValue::I32Array(a) => numeric_array_attr(name, make_i32_type(), a),
+        AttrValue::I32Array(a) => numeric_array_attr(name, make_i32_type(), a)?,
         AttrValue::I64(v) => numeric_scalar_attr(name, make_i64_type(), &v.to_le_bytes()),
-        AttrValue::I64Array(a) => numeric_array_attr(name, make_i64_type(), a),
+        AttrValue::I64Array(a) => numeric_array_attr(name, make_i64_type(), a)?,
         AttrValue::U8(v) => numeric_scalar_attr(name, make_u8_type(), &v.to_le_bytes()),
-        AttrValue::U8Array(a) => numeric_array_attr(name, make_u8_type(), a),
+        AttrValue::U8Array(a) => numeric_array_attr(name, make_u8_type(), a)?,
         AttrValue::U16(v) => numeric_scalar_attr(name, make_u16_type(), &v.to_le_bytes()),
-        AttrValue::U16Array(a) => numeric_array_attr(name, make_u16_type(), a),
+        AttrValue::U16Array(a) => numeric_array_attr(name, make_u16_type(), a)?,
         AttrValue::U32(v) => numeric_scalar_attr(name, make_u32_type(), &v.to_le_bytes()),
-        AttrValue::U32Array(a) => numeric_array_attr(name, make_u32_type(), a),
+        AttrValue::U32Array(a) => numeric_array_attr(name, make_u32_type(), a)?,
         AttrValue::U64(v) => numeric_scalar_attr(name, make_u64_type(), &v.to_le_bytes()),
-        AttrValue::U64Array(a) => numeric_array_attr(name, make_u64_type(), a),
+        AttrValue::U64Array(a) => numeric_array_attr(name, make_u64_type(), a)?,
         AttrValue::String(s) => fixed_string_scalar_attr(name, s, None, CharacterSet::Utf8),
         AttrValue::StringSized { value, width } => {
             fixed_string_scalar_attr(name, value, Some(*width), CharacterSet::Utf8)
         }
-        AttrValue::StringArray(arr) => fixed_string_array_attr(name, arr, None, CharacterSet::Utf8),
+        AttrValue::StringArray(arr) => {
+            fixed_string_array_attr(name, arr, None, CharacterSet::Utf8)?
+        }
         AttrValue::StringArraySized { values, width } => {
-            fixed_string_array_attr(name, values, Some(*width), CharacterSet::Utf8)
+            fixed_string_array_attr(name, values, Some(*width), CharacterSet::Utf8)?
         }
         AttrValue::AsciiString(s) => fixed_string_scalar_attr(name, s, None, CharacterSet::Ascii),
         AttrValue::AsciiStringSized { value, width } => {
             fixed_string_scalar_attr(name, value, Some(*width), CharacterSet::Ascii)
         }
         AttrValue::AsciiStringArray(arr) => {
-            fixed_string_array_attr(name, arr, None, CharacterSet::Ascii)
+            fixed_string_array_attr(name, arr, None, CharacterSet::Ascii)?
         }
         AttrValue::AsciiStringArraySized { values, width } => {
-            fixed_string_array_attr(name, values, Some(*width), CharacterSet::Ascii)
+            fixed_string_array_attr(name, values, Some(*width), CharacterSet::Ascii)?
         }
         AttrValue::VarLenAsciiCharArray(values) => {
             vlen_string_array_attr(name, values, make_matlab_vlen_ascii_type())?
@@ -1042,7 +1044,7 @@ fn vlen_string_array_attr(
     values: &[String],
     datatype: Datatype,
 ) -> Result<AttributeMessage, FormatError> {
-    vlen_string_attr(name, values, datatype, simple_1d(values.len() as u64))
+    vlen_string_attr(name, values, datatype, simple_1d(values.len() as u64)?)
 }
 
 /// Encodes one 16-byte global-heap reference per string with a placeholder collection address.
@@ -1704,21 +1706,11 @@ fn encode_fixed_strings<S: AsRef<str>>(
 }
 
 pub(crate) fn scalar_ds() -> Dataspace {
-    Dataspace {
-        space_type: DataspaceType::Scalar,
-        rank: 0,
-        dimensions: vec![],
-        max_dimensions: None,
-    }
+    Dataspace::scalar()
 }
 
-pub(crate) fn simple_1d(n: u64) -> Dataspace {
-    Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![n],
-        max_dimensions: None,
-    }
+pub(crate) fn simple_1d(n: u64) -> Result<Dataspace, FormatError> {
+    Dataspace::simple(vec![n], None)
 }
 
 // ---- Attribute values ----

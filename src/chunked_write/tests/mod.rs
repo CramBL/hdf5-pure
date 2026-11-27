@@ -9,7 +9,7 @@ use crate::chunked_read;
 use crate::convert;
 use crate::data_layout::ChunkIndexLayout;
 use crate::data_layout::DataLayout;
-use crate::dataspace::{Dataspace, DataspaceType};
+use crate::dataspace::Dataspace;
 use crate::datatype::layout::FloatingPointLayout;
 use crate::datatype::{Datatype, byte_order};
 use crate::fill_value::FillPattern;
@@ -672,9 +672,9 @@ fn auto_chunking_a_zero_element_shape_is_rejected(#[case] shape: &[u64]) {
         ..Default::default()
     };
     let unlimited = vec![MaxExtent::Unlimited; shape.len()];
-    let extent = Extent::new(shape, Some(&unlimited)).unwrap();
+    let extent = Dataspace::simple(shape.to_vec(), Some(unlimited)).unwrap();
     assert_eq!(
-        auto.validate_geometry(extent).unwrap_err(),
+        auto.validate_geometry(&extent).unwrap_err(),
         "a zero-element dataset must be given explicit chunk dimensions (its shape has none to derive)"
     );
     assert_eq!(auto.resolve_chunk_dims(shape), shape);
@@ -684,10 +684,10 @@ fn auto_chunking_a_zero_element_shape_is_rejected(#[case] shape: &[u64]) {
         chunk_dims: Some(vec![512]),
         ..Default::default()
     };
-    let unlimited = Extent::new(&[0], Some(&[MaxExtent::Unlimited])).unwrap();
-    explicit.validate_geometry(unlimited).unwrap();
-    let bounded = Extent::new(&[0], None).unwrap();
-    explicit.validate_geometry(bounded).unwrap();
+    let unlimited = Dataspace::simple(vec![0], Some(vec![MaxExtent::Unlimited])).unwrap();
+    explicit.validate_geometry(&unlimited).unwrap();
+    let bounded = Dataspace::simple(vec![0], None).unwrap();
+    explicit.validate_geometry(&bounded).unwrap();
 }
 
 /// Sets filters through the builder switches in their canonical order.
@@ -878,12 +878,7 @@ fn roundtrip_chunked(
     file_data[data_address.get() as usize..].copy_from_slice(&result.data_bytes);
 
     let layout = DataLayout::parse(&result.layout_message, 8, 8).unwrap();
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: shape.len() as u8,
-        dimensions: shape.to_vec(),
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::simple(shape.to_vec(), None).unwrap();
     let datatype = make_f64_type();
 
     let pipeline = result
@@ -1546,12 +1541,7 @@ fn roundtrip_ea(
         "{layout:?}"
     );
 
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: shape.len() as u8,
-        dimensions: shape.to_vec(),
-        max_dimensions: Some(maxshape.to_vec()),
-    };
+    let dataspace = Dataspace::simple(shape.to_vec(), Some(maxshape.to_vec())).unwrap();
     let datatype = make_f64_type();
 
     let output = chunked_read::read_chunked_data_cached(

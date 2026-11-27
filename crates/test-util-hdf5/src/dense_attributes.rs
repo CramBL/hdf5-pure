@@ -276,9 +276,9 @@ pub fn assert_storage(file: &File, image: &[u8], fixture: Fixture, byte_order: D
             let end = start + usize::try_from(object_length).unwrap();
             let attribute =
                 AttributeMessage::parse(&block[start..end], widths.lengths.get()).unwrap();
-            assert_eq!(attribute.dataspace.space_type, DataspaceType::Scalar);
-            assert_eq!(attribute.dataspace.rank, 0);
-            assert!(attribute.dataspace.dimensions.is_empty());
+            assert_eq!(attribute.dataspace.space_type(), DataspaceType::Scalar);
+            assert_eq!(attribute.dataspace.dimensions().len(), 0);
+            assert!(attribute.dataspace.dimensions().is_empty());
             assert_eq!(attribute.datatype, f64_datatype(byte_order));
             assert_eq!(
                 bytes::u32_at(record, record.len() - size_of::<u32>()),

@@ -402,9 +402,9 @@ fn assert_header(image: &[u8], address: u64, fixture: Fixture, path: &str) {
             .iter()
             .find(|(name, _)| *name == attribute.name)
             .unwrap();
-        assert_eq!(attribute.dataspace.dimensions, value.shape());
+        assert_eq!(attribute.dataspace.dimensions(), value.shape());
         assert_eq!(
-            attribute.dataspace.space_type,
+            attribute.dataspace.space_type(),
             if value.shape().is_empty() {
                 DataspaceType::Scalar
             } else {

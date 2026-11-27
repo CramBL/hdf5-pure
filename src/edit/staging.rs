@@ -159,7 +159,7 @@ impl WriteEngine {
         let fd = self.staged.dataset_at(path)?;
         Some(StagedMeta {
             datatype: fd.dt.clone(),
-            dimensions: fd.ds.dimensions.clone(),
+            dimensions: fd.ds.dimensions().to_vec(),
             maxshape: fd.ds.extensible_max_dimensions().map(<[MaxExtent]>::to_vec),
             chunked: fd.chunk_options.is_chunked() || fd.maxshape.is_some(),
             filters: fd

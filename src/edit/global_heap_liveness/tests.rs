@@ -287,12 +287,7 @@ fn parsed_attribute(datatype: Datatype, count: u64, raw_data: Vec<u8>) -> Attrib
     AttributeMessage {
         name: "labels".into(),
         datatype,
-        dataspace: Dataspace {
-            space_type: format::DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![count],
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::simple(vec![count], None).unwrap(),
         raw_data,
         datatype_location: format::DatatypeLocation::Inline,
     }

@@ -9,7 +9,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
-use crate::dataspace::{Dataspace, DataspaceType, Extent};
+use crate::dataspace::{Dataspace, DataspaceType};
 use crate::datatype;
 use crate::width::OffsetWidth;
 use crate::{Datatype, FormatError, MaxExtent};
@@ -72,12 +72,7 @@ impl<'a> ChunkedGeometry<'a> {
     ///     size: 1,
     ///     tag: vec![],
     /// }));
-    /// let dataspace = format::Dataspace {
-    ///     space_type: format::DataspaceType::Simple,
-    ///     rank: 1,
-    ///     dimensions: vec![8],
-    ///     max_dimensions: None,
-    /// };
+    /// let dataspace = format::Dataspace::simple(vec![8], None)?;
     /// let layout = format::DataLayout::Chunked {
     ///     flags: format::ChunkedLayoutFlags::NONE,
     ///     chunk_dimensions: vec![4, 10],
@@ -128,11 +123,8 @@ impl<'a> ChunkedGeometry<'a> {
         else {
             return Err(FormatError::InvalidChunkGeometry("dataset is not chunked"));
         };
-        let rank = dataspace.dimensions.len();
-        if dataspace.space_type != DataspaceType::Simple
-            || rank == 0
-            || rank != usize::from(dataspace.rank)
-        {
+        let rank = dataspace.dimensions().len();
+        if dataspace.space_type() != DataspaceType::Simple {
             return Err(FormatError::InvalidChunkGeometry(
                 "chunking requires a simple dataspace of nonzero rank",
             ));
@@ -158,8 +150,6 @@ impl<'a> ChunkedGeometry<'a> {
                 "chunk element size differs from the datatype size",
             ));
         }
-        Extent::new(&dataspace.dimensions, dataspace.max_dimensions.as_deref())
-            .map_err(FormatError::InvalidChunkGeometry)?;
         let raw_size = spatial
             .iter()
             .try_fold(element_size.get() as u64, |size, &dimension| {
@@ -204,12 +194,7 @@ mod tests {
         #[case] maximum: Option<Vec<MaxExtent>>,
         #[case] expected: Option<Vec<MaxExtent>>,
     ) {
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![6, 8],
-            max_dimensions: maximum,
-        };
+        let dataspace = Dataspace::simple(vec![6, 8], maximum).unwrap();
         let layout = layout(vec![3, 4, 8]);
         let geometry = ChunkedGeometry::new(&datatype(8), &dataspace, &layout).unwrap();
         assert_eq!(geometry.spatial, &[3, 4]);
@@ -227,7 +212,7 @@ mod tests {
             geometry.maxshape.map(<[MaxExtent]>::as_ptr),
             expected
                 .as_ref()
-                .map(|_| dataspace.max_dimensions.as_ref().unwrap().as_ptr()),
+                .map(|_| dataspace.max_dimensions().unwrap().as_ptr()),
         );
     }
 
@@ -274,21 +259,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case::scalar(DataspaceType::Scalar, 0, vec![])]
-    #[case::null(DataspaceType::Null, 0, vec![])]
-    #[case::empty_simple(DataspaceType::Simple, 0, vec![])]
-    #[case::rank_mismatch(DataspaceType::Simple, 1, vec![6, 8])]
-    fn invalid_dataspaces_are_errors(
-        #[case] space_type: DataspaceType,
-        #[case] rank: u8,
-        #[case] dimensions: Vec<u64>,
-    ) {
-        let dataspace = Dataspace {
-            space_type,
-            rank,
-            dimensions,
-            max_dimensions: None,
-        };
+    #[case::scalar(DataspaceType::Scalar)]
+    #[case::null(DataspaceType::Null)]
+    fn non_simple_dataspaces_are_errors(#[case] space_type: DataspaceType) {
+        let dataspace = Dataspace::new(space_type, vec![], None).unwrap();
         let err =
             ChunkedGeometry::new(&datatype(8), &dataspace, &layout(vec![2, 4, 8])).unwrap_err();
         assert_eq!(
@@ -297,23 +271,6 @@ mod tests {
                 "chunking requires a simple dataspace of nonzero rank",
             )
         );
-    }
-
-    #[rstest]
-    #[case::rank(vec![MaxExtent::Fixed(6)], "maxshape must have the same rank as the dataset shape")]
-    #[case::too_small(
-        vec![MaxExtent::Fixed(5), MaxExtent::Fixed(8)],
-        "maxshape must be at least the current shape in every dimension",
-    )]
-    fn invalid_maximum_dimensions_are_errors(
-        #[case] maximum: Vec<MaxExtent>,
-        #[case] reason: &'static str,
-    ) {
-        let mut dataspace = dataspace();
-        dataspace.max_dimensions = Some(maximum);
-        let err =
-            ChunkedGeometry::new(&datatype(8), &dataspace, &layout(vec![2, 4, 8])).unwrap_err();
-        assert_eq!(err, FormatError::InvalidChunkGeometry(reason));
     }
 
     #[test]
@@ -389,12 +346,7 @@ mod tests {
     }
 
     fn dataspace() -> Dataspace {
-        Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![6, 8],
-            max_dimensions: None,
-        }
+        Dataspace::simple(vec![6, 8], None).unwrap()
     }
 
     fn layout(chunk_dimensions: Vec<u64>) -> DataLayout {

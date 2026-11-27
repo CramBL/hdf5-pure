@@ -319,9 +319,7 @@ impl WriteEngine {
             ));
         }
         let disk_ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
-        if disk_ds.space_type != fd.ds.space_type
-            || disk_ds.rank != fd.ds.rank
-            || disk_ds.dimensions != fd.ds.dimensions
+        if disk_ds.space_type() != fd.ds.space_type() || disk_ds.dimensions() != fd.ds.dimensions()
         {
             return Err(Error::EditUnsupported(
                 "write_dataset shape does not match the on-disk dataset (overwrite, not reshape)",
@@ -576,7 +574,7 @@ impl WriteEngine {
             ));
         }
 
-        if disk_ds.space_type != DataspaceType::Simple || disk_ds.dimensions.len() != 1 {
+        if disk_ds.space_type() != DataspaceType::Simple || disk_ds.dimensions().len() != 1 {
             return Err(Error::AppendUnsupported(
                 "append requires a rank-1 dataset in this release",
             ));
@@ -615,7 +613,7 @@ impl WriteEngine {
         }
 
         let new_elems = (ab.raw().len() / element_size) as u64;
-        let current_dim0 = disk_ds.dimensions[0];
+        let current_dim0 = disk_ds.dimensions()[0];
         let new_dim0 = current_dim0
             .checked_add(new_elems)
             .ok_or(Error::AppendUnsupported(
@@ -623,8 +621,7 @@ impl WriteEngine {
             ))?;
 
         let maximum = disk_ds
-            .max_dimensions
-            .as_deref()
+            .max_dimensions()
             .map_or(MaxExtent::Fixed(current_dim0), |maximum| maximum[0]);
         if let MaxExtent::Fixed(limit) = maximum
             && new_dim0 > limit
@@ -677,7 +674,7 @@ impl WriteEngine {
         }
 
         let infos = chunked_read::enumerate_chunks_from_source(&indexes, &dl, &disk_ds, widths)?;
-        let grid = chunked_read::plan_dense_grid(infos, &disk_ds.dimensions, spatial).ok_or(
+        let grid = chunked_read::plan_dense_grid(infos, disk_ds.dimensions(), spatial).ok_or(
             Error::AppendUnsupported(
                 "dataset has a sparse or inconsistent chunk grid; cannot append",
             ),
@@ -751,14 +748,14 @@ impl WriteEngine {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut grown = disk_ds.clone();
-        grown.dimensions[0] = new_dim0;
+        grown.set_first_dimension(new_dim0)?;
         let new_dataspace_body = grown.serialize(widths.lengths.get())?;
 
         let (kind, slot_of_chunk, index_slots) = chunked_write::plan_index_slots(
             widths,
-            &grown.dimensions,
+            grown.dimensions(),
             spatial,
-            grown.max_dimensions.as_deref(),
+            grown.max_dimensions(),
             raw_size,
             has_filters,
             StorageAllocation::Allocated,
@@ -1145,7 +1142,7 @@ impl WriteEngine {
     /// Returns [`Error::AllocationPublicationUncertain`] if allocation publication is uncertain.
     fn build_chunked_dataset(&mut self, fd: &mut FlatDataset) -> Result<Vec<u8>, Error> {
         let widths = self.context.widths();
-        let chunk_dims = fd.chunk_options.resolve_chunk_dims(&fd.ds.dimensions);
+        let chunk_dims = fd.chunk_options.resolve_chunk_dims(fd.ds.dimensions());
         let ctx = ChunkContext::from_stored_datatype(
             &chunk_dims,
             &fd.dt,
@@ -1157,7 +1154,7 @@ impl WriteEngine {
         let set = chunked_write::compress_chunks(
             widths,
             fd.storage.raw(),
-            &fd.ds.dimensions,
+            fd.ds.dimensions(),
             ctx,
             &fd.chunk_options,
             fd.maxshape.as_deref(),
@@ -1696,7 +1693,7 @@ impl WriteEngine {
                 ));
             }
         }
-        let Some((lead, inner)) = fd.ds.dimensions.split_first() else {
+        let Some((lead, inner)) = fd.ds.dimensions().split_first() else {
             return Err(Error::AppendUnsupported(
                 "a scalar dataset has no dimension to append along",
             ));
@@ -1727,11 +1724,7 @@ impl WriteEngine {
         let grown = lead
             .checked_add(bytes.len() as u64 / row_bytes)
             .ok_or(Error::AppendUnsupported("staged dataset length overflows"))?;
-        if let Some(max) = fd
-            .ds
-            .max_dimensions
-            .as_ref()
-            .and_then(|m| m.first().copied())
+        if let Some(max) = fd.ds.max_dimensions().and_then(|m| m.first().copied())
             && matches!(max, MaxExtent::Fixed(limit) if limit < grown)
         {
             return Err(Error::AppendUnsupported(
@@ -1751,25 +1744,32 @@ impl WriteEngine {
             }
             .into());
         }
-        if fd.storage.allocation() == StorageAllocation::Unallocated && !bytes.is_empty() {
-            let elem_size = hdf5_pure_format::__private::stored_element_size_usize(
-                &fd.dt,
-                self.context.widths().offsets,
-            )?;
-            fd.storage = PreparedElements::Bytes(PreparedBytes::new(
-                FillPattern::new(
-                    fd.fill_time,
-                    fd.fill.as_ref().map(PreparedFill::as_bytes),
-                    elem_size,
-                )
-                .buffer(fd.extent.to_usize()?)?,
-            ));
-        }
+        let mut replacement =
+            if fd.storage.allocation() == StorageAllocation::Unallocated && !bytes.is_empty() {
+                let elem_size = hdf5_pure_format::__private::stored_element_size_usize(
+                    &fd.dt,
+                    self.context.widths().offsets,
+                )?;
+                Some(PreparedElements::Bytes(PreparedBytes::new(
+                    FillPattern::new(
+                        fd.fill_time,
+                        fd.fill.as_ref().map(PreparedFill::as_bytes),
+                        elem_size,
+                    )
+                    .buffer(fd.extent.to_usize()?)?,
+                )))
+            } else {
+                None
+            };
         if !bytes.is_empty() {
-            fd.storage.raw_mut()?.extend_from_slice(bytes);
+            let raw = replacement.as_mut().unwrap_or(&mut fd.storage).raw_mut()?;
+            fd.ds.set_first_dimension(grown)?;
+            raw.extend_from_slice(bytes);
+        }
+        if let Some(storage) = replacement {
+            fd.storage = storage;
         }
         fd.extent = extent;
-        fd.ds.dimensions[0] = grown;
         #[cfg(feature = "provenance")]
         fd.rebuild_provenance();
         Ok(())
@@ -2161,13 +2161,13 @@ pub(super) fn flatten_dataset(
         file_writer::validate_collections(widths, collections)?;
     }
     file_writer::prepare_attribute_widths(widths, &mut attrs)?;
-    let maxshape = ds.max_dimensions.clone();
+    let maxshape = ds.max_dimensions().map(<[_]>::to_vec);
     let fill_time = fill_time.unwrap_or_default();
     if chunk_options.is_chunked() || maxshape.is_some() {
         chunk_options
             .refuse_unavailable_filters()
             .map_err(Error::EditUnsupported)?;
-        let chunk_dims = chunk_options.resolve_chunk_dims(&ds.dimensions);
+        let chunk_dims = chunk_options.resolve_chunk_dims(ds.dimensions());
         let ctx = ChunkContext::from_stored_datatype(&chunk_dims, &dt, stored_element_size);
         chunked_read::bounded_chunk_len(&chunk_dims, elem_size)?;
         chunk_options.build_pipeline(
@@ -2437,7 +2437,7 @@ impl ChunkGeometry {
             maxshape,
         } = geometry;
         Self {
-            shape: dataspace.dimensions.clone(),
+            shape: dataspace.dimensions().to_vec(),
             spatial: spatial.to_vec(),
             element_size,
             raw_size,
@@ -2597,9 +2597,9 @@ fn try_rebuild_index_in_place(
     // Map the current dense grid onto the index slots of the maximum shape.
     let (_, slot_of_chunk, index_slots) = crate::chunked_write::plan_index_slots(
         widths,
-        &ds.dimensions,
+        ds.dimensions(),
         spatial,
-        ds.max_dimensions.as_deref(),
+        ds.max_dimensions(),
         raw_size,
         true,
         crate::chunked_write::StorageAllocation::Allocated,

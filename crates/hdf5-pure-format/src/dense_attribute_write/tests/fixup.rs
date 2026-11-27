@@ -6,7 +6,6 @@ use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
 use test_util::{dataspace, datatype};
 
 use crate::dataspace::Dataspace;
-use crate::dataspace::DataspaceType;
 use crate::datatype::Datatype;
 use crate::shared_message::DatatypeLocation;
 
@@ -406,12 +405,7 @@ fn variable_attribute(name: &str, count: usize) -> AttributeMessage {
         StringPadding::NullTerminate,
         CharacterSet::Utf8,
     ));
-    attr.dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![count as u64],
-        max_dimensions: None,
-    };
+    attr.dataspace = Dataspace::simple(vec![count as u64], None).unwrap();
     attr.raw_data = (0..count)
         .flat_map(|index| {
             let mut reference = Vec::new();

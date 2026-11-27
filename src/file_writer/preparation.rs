@@ -202,7 +202,7 @@ impl PreparedDataset {
             )?;
         }
         prepare_attribute_widths(widths, &mut attrs)?;
-        let maxshape = dspace.max_dimensions.clone();
+        let maxshape = dspace.max_dimensions().map(<[_]>::to_vec);
         let patches = VlPatch::add_strings(&attribute_specs, attr_heap)?;
         #[cfg(feature = "provenance")]
         let pending_hash =
@@ -280,13 +280,13 @@ impl PreparedDataset {
     ) -> Result<DatasetMeasure, FormatError> {
         let (data, messages) = if self.is_chunked() {
             if self.storage.reference_targets().is_some() {
-                let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
+                let chunk_dims = self.chunk_options.resolve_chunk_dims(self.ds.dimensions());
                 let ctx =
                     ChunkContext::from_stored_datatype(&chunk_dims, &self.dt, self.element_size);
                 let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
                 let header = self.chunk_options.measure_header(
                     self.widths,
-                    &self.ds.dimensions,
+                    self.ds.dimensions(),
                     ctx,
                     self.maxshape.as_deref(),
                     FillPattern::from_value(self.fill.as_ref().map(PreparedFill::as_bytes), elem),
@@ -456,13 +456,13 @@ impl PreparedDataset {
     /// Filter-specific errors from [`ChunkOptions::build_pipeline`] and
     /// [`crate::filters::compress_chunk_with`] are propagated.
     pub(super) fn compress_chunks(&self) -> Result<CompressedChunkSet, FormatError> {
-        let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
+        let chunk_dims = self.chunk_options.resolve_chunk_dims(self.ds.dimensions());
         let ctx = ChunkContext::from_stored_datatype(&chunk_dims, &self.dt, self.element_size);
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         chunked_write::compress_chunks(
             self.widths,
             self.storage.raw(),
-            &self.ds.dimensions,
+            self.ds.dimensions(),
             ctx,
             &self.chunk_options,
             self.maxshape.as_deref(),
@@ -500,7 +500,7 @@ impl PreparedDataset {
             let prepared = VerbatimChunks::new(
                 self.widths,
                 &rc.meta,
-                &self.ds.dimensions,
+                self.ds.dimensions(),
                 &rc.chunk_dims,
                 rc.element_size,
                 rc.flags,
@@ -581,7 +581,7 @@ impl PreparedDataset {
             } = chunked_write::plan_chunked_data_verbatim(
                 self.widths,
                 &rc.meta,
-                &self.ds.dimensions,
+                self.ds.dimensions(),
                 &rc.chunk_dims,
                 rc.element_size,
                 rc.flags,
@@ -640,7 +640,7 @@ impl PreparedDataset {
                 chunks: VerbatimChunks::new(
                     self.widths,
                     &rc.meta,
-                    &self.ds.dimensions,
+                    self.ds.dimensions(),
                     &rc.chunk_dims,
                     rc.element_size,
                     rc.flags,
@@ -1446,7 +1446,6 @@ mod tests {
     use crate::convert::Narrow;
     use crate::data_layout::ChunkedLayoutFlags;
     use crate::dataspace::Dataspace;
-    use crate::dataspace::DataspaceType;
     use crate::datatype::Datatype;
     use crate::error::FormatError;
     use crate::file_emission::EmissionError;
@@ -1509,7 +1508,7 @@ mod tests {
         .unwrap();
         assert!(heaps.is_empty());
         assert_eq!(dataset.name.as_str(), "values");
-        assert_eq!(dataset.ds.dimensions, [4]);
+        assert_eq!(dataset.ds.dimensions(), [4]);
         assert_eq!(dataset.is_chunked(), chunked);
         let measured = dataset.measure(
             StoredAddress::new(0),
@@ -2261,12 +2260,7 @@ mod tests {
             AttributeMessage {
                 name: "reference".into(),
                 datatype: crate::type_builders::make_object_reference_type(),
-                dataspace: Dataspace {
-                    space_type: DataspaceType::Scalar,
-                    rank: 0,
-                    dimensions: Vec::new(),
-                    max_dimensions: None,
-                },
+                dataspace: Dataspace::scalar(),
                 raw_data: vec![0; 8],
                 datatype_location: DatatypeLocation::Inline,
             },

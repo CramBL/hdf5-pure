@@ -29,7 +29,7 @@ use crate::chunked_write;
 use crate::chunked_write::{ChunkProvider, StorageAllocation};
 use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
-use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
+use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
 use crate::datatype::StringPadding;
@@ -503,12 +503,7 @@ fn a_chunked_overwrite_stores_its_partial_edge_chunks_raw_under_the_layout_flag(
     } else {
         ChunkedLayoutFlags::NONE
     };
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: shape.len().try_into().unwrap(),
-        dimensions: shape.to_vec(),
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::simple(shape.to_vec(), None).unwrap();
     let layout = DataLayout::Chunked {
         flags,
         chunk_dimensions: chunk_dims

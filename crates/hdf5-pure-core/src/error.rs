@@ -189,6 +189,27 @@ pub enum FormatError {
         /// The dimension whose multiplication would overflow.
         dimension: u64,
     },
+    /// The product of the current dataspace dimensions exceeds [`u64::MAX`].
+    DataspaceElementCountOverflow {
+        /// The product of the preceding dimensions.
+        count: u64,
+        /// The size of the next dimension in the product.
+        dimension: u64,
+    },
+    /// A dimension update was requested for a scalar or null dataspace.
+    DataspaceHasNoDimensions {
+        /// The dataspace type byte.
+        space_type: u8,
+    },
+    /// A finite maximum is smaller than the current dimension.
+    DataspaceMaximumTooSmall {
+        /// The zero-based dimension index.
+        dimension: usize,
+        /// The current dimension size.
+        current: u64,
+        /// The finite maximum size.
+        maximum: u64,
+    },
     /// A containing datatype message has a lower version than one of its children.
     DatatypeChildVersion {
         /// The containing datatype's class code.
@@ -679,6 +700,11 @@ pub enum FormatError {
         dimensions: usize,
         /// The number of maximum dimensions supplied, if present.
         maximum_dimensions: Option<usize>,
+    },
+    /// A finite dataspace maximum equals the unlimited marker.
+    InvalidDataspaceMaximum {
+        /// The zero-based dimension index.
+        dimension: usize,
     },
     /// A simple dataspace has rank zero or a scalar or null dataspace has a positive rank.
     InvalidDataspaceRank {
@@ -2975,6 +3001,25 @@ impl fmt::Display for FormatError {
             Self::ConflictingDatasetStorage => {
                 write!(f, "dataset requests conflicting storage sources")
             }
+            Self::DataspaceElementCountOverflow { count, dimension } => write!(
+                f,
+                "dataspace element count {count} times dimension {dimension} exceeds u64"
+            ),
+            Self::DataspaceHasNoDimensions { space_type } => {
+                write!(f, "dataspace type {space_type} has no dimensions")
+            }
+            Self::DataspaceMaximumTooSmall {
+                dimension,
+                current,
+                maximum,
+            } => write!(
+                f,
+                "dataspace dimension {dimension} has size {current} exceeding its maximum {maximum}"
+            ),
+            Self::InvalidDataspaceMaximum { dimension } => write!(
+                f,
+                "finite maximum of dataspace dimension {dimension} equals the unlimited marker"
+            ),
             Self::DatasetDimensionUnlimited { dimension } => {
                 write!(
                     f,

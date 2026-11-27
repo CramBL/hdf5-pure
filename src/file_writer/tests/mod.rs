@@ -16,7 +16,6 @@ use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
 use crate::attribute_info::AttributeCreationOrderIndex;
 use crate::attribute_policy;
-use crate::dataspace::DataspaceType;
 use crate::group::v2 as group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::object_header::ObjectHeader;
@@ -723,12 +722,7 @@ fn dataset_header_matches_independent_bytes(#[case] location: DatatypeLocation) 
 }
 
 fn test_dataset_space() -> Dataspace {
-    Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![3],
-        max_dimensions: None,
-    }
+    Dataspace::simple(vec![3], None).unwrap()
 }
 
 fn test_dataset_header(dt: &Datatype, location: &DatatypeLocation, ds: &Dataspace) -> Vec<u8> {

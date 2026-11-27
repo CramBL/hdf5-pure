@@ -814,8 +814,8 @@ fn emit_dataset(
         )));
     }
 
-    let dims = dataspace.dimensions.clone();
-    let n_elements = dataspace.num_elements().get();
+    let dims = dataspace.dimensions().to_vec();
+    let n_elements = dataspace.num_elements()?.get();
 
     // The chunks the source holds, walked once. Both the unallocated test below
     // and the verbatim planner further down need the list, and each walk is the
@@ -1241,8 +1241,8 @@ fn emit_embedded_address_dataset(
         check_embedded_reference_layout(dataspace, path, layout, file)?;
     }
 
-    let dims = &dataspace.dimensions;
-    let n_elements = dataspace.num_elements();
+    let dims = dataspace.dimensions();
+    let n_elements = dataspace.num_elements()?;
 
     // Read the element bytes once, resolving the variable-length payloads in the
     // same pass when there are any.

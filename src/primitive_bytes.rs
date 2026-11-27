@@ -159,7 +159,10 @@ mod tests {
                     type_builders::build_attr_message("values", &AttrValue::$attr(values)).unwrap();
                 assert_eq!(attr.raw_data, expected);
                 assert_eq!(attr.datatype, datatype);
-                assert_eq!(attr.dataspace, type_builders::simple_1d(count as u64));
+                assert_eq!(
+                    attr.dataspace,
+                    type_builders::simple_1d(count as u64).unwrap()
+                );
             }
         };
     }

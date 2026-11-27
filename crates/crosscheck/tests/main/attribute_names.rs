@@ -8,7 +8,6 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure_format::__private::AttributeMessage;
 use hdf5_pure_format::__private::Dataspace;
-use hdf5_pure_format::__private::DataspaceType;
 use hdf5_pure_format::__private::DatatypeLocation;
 use hdf5_pure_format::OffsetWidth;
 use libhdf5::Location;
@@ -247,12 +246,7 @@ fn c_reads_attributes_at_the_utf8_compact_storage_boundary(
     let probe = AttributeMessage {
         name: "xx".into(),
         datatype: hdf5_pure::make_i8_type(),
-        dataspace: Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![1],
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::simple(vec![1], None).unwrap(),
         raw_data: vec![7],
         datatype_location: DatatypeLocation::Inline,
     };

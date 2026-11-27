@@ -34,7 +34,8 @@ impl StoredDataspace<'_> {
     /// # Errors
     ///
     /// Returns [`FormatError::UnsupportedDataspacePermutation`] at the first dimension whose
-    /// stored permutation index differs from its position.
+    /// stored permutation index differs from its position. Propagates the shape errors of
+    /// [`Dataspace::new`].
     pub(crate) fn into_dataspace(self) -> Result<Dataspace, FormatError> {
         let Self {
             header,
@@ -45,16 +46,15 @@ impl StoredDataspace<'_> {
         if let Some(indices) = permutation {
             indices.require_identity(header.rank)?;
         }
-        Ok(Dataspace {
-            space_type: match header.kind {
+        Dataspace::new(
+            match header.kind {
                 Kind::VersionOne if header.rank == 0 => DataspaceType::Scalar,
                 Kind::VersionOne => DataspaceType::Simple,
                 Kind::VersionTwo(space_type) => space_type,
             },
-            rank: header.rank,
-            dimensions: current.collect(|value| value),
-            max_dimensions: maxima.map(|fields| fields.collect(shape::max_extent_from_length)),
-        })
+            current.collect(|value| value),
+            maxima.map(|fields| fields.collect(shape::max_extent_from_length)),
+        )
     }
 }
 

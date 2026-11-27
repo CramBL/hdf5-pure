@@ -74,12 +74,7 @@ fn attribute_edits_capture_only_original_touched_references(
     let expected = AttributeMessage {
         name: "label".into(),
         datatype: global_heap_fixture::vlen_string(),
-        dataspace: Dataspace {
-            space_type: format::DataspaceType::Scalar,
-            rank: 0,
-            dimensions: Vec::new(),
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::scalar(),
         raw_data: global_heap::reference(6, collections[0], 1, Widths::EIGHT),
         datatype_location: format::DatatypeLocation::Inline,
     };
@@ -147,12 +142,7 @@ fn attribute_predecessors_retain_resolved_committed_datatypes(#[case] initial: I
         [AttributeMessage {
             name: "label".into(),
             datatype: global_heap_fixture::vlen_string(),
-            dataspace: Dataspace {
-                space_type: format::DataspaceType::Scalar,
-                rank: 0,
-                dimensions: Vec::new(),
-                max_dimensions: None,
-            },
+            dataspace: Dataspace::scalar(),
             raw_data: global_heap::reference(6, collections[0], 1, Widths::EIGHT),
             datatype_location: format::DatatypeLocation::Committed(StoredAddress::new(definition)),
         }]

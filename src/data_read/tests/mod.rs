@@ -5,7 +5,7 @@ use super::*;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::convert;
-use crate::dataspace::{Dataspace, DataspaceType};
+use crate::dataspace::Dataspace;
 use crate::datatype::layout::FloatingPointLayout;
 use crate::datatype::{CharacterSet, StringPadding};
 use crate::fill_value::FillPattern;
@@ -58,12 +58,7 @@ fn make_u8_type() -> Datatype {
 }
 
 fn make_simple_dataspace(dims: &[u64]) -> Dataspace {
-    Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: dims.len() as u8,
-        dimensions: dims.to_vec(),
-        max_dimensions: None,
-    }
+    Dataspace::simple(dims.to_vec(), None).unwrap()
 }
 
 #[test]

@@ -86,7 +86,6 @@ pub use crate::data_layout::SINGLE_INDEX_WITH_FILTER;
 pub use crate::data_layout::SingleChunkField;
 pub use crate::dataspace::Dataspace;
 pub use crate::dataspace::DataspaceType;
-pub use crate::dataspace::Extent;
 pub use crate::dataspace::PreparedDataspace;
 pub use crate::dataspace::stored_max_dimensions;
 pub use crate::dataspace::stored_max_extent;

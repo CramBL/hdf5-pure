@@ -786,7 +786,7 @@ impl WriteEngine {
         {
             return false;
         }
-        if disk_ds.dimensions.len() != 1 {
+        if disk_ds.dimensions().len() != 1 {
             return false;
         }
         let Ok(geometry) = ChunkedGeometry::with_offset_width(
@@ -797,7 +797,7 @@ impl WriteEngine {
         ) else {
             return false;
         };
-        match (geometry.spatial.first(), disk_ds.dimensions.first()) {
+        match (geometry.spatial.first(), disk_ds.dimensions().first()) {
             (Some(&chunk_elems), Some(&dim0)) => dim0 % chunk_elems != 0,
             _ => false,
         }

@@ -93,7 +93,7 @@ impl ParsedChunkIndex {
             logical: _,
             coverage,
         } = self;
-        if *ds_dims != region.spec().dataspace().dimensions
+        if *ds_dims != region.spec().dataspace().dimensions()
             || chunk_dims.len() != *rank
             || chunk_dims.contains(&0)
         {
@@ -391,7 +391,7 @@ mod tests {
     use crate::address::StoredAddressExt;
     use crate::chunked_read::StoredChunkSize;
     use crate::data_layout::DataLayout;
-    use crate::dataspace::{Dataspace, DataspaceType};
+    use crate::dataspace::Dataspace;
     use crate::fill_value::FillPattern;
     use crate::read_spec::RawReadSpec;
     use crate::type_builders;
@@ -419,12 +419,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![8_192],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![8_192], None).unwrap();
         let datatype = type_builders::make_u8_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
@@ -452,18 +447,14 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![u64::MAX],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![u64::MAX - 1], None).unwrap();
         let datatype = type_builders::make_u8_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
-        let region = ReadRegion::rows(spec, u64::MAX - 2, 2).unwrap();
+        let region = ReadRegion::rows(spec, u64::MAX - 2, 1).unwrap();
         let index =
-            ParsedChunkIndex::new(vec![chunk(&[u64::MAX - 3], 0x1000)], &[4], &[u64::MAX]).unwrap();
+            ParsedChunkIndex::new(vec![chunk(&[u64::MAX - 3], 0x1000)], &[4], &[u64::MAX - 1])
+                .unwrap();
         let selection = index.select(&region).unwrap();
         let clipped: Vec<_> = selection
             .chunks()
@@ -474,7 +465,7 @@ mod tests {
                     .map(|axis| (axis.start(), axis.end()))
             })
             .collect();
-        assert_eq!(clipped, [(u64::MAX - 2, u64::MAX)]);
+        assert_eq!(clipped, [(u64::MAX - 2, u64::MAX - 1)]);
         assert_eq!(selection.coverage, SelectionCoverage::Complete);
     }
 
@@ -495,12 +486,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![3, 5],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![3, 5], None).unwrap();
         let datatype = type_builders::make_u8_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
@@ -525,12 +511,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![4, 5],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![4, 5], None).unwrap();
         let datatype = type_builders::make_u8_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
@@ -589,12 +570,7 @@ mod tests {
             address: None,
             size: 0,
         };
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 2,
-            dimensions: vec![3, 5],
-            max_dimensions: None,
-        };
+        let dataspace = Dataspace::simple(vec![3, 5], None).unwrap();
         let datatype = type_builders::make_u8_type();
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();

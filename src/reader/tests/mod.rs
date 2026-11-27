@@ -16,7 +16,6 @@ use crate::PhysicalAddress;
 use crate::address::BaseAddressExt;
 use crate::address::DecodedStoredAddress;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
-use crate::dataspace::DataspaceType;
 use crate::image::WriteBuffering;
 use crate::source;
 use crate::source::PhysicalBytes;
@@ -2102,12 +2101,7 @@ fn empty_region_reads_preserve_layout_errors(
     #[case] layout: DataLayout,
     #[case] expected: Option<FormatError>,
 ) {
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 1,
-        dimensions: vec![0],
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::simple(vec![0], None).unwrap();
     let datatype = crate::make_u8_type();
     let region = ReadRegion::parse(
         RawReadSpec::plain(&layout, &dataspace, &datatype),
@@ -2133,12 +2127,7 @@ fn compact_regions_read_selected_columns() {
     let layout = DataLayout::Compact {
         data: (0..16).collect(),
     };
-    let dataspace = Dataspace {
-        space_type: DataspaceType::Simple,
-        rank: 2,
-        dimensions: vec![4, 4],
-        max_dimensions: None,
-    };
+    let dataspace = Dataspace::simple(vec![4, 4], None).unwrap();
     let datatype = crate::make_u8_type();
     let region = ReadRegion::parse(
         RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap(),
@@ -2219,12 +2208,7 @@ fn embedded_variable_length_reader_rejects_a_plan_for_another_width() {
 #[test]
 fn a_typed_read_windows_in_whole_chunk_bands() {
     const BUDGET: u64 = TYPED_READ_WINDOW_BYTES;
-    let ds1 = |dims: &[u64]| Dataspace {
-        space_type: crate::dataspace::DataspaceType::Simple,
-        rank: dims.len() as u8,
-        dimensions: dims.to_vec(),
-        max_dimensions: None,
-    };
+    let ds1 = |dims: &[u64]| Dataspace::simple(dims.to_vec(), None).unwrap();
     let contiguous = DataLayout::Contiguous {
         address: Some(StoredAddress::new(0)),
         size: 0,
@@ -2282,12 +2266,7 @@ fn a_typed_read_windows_in_whole_chunk_bands() {
     );
 
     // A scalar has one logical row, including with chunked layout metadata.
-    let scalar = Dataspace {
-        space_type: crate::dataspace::DataspaceType::Scalar,
-        rank: 0,
-        dimensions: Vec::new(),
-        max_dimensions: None,
-    };
+    let scalar = Dataspace::scalar();
     assert!(typed_window_rows(&chunked(8), &scalar, elem).unwrap().get() >= 1);
 
     // A zero inner dimension makes a row zero bytes wide, and the dataset
@@ -2367,12 +2346,7 @@ fn attr_datatypes_reports_the_byte_order_attrs_normalizes() {
         datatype: Datatype::FixedPoint(
             FixedPointType::new(4, DatatypeByteOrder::BigEndian, true, 0, 32).unwrap(),
         ),
-        dataspace: Dataspace {
-            space_type: crate::dataspace::DataspaceType::Scalar,
-            rank: 0,
-            dimensions: vec![],
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::scalar(),
         raw_data: (-7i32).to_be_bytes().to_vec(),
         datatype_location: crate::shared_message::DatatypeLocation::Inline,
     };
@@ -2430,12 +2404,7 @@ fn attr_datatypes_reports_an_attribute_attrs_omits() {
     let raw = crate::attribute::AttributeMessage {
         name: "raw".into(),
         datatype: opaque.clone(),
-        dataspace: Dataspace {
-            space_type: crate::dataspace::DataspaceType::Scalar,
-            rank: 0,
-            dimensions: vec![],
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::scalar(),
         raw_data: vec![1, 2, 3],
         datatype_location: crate::shared_message::DatatypeLocation::Inline,
     };
@@ -2507,12 +2476,7 @@ fn an_attribute_too_wide_to_decode_is_omitted_rather_than_truncated() {
     let huge = crate::attribute::AttributeMessage {
         name: "huge".into(),
         datatype: wide.clone(),
-        dataspace: Dataspace {
-            space_type: crate::dataspace::DataspaceType::Scalar,
-            rank: 0,
-            dimensions: vec![],
-            max_dimensions: None,
-        },
+        dataspace: Dataspace::scalar(),
         raw_data,
         datatype_location: crate::shared_message::DatatypeLocation::Inline,
     };

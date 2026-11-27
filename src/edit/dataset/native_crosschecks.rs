@@ -237,7 +237,7 @@ fn append_native_dataset(widths: FormatWidths, index_case: IndexCase, filtered: 
     let region = super::replace_layout_message(&region, &layout).unwrap();
     let (dataspace, layout) = dataset_layout(&region);
     assert_eq!(
-        dataspace.dimensions,
+        dataspace.dimensions(),
         [u64::try_from(index_case.grown()).unwrap()]
     );
     let DataLayout::Chunked { index, .. } = layout else {

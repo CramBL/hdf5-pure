@@ -5969,7 +5969,7 @@ fn typed_window_rows(
     elem_size: NonZeroUsize,
 ) -> Result<NonZeroU64, FormatError> {
     let mut row_bytes = elem_size.get() as u64;
-    for &d in ds.dimensions.iter().skip(1) {
+    for &d in ds.dimensions().iter().skip(1) {
         row_bytes = row_bytes
             .checked_mul(d)
             .ok_or(FormatError::OffsetOverflow {
@@ -6982,7 +6982,7 @@ the same commit to replace it",
             return Ok(meta.dimensions);
         }
         let ds = self.dataspace()?;
-        Ok(ds.dimensions.clone())
+        Ok(ds.dimensions().to_vec())
     }
 
     /// Returns the dataset's maximum dimensions, when it is extensible.
@@ -7063,7 +7063,7 @@ the same commit to replace it",
         else {
             return Ok(None);
         };
-        let rank = self.dataspace()?.dimensions.len();
+        let rank = self.dataspace()?.dimensions().len();
         if chunk_dimensions.len() <= rank {
             return Ok(None);
         }
@@ -7154,7 +7154,7 @@ the same commit to replace it",
     /// its metadata.
     pub fn chunks(&self) -> Result<Vec<Chunk>, Error> {
         let dataspace = self.dataspace()?;
-        let rank = dataspace.dimensions.len();
+        let rank = dataspace.dimensions().len();
         let DataLayout::Chunked {
             flags,
             chunk_dimensions,
@@ -7174,7 +7174,7 @@ the same commit to replace it",
                 let bypassed_raw = ChunkDecoding::at_extent(
                     flags,
                     &chunk_dimensions,
-                    &dataspace.dimensions,
+                    dataspace.dimensions(),
                     &c.offsets,
                 ) == ChunkDecoding::Verbatim;
                 Ok(Chunk::new(
@@ -7424,7 +7424,7 @@ the same commit to replace it",
         let decoded_width = D::decoded_width(&dt);
 
         let mut out = Vec::new();
-        let n0 = ds.dimensions.first().copied().unwrap_or(1);
+        let n0 = ds.dimensions().first().copied().unwrap_or(1);
         let rows = typed_window_rows(&dl, &ds, elem_size)?.get();
         if n0 <= rows || decoded_width != dt.type_size() {
             // No reservation here: the decoder sizes the output from the bytes it
@@ -7434,7 +7434,7 @@ the same commit to replace it",
             return Ok(out);
         }
 
-        let values = ds.num_elements().to_usize()?;
+        let values = ds.num_elements()?.to_usize()?;
 
         // One pass for the whole sweep, not one per window: the sweep visits each
         // chunk exactly once, so a window that offered its chunks to a cache
@@ -7567,7 +7567,7 @@ the same commit to replace it",
         let raw = self.read_raw()?;
         Ok(vl_data::vlen_string_payload_size(
             &raw,
-            dataspace.num_elements(),
+            dataspace.num_elements()?,
             self.file.widths.offsets,
         )?)
     }
@@ -7606,13 +7606,13 @@ the same commit to replace it",
             }
             .into());
         }
-        let dataspace = self.dataspace()?;
+        let count = self.dataspace()?.num_elements()?;
         if let Some(limit) = options.max_elements()
-            && dataspace.num_elements() > ElementCount::new(limit as u64)
+            && count > ElementCount::new(limit as u64)
         {
             return Err(FormatError::VariableLengthElementLimitExceeded {
                 limit,
-                actual: dataspace.num_elements().get(),
+                actual: count.get(),
             }
             .into());
         }
@@ -7621,7 +7621,7 @@ the same commit to replace it",
             Ok(vl_data::visit_vl_strings_from_source(
                 source,
                 &raw,
-                dataspace.num_elements(),
+                count,
                 self.file.widths,
                 self.file.addresses(),
                 options,
@@ -7649,13 +7649,13 @@ the same commit to replace it",
             }
             .into());
         }
-        let dataspace = self.dataspace()?;
+        let count = self.dataspace()?.num_elements()?;
         if let Some(limit) = options.max_elements()
-            && dataspace.num_elements() > ElementCount::new(limit as u64)
+            && count > ElementCount::new(limit as u64)
         {
             return Err(FormatError::VariableLengthElementLimitExceeded {
                 limit,
-                actual: dataspace.num_elements().get(),
+                actual: count.get(),
             }
             .into());
         }
@@ -7664,7 +7664,7 @@ the same commit to replace it",
             Ok(vl_data::read_vl_byte_objects_from_source(
                 source,
                 &raw,
-                dataspace.num_elements(),
+                count,
                 self.file.widths,
                 self.file.addresses(),
                 1, // VL string references count bytes
@@ -7711,13 +7711,13 @@ the same commit to replace it",
                 FormatError::VlDataError("non-string VL base type has zero size".into()).into(),
             );
         }
-        let dataspace = self.dataspace()?;
+        let count = self.dataspace()?.num_elements()?;
         if let Some(limit) = options.max_elements()
-            && dataspace.num_elements() > ElementCount::new(limit as u64)
+            && count > ElementCount::new(limit as u64)
         {
             return Err(FormatError::VariableLengthElementLimitExceeded {
                 limit,
-                actual: dataspace.num_elements().get(),
+                actual: count.get(),
             }
             .into());
         }
@@ -7726,7 +7726,7 @@ the same commit to replace it",
             vl_data::read_vl_byte_objects_from_source(
                 source,
                 &raw,
-                dataspace.num_elements(),
+                count,
                 self.file.widths,
                 self.file.addresses(),
                 element_size,
