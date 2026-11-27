@@ -35,7 +35,7 @@ fn metadata_fields_use_independent_file_widths(
     )
     .unwrap();
     assert_eq!(
-        space.serialize(lengths.get()).unwrap(),
+        space.prepare(lengths).unwrap().to_bytes(),
         dataspace::v2_with_widths(
             2,
             dataspace::Flags::MAX_DIMS,
@@ -196,7 +196,6 @@ fn dataspace_dimensions_preserve_the_selected_length_width(
         Some(&[value]),
     )
     .build();
-    assert_eq!(dataspace.serialize(width.get()).unwrap(), expected);
     assert_eq!(dataspace.prepare(width).unwrap().to_bytes(), expected);
     assert_eq!(Dataspace::parse(&expected, width.get()).unwrap(), dataspace);
 }
@@ -389,18 +388,6 @@ fn stored_maxima_reject_a_dimension_outside_the_length_width(
             length: dimension,
             length_size: width.get()
         },
-    );
-}
-
-#[rstest]
-#[case::zero(0)]
-#[case::one(1)]
-#[case::sixteen(16)]
-fn dataspace_serialization_rejects_unsupported_length_sizes(#[case] size: u8) {
-    let dataspace = Dataspace::scalar();
-    assert_eq!(
-        dataspace.serialize(size).unwrap_err(),
-        FormatError::InvalidLengthSize(size)
     );
 }
 

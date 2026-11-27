@@ -127,6 +127,17 @@ mod tests {
         assert_eq!(LengthWidth::try_from(8), Ok(LengthWidth::Eight));
     }
 
+    #[rstest::rstest]
+    #[case::zero(0)]
+    #[case::one(1)]
+    #[case::sixteen(16)]
+    fn unsupported_length_widths_report_the_stored_byte(#[case] size: u8) {
+        assert_eq!(
+            LengthWidth::try_from(size).unwrap_err(),
+            FormatError::InvalidLengthSize(size)
+        );
+    }
+
     #[test]
     fn a_parsed_width_reports_the_byte_it_came_from() {
         for size in [2u8, 4, 8] {
