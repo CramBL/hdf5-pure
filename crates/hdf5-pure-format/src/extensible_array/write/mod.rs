@@ -636,95 +636,13 @@ enum Region<'a> {
     },
 }
 
-impl ExtensibleArrayStats {
-    fn empty(layout: Layout, num_slots: u64) -> Self {
-        Self {
-            nsuper_blks: 0,
-            super_blk_size: 0,
-            ndata_blks: 0,
-            data_blk_size: 0,
-            max_idx_set: num_slots,
-            nelmts: u64::from(layout.inline_elements()),
-        }
-    }
-
-    /// Adds a complete data block's counts and returns its checked length and logical slots.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the block offset exceeds its
-    /// field width or the length, slots, or statistics overflow [`u64`].
-    fn data(&mut self, layout: Layout, block: DataBlock) -> Result<(u64, Range<u64>), FormatError> {
-        let DataBlock {
-            offset,
-            elements,
-            libhdf5_offset: _,
-        } = block;
-        let offset_len = usize::from(layout.block_offset_len());
-        if offset.to_le_bytes()[offset_len..]
-            .iter()
-            .any(|&byte| byte != 0)
-        {
-            return Err(FormatError::InvalidExtensibleArrayGeometry);
-        }
-        let length = layout.data_block_len(block)?;
-        let slots = layout.slots(offset, elements)?;
-        self.ndata_blks = super::sum([self.ndata_blks, 1])?;
-        self.data_blk_size = super::sum([self.data_blk_size, length])?;
-        self.nelmts = super::sum([self.nelmts, elements])?;
-        Ok((length, slots))
-    }
-
-    /// Adds a secondary block's counts and returns its complete length and logical slots.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if its length, logical range, or
-    /// accumulated statistics overflow [`u64`].
-    fn secondary(
-        &mut self,
-        layout: Layout,
-        block: SuperBlock,
-    ) -> Result<(u64, Range<u64>), FormatError> {
-        let SuperBlock {
-            offset,
-            blocks,
-            block_elements,
-        } = block;
-        let length = layout.super_block_len(block)?;
-        let slots = layout.slots(offset, super::product(blocks, block_elements)?)?;
-        self.nsuper_blks = super::sum([self.nsuper_blks, 1])?;
-        self.super_blk_size = super::sum([self.super_blk_size, length])?;
-        Ok((length, slots))
-    }
-
-    /// Checks that every header statistic fits the encoded length width.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::LengthTooLarge`] if a statistic exceeds `widths.lengths`.
-    fn with_widths(self, widths: FormatWidths) -> Result<Self, FormatError> {
-        self.require_field_fits(widths.lengths)?;
-        Ok(self)
-    }
-
-    fn total_len(self, layout: Layout, widths: FormatWidths) -> Result<u64, FormatError> {
-        super::sum([
-            super::header_len(widths),
-            layout.index_block_len()?,
-            self.super_blk_size,
-            self.data_blk_size,
-        ])
-    }
-}
-
 fn vec_blocks(
     layout: Layout,
     widths: FormatWidths,
 ) -> Result<Vec<ExtensibleArrayBlock>, FormatError> {
     Ok(alloc::vec![
         ExtensibleArrayBlock {
-            length: super::header_len(widths),
+            length: super::header::header_len(widths),
             location: BlockLocation::Header,
         },
         ExtensibleArrayBlock {
