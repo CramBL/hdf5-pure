@@ -34,19 +34,17 @@ impl<'a> DenseAttrPlacement<'a> {
         plan: &'a DenseAttrPlan,
         addresses: &[StoredAddress],
     ) -> Result<Self, FormatError> {
-        let DenseAttrPlan {
-            attributes,
-            geometry,
-        } = plan;
-        let widths = geometry.widths;
+        let attributes = plan.attributes();
+        let geometry = plan.geometry();
+        let widths = geometry.widths();
         let info = plan.placement_info(addresses)?;
-        let heap_end = 1 + geometry.managed_plan.block_lengths().len();
-        let heap = geometry.managed_plan.place(&addresses[1..heap_end])?;
+        let heap_end = 1 + geometry.managed_plan().block_lengths().len();
+        let heap = geometry.managed_plan().place(&addresses[1..heap_end])?;
         let mut cursor = heap_end;
         let mut indexes = Vec::with_capacity(3);
-        for tree in core::iter::once(&geometry.name_plan)
-            .chain(geometry.corder_plan.iter())
-            .chain(geometry.huge_plan.iter())
+        for tree in core::iter::once(geometry.name_plan())
+            .chain(geometry.corder_plan())
+            .chain(geometry.huge_plan())
         {
             let end = cursor + 1 + tree.block_lengths().len();
             indexes.push(PlacedIndex {
@@ -59,7 +57,7 @@ impl<'a> DenseAttrPlacement<'a> {
         let huge_addresses = &addresses[cursor..];
         let header = plan.heap_header(
             heap.root_address(),
-            if geometry.huge_plan.is_some() {
+            if geometry.huge_plan().is_some() {
                 indexes
                     .last()
                     .map_or(StoredAddress::undefined(widths.offsets), |index| {
@@ -70,17 +68,17 @@ impl<'a> DenseAttrPlacement<'a> {
             },
         );
         let ids = FractalHeapIdLayout::new(&header, widths.offsets, widths.lengths);
-        let mut managed = Vec::with_capacity(attributes.len() - geometry.huge_count);
-        let mut huge = Vec::with_capacity(geometry.huge_count);
+        let mut managed = Vec::with_capacity(attributes.len() - geometry.huge_count());
+        let mut huge = Vec::with_capacity(geometry.huge_count());
         let mut heap_ids = Vec::with_capacity(attributes.len());
         let mut huge_records = Vec::new();
         let mut direct_records = Vec::new();
         let direct = header.huge_ids_direct_with_widths(widths);
-        for (attribute, huge_id) in attributes.iter().zip(&geometry.huge_id_of) {
+        for (attribute, huge_id) in attributes.iter().zip(geometry.huge_id_of()) {
             let id = if let Some(id) = huge_id {
                 let address = huge_addresses[huge.len()];
-                let length = attribute.bytes.len().to_u64();
-                huge.push(attribute.bytes.as_slice());
+                let length = attribute.bytes().len().to_u64();
+                huge.push(attribute.bytes());
                 if direct {
                     direct_records.push(HugeObjectDirectRecord { address, length });
                     header.encode_huge_direct_id(address, length, widths)?
@@ -99,10 +97,10 @@ impl<'a> DenseAttrPlacement<'a> {
                 }
             } else {
                 let id = header.encode_managed_id(
-                    geometry.managed_plan.heap_offset(managed.len()),
-                    attribute.bytes.len().to_u64(),
+                    geometry.managed_plan().heap_offset(managed.len()),
+                    attribute.bytes().len().to_u64(),
                 )?;
-                managed.push(attribute.bytes.as_slice());
+                managed.push(attribute.bytes());
                 id
             };
             heap_ids.push(id);
@@ -113,28 +111,28 @@ impl<'a> DenseAttrPlacement<'a> {
                 record.encode(&mut huge_records, widths.offsets, widths.lengths)?;
             }
         }
-        for &(hash, position) in &geometry.order {
+        for &(hash, position) in geometry.indexes().order() {
             let position = position.to_usize()?;
             AttributeRecord {
                 heap_id: PreparedHeapId::new(&ids, &heap_ids[position])?.bytes(),
                 flags: MessageFlags::NONE,
-                creation_order: attributes[position].creation_index,
+                creation_order: attributes[position].creation_index(),
             }
             .encode_name_record(&mut indexes[0].records, hash);
         }
-        if geometry.indexed {
-            for &position in &geometry.corder_order {
+        if geometry.indexes().indexed() {
+            for &position in geometry.indexes().corder_order() {
                 let position = position.to_usize()?;
                 AttributeRecord {
                     heap_id: PreparedHeapId::new(&ids, &heap_ids[position])?.bytes(),
                     flags: MessageFlags::NONE,
-                    creation_order: attributes[position].creation_index,
+                    creation_order: attributes[position].creation_index(),
                 }
                 .encode_creation_order_record(&mut indexes[1].records);
             }
         }
-        if geometry.huge_plan.is_some() {
-            indexes[1 + usize::from(geometry.indexed)].records = huge_records;
+        if geometry.huge_plan().is_some() {
+            indexes[1 + usize::from(geometry.indexes().indexed())].records = huge_records;
         }
         Ok(Self {
             plan,
@@ -188,10 +186,10 @@ impl<'a> DenseAttrPlacement<'a> {
             huge,
             info: _,
         } = self;
-        let widths = plan.geometry.widths;
+        let widths = plan.geometry().widths();
         let heap_address = addresses[0];
-        let huge_index = if plan.geometry.huge_plan.is_some() {
-            indexes[1 + usize::from(plan.geometry.indexed)].address
+        let huge_index = if plan.geometry().huge_plan().is_some() {
+            indexes[1 + usize::from(plan.geometry().indexes().indexed())].address
         } else {
             StoredAddress::undefined(widths.offsets)
         };
@@ -258,15 +256,15 @@ impl DenseAttrPlan {
                 });
             }
         }
-        let geometry = &self.geometry;
-        let name = 1 + geometry.managed_plan.block_lengths().len();
-        let creation = name + 1 + geometry.name_plan.block_lengths().len();
+        let geometry = self.geometry();
+        let name = 1 + geometry.managed_plan().block_lengths().len();
+        let creation = name + 1 + geometry.name_plan().block_lengths().len();
         AttributeInfoMessage::new(
-            geometry.widths.offsets,
-            geometry.next_index,
+            geometry.widths().offsets,
+            geometry.indexes().next_index(),
             DecodedStoredAddress::Defined(addresses[0]),
             DecodedStoredAddress::Defined(addresses[name]),
-            if geometry.indexed {
+            if geometry.indexes().indexed() {
                 AttributeCreationOrderIndex::Defined(addresses[creation])
             } else {
                 AttributeCreationOrderIndex::Absent

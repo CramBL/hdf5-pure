@@ -55,7 +55,7 @@ fn dense_storage_emits_the_version_three_attribute_body_once(#[case] name: &str,
     .build();
     let prepared =
         PreparedDenseAttrs::new(&[attribute], DenseAttrCreationOrder::Untracked, []).unwrap();
-    let body = &prepared.plan.attributes[0].bytes;
+    let body = prepared.plan.attributes()[0].bytes();
     assert_eq!(body, &expected);
     let actual = prepared
         .finalize(
@@ -88,14 +88,17 @@ fn prepared_clones_retain_shared_geometry_through_finalization(#[case] len: u32)
     )
     .unwrap();
     let cloned = prepared.clone();
-    assert!(Arc::ptr_eq(&prepared.plan.geometry, &cloned.plan.geometry));
+    assert!(core::ptr::eq(
+        prepared.plan.geometry(),
+        cloned.plan.geometry()
+    ));
     let ready = cloned
         .finalize(
             |reference| panic!("unexpected reference {reference:?}"),
             |_| Ok(replacement.as_slice()),
         )
         .unwrap();
-    assert!(Arc::ptr_eq(&prepared.plan.geometry, &ready.geometry));
+    assert!(core::ptr::eq(prepared.plan.geometry(), ready.geometry()));
     let blob = ready.build(StoredAddress::new(0x8000)).unwrap();
     assert_eq!(u64::try_from(blob.blob.len()).unwrap(), prepared.blob_len());
 }
@@ -156,13 +159,13 @@ fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed:
         },
     )
     .unwrap();
-    assert_eq!(prepared.next_index, Some(u16::MAX));
-    assert_eq!(prepared.indexed, indexed);
+    assert_eq!(prepared.indexes.next_index, Some(u16::MAX));
+    assert_eq!(prepared.indexes.indexed, indexed);
     assert_eq!(
         prepared
             .attributes
             .iter()
-            .map(|a| a.creation_index)
+            .map(|a| a.creation_index())
             .collect::<Vec<_>>(),
         vec![7, 2]
     );
@@ -170,7 +173,7 @@ fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed:
         prepared
             .attributes
             .iter()
-            .map(|a| a.bytes.clone())
+            .map(|a| a.bytes().to_vec())
             .collect::<Vec<_>>(),
         attrs
             .iter()
@@ -180,7 +183,7 @@ fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed:
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        prepared.corder_order,
+        prepared.indexes.corder_order,
         if indexed { vec![1, 0] } else { vec![] }
     );
 }
@@ -197,14 +200,14 @@ fn dense_attribute_preparation_preserves_untracked_positions() {
         DenseAttrCreationOrder::Untracked,
     )
     .unwrap();
-    assert_eq!(prepared.next_index, None);
-    assert!(!prepared.indexed);
-    assert!(prepared.corder_order.is_empty());
+    assert_eq!(prepared.indexes.next_index, None);
+    assert!(!prepared.indexes.indexed);
+    assert!(prepared.indexes.corder_order.is_empty());
     assert_eq!(
         prepared
             .attributes
             .iter()
-            .map(|a| a.creation_index)
+            .map(|a| a.creation_index())
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
@@ -248,10 +251,10 @@ fn dense_attribute_preparation_preserves_empty_set_metadata(
     )
     .unwrap();
     assert!(prepared.attributes.is_empty());
-    assert!(prepared.order.is_empty());
-    assert!(prepared.corder_order.is_empty());
-    assert_eq!(prepared.next_index, next);
-    assert_eq!(prepared.indexed, indexed);
+    assert!(prepared.indexes.order.is_empty());
+    assert!(prepared.indexes.corder_order.is_empty());
+    assert_eq!(prepared.indexes.next_index, next);
+    assert_eq!(prepared.indexes.indexed, indexed);
 }
 
 #[test]
@@ -502,9 +505,9 @@ fn finalization_retains_geometry_and_encodes_resolved_references(#[case] referen
     attrs[1].raw_data.copy_from_slice(&payload);
     assert_eq!(
         ready
-            .attributes
+            .attributes()
             .iter()
-            .map(|a| a.bytes.clone())
+            .map(|a| a.bytes().to_vec())
             .collect::<Vec<_>>(),
         attrs
             .iter()
@@ -526,7 +529,10 @@ fn finalization_retains_geometry_and_encodes_resolved_references(#[case] referen
         built.blob,
         direct.build(StoredAddress::new(0x8000)).unwrap().blob
     );
-    assert_eq!(ready.geometry.huge_count, usize::from(references >= 5_000));
+    assert_eq!(
+        ready.geometry.huge_count(),
+        usize::from(references >= 5_000)
+    );
 }
 
 #[rstest]
@@ -745,7 +751,7 @@ fn prepared_dense_output_matches_baseline_bytes(
         .unwrap();
     let built = ready.build(StoredAddress::new(0x8000)).unwrap();
     assert_eq!(
-        ready.geometry.huge_count,
+        ready.geometry.huge_count(),
         usize::from(matches!(shape, CanonicalShape::Mixed))
     );
     assert_eq!(built.blob.len(), len);
@@ -794,24 +800,24 @@ struct RetainedGeometry {
 }
 
 fn geometry(plan: &DenseAttrPlan) -> RetainedGeometry {
-    let g = &plan.geometry;
+    let g = plan.geometry();
     RetainedGeometry {
-        huge_ids: g.huge_id_of.clone(),
-        name_order: g.order.clone(),
-        creation_order: g.corder_order.clone(),
+        huge_ids: g.huge_id_of().to_vec(),
+        name_order: g.indexes().order().to_vec(),
+        creation_order: g.indexes().corder_order().to_vec(),
         sizes_and_offsets: [
-            g.huge_total,
-            g.managed_plan.region_size(),
-            g.managed_off,
-            g.btree_off,
-            g.name_nodes_off,
-            g.corder_bthd_off,
-            g.corder_nodes_off,
-            g.huge_bthd_off,
-            g.huge_nodes_off,
-            g.huge_data_off,
-            g.total_len,
-            g.managed_plan.managed_space(),
+            g.huge_total(),
+            g.managed_plan().region_size(),
+            g.offsets().managed_off,
+            g.offsets().btree_off,
+            g.offsets().name_nodes_off,
+            g.offsets().corder_bthd_off,
+            g.offsets().corder_nodes_off,
+            g.offsets().huge_bthd_off,
+            g.offsets().huge_nodes_off,
+            g.offsets().huge_data_off,
+            g.offsets().total_len,
+            g.managed_plan().managed_space(),
         ],
     }
 }
