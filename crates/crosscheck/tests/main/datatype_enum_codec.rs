@@ -80,7 +80,7 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         .find(|message| message.msg_type == MessageType::DATATYPE)
         .unwrap()
         .data;
-    let (message, consumed) = DatatypeMessage::parse(bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(bytes).unwrap();
     assert_eq!(
         format::parse_datatype(bytes).unwrap(),
         (message.to_datatype().unwrap(), consumed)
@@ -98,7 +98,7 @@ fn datatype_enum_codecs_preserve_native_descriptions(
     assert_eq!(&bytes[consumed..], vec![0; bytes.len() - consumed]);
     let canonical =
         format::serialize_datatype_with_offset_width(&semantic, superblock.offset_size).unwrap();
-    let (parsed, consumed) = DatatypeMessage::parse(&canonical).unwrap();
+    let (parsed, consumed) = DatatypeMessage::parse_prefix(&canonical).unwrap();
     assert_eq!(consumed, canonical.len());
     assert_eq!(parsed.to_datatype().unwrap(), semantic);
     assert_eq!(parsed.version(), DatatypeVersion::Three);

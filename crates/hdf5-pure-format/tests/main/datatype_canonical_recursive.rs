@@ -35,7 +35,6 @@ fn datatype_canonical_recursive_preserves_properties_and_minimal_versions(
     let source = parent.bytes(OffsetWidth::Eight, true);
     let semantic = DatatypeMessage::parse(&source)
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     let expected = wrapper.bytes(
@@ -58,7 +57,6 @@ fn prepared_atomic_datatype_checks_capacity_before_writing(
     let source = leaf.bytes(Version::Five);
     let datatype = DatatypeMessage::parse(&source)
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     assert_prepared_capacity(&datatype, width, &leaf.bytes(Version::One));
@@ -73,7 +71,6 @@ fn prepared_nested_datatype_checks_capacity_before_writing(
     let source = parent.bytes(OffsetWidth::Eight, true);
     let semantic = DatatypeMessage::parse(&source)
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     let expected = wrapper.bytes(
@@ -93,7 +90,6 @@ fn prepared_nested_array_datatype_checks_capacity_before_writing(
     let source = parent.bytes(OffsetWidth::Eight, true);
     let semantic = DatatypeMessage::parse(&source)
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     let array = Wrapper::Array.bytes(
@@ -280,7 +276,6 @@ fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
 ) {
     let base = DatatypeMessage::parse(&leaf.bytes(Version::Five))
         .unwrap()
-        .0
         .to_datatype()
         .unwrap();
     let Datatype::FixedPoint(base) = base else {
@@ -317,7 +312,6 @@ fn datatype_canonical_enumeration_preserves_integer_properties_and_raw_values(
     assert_eq!(
         DatatypeMessage::parse(&expected)
             .unwrap()
-            .0
             .to_datatype()
             .unwrap(),
         datatype
@@ -350,7 +344,7 @@ fn enumeration_values_keep_the_width_of_the_decoded_parent(
     );
 
     let (datatype, consumed) = format::parse_datatype(&bytes).unwrap();
-    let (retained, retained_consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (retained, retained_consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(retained_consumed, bytes.len());
     assert_eq!(retained.to_datatype().unwrap(), datatype);
@@ -402,7 +396,7 @@ fn constructed_containers_keep_a_retained_enumeration_width(
             value: &vec![0; size as usize],
         }],
     );
-    let (retained, consumed) = DatatypeMessage::parse(&enumeration).unwrap();
+    let (retained, consumed) = DatatypeMessage::parse_prefix(&enumeration).unwrap();
     assert_eq!(consumed, enumeration.len());
     let array = DatatypeMessage::new(
         DatatypeVersion::Three,
@@ -597,7 +591,7 @@ fn an_array_of_compounds_can_change_descriptor_width_outside_an_enumeration() {
     let expected = array_of_sequence_compounds(8, 8);
     let (datatype, consumed) = format::parse_datatype(&source).unwrap();
     assert_eq!(consumed, source.len());
-    let (retained, consumed) = DatatypeMessage::parse(&source).unwrap();
+    let (retained, consumed) = DatatypeMessage::parse_prefix(&source).unwrap();
     assert_eq!(consumed, source.len());
     assert_eq!(retained.stored_size(OffsetWidth::Eight).unwrap(), 64);
     assert_eq!(retained.serialize(OffsetWidth::Eight).unwrap(), expected);
@@ -633,7 +627,7 @@ fn array_of_sequence_compounds(first_offsets: usize, second_offsets: usize) -> V
 fn parse_enumeration(bytes: &[u8]) -> (Datatype, DatatypeMessage) {
     let (datatype, consumed) = format::parse_datatype(bytes).unwrap();
     assert_eq!(consumed, bytes.len());
-    let (retained, consumed) = DatatypeMessage::parse(bytes).unwrap();
+    let (retained, consumed) = DatatypeMessage::parse_prefix(bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(retained.to_datatype().unwrap(), datatype);
     (datatype, retained)
@@ -846,7 +840,6 @@ impl EmptyModel {
     fn datatype(self) -> Datatype {
         let parent = DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One))
             .unwrap()
-            .0
             .to_datatype()
             .unwrap();
         match self {

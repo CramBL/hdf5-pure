@@ -119,7 +119,7 @@ fn datatype_enum_codecs_preserve_nested_mixtures(
         }],
     );
     let bytes = datatype::array(5, [0; 3], descriptor * 2, 1, &[2], &compound);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(
         format::parse_datatype(&bytes).unwrap(),
@@ -257,7 +257,7 @@ fn datatype_enum_codecs_preserve_the_decoded_floating_point_base() {
     data.extend_from_slice(&[0xaa, 0xbb]);
 
     let (semantic, consumed) = format::parse_datatype(&data).unwrap();
-    let (retained, retained_consumed) = DatatypeMessage::parse(&data).unwrap();
+    let (retained, retained_consumed) = DatatypeMessage::parse_prefix(&data).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(retained_consumed, consumed);
     assert_eq!(retained.to_datatype().unwrap(), semantic);
@@ -373,9 +373,9 @@ fn datatype_enum_codecs_exclude_legacy_padding_from_names() {
     input[26..28].copy_from_slice(&[0xfe, 0xff]);
     input[35] = 0xfd;
 
-    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, input.len());
-    assert_eq!(message, DatatypeMessage::parse(&bytes).unwrap().0);
+    assert_eq!(message, DatatypeMessage::parse(&bytes).unwrap());
     assert_eq!(
         format::parse_datatype(&input).unwrap(),
         (message.to_datatype().unwrap(), consumed)
@@ -484,7 +484,7 @@ fn checked(
     DatatypeMessage::new(
         version,
         DatatypeProperties::Enumeration {
-            base_type: Box::new(DatatypeMessage::parse(child).unwrap().0),
+            base_type: Box::new(DatatypeMessage::parse(child).unwrap()),
             members,
         },
     )
@@ -493,7 +493,7 @@ fn checked(
 fn assert_encoding(bytes: &[u8], expected: DatatypeMessage) {
     let mut input = bytes.to_vec();
     input.push(0xff);
-    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message, expected);
     assert_eq!(
@@ -523,9 +523,7 @@ fn assert_bounded_encoding(message: &DatatypeMessage, width: OffsetWidth, bytes:
 
 #[test]
 fn datatype_enum_construction_rejects_unencodable_member_counts() {
-    let child = DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One))
-        .unwrap()
-        .0;
+    let child = DatatypeMessage::parse(&Leaf::Integer.bytes(Version::One)).unwrap();
     let count = usize::from(u16::MAX) + 1;
     assert_eq!(
         DatatypeMessage::new(

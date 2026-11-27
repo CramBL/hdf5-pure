@@ -10,7 +10,6 @@ use core::ffi::CStr;
 use core::num::{NonZeroU32, NonZeroUsize};
 
 use hdf5_pure_core::__private;
-use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{ComplexType, DatatypeMemberName, EnumMember, FormatError};
 
 use super::atomic;
@@ -27,15 +26,6 @@ use crate::datatype::nesting::MessageDepth;
 use crate::datatype::stored_size;
 use crate::datatype::variable_length::{self, VariableLengthMetadata};
 use crate::width::OffsetWidth;
-
-/// A parsed datatype paired with the nonzero element size from its message.
-pub(in crate::datatype) struct Decoded<T> {
-    pub(in crate::datatype) datatype: T,
-    /// The size in bytes of one stored element.
-    pub(in crate::datatype) stored_size: NonZeroU32,
-    /// The offset widths inferred from variable-length descriptors in the description.
-    pub(in crate::datatype) offsets: DatatypeOffsets,
-}
 
 /// Whether to decode a semantic datatype or retain its message versions.
 #[derive(Clone, Copy, PartialEq)]

@@ -34,7 +34,7 @@ fn datatype_variable_length_codecs_preserve_parent_properties(
     let expected = DatatypeMessage::new(
         DatatypeVersion::try_from(version.get()).unwrap(),
         DatatypeProperties::VariableLengthSequence {
-            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap().0),
+            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap()),
         },
     )
     .unwrap();
@@ -80,7 +80,7 @@ fn datatype_variable_length_codecs_preserve_string_metadata(
                 Charset::Ascii => CharacterSet::Ascii,
                 Charset::Utf8 => CharacterSet::Utf8,
             },
-            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap().0),
+            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap()),
         },
     )
     .unwrap();
@@ -97,7 +97,7 @@ fn datatype_variable_length_codecs_preserve_vax_parent(#[case] version: VaxVersi
     let expected = DatatypeMessage::new(
         DatatypeVersion::Five,
         DatatypeProperties::VariableLengthSequence {
-            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap().0),
+            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap()),
         },
     )
     .unwrap();
@@ -119,7 +119,7 @@ fn datatype_variable_length_codecs_preserve_nested_versions_and_change_widths(
     let parent = Leaf::Integer.bytes(leaf);
     let nested = datatype::variable_length(inner.get(), [0; 3], 10, &parent);
     let bytes = datatype::variable_length(outer.get(), [0; 3], 10, &nested);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.version().get(), outer.get());
     let DatatypeProperties::VariableLengthSequence { base_type } = message.properties() else {
@@ -150,7 +150,7 @@ fn datatype_variable_length_codecs_preserve_nested_string_parents(#[case] string
         DatatypeProperties::VariableLengthString {
             padding: StringPadding::SpacePad,
             charset: CharacterSet::Utf8,
-            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap().0),
+            base_type: Box::new(DatatypeMessage::parse(&parent).unwrap()),
         },
     )
     .unwrap();
@@ -273,7 +273,7 @@ fn datatype_variable_length_codecs_bound_recursive_descriptions() {
     let bytes = (0..63).fold(leaf, |parent, _| {
         datatype::variable_length(1, [0; 3], 16, &parent)
     });
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
     let too_deep = datatype::variable_length(1, [0; 3], 16, &bytes);
@@ -301,7 +301,7 @@ fn descriptor_size(width: OffsetWidth) -> u32 {
 fn assert_encoding(bytes: &[u8], expected: DatatypeMessage, width: OffsetWidth) {
     let mut input = bytes.to_vec();
     input.push(0xff);
-    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message, expected);
     assert_eq!(message.serialize(width).unwrap(), bytes);

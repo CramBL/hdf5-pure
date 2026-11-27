@@ -2,6 +2,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private;
 use hdf5_pure_core::{
@@ -12,7 +13,7 @@ use super::header::{Context, Header};
 use super::message;
 use super::message::atomic::AtomicReservedFlagPolicy;
 use super::message::compound_layout::CompoundLayout;
-use super::message::decode::{self, Decoded, Layout, Member, Projection};
+use super::message::decode::{self, Layout, Member, Projection};
 use super::nesting::MessageDepth;
 use super::variable_length::VariableLengthMetadata;
 use super::{references, stored_size};
@@ -116,8 +117,17 @@ use crate::width::OffsetWidth;
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     let mut cursor = ByteCursor::new(data);
-    let Decoded { datatype, .. } = parse_datatype_at(&mut cursor, MessageDepth::ROOT)?;
+    let DecodedDatatype { datatype, .. } = parse_datatype_at(&mut cursor, MessageDepth::ROOT)?;
     Ok((datatype, cursor.position()))
+}
+
+/// A parsed datatype paired with the nonzero element size from its message.
+struct DecodedDatatype {
+    datatype: Datatype,
+    /// The size in bytes of one stored element.
+    stored_size: NonZeroU32,
+    /// The offset widths inferred from variable-length descriptors in the description.
+    offsets: __private::DatatypeOffsets,
 }
 
 /// Parses the next datatype and retains its stored element size.
@@ -128,7 +138,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
 fn parse_datatype_at(
     cursor: &mut ByteCursor<'_>,
     depth: MessageDepth,
-) -> Result<Decoded<Datatype>, FormatError> {
+) -> Result<DecodedDatatype, FormatError> {
     let header = Header::parse(cursor, Context::Description)?;
     let size = header.size;
     let mut offsets = __private::DatatypeOffsets::default();
@@ -151,7 +161,7 @@ fn parse_datatype_at(
                     offset,
                     shape,
                 } = compound.member(cursor)?;
-                let Decoded {
+                let DecodedDatatype {
                     datatype,
                     stored_size,
                     offsets: field_offsets,
@@ -183,7 +193,7 @@ fn parse_datatype_at(
         }
         Layout::Reference => references::decode_reference(&header)?,
         Layout::Enumeration(enumeration) => {
-            let Decoded {
+            let DecodedDatatype {
                 datatype: base_type,
                 stored_size: base_size,
                 offsets: base_offsets,
@@ -212,7 +222,7 @@ fn parse_datatype_at(
             let dimensions = array.dimensions(cursor)?;
             let base = parse_nested_datatype(cursor, depth)?;
             let stored_size = decode::array_size(size, base.stored_size, &dimensions)?;
-            return Ok(Decoded {
+            return Ok(DecodedDatatype {
                 datatype: Datatype::Array {
                     base_type: Box::new(base.datatype),
                     dimensions,
@@ -226,7 +236,7 @@ fn parse_datatype_at(
             Datatype::Complex(datatype)
         }
     };
-    Ok(Decoded {
+    Ok(DecodedDatatype {
         datatype,
         stored_size: stored_size::positive_size(header.class.code(), size)?,
         offsets,
@@ -244,7 +254,7 @@ fn parse_datatype_at(
 fn parse_nested_datatype(
     cursor: &mut ByteCursor<'_>,
     parent_depth: MessageDepth,
-) -> Result<Decoded<Datatype>, FormatError> {
+) -> Result<DecodedDatatype, FormatError> {
     let depth = parent_depth.child()?;
     let mut nested = *cursor;
     let decoded = parse_datatype_at(&mut nested, depth)?;
@@ -319,8 +329,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
 /// let bytes = serialize_datatype_with_offset_width(&array, OffsetWidth::Two)?;
 /// assert_eq!(&bytes[..8], &[0x3a, 0, 0, 0, 20, 0, 0, 0]);
 /// assert_eq!(&bytes[13..21], &[0x19, 0, 0, 0, 10, 0, 0, 0]);
-/// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
-/// assert_eq!(consumed, bytes.len());
+/// let parsed = DatatypeMessage::parse(&bytes)?;
 /// assert_eq!(parsed.to_datatype()?, array);
 /// # Ok::<(), FormatError>(())
 /// ```

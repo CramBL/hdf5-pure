@@ -3,19 +3,20 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::DatatypeOffsets;
 use hdf5_pure_core::{DatatypeMemberName, FormatError};
 
 use super::atomic::AtomicReservedFlagPolicy;
 use super::compound_layout::CompoundLayout;
-use super::decode::{self, Decoded, Layout, Member, Projection};
+use super::decode::{self, Layout, Member, Projection};
 use super::representation::{
     self, CompoundV1Member, DatatypeMessage, DatatypeMessageMember, DatatypeProperties,
 };
 use super::version::DatatypeVersion;
 use crate::bytes::ByteCursor;
-use crate::codec::Decode;
+use crate::codec::{self, DecodeFrame, DecodePrefix, Parsed};
 use crate::datatype::header::{
     ARRAY_CLASS, COMPOUND_CLASS, Context, ENUMERATION_CLASS, Header, REFERENCE_CLASS,
 };
@@ -117,7 +118,7 @@ impl DatatypeMessage {
     /// use hdf5_pure_format::__private::{DatatypeMessage, DatatypeVersion, OffsetWidth};
     ///
     /// let bytes = [0x50, 0x08, 0, 0, 2, 0, 0, 0, 0, 0, 16, 0, 0xff];
-    /// let (message, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// let (message, consumed) = DatatypeMessage::parse_prefix(&bytes)?;
     /// assert_eq!(message.version(), DatatypeVersion::Five);
     /// assert_eq!(consumed, 12);
     /// assert_eq!(message.serialize(OffsetWidth::Eight)?, bytes[..consumed]);
@@ -125,16 +126,24 @@ impl DatatypeMessage {
     /// ```
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
-    pub fn parse(data: &[u8]) -> Result<(Self, usize), FormatError> {
-        let mut cursor = ByteCursor::new(data);
-        let decoded = Self::parse_at(&mut cursor, MessageDepth::ROOT)?;
-        Ok((decoded.datatype, cursor.position()))
+    pub fn parse_prefix(data: &[u8]) -> Result<(Self, usize), FormatError> {
+        Ok(Self::decode_prefix(data, ())?.into_parts())
+    }
+
+    /// Parses exactly one datatype description from `data`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::parse_prefix`] for an invalid description.
+    /// Returns [`FormatError::TrailingMetadataBytes`] if bytes follow a valid description.
+    pub fn parse(data: &[u8]) -> Result<Self, FormatError> {
+        Self::decode_frame(data, ())
     }
 
     fn parse_at(
         cursor: &mut ByteCursor<'_>,
         depth: MessageDepth,
-    ) -> Result<Decoded<Self>, FormatError> {
+    ) -> Result<DecodedMessage, FormatError> {
         let header = Header::parse(cursor, Context::Description)?;
         let mut offsets = DatatypeOffsets::default();
         let properties = match Layout::from_header(&header, Projection::Retained)? {
@@ -147,7 +156,7 @@ impl DatatypeMessage {
                         AtomicReservedFlagPolicy::Reject,
                     )?
                     .into_properties();
-                return Ok(Decoded {
+                return Ok(DecodedMessage {
                     datatype: Self::from_parsed(ParsedProperties::new(header.version, properties)),
                     stored_size: stored_size::positive_size(header.class.code(), header.size)?,
                     offsets,
@@ -165,7 +174,7 @@ impl DatatypeMessage {
                         offset,
                         shape,
                     } = compound.member(cursor)?;
-                    let Decoded {
+                    let DecodedMessage {
                         datatype,
                         stored_size: field_size,
                         offsets: field_offsets,
@@ -196,7 +205,7 @@ impl DatatypeMessage {
                     offsets.include_field(field_offsets);
                 }
                 drop(layout);
-                return Ok(Decoded {
+                return Ok(DecodedMessage {
                     datatype: Self::from_parsed(ParsedProperties::new(
                         header.version,
                         members.into_properties(header.version, header.size)?,
@@ -207,7 +216,7 @@ impl DatatypeMessage {
             }
             Layout::Reference => return Err(FormatError::InvalidDatatypeClass(REFERENCE_CLASS)),
             Layout::Enumeration(enumeration) => {
-                let Decoded {
+                let DecodedMessage {
                     datatype: base_type,
                     stored_size: base_size,
                     offsets: base_offsets,
@@ -217,7 +226,7 @@ impl DatatypeMessage {
                     .version
                     .check_child(ENUMERATION_CLASS, base_type.version())?;
                 representation::check_enumeration_members(&members, base_size.get())?;
-                return Ok(Decoded {
+                return Ok(DecodedMessage {
                     datatype: Self::from_parsed(ParsedProperties {
                         version: header.version,
                         properties: DatatypeProperties::Enumeration {
@@ -249,7 +258,7 @@ impl DatatypeMessage {
             }
             Layout::Array(array) => {
                 let dimensions = array.dimensions(cursor)?;
-                let Decoded {
+                let DecodedMessage {
                     datatype: base_type,
                     stored_size: base_size,
                     offsets: base_offsets,
@@ -258,7 +267,7 @@ impl DatatypeMessage {
                 header
                     .version
                     .check_child(ARRAY_CLASS, base_type.version())?;
-                return Ok(Decoded {
+                return Ok(DecodedMessage {
                     datatype: Self::from_parsed(ParsedProperties::new(
                         header.version,
                         DatatypeProperties::Array {
@@ -280,12 +289,41 @@ impl DatatypeMessage {
                 }
             }
         };
-        Ok(Decoded {
+        Ok(DecodedMessage {
             datatype: Self::new(header.version, properties)?,
             stored_size: stored_size::positive_size(header.class.code(), header.size)?,
             offsets,
         })
     }
+}
+
+impl DecodePrefix<'_> for DatatypeMessage {
+    type Context = ();
+    type Error = FormatError;
+
+    fn decode_prefix(input: &[u8], (): ()) -> Result<Parsed<Self>, FormatError> {
+        let mut cursor = ByteCursor::new(input);
+        let decoded = Self::parse_at(&mut cursor, MessageDepth::ROOT)?;
+        Ok(Parsed::from_cursor(decoded.datatype, &cursor))
+    }
+}
+
+impl DecodeFrame<'_> for DatatypeMessage {
+    type Context = ();
+    type Error = FormatError;
+
+    fn decode_frame(frame: &[u8], (): ()) -> Result<Self, FormatError> {
+        Ok(codec::decode_exact(frame, ())?)
+    }
+}
+
+/// A retained description and the stored layout used to decode its enclosing datatype.
+struct DecodedMessage {
+    datatype: DatatypeMessage,
+    /// The size of one element in the file, in bytes.
+    stored_size: NonZeroU32,
+    /// The offset widths inferred from variable-length descriptors in the description.
+    offsets: DatatypeOffsets,
 }
 
 /// A version and properties whose layout and relationships the parser has checked.
@@ -383,19 +421,5 @@ impl ParsedCompoundMembers {
                 Ok(DatatypeProperties::CompoundV1 { size, members })
             }
         }
-    }
-}
-
-impl<'input> Decode<'input> for DatatypeMessage {
-    type Context = ();
-    type Error = FormatError;
-
-    /// Parses the description at the start of `input`, allowing trailing bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`Self::parse`].
-    fn decode(input: &'input [u8], (): ()) -> Result<Self, Self::Error> {
-        Self::parse(input).map(|(message, _)| message)
     }
 }

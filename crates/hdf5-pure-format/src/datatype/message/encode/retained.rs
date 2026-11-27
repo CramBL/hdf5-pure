@@ -89,9 +89,8 @@ impl DatatypeMessage {
     /// let bytes = sequence.serialize(OffsetWidth::Two)?;
     /// assert_eq!(&bytes[..8], &[0x59, 0, 0, 0, 10, 0, 0, 0]);
     /// assert_eq!(bytes[8], 0x20);
-    /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// let parsed = DatatypeMessage::parse(&bytes)?;
     /// assert_eq!(parsed, sequence);
-    /// assert_eq!(consumed, bytes.len());
     /// # Ok::<(), FormatError>(())
     /// ```
     ///
@@ -121,9 +120,8 @@ impl DatatypeMessage {
     /// assert_eq!(&bytes[..8], &[0x5a, 0, 0, 0, 16, 0, 0, 0]);
     /// assert_eq!(bytes[13], 0x5b);
     /// assert_eq!(bytes[21], 0x21);
-    /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// let parsed = DatatypeMessage::parse(&bytes)?;
     /// assert_eq!(parsed, array);
-    /// assert_eq!(consumed, bytes.len());
     /// # Ok::<(), FormatError>(())
     /// ```
     ///
@@ -153,9 +151,8 @@ impl DatatypeMessage {
     /// let bytes = compound.serialize(OffsetWidth::Eight)?;
     /// assert_eq!(&bytes[..12], &[0x56, 1, 0, 0, 4, 0, 0, 0, b'x', 0xff, 0, 3]);
     /// assert_eq!(bytes[12], 0x20);
-    /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// let parsed = DatatypeMessage::parse(&bytes)?;
     /// assert_eq!(parsed, compound);
-    /// assert_eq!(consumed, bytes.len());
     /// # Ok::<(), FormatError>(())
     /// ```
     ///
@@ -217,9 +214,8 @@ impl DatatypeMessage {
     /// assert_eq!(&bytes[..8], &[0x58, 2, 0, 0, 1, 0, 0, 0]);
     /// assert_eq!(bytes[8], 0x20);
     /// assert_eq!(&bytes[20..], b"low\0high\xff\0\x01\x02");
-    /// let (parsed, consumed) = DatatypeMessage::parse(&bytes)?;
+    /// let parsed = DatatypeMessage::parse(&bytes)?;
     /// assert_eq!(parsed, enumeration);
-    /// assert_eq!(consumed, bytes.len());
     /// # Ok::<(), FormatError>(())
     /// ```
     pub fn serialize(&self, offset_width: OffsetWidth) -> Result<Vec<u8>, FormatError> {
@@ -248,7 +244,7 @@ impl DatatypeMessage {
     ///     b'x', 0xff, 0, 0, 0, 0, 0, 0,
     ///     7,
     /// ];
-    /// let (message, _) = DatatypeMessage::parse(&bytes)?;
+    /// let message = DatatypeMessage::parse(&bytes)?;
     /// let prepared = message.prepare(OffsetWidth::Eight)?;
     /// let mut output = [0xff; 30];
     ///

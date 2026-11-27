@@ -43,7 +43,7 @@ fn datatype_compound_codecs_preserve_compound_properties(
             },
         ],
     );
-    let child = DatatypeMessage::parse(&child).unwrap().0;
+    let child = DatatypeMessage::parse(&child).unwrap();
     let expected = DatatypeMessage::new(
         version,
         DatatypeProperties::Compound {
@@ -88,7 +88,7 @@ fn datatype_compound_codecs_preserve_member_offset_widths(
             members: vec![DatatypeMessageMember::new(
                 DatatypeMemberName::from(c"x"),
                 offset,
-                DatatypeMessage::parse(&child).unwrap().0,
+                DatatypeMessage::parse(&child).unwrap(),
             )],
         },
     )
@@ -237,7 +237,7 @@ fn datatype_compound_encoder_uses_selected_member_extent() {
             datatype: &sequence,
         }],
     );
-    let message = DatatypeMessage::parse(&bytes).unwrap().0;
+    let message = DatatypeMessage::parse(&bytes).unwrap();
     assert_eq!(
         message.serialize(OffsetWidth::Eight).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
@@ -292,7 +292,6 @@ fn datatype_compound_codecs_preserve_vax_members(
     assert_eq!(
         DatatypeMessage::parse(&bytes)
             .unwrap()
-            .0
             .serialize(OffsetWidth::Eight)
             .unwrap(),
         bytes
@@ -338,7 +337,7 @@ fn datatype_compound_codecs_preserve_recursive_mixtures(
     );
     let array = datatype::array(5, [0; 3], 128, 1, &[2], &outer);
     let bytes = datatype::variable_length(Version::Five.get(), [0; 3], 10, &array);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(
         message.to_datatype().unwrap(),
@@ -401,7 +400,7 @@ fn datatype_compound_codecs_preserve_high_member_count_byte() {
         .collect::<Vec<_>>();
     let [low, high] = count.to_le_bytes();
     let bytes = containers::compound(3, [low, high, 0], 1028, MemberOffset::Two, &fields);
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     let DatatypeProperties::Compound { members, .. } = message.properties() else {
         panic!("{message:?}")
@@ -435,7 +434,7 @@ fn datatype_compound_codecs_reject_empty_member_sets(
 #[test]
 fn datatype_compound_codecs_reject_duplicate_member_names() {
     let parent = Leaf::Integer.bytes(Version::One);
-    let child = DatatypeMessage::parse(&parent).unwrap().0;
+    let child = DatatypeMessage::parse(&parent).unwrap();
     let members = vec![
         DatatypeMessageMember::new(DatatypeMemberName::from(c"\xff"), 0, child.clone()),
         DatatypeMessageMember::new(DatatypeMemberName::from(c"\xff"), 4, child),
@@ -581,7 +580,7 @@ fn datatype_compound_codecs_preserve_member_name_bytes(
     };
     let mut input = bytes.clone();
     input.push(0xff);
-    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message.version(), version);
     let DatatypeProperties::Compound { members, .. } = message.properties() else {
@@ -618,7 +617,7 @@ fn prepared_compound_write_preserves_output_outside_its_extent() {
             datatype: &child,
         }],
     );
-    let (message, _) = DatatypeMessage::parse(&bytes).unwrap();
+    let message = DatatypeMessage::parse(&bytes).unwrap();
     let prepared = message.prepare(OffsetWidth::Eight).unwrap();
     let expected = bytes.len();
     let available = expected - 1;
@@ -794,7 +793,7 @@ fn datatype_compound_codecs_preserve_float_member_versions(
             members: vec![DatatypeMessageMember::new(
                 DatatypeMemberName::from(c"x"),
                 0,
-                DatatypeMessage::parse(&parent).unwrap().0,
+                DatatypeMessage::parse(&parent).unwrap(),
             )],
         },
     )
@@ -839,7 +838,7 @@ fn datatype_compound_codecs_bound_recursion() {
         format::parse_datatype(&bytes).unwrap(),
         (expected.to_datatype().unwrap(), bytes.len())
     );
-    let (message, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message, expected);
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
@@ -916,7 +915,7 @@ fn datatype_compound_codecs_preserve_a_version_one_compound_in_a_version_three_c
         format::parse_datatype(&bytes).unwrap(),
         (expected.clone(), bytes.len())
     );
-    let (retained, consumed) = DatatypeMessage::parse(&bytes).unwrap();
+    let (retained, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     let DatatypeProperties::Compound { members, .. } = retained.properties() else {
         panic!("expected a compound datatype");
@@ -929,7 +928,7 @@ fn datatype_compound_codecs_preserve_a_version_one_compound_in_a_version_three_c
 fn assert_encoding(bytes: &[u8], expected: DatatypeMessage, width: OffsetWidth) {
     let mut input = bytes.to_vec();
     input.push(0xff);
-    let (message, consumed) = DatatypeMessage::parse(&input).unwrap();
+    let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message, expected);
     assert_eq!(message.serialize(width).unwrap(), bytes);
