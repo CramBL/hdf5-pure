@@ -54,7 +54,7 @@ impl DenseAttrPlan {
     pub fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
         let geometry = self.geometry();
         let widths = geometry.widths();
-        self.extent(heap_address)?;
+        let attribute_info = self.attribute_info_for_heap(heap_address)?;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
         let heap_id_length = DENSE_ATTR_HEAP_ID_LENGTH;
 
@@ -213,7 +213,7 @@ impl DenseAttrPlan {
         }
 
         Ok(DenseAttrBlob {
-            attribute_info: self.attribute_info_for_heap(frhp_addr)?,
+            attribute_info,
             blob,
         })
     }
