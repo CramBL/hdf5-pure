@@ -10,7 +10,6 @@ use super::framing::CHECKSUM_LEN;
 use super::framing::VERSION;
 use super::geometry;
 use super::geometry::Geometry;
-use super::header;
 use crate::bytes;
 use crate::checksum::JenkinsLookup3;
 use crate::chunk_record::ChunkRecord;
@@ -28,14 +27,11 @@ impl FixedArrayPlan {
     ///
     /// Returns [`FormatError::InvalidFixedArrayGeometry`] if `page_bits` is 64 or more, or a block
     /// length or their sum overflows.
-    pub fn with_page_bits(mut self, page_bits: u8) -> Result<Self, FormatError> {
-        self.geometry =
-            Geometry::new(self.geometry.encoding(), self.geometry.entries(), page_bits)?;
-        self.page_bits = page_bits;
-        self.data_block_length = self.geometry.data_block_len()?;
-        self.total_length =
-            geometry::sum([header::header_len(self.widths), self.data_block_length])?;
-        Ok(self)
+    pub fn with_page_bits(self, page_bits: u8) -> Result<Self, FormatError> {
+        Self::from_geometry(
+            self.lengths,
+            Geometry::new(self.geometry.encoding(), self.geometry.entries(), page_bits)?,
+        )
     }
 
     /// Encodes one entry at the plan's retained address and filtered-size widths.
@@ -83,7 +79,7 @@ impl FixedArrayPlan {
 
     /// Returns the base 2 logarithm of the maximum entries per page.
     pub const fn page_bits(&self) -> u8 {
-        self.page_bits
+        self.geometry.page_bits()
     }
 }
 
@@ -129,25 +125,14 @@ impl FixedArrayPlacement {
         &self,
         mut write: impl FnMut(&[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        let Self {
-            plan,
-            header,
-            data_block,
-        } = *self;
-        let FixedArrayPlan {
-            widths,
-            geometry,
-            encoding: _,
-            entry_size: _,
-            page_bits: _,
-            data_block_length: _,
-            total_length: _,
-        } = plan;
-        let mut prefix = super::output_buffer(data_block::data_block_prefix_len(widths.offsets))?;
+        let [header, data_block] = self.ranges();
+        let geometry = self.plan().geometry();
+        let offsets = geometry.encoding().offsets();
+        let mut prefix = super::output_buffer(data_block::data_block_prefix_len(offsets))?;
         prefix.extend_from_slice(&DATA_BLOCK_SIGNATURE);
         prefix.push(VERSION);
         prefix.push(geometry.encoding().client().id());
-        bytes::try_write_defined_offset(&mut prefix, header.start().get(), widths.offsets)?;
+        bytes::try_write_defined_offset(&mut prefix, header.start().get(), offsets)?;
         let body_length = match geometry.paging() {
             Some(paging) => geometry::sum([
                 prefix.len().to_u64(),
