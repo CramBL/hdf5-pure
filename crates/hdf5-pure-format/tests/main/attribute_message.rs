@@ -11,13 +11,39 @@ use hdf5_pure_format::__private::{
 };
 use hdf5_pure_format::{Datatype, MessageType};
 use rstest::rstest;
-use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
+use test_util::attribute::{Attribute, UnpaddedAttribute, UnpaddedVersion};
 use test_util::datatype::containers::MemberOffset;
 use test_util::datatype::leaf::Version;
 use test_util::object_header::v2::{self, HeaderFlags};
 use test_util::object_header::{Message, MessageFlags as FixtureFlags, MessageType as FixtureType};
 use test_util::widths::Widths;
 use test_util::{dataspace, datatype};
+
+#[rstest]
+#[case::zero(0)]
+#[case::nonzero(0xff)]
+fn rejects_bytes_after_the_inline_datatype_in_its_declared_field(#[case] suffix: u8) {
+    let mut field = datatype::f64_le();
+    let consumed = field.len();
+    field.push(suffix);
+    let bytes = Attribute::new("x", &field, &dataspace::scalar(), &[0; 8]).build();
+    assert_eq!(
+        AttributeMessage::parse(&bytes, 8).unwrap_err(),
+        FormatError::TrailingMetadataBytes {
+            consumed,
+            frame_len: field.len(),
+        }
+    );
+}
+
+#[test]
+fn version_one_field_alignment_follows_the_inline_datatype() {
+    let field = datatype::f64_le();
+    let values = 42.0f64.to_le_bytes();
+    let bytes = Attribute::new("x", &field, &dataspace::scalar(), &values).build();
+    let attribute = AttributeMessage::parse(&bytes, 8).unwrap();
+    assert_eq!(attribute.raw_data, values);
+}
 
 #[rstest]
 #[case::ascii_v2("array", AttributeMessage::prepare, UnpaddedVersion::Two)]

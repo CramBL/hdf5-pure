@@ -12,13 +12,13 @@ use alloc::vec::Vec;
 use hdf5_pure_core::__private::ElementSize;
 
 use crate::bytes;
-use crate::codec::{Decode, Encode};
+use crate::codec::{Decode, DecodeFrame, Encode};
 use crate::convert::Narrow;
 use crate::dataspace::{Dataspace, PreparedDataspace};
 use crate::datatype;
 use crate::datatype::CharacterSet;
-use crate::datatype::Datatype;
 use crate::datatype::message::PreparedDatatype;
+use crate::datatype::{Datatype, DecodedDatatype};
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::shared_message::CommittedDatatypeReference;
@@ -170,8 +170,9 @@ impl AttributeMessage {
     ///
     /// Returns [`FormatError::InvalidAttributeVersion`] for an unsupported version,
     /// [`FormatError::InvalidAttributeFlags`] for unsupported flags, or
-    /// [`FormatError::UnexpectedEof`] if the prefix, name, or datatype is truncated. Propagates
-    /// datatype-decoding and resolver errors.
+    /// [`FormatError::UnexpectedEof`] if the prefix, name, or datatype is truncated. Returns
+    /// [`FormatError::TrailingMetadataBytes`] if an inline datatype ends before its field does.
+    /// Propagates other datatype-decoding and resolver errors.
     ///
     /// # Examples
     ///
@@ -370,7 +371,9 @@ impl AttributeMessage {
     /// [`FormatError::UnexpectedEof`] if a field is truncated. Returns
     /// [`FormatError::OffsetOverflow`] if the element count times its stored size exceeds
     /// [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if it exceeds [`usize::MAX`].
-    /// Propagates datatype, dataspace, stored-element-size, and resolver errors.
+    /// Returns [`FormatError::TrailingMetadataBytes`] if an inline datatype ends before its
+    /// declared field does. Version 1 alignment padding follows the field. Propagates datatype,
+    /// dataspace, stored-element-size, and resolver errors.
     pub fn parse_resolving_at_with_widths(
         data: &[u8],
         widths: FormatWidths,
@@ -947,7 +950,7 @@ fn decode_datatype(
         )
     } else {
         (
-            datatype::parse_datatype(dt_field)?.0,
+            DecodedDatatype::decode_frame(dt_field, ())?.into_datatype(),
             DatatypeLocation::Inline,
         )
     })

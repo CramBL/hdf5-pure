@@ -18,6 +18,7 @@ use super::nesting::MessageDepth;
 use super::variable_length::VariableLengthMetadata;
 use super::{references, stored_size};
 use crate::bytes::ByteCursor;
+use crate::codec::{self, DecodeFrame, DecodePrefix, Parsed};
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
@@ -116,18 +117,45 @@ use crate::width::OffsetWidth;
 /// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
 /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
-    let mut cursor = ByteCursor::new(data);
-    let DecodedDatatype { datatype, .. } = parse_datatype_at(&mut cursor, MessageDepth::ROOT)?;
-    Ok((datatype, cursor.position()))
+    Ok(DecodedDatatype::decode_prefix(data, ())?
+        .map(DecodedDatatype::into_datatype)
+        .into_parts())
 }
 
-/// A parsed datatype paired with the nonzero element size from its message.
-struct DecodedDatatype {
+/// A semantic datatype with its stored element size and inferred descriptor widths.
+pub(crate) struct DecodedDatatype {
     datatype: Datatype,
     /// The size in bytes of one stored element.
     stored_size: NonZeroU32,
     /// The offset widths inferred from variable-length descriptors in the description.
     offsets: __private::DatatypeOffsets,
+}
+
+impl DecodedDatatype {
+    /// Returns the semantic datatype, discarding the separate stored layout.
+    pub(crate) fn into_datatype(self) -> Datatype {
+        self.datatype
+    }
+}
+
+impl DecodePrefix<'_> for DecodedDatatype {
+    type Context = ();
+    type Error = FormatError;
+
+    fn decode_prefix(input: &[u8], (): ()) -> Result<Parsed<Self>, FormatError> {
+        let mut cursor = ByteCursor::new(input);
+        let decoded = parse_datatype_at(&mut cursor, MessageDepth::ROOT)?;
+        Ok(Parsed::from_cursor(decoded, &cursor))
+    }
+}
+
+impl DecodeFrame<'_> for DecodedDatatype {
+    type Context = ();
+    type Error = FormatError;
+
+    fn decode_frame(frame: &[u8], (): ()) -> Result<Self, FormatError> {
+        Ok(codec::decode_exact(frame, ())?)
+    }
 }
 
 /// Parses the next datatype and retains its stored element size.
