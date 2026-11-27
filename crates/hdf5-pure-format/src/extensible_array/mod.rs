@@ -81,8 +81,18 @@ pub struct ExtensibleArrayBlockFraming {
 }
 
 impl ExtensibleArrayBlockFraming {
+    fn secondary(block: &ExtensibleArraySuperBlockRef) -> Self {
+        Self {
+            owner: block.owner(),
+            range: block.parse_range(),
+            parse_range: block.parse_range(),
+            signature: SUPER_BLOCK_SIGNATURE,
+            offset: (block.offset(), None),
+        }
+    }
+
     fn data(owner: Owner, address: PhysicalAddress, block: DataBlock) -> Result<Self, FormatError> {
-        let layout = owner.layout;
+        let layout = owner.layout();
         let range = FileRange::new(address, layout.data_block_len(block)?)?;
         Ok(Self {
             owner,
@@ -138,7 +148,7 @@ impl ExtensibleArrayBlockFraming {
     pub fn prefix_range(&self) -> Result<FileRange, FormatError> {
         FileRange::new(
             self.range.start(),
-            self.owner.layout.prefix_len() + u64::from(self.owner.layout.block_offset_len()),
+            self.owner.layout().prefix_len() + u64::from(self.owner.layout().block_offset_len()),
         )
     }
 
@@ -167,6 +177,13 @@ pub struct ExtensibleArrayIndexBlockRef {
 }
 
 impl ExtensibleArrayIndexBlockRef {
+    fn new(owner: Owner, address: StoredAddress) -> Result<Self, FormatError> {
+        Ok(Self {
+            owner,
+            range: FileRange::new(owner.resolve(address)?, owner.layout().index_block_len()?)?,
+        })
+    }
+
     /// Parses the index block in `region`.
     ///
     /// # Errors
@@ -188,7 +205,7 @@ impl ExtensibleArrayIndexBlockRef {
         let bytes = region.subregion(range)?.bytes();
         let cursor = owner.parse_prefix(bytes, INDEX_BLOCK_SIGNATURE)?;
         checksum::verify_trailing(bytes)?;
-        let layout = owner.layout;
+        let layout = owner.layout();
         let (elements, addresses) = body(bytes, cursor.position())?
             .split_at_checked(
                 layout
@@ -253,7 +270,7 @@ impl<'a> ExtensibleArrayIndexBlock<'a> {
         } = *self;
         owner
             .addresses(data_blocks)
-            .zip(owner.layout.direct_blocks())
+            .zip(owner.layout().direct_blocks())
             .filter_map(move |(address, block)| {
                 address
                     .transpose()
@@ -273,7 +290,7 @@ impl<'a> ExtensibleArrayIndexBlock<'a> {
             super_blocks,
             ..
         } = *self;
-        let layout = owner.layout;
+        let layout = owner.layout();
         owner
             .addresses(super_blocks)
             .zip(
@@ -301,6 +318,13 @@ pub struct ExtensibleArraySuperBlockRef {
 }
 
 impl ExtensibleArraySuperBlockRef {
+    fn owner(&self) -> Owner {
+        self.owner
+    }
+    fn offset(&self) -> u64 {
+        self.super_block.offset()
+    }
+
     fn new(
         owner: Owner,
         address: PhysicalAddress,
@@ -308,25 +332,14 @@ impl ExtensibleArraySuperBlockRef {
     ) -> Result<Self, FormatError> {
         Ok(Self {
             owner,
-            range: FileRange::new(address, owner.layout.super_block_len(super_block)?)?,
+            range: FileRange::new(address, owner.layout().super_block_len(super_block)?)?,
             super_block,
         })
     }
 
     /// Returns the expected prefix fields and ranges for this secondary block.
     pub fn framing(&self) -> ExtensibleArrayBlockFraming {
-        let Self {
-            owner,
-            range,
-            super_block,
-        } = *self;
-        ExtensibleArrayBlockFraming {
-            owner,
-            range,
-            parse_range: range,
-            signature: SUPER_BLOCK_SIGNATURE,
-            offset: (super_block.offset(), None),
-        }
+        ExtensibleArrayBlockFraming::secondary(self)
     }
 
     /// Returns the expected prefix fields and ranges for data block `local` at `address`.
@@ -383,7 +396,7 @@ impl ExtensibleArraySuperBlockRef {
         owner.parse_block_offset(&mut cursor, super_block.offset(), None)?;
         checksum::verify_trailing(bytes)?;
         let (bitmap, data_blocks) = body(bytes, cursor.position())?
-            .split_at_checked(owner.layout.bitmap_len(super_block)?.to_usize()?)
+            .split_at_checked(owner.layout().bitmap_len(super_block)?.to_usize()?)
             .ok_or_else(|| internal("super block ends inside its page-init bitmap"))?;
         Ok(ExtensibleArraySuperBlock {
             owner,
@@ -413,7 +426,7 @@ impl ExtensibleArraySuperBlockRef {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range ends past
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
-        self.super_block.slots(self.owner.layout)
+        self.super_block.slots(self.owner.layout())
     }
 }
 
@@ -448,12 +461,8 @@ impl<'a> ExtensibleArraySuperBlock<'a> {
             .filter_map(move |(address, (local, block))| {
                 address.transpose().map(|address| {
                     let block = block?;
-                    let pages = match owner.layout.pages(block.elements()) {
-                        Some(pages) => Some(PageBitmap {
-                            bitmap,
-                            first_page: product(local, pages)?,
-                            pages,
-                        }),
+                    let pages = match owner.layout().pages(block.elements()) {
+                        Some(pages) => Some(PageBitmap::for_block(bitmap, local, pages)?),
                         None => None,
                     };
                     ExtensibleArrayDataBlockRef::new(owner, address?, block, pages)
@@ -484,7 +493,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
         block: DataBlock,
         pages: Option<PageBitmap<'a>>,
     ) -> Result<Self, FormatError> {
-        let layout = owner.layout;
+        let layout = owner.layout();
         let range = FileRange::new(address, layout.data_block_len(block)?)?;
         Ok(Self {
             owner,
@@ -562,7 +571,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
                 ExtensibleArrayDataBlock::Elements(ExtensibleArrayElements::below_max_index_set(
                     owner,
                     body(bytes, cursor.position())?,
-                    owner.layout.first_slot(block.offset())?,
+                    owner.layout().first_slot(block.offset())?,
                 ))
             }
         })
@@ -587,14 +596,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
             ..
         } = *self;
         pages
-            .map(|bitmap| {
-                Ok(ExtensibleArrayPages {
-                    owner,
-                    first_page: range.start().checked_add(owner.layout.pages_offset())?,
-                    first_slot: owner.layout.first_slot(block.offset())?,
-                    bitmap,
-                })
-            })
+            .map(|bitmap| ExtensibleArrayPages::new(owner, range, block, bitmap))
             .transpose()
     }
 
@@ -624,7 +626,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range ends past
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
-        self.block.slots(self.owner.layout)
+        self.block.slots(self.owner.layout())
     }
 }
 
@@ -650,6 +652,20 @@ pub struct ExtensibleArrayPages<'a> {
 }
 
 impl<'a> ExtensibleArrayPages<'a> {
+    fn new(
+        owner: Owner,
+        range: FileRange,
+        block: DataBlock,
+        bitmap: PageBitmap<'a>,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            owner,
+            first_page: range.start().checked_add(owner.layout().pages_offset())?,
+            first_slot: owner.layout().first_slot(block.offset())?,
+            bitmap,
+        })
+    }
+
     /// Returns the reference to each page the bitmap marks initialized, in page order.
     ///
     /// A page the bitmap does not mark is uninitialized and has no reference, and neither has a
@@ -663,13 +679,13 @@ impl<'a> ExtensibleArrayPages<'a> {
             first_slot,
             bitmap,
         } = *self;
-        let layout = owner.layout;
+        let layout = owner.layout();
         let page_elements = layout.page_nelmts().get();
         (0..bitmap.pages)
             .take_while(move |&page| {
                 page.checked_mul(page_elements)
                     .and_then(|offset| offset.checked_add(first_slot))
-                    .is_some_and(|slot| slot < owner.max_index_set)
+                    .is_some_and(|slot| slot < owner.max_index_set())
             })
             .filter(move |&page| bitmap.initialized(page))
             .map(move |page| {
@@ -737,7 +753,7 @@ impl ExtensibleArrayPageRef {
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the range ends past
     /// [`u64::MAX`].
     pub fn slots(&self) -> Result<Range<u64>, FormatError> {
-        let elements = self.owner.layout.page_nelmts().get();
+        let elements = self.owner.layout().page_nelmts().get();
         let end = sum([self.first_slot, elements])?;
         Ok(self.first_slot..end)
     }
@@ -756,9 +772,9 @@ pub struct ExtensibleArrayElements<'a> {
 
 impl<'a> ExtensibleArrayElements<'a> {
     fn below_max_index_set(owner: Owner, bytes: &'a [u8], first_slot: u64) -> Self {
-        let encoding = owner.layout.encoding();
+        let encoding = owner.layout().encoding();
         let len = owner
-            .max_index_set
+            .max_index_set()
             .saturating_sub(first_slot)
             .to_usize()
             .ok()
@@ -803,6 +819,26 @@ struct Owner {
 }
 
 impl Owner {
+    fn from_header(
+        base: BaseAddress,
+        address: PhysicalAddress,
+        header: &ExtensibleArrayHeader,
+    ) -> Self {
+        Self {
+            base,
+            header: address,
+            layout: header.layout(),
+            max_index_set: header.stored_statistics().max_idx_set,
+        }
+    }
+
+    fn layout(self) -> Layout {
+        self.layout
+    }
+    fn max_index_set(self) -> u64 {
+        self.max_index_set
+    }
+
     fn resolve(self, address: StoredAddress) -> Result<PhysicalAddress, FormatError> {
         self.base.resolve(address)
     }
@@ -890,7 +926,15 @@ struct PageBitmap<'a> {
     pages: u64,
 }
 
-impl PageBitmap<'_> {
+impl<'a> PageBitmap<'a> {
+    fn for_block(bitmap: &'a [u8], local: u64, pages: u64) -> Result<Self, FormatError> {
+        Ok(Self {
+            bitmap,
+            first_page: product(local, pages)?,
+            pages,
+        })
+    }
+
     fn initialized(self, page: u64) -> bool {
         self.first_page
             .checked_add(page)

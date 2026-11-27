@@ -60,19 +60,11 @@ impl ExtensibleArrayHeaderLocator {
         let index_block = if index_block_address.is_undefined(header.encoding.offsets()) {
             None
         } else {
-            let owner = Owner {
-                base: self.base,
-                header: range.start(),
-                layout: header.layout(),
-                max_index_set: header.stored_statistics().max_idx_set,
-            };
-            Some(ExtensibleArrayIndexBlockRef {
+            let owner = Owner::from_header(self.base, range.start(), &header);
+            Some(ExtensibleArrayIndexBlockRef::new(
                 owner,
-                range: FileRange::new(
-                    owner.resolve(index_block_address)?,
-                    owner.layout.index_block_len()?,
-                )?,
-            })
+                index_block_address,
+            )?)
         };
         Ok(ExtensibleArray {
             range,
