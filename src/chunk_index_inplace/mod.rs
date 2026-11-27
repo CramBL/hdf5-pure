@@ -19,6 +19,7 @@ use hdf5_pure_format::__private::ChunkIndexFields;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::EA_CLIENT_ID_UNFILTERED;
 use hdf5_pure_format::__private::ExtensibleArray;
 use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
@@ -780,18 +781,18 @@ impl Located {
             }
         }
         let dt_bytes = file.read_metadata_at(datatype_msg.data_off, datatype_msg.size)?;
-        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes)?;
-        crate::file_writer::require_reference_width(widths, &datatype)?;
-        let element_size =
-            hdf5_pure_format::__private::stored_element_size_usize(&datatype, widths.offsets)?;
+        let decoded = DecodedDatatype::from_record(&dt_bytes)?;
+        crate::file_writer::require_reference_width(widths, decoded.datatype())?;
+        let element_size = decoded.element_size_at(widths.offsets)?;
+        let datatype = decoded.into_datatype();
         if let DataLayout::Chunked {
             chunk_dimensions, ..
         } = &layout
             && let Some(&stored_size) = chunk_dimensions.last()
-            && stored_size != element_size.get() as u64
+            && stored_size != u64::from(element_size.get())
         {
             return Err(FormatError::ChunkElementSizeMismatch {
-                datatype: element_size.get(),
+                datatype: element_size.narrow::<NonZeroUsize>()?.get(),
                 layout: stored_size.to_usize()?,
             }
             .into());
@@ -801,7 +802,7 @@ impl Located {
             element_size: elem_bytes,
             raw_size,
             ..
-        } = ChunkedGeometry::with_offset_width(widths.offsets, &datatype, &dataspace, &layout)?;
+        } = ChunkedGeometry::with_element_size(element_size, &dataspace, &layout)?;
         let chunk_elems = spatial[0];
         let chunk_bytes = if matches!(
             fields,

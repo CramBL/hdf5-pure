@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hdf5_pure_core::__private::ElementCount;
 use hdf5_pure_core::PhysicalAddress;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::GroupInfo;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LinkStorageError;
@@ -2066,11 +2067,9 @@ impl FileInner {
     ///
     /// Returns [`Error::MissingMessage`] if `header` has no Datatype message, and [`Error::Format`]
     /// if the message does not parse.
-    fn header_datatype(&self, header: &ObjectHeader) -> Result<Datatype, Error> {
+    fn header_datatype(&self, header: &ObjectHeader) -> Result<DecodedDatatype, Error> {
         let message = find_message(header, MessageType::DATATYPE)?;
-        let (datatype, _) =
-            hdf5_pure_format::__private::parse_datatype(&self.message_body(message)?)?;
-        Ok(datatype)
+        Ok(DecodedDatatype::from_record(&self.message_body(message)?)?)
     }
 
     fn parse_header(&self, address: u64) -> Result<ObjectHeader, FormatError> {
@@ -4404,7 +4403,10 @@ impl File {
         header: PhysicalAddress,
         parsed: Option<ParsedHeader>,
     ) -> Result<Datatype, Error> {
-        self.inner.header_datatype(&self.header_at(header, parsed)?)
+        Ok(self
+            .inner
+            .header_datatype(&self.header_at(header, parsed)?)?
+            .into_datatype())
     }
 
     /// Reuses a current parsed header or reads it at `address`.
@@ -4968,8 +4970,10 @@ impl Group {
     /// [`Error::NotANamedDatatype`] if `path` identifies an object of another kind, as `H5Topen`
     /// rejects one.
     pub fn named_datatype(&self, path: &str) -> Result<Datatype, Error> {
-        self.file
-            .header_datatype(&self.named_datatype_header(path)?)
+        Ok(self
+            .file
+            .header_datatype(&self.named_datatype_header(path)?)?
+            .into_datatype())
     }
 
     /// Returns how many things reference the committed (`H5Tcommit`) datatype `path` names:
@@ -7251,10 +7255,15 @@ the same commit to replace it",
     /// [`FormatError::LengthTooLarge`] if an array size exceeds its four-byte field. Propagates
     /// datatype parsing errors.
     pub fn element_size(&self) -> Result<u64, Error> {
-        Ok(u64::from(
-            crate::datatype::stored_element_size(&self.datatype()?, self.file.widths.offsets)?
-                .get(),
-        ))
+        let width = self.file.widths.offsets;
+        let size = if let Some(meta) = self.staged_meta()? {
+            crate::datatype::stored_element_size(&meta.datatype, width)?
+        } else {
+            self.file
+                .header_datatype(&self.resolved()?.header)?
+                .element_size_at(width)?
+        };
+        Ok(u64::from(size.get()))
     }
 
     /// Returns the dataset's fill time policy.
@@ -7892,9 +7901,7 @@ the same commit to replace it",
             return Ok(meta.datatype);
         }
         let state = self.resolved()?;
-        let msg = find_message(&state.header, MessageType::DATATYPE)?;
-        let (dt, _) = hdf5_pure_format::__private::parse_datatype(&self.file.message_body(msg)?)?;
-        Ok(dt)
+        Ok(self.file.header_datatype(&state.header)?.into_datatype())
     }
 
     /// Returns the object-header address of this dataset's committed element type, as its
@@ -8009,10 +8016,7 @@ the same commit to replace it",
             return Ok(Vec::new());
         }
         let dataspace = self.dataspace()?;
-        let elem_size = crate::datatype::stored_element_size_usize(
-            &self.datatype()?,
-            self.file.widths.offsets,
-        )?;
+        let elem_size = self.element_size()?;
         // The chunk index stores base-relative addresses, in its root and in every internal
         // node, so the walk runs over a view of the file framed at the base. Every address it
         // reports stays in that frame.
@@ -8023,7 +8027,7 @@ the same commit to replace it",
                 index,
                 &chunk_dimensions,
                 &dataspace,
-                elem_size.get() as u64,
+                elem_size,
                 self.file.widths,
             )?)
         })

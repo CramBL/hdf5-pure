@@ -12,6 +12,7 @@ use hdf5_pure_core::__private::NonZeroByteLength;
 use hdf5_pure_core::AddressRange;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::PreparedLink;
@@ -311,7 +312,7 @@ impl WriteEngine {
             dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
         let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
 
-        let (disk_dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
+        let disk_dt = DecodedDatatype::from_record(&region[dt_b..dt_e])?.into_datatype();
         if !overwrite_datatypes_match(&disk_dt, &fd.dt) {
             return Err(Error::EditUnsupported(
                 "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
@@ -555,7 +556,7 @@ impl WriteEngine {
             "dataset header has no data layout",
         ))?;
 
-        let (disk_dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
+        let decoded = DecodedDatatype::from_record(&region[dt_b..dt_e])?;
         let disk_ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
         let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
 
@@ -581,12 +582,13 @@ impl WriteEngine {
             ));
         }
 
+        let disk_dt = decoded.datatype();
         let ChunkedGeometry {
             spatial,
             element_size,
             raw_size,
             ..
-        } = ChunkedGeometry::with_offset_width(widths.offsets, &disk_dt, &disk_ds, &dl)?;
+        } = ChunkedGeometry::with_offset_width(widths.offsets, disk_dt, &disk_ds, &dl)?;
         let chunk_elems = spatial[0];
         if ab.raw().len() % element_size != 0 {
             return Err(Error::AppendUnsupported(
@@ -594,7 +596,7 @@ impl WriteEngine {
             ));
         }
         match ab.elem_dt() {
-            Some(expected) if !append::datatypes_match(&disk_dt, expected) => {
+            Some(expected) if !append::datatypes_match(disk_dt, expected) => {
                 return Err(Error::AppendUnsupported(
                     "append datatype does not match the on-disk dataset (wrong element \
                      type or byte order)",
@@ -602,7 +604,7 @@ impl WriteEngine {
             }
             Some(_) => {}
             None => {
-                if !append::datatype_is_raw_appendable(&disk_dt) {
+                if !append::datatype_is_raw_appendable(disk_dt) {
                     return Err(Error::AppendUnsupported(
                         "append_raw onto this dataset's datatype (non-little-endian, \
                          variable-length, or reference) could misencode the bytes; use a \
@@ -705,8 +707,8 @@ impl WriteEngine {
 
         let ctx = ChunkContext::from_stored_datatype(
             spatial,
-            &disk_dt,
-            hdf5_pure_format::__private::stored_element_size(&disk_dt, widths.offsets)?,
+            disk_dt,
+            decoded.element_size_at(widths.offsets)?,
         );
         let mut scratch = FilterScratch::new();
         let (mut tail_raw, old_tail_allocation) = if has_partial {

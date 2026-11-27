@@ -505,6 +505,7 @@ pub(crate) const SYMBOLIC_LINK: u32 = 2;
 #[cfg(test)]
 mod tests {
     use hdf5_pure_format::__private as format;
+    use hdf5_pure_format::__private::DecodedDatatype;
     use rstest::rstest;
     use test_util::btree::v1 as btree_v1;
     use test_util::image::Image;
@@ -1413,7 +1414,9 @@ mod tests {
             .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
             .unwrap()
             .data;
-        let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
+        let dt = DecodedDatatype::from_record(dt_data)
+            .unwrap()
+            .into_datatype();
         let ds =
             crate::dataspace::Dataspace::parse_with_length_width(ds_data, widths.lengths).unwrap();
         let dl = crate::data_layout::DataLayout::parse_with_widths(dl_data, widths).unwrap();

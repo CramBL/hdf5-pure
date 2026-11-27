@@ -2,6 +2,7 @@ use hdf5_pure_core::{
     Datatype, DatatypeByteOrder, DatatypeMemberName, EnumMember, FloatingPointType, FormatError,
 };
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
@@ -121,8 +122,9 @@ fn datatype_enum_codecs_preserve_nested_mixtures(
     let bytes = datatype::array(5, [0; 3], descriptor * 2, 1, &[2], &compound);
     let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), consumed)
     );
     assert_eq!(message.serialize(width).unwrap(), bytes);
@@ -244,10 +246,10 @@ fn datatype_enum_parsers_reject_size_mismatch(#[case] size: u32) {
     let bytes = containers::enumeration(Version::Three.get(), [1, 0, 0], size, &child, &values);
     let expected = FormatError::EnumBaseSizeMismatch { size, base_size: 4 };
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
     let array = datatype::array(Version::Three.get(), [0; 3], 8, 1, &[2], &bytes);
     assert_eq!(DatatypeMessage::parse(&array).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&array).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&array).unwrap_err(), expected);
 }
 
 #[test]
@@ -256,7 +258,8 @@ fn datatype_enum_codecs_preserve_the_decoded_floating_point_base() {
     let mut data = bytes.clone();
     data.extend_from_slice(&[0xaa, 0xbb]);
 
-    let (semantic, consumed) = format::parse_datatype(&data).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&data).unwrap();
+    let semantic = decoded.into_datatype();
     let (retained, retained_consumed) = DatatypeMessage::parse_prefix(&data).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(retained_consumed, consumed);
@@ -361,7 +364,9 @@ fn datatype_enum_codecs_preserve_name_bytes(#[case] version: DatatypeVersion) {
     let expected = checked(version, &child, &members).unwrap();
     assert_bounded_encoding(&expected, OffsetWidth::Eight, &bytes);
     assert_encoding(&bytes, expected);
-    let (semantic, _) = format::parse_datatype(&bytes).unwrap();
+    let semantic = DecodedDatatype::from_record(&bytes)
+        .unwrap()
+        .into_datatype();
     let canonical = containers::enumeration(3, [9, 0, 0], 4, &child, &members);
     assert_eq!(format::serialize_datatype(&semantic).unwrap(), canonical);
 }
@@ -376,8 +381,9 @@ fn datatype_enum_codecs_exclude_legacy_padding_from_names() {
     let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, input.len());
     assert_eq!(message, DatatypeMessage::parse(&bytes).unwrap());
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&input).unwrap();
     assert_eq!(
-        format::parse_datatype(&input).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), consumed)
     );
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
@@ -403,7 +409,7 @@ fn datatype_enum_parsers_report_incomplete_nested_legacy_fields(
         }
     );
     assert_eq!(
-        format::parse_datatype(&body).unwrap_err(),
+        DecodedDatatype::parse_prefix(&body).unwrap_err(),
         FormatError::UnexpectedEof {
             expected: prefix + semantic_expected,
             available: body.len(),
@@ -496,8 +502,9 @@ fn assert_encoding(bytes: &[u8], expected: DatatypeMessage) {
     let (message, consumed) = DatatypeMessage::parse_prefix(&input).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(message, expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&input).unwrap();
     assert_eq!(
-        format::parse_datatype(&input).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected.to_datatype().unwrap(), bytes.len())
     );
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);

@@ -1,6 +1,7 @@
 use hdf5_pure_core::CompoundMember;
 use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::{Datatype, FixedPointType, FormatError, VariableLengthType};
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     self as format, DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion,
     OffsetWidth,
@@ -121,7 +122,7 @@ fn datatype_compound_parser_uses_source_member_extent() {
         compound_size: 10,
     };
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -147,8 +148,9 @@ fn compound_v1_sequence_member_fits_at_its_stored_size(
             }
         }
     };
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (
             Datatype::Compound {
                 size: SEQUENCE_MEMBER_OFFSET + count * descriptor_size,
@@ -178,7 +180,7 @@ fn compound_v1_sequence_member_rejects_a_one_byte_overrun(
     let mut bytes = legacy_compound::sequence_member(width, SEQUENCE_MEMBER_OFFSET, shape);
     bytes[4..8].copy_from_slice(&compound_size.to_le_bytes());
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::CompoundFieldOutOfBounds {
             name: DatatypeMemberName::from(c"arr"),
             offset: u64::from(SEQUENCE_MEMBER_OFFSET),
@@ -217,7 +219,7 @@ fn compound_v1_implicit_array_rejects_an_overlapping_member(
         first: DatatypeMemberName::from(c"arr"),
         second: DatatypeMemberName::from(c"tag"),
     };
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
 }
 
@@ -341,7 +343,9 @@ fn datatype_compound_codecs_preserve_recursive_mixtures(
     assert_eq!(consumed, bytes.len());
     assert_eq!(
         message.to_datatype().unwrap(),
-        format::parse_datatype(&bytes).unwrap().0
+        DecodedDatatype::from_record(&bytes)
+            .unwrap()
+            .into_datatype()
     );
     let descriptor = 8 + u32::from(width.get());
     let sequence = datatype::variable_length(4, [0; 3], descriptor, &parent);
@@ -573,7 +577,9 @@ fn datatype_compound_codecs_preserve_member_name_bytes(
                 CompoundMember::new(
                     DatatypeMemberName::new(field.name).unwrap(),
                     field.offset,
-                    format::parse_datatype(field.datatype).unwrap().0,
+                    DecodedDatatype::from_record(field.datatype)
+                        .unwrap()
+                        .into_datatype(),
                 )
             })
             .collect(),
@@ -596,8 +602,9 @@ fn datatype_compound_codecs_preserve_member_name_bytes(
         );
     }
     assert_eq!(message.to_datatype().unwrap(), expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&input).unwrap();
     assert_eq!(
-        format::parse_datatype(&input).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected, bytes.len())
     );
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap(), bytes);
@@ -682,7 +689,8 @@ fn canonical_encoding_preserves_legacy_compound_member_name_bytes(
             })
             .collect(),
     };
-    let (datatype, consumed) = format::parse_datatype(&legacy).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&legacy).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, legacy.len());
     assert_eq!(datatype, expected);
     assert_eq!(
@@ -713,7 +721,7 @@ fn semantic_compound_parser_reports_incomplete_legacy_name_and_offset_fields(
         }],
     );
     assert_eq!(
-        format::parse_datatype(&bytes[..available]).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes[..available]).unwrap_err(),
         FormatError::UnexpectedEof {
             expected,
             available
@@ -834,8 +842,9 @@ fn datatype_compound_codecs_bound_recursion() {
         )
         .unwrap();
     }
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected.to_datatype().unwrap(), bytes.len())
     );
     let (message, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
@@ -858,7 +867,7 @@ fn datatype_compound_codecs_bound_recursion() {
         FormatError::NestingDepthExceeded
     );
     assert_eq!(
-        format::parse_datatype(&too_deep).unwrap_err(),
+        DecodedDatatype::parse_prefix(&too_deep).unwrap_err(),
         FormatError::NestingDepthExceeded
     );
     let too_deep = DatatypeMessage::new(
@@ -911,8 +920,9 @@ fn datatype_compound_codecs_preserve_a_version_one_compound_in_a_version_three_c
             },
         )],
     };
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected.clone(), bytes.len())
     );
     let (retained, consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();

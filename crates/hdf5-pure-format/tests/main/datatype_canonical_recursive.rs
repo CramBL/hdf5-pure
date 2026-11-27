@@ -4,6 +4,7 @@ use hdf5_pure_core::{
     VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
@@ -343,7 +344,8 @@ fn enumeration_values_keep_the_width_of_the_decoded_parent(
         }],
     );
 
-    let (datatype, consumed) = format::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let datatype = decoded.into_datatype();
     let (retained, retained_consumed) = DatatypeMessage::parse_prefix(&bytes).unwrap();
     assert_eq!(consumed, bytes.len());
     assert_eq!(retained_consumed, bytes.len());
@@ -353,7 +355,7 @@ fn enumeration_values_keep_the_width_of_the_decoded_parent(
     };
     assert_eq!(
         enumeration.base_type(),
-        &format::parse_datatype(&base).unwrap().0
+        &DecodedDatatype::from_record(&base).unwrap().into_datatype()
     );
     assert_eq!(enumeration.size().get(), size);
     assert_eq!(
@@ -589,7 +591,8 @@ fn a_compound_enumeration_without_descriptors_accepts_every_offset_width(
 fn an_array_of_compounds_can_change_descriptor_width_outside_an_enumeration() {
     let source = array_of_sequence_compounds(4, 8);
     let expected = array_of_sequence_compounds(8, 8);
-    let (datatype, consumed) = format::parse_datatype(&source).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&source).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, source.len());
     let (retained, consumed) = DatatypeMessage::parse_prefix(&source).unwrap();
     assert_eq!(consumed, source.len());
@@ -625,7 +628,8 @@ fn array_of_sequence_compounds(first_offsets: usize, second_offsets: usize) -> V
 }
 
 fn parse_enumeration(bytes: &[u8]) -> (Datatype, DatatypeMessage) {
-    let (datatype, consumed) = format::parse_datatype(bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(bytes).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, bytes.len());
     let (retained, consumed) = DatatypeMessage::parse_prefix(bytes).unwrap();
     assert_eq!(consumed, bytes.len());

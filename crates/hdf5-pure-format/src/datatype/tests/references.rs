@@ -12,6 +12,7 @@ use super::super::header;
 use super::super::message::version::{DATATYPE_VERSION_ONE, DATATYPE_VERSION_THREE};
 use super::super::references;
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 
 #[test]
 fn class_predicate_admits_reference_holding_datatypes() {
@@ -98,7 +99,8 @@ fn object_address_checks_recognize_enumerations_with_reference_bases() {
             value: &value,
         }],
     );
-    let (datatype, consumed) = semantic::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, bytes.len());
     let Datatype::Enumeration(enumeration) = &datatype else {
         panic!("expected an enumeration, got {datatype:?}");
@@ -143,7 +145,7 @@ fn class_predicate_admits_compounds_with_integer_members() {
 #[test]
 fn test_reference_object() {
     let buf = header::build_datatype_header(7, DATATYPE_VERSION_ONE, [0, 0, 0], 8);
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     assert_eq!(
         dt,
         Datatype::Reference {
@@ -156,7 +158,7 @@ fn test_reference_object() {
 #[test]
 fn test_reference_region() {
     let buf = header::build_datatype_header(7, DATATYPE_VERSION_ONE, [1, 0, 0], 12);
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     assert_eq!(
         dt,
         Datatype::Reference {
@@ -169,6 +171,6 @@ fn test_reference_region() {
 #[test]
 fn test_error_invalid_reference_type() {
     let buf = header::build_datatype_header(7, DATATYPE_VERSION_ONE, [5, 0, 0], 8);
-    let err = semantic::parse_datatype(&buf).unwrap_err();
+    let err = DecodedDatatype::parse_prefix(&buf).unwrap_err();
     assert_eq!(err, FormatError::InvalidReferenceType(5));
 }

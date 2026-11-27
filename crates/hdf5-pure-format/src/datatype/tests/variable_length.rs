@@ -7,6 +7,7 @@ use rstest::rstest;
 use super::super::header::{self, OPAQUE_CLASS, STRING_CLASS, VARIABLE_LENGTH_CLASS};
 use super::super::message::version::DATATYPE_VERSION_ONE;
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 use super::super::variable_length::{
     VARIABLE_LENGTH_PADDING_SHIFT, VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING,
 };
@@ -36,7 +37,7 @@ fn rejects_reserved_variable_length_subtypes(#[case] subtype: u8) {
     );
     bytes.extend_from_slice(&fixtures::build_fixed_point(1, false, false, 0, 8));
     assert_eq!(
-        semantic::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::InvalidVariableLengthSubtype(subtype)
     );
 }
@@ -67,7 +68,7 @@ fn rejects_variable_length_reserved_bits(
     );
     bytes.extend_from_slice(&fixtures::build_fixed_point(1, false, false, 0, 8));
     assert_eq!(
-        semantic::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::InvalidVariableLengthReservedBits(bits)
     );
 }
@@ -88,7 +89,7 @@ fn rejects_string_metadata_on_variable_length_sequences(#[case] padding: u8, #[c
     );
     bytes.extend_from_slice(&fixtures::build_fixed_point(1, false, false, 0, 8));
     assert_eq!(
-        semantic::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::InvalidVariableLengthSequenceMetadata { padding, charset }
     );
 }
@@ -105,7 +106,7 @@ fn rejects_invalid_variable_length_string_metadata(
     let mut bytes =
         header::build_datatype_header(VARIABLE_LENGTH_CLASS, DATATYPE_VERSION_ONE, flags, 16);
     bytes.extend_from_slice(&fixtures::build_fixed_point(1, false, false, 0, 8));
-    assert_eq!(semantic::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -125,7 +126,7 @@ fn rejects_zero_sized_variable_length_string_bases(#[case] class: u8) {
         0,
     ));
     assert_eq!(
-        semantic::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::ZeroSizedDatatype { class }
     );
 }
@@ -151,7 +152,8 @@ fn variable_length_strings_preserve_metadata_and_base_byte_order(
         16,
     );
     bytes.extend_from_slice(&fixtures::build_fixed_point(1, big_endian, false, 0, 8));
-    let (datatype, consumed) = semantic::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, bytes.len());
     assert_eq!(
         datatype,
@@ -205,8 +207,9 @@ fn nested_variable_length_sequences_roundtrip() {
     ));
     expected.extend_from_slice(&fixtures::build_fixed_point(4, false, true, 0, 32));
     assert_eq!(semantic::serialize_datatype(&datatype).unwrap(), expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&expected).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&expected).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, expected.len())
     );
 }
@@ -216,7 +219,7 @@ fn test_variable_length_string_utf8() {
     let mut buf = header::build_datatype_header(9, DATATYPE_VERSION_ONE, [0x01, 0x01, 0], 16);
     buf.extend_from_slice(&fixtures::build_fixed_point(1, false, false, 0, 8));
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     match dt {
         Datatype::VariableLength(VariableLengthType::String(string)) => {
             assert_eq!(string.padding(), &StringPadding::NullTerminate);
@@ -232,7 +235,7 @@ fn test_variable_length_sequence_f32() {
     let mut buf = header::build_datatype_header(9, DATATYPE_VERSION_ONE, [0x00, 0x00, 0], 16);
     buf.extend_from_slice(&fixtures::build_float(4, 23, 8, 0, 23, 127));
 
-    let (dt, _) = semantic::parse_datatype(&buf).unwrap();
+    let dt = DecodedDatatype::from_record(&buf).unwrap().into_datatype();
     match dt {
         Datatype::VariableLength(VariableLengthType::Sequence { element_type }) => {
             assert_eq!(element_type.type_size(), 4);

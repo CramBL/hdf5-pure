@@ -1,12 +1,27 @@
 use hdf5_pure_core::{CharacterSet, FormatError, StringPadding};
 use hdf5_pure_format::__private::{
-    self as format, DatatypeMessage, DatatypeProperties, DatatypeVersion, OffsetWidth,
+    DatatypeMessage, DatatypeProperties, DatatypeVersion, DecodedDatatype, OffsetWidth,
 };
 use rstest::rstest;
 use test_util::datatype;
 use test_util::datatype::leaf::{
     self, Charset, Leaf, OpaqueTag, Order, Padding, VaxVersion, Version,
 };
+
+#[rstest]
+#[case::recorded(OffsetWidth::Two, 30)]
+#[case::wider(OffsetWidth::Eight, 48)]
+fn datatype_record_sizes_array_elements_at_the_requested_width(
+    #[case] width: OffsetWidth,
+    #[case] expected: u32,
+) {
+    let sequence = datatype::variable_length(3, [0; 3], 10, &Leaf::Integer.bytes(Version::Three));
+    let mut record = datatype::array(3, [0; 3], 30, 1, &[3], &sequence);
+    record.extend_from_slice(&[0xab, 0xcd]);
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&record).unwrap();
+    assert_eq!(consumed, record.len() - 2);
+    assert_eq!(decoded.element_size_at(width).unwrap().get(), expected);
+}
 
 #[rstest]
 #[case::integer(Leaf::Integer)]
@@ -202,7 +217,7 @@ fn datatype_parsers_reject_invalid_descriptor_sizes(#[case] size: u32) {
         &Leaf::Integer.bytes(Version::One),
     );
     let expected = FormatError::InvalidVariableLengthSize { size };
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
 }
 
@@ -264,7 +279,7 @@ fn variable_length_parsers_report_nested_eof_from_the_message_start(
         available,
     };
     assert_eq!(DatatypeMessage::parse(input).unwrap_err(), error);
-    assert_eq!(format::parse_datatype(input).unwrap_err(), error);
+    assert_eq!(DecodedDatatype::parse_prefix(input).unwrap_err(), error);
 }
 
 #[test]

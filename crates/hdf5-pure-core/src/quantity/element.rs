@@ -136,6 +136,12 @@ impl ElementSize {
     }
 }
 
+impl From<NonZeroU64> for ElementSize {
+    fn from(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

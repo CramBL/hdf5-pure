@@ -2,7 +2,7 @@ use hdf5_pure::DatatypeMemberName;
 use hdf5_pure::{
     CompoundTypeBuilder, Datatype, Error, File, FileBuilder, FormatError, OffsetWidth,
 };
-use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::PreparedDatatype;
 use rstest::rstest;
 use test_util::datatype;
@@ -65,9 +65,9 @@ fn writer_preserves_padded_compound_enumeration_at_the_source_width() {
 }
 
 fn decoded_enumeration_with_padded_compound_base() -> Datatype {
-    format::parse_datatype(&datatype::enum_with_padded_sequence_parent(Version::Three))
+    DecodedDatatype::from_record(&datatype::enum_with_padded_sequence_parent(Version::Three))
         .unwrap()
-        .0
+        .into_datatype()
 }
 
 fn decoded_narrow_enumeration() -> Datatype {
@@ -84,7 +84,8 @@ fn decoded_narrow_enumeration() -> Datatype {
             value: &[0; 12],
         }],
     );
-    let (datatype, consumed) = format::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, bytes.len());
     datatype
 }

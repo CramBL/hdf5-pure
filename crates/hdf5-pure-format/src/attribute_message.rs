@@ -9,13 +9,14 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use core::num::NonZeroU64;
+
 use hdf5_pure_core::__private::ElementSize;
 
 use crate::bytes;
 use crate::codec::{Decode, DecodeFrame, Encode};
 use crate::convert::Narrow;
 use crate::dataspace::{Dataspace, PreparedDataspace};
-use crate::datatype;
 use crate::datatype::CharacterSet;
 use crate::datatype::message::PreparedDatatype;
 use crate::datatype::{Datatype, DecodedDatatype};
@@ -230,7 +231,8 @@ impl AttributeMessage {
         resolver: &dyn SharedResolver,
     ) -> Result<Datatype, FormatError> {
         let prefix = AttributePrefix::parse(data)?;
-        decode_datatype(prefix.datatype, prefix.flags, resolver).map(|(datatype, _)| datatype)
+        decode_datatype(prefix.datatype, prefix.flags, resolver)
+            .map(|(decoded, _)| decoded.into_datatype())
     }
 
     /// Parses an attribute body with independently selected address and length widths.
@@ -436,16 +438,21 @@ impl AttributeMessage {
         prefix: AttributePrefix<'_>,
         inspect: impl FnOnce(&Datatype) -> Result<(), FormatError>,
     ) -> Result<(AttributeMessage, usize), FormatError> {
-        let (datatype, datatype_location) =
+        let (decoded, datatype_location) =
             decode_datatype(prefix.datatype, prefix.flags, resolver)?;
-        inspect(&datatype)?;
+        inspect(decoded.datatype())?;
         let (ds_field, raw_at) = prefix.dataspace(data)?;
         let dataspace = decode_dataspace(ds_field, prefix.flags, widths.lengths, resolver)?;
-        let raw_data = compute_raw_data(data, raw_at, &dataspace, &datatype, widths.offsets)?;
+        let raw_data = compute_raw_data(
+            data,
+            raw_at,
+            &dataspace,
+            ElementSize::from(NonZeroU64::from(decoded.element_size_at(widths.offsets)?)),
+        )?;
         Ok((
             AttributeMessage {
                 name: extract_name(prefix.name),
-                datatype,
+                datatype: decoded.into_datatype(),
                 dataspace,
                 raw_data,
                 datatype_location,
@@ -926,7 +933,7 @@ fn decode_datatype(
     dt_field: &[u8],
     flags: u8,
     resolver: &dyn SharedResolver,
-) -> Result<(Datatype, DatatypeLocation), FormatError> {
+) -> Result<(DecodedDatatype, DatatypeLocation), FormatError> {
     // libhdf5 rejects a flags byte that sets any other bit (`H5Oattr.c`, HDF5 2.1.0).
     if flags & !FLAG_ALL != 0 {
         return Err(FormatError::InvalidAttributeFlags(flags));
@@ -942,7 +949,7 @@ fn decode_datatype(
         let address = resolver.committed_address(dt_field)?;
         let body = resolver.resolve(dt_field, MessageType::DATATYPE)?;
         (
-            datatype::parse_datatype(&body)?.0,
+            DecodedDatatype::from_record(&body)?,
             match address {
                 Some(address) => DatatypeLocation::Committed(address),
                 None => DatatypeLocation::Inline,
@@ -950,7 +957,7 @@ fn decode_datatype(
         )
     } else {
         (
-            DecodedDatatype::decode_frame(dt_field, ())?.into_datatype(),
+            DecodedDatatype::decode_frame(dt_field, ())?,
             DatatypeLocation::Inline,
         )
     })
@@ -982,21 +989,16 @@ fn compute_raw_data(
     data: &[u8],
     pos: usize,
     dataspace: &Dataspace,
-    datatype: &Datatype,
-    offsets: OffsetWidth,
+    element_size: ElementSize,
 ) -> Result<Vec<u8>, FormatError> {
-    let num_elements = dataspace.num_elements();
-    let elem_size = u64::from(datatype::stored_type_size(datatype, offsets)?);
-    let expected_size = match ElementSize::new(elem_size) {
-        Some(size) => size
-            .byte_length(num_elements)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: num_elements.get(),
-                length: elem_size,
-            })?
-            .to_usize()?,
-        None => 0,
-    };
+    let count = dataspace.num_elements();
+    let expected_size = element_size
+        .byte_length(count)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: count.get(),
+            length: element_size.get(),
+        })?
+        .to_usize()?;
     bytes::ensure_len(data, pos, expected_size)?;
     Ok(if expected_size > 0 {
         data.get(pos..pos + expected_size)

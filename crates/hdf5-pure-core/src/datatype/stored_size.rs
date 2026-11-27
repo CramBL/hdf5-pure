@@ -54,6 +54,11 @@ impl DatatypeOffsets {
         Ok(())
     }
 
+    /// Returns the descriptor width used to size one element, if its size depends on that width.
+    pub const fn element_width(self) -> Option<OffsetWidth> {
+        self.element
+    }
+
     /// Computes the stored element size with the descriptor width recorded for this datatype.
     ///
     /// # Errors

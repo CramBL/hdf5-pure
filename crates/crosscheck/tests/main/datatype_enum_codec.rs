@@ -8,6 +8,7 @@ use hdf5_pure_core::{
     MessageType, VariableLengthType,
 };
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     AccessMode, DatatypeMessage, DatatypeVersion, FormatWidths, ObjectHeader,
 };
@@ -81,8 +82,9 @@ fn datatype_enum_codecs_preserve_native_descriptions(
         .unwrap()
         .data;
     let (message, consumed) = DatatypeMessage::parse_prefix(bytes).unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), consumed)
     );
     let semantic = shape.semantic(big_endian, name);

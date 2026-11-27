@@ -11,6 +11,7 @@ use hdf5_pure_core::{
     MantissaNormalization, StringPadding, TimeType,
 };
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{DatatypeMessage, DatatypeProperties, OffsetWidth};
 use libhdf5::Datatype as NativeDatatype;
 use libhdf5::file::LibraryVersion;
@@ -84,8 +85,9 @@ fn datatype_leaf_codecs_preserve_native_file_versions_and_properties(
     assert_eq!(message.properties(), &leaf.properties());
     let canonical = message.serialize(OffsetWidth::Eight).unwrap();
     let semantic = message.to_datatype().unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(body).unwrap();
     assert_eq!(
-        format::parse_datatype(body).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (semantic.clone(), consumed)
     );
     let semantic_encoded = format::serialize_datatype(&semantic).unwrap();
@@ -214,7 +216,8 @@ fn ordinary_float_parser_reads_native_legacy_containers(
             )],
         }
     };
-    let (actual, consumed) = format::parse_datatype(body).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(body).unwrap();
+    let actual = decoded.into_datatype();
     assert_eq!(actual, expected);
     let image = std::fs::read(&path).unwrap();
     assert!(

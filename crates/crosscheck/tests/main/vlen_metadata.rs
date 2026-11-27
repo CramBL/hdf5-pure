@@ -12,6 +12,7 @@ use hdf5_pure::LibVer;
 use hdf5_pure::StringPadding;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
+use hdf5_pure_format::__private::DecodedDatatype;
 use libhdf5::Datatype as CDatatype;
 use libhdf5::file::LibraryVersion;
 use libhdf5::types::FloatSize;
@@ -131,8 +132,9 @@ fn reads_c_variable_length_string_metadata(
         ["alpha", if utf8 { "mètre" } else { "beta" }]
     );
     let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype).unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&encoded).unwrap();
     assert_eq!(
-        hdf5_pure_format::__private::parse_datatype(&encoded).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, encoded.len())
     );
 }
@@ -218,8 +220,9 @@ fn reads_c_nested_variable_length_sequence_datatype() {
         )))
     );
     let encoded = hdf5_pure_format::__private::serialize_datatype(&datatype).unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&encoded).unwrap();
     assert_eq!(
-        hdf5_pure_format::__private::parse_datatype(&encoded).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, encoded.len())
     );
 }
@@ -369,8 +372,6 @@ fn preserves_c_variable_length_integer_string_bases(
     };
     assert_eq!(string.base_type(), &expected);
     let bytes = hdf5_pure_format::__private::serialize_datatype(&actual).unwrap();
-    assert_eq!(
-        hdf5_pure_format::__private::parse_datatype(&bytes).unwrap(),
-        (actual, bytes.len())
-    );
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    assert_eq!((decoded.into_datatype(), bytes_read), (actual, bytes.len()));
 }

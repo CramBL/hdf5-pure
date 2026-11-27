@@ -1,9 +1,10 @@
 use hdf5_pure_core::{
     CompoundMember, Datatype, DatatypeMemberName, FixedPointType, FormatError, VariableLengthType,
 };
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
-    self as format, CompoundV1Member, CompoundV1Shape, DatatypeMessage, DatatypeMessageMember,
-    DatatypeProperties, DatatypeVersion, OffsetWidth,
+    CompoundV1Member, CompoundV1Shape, DatatypeMessage, DatatypeMessageMember, DatatypeProperties,
+    DatatypeVersion, OffsetWidth,
 };
 use rstest::rstest;
 use test_util::datatype::containers::{self, CompoundField, MemberOffset};
@@ -76,10 +77,8 @@ fn retained_version_one_compound_preserves_all_inline_array_extent_slots(
         )],
     };
     assert_eq!(message.to_datatype().unwrap(), expected);
-    assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
-        (expected, consumed)
-    );
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    assert_eq!((decoded.into_datatype(), bytes_read), (expected, consumed));
 }
 
 #[test]
@@ -110,10 +109,8 @@ fn retained_version_one_scalar_preserves_inactive_extents() {
         )],
     };
     assert_eq!(message.to_datatype().unwrap(), projected);
-    assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
-        (projected, consumed)
-    );
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    assert_eq!((decoded.into_datatype(), bytes_read), (projected, consumed));
 }
 
 #[test]
@@ -188,7 +185,8 @@ fn retained_version_two_compound_preserves_name_bytes_and_nested_versions() {
         ],
     };
     assert_eq!(expected.to_datatype().unwrap(), projected);
-    assert_eq!(format::parse_datatype(&bytes).unwrap(), (projected, length));
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    assert_eq!((decoded.into_datatype(), bytes_read), (projected, length));
 }
 
 #[rstest]
@@ -205,7 +203,7 @@ fn datatype_parsers_reject_invalid_inline_array_fields(
     let byte = leaf::unsigned_byte(Version::One);
     let bytes = legacy_compound::raw_member(u32::MAX, 0, rank, permutation, extents, &byte);
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -216,13 +214,17 @@ fn retained_version_one_compound_rejects_nonzero_reserved_bytes(
     #[case] byte: u8,
 ) {
     let mut bytes = legacy_compound::array_member();
-    let baseline = format::parse_datatype(&bytes).unwrap();
+    let (expected, expected_len) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     bytes[offset] = byte;
     assert_eq!(
         DatatypeMessage::parse(&bytes).unwrap_err(),
         FormatError::InvalidCompoundV1ReservedByte { offset, byte }
     );
-    assert_eq!(format::parse_datatype(&bytes).unwrap(), baseline);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    assert_eq!(
+        (decoded.datatype(), bytes_read),
+        (expected.datatype(), expected_len)
+    );
 }
 
 #[rstest]
@@ -290,7 +292,7 @@ fn compound_v1_parser_acquires_complete_fields_before_checking_their_values(
         },
     );
     assert_eq!(
-        format::parse_datatype(&bytes[..available]).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes[..available]).unwrap_err(),
         FormatError::UnexpectedEof {
             expected,
             available
@@ -310,7 +312,7 @@ fn datatype_parsers_report_nested_legacy_compound_eof_from_the_outer_description
         expected: body.len() + 1,
         available: body.len(),
     };
-    assert_eq!(format::parse_datatype(&body).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&body).unwrap_err(), expected);
     assert_eq!(DatatypeMessage::parse(&body).unwrap_err(), expected);
 }
 

@@ -51,6 +51,7 @@ use hdf5_pure_core::{BaseAddress, PhysicalAddress, SuperblockStatus};
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DataLayout;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LinkInfoMessage;
@@ -2619,7 +2620,9 @@ fn prepared_attribute_body_allocates_only_for_owned_output(
     let dimensions = [1024];
     let raw_data = vec![0x17; usize::try_from(dimensions[0]).unwrap() * 4];
     let datatype_bytes = Leaf::LittleInteger.bytes(Version::One);
-    let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&datatype_bytes).unwrap();
+    let datatype = DecodedDatatype::from_record(&datatype_bytes)
+        .unwrap()
+        .into_datatype();
     let message = AttributeMessage {
         name: "array".into(),
         datatype,

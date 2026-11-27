@@ -5,8 +5,9 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
 
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU32, NonZeroUsize};
 
+use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, DataspaceType, Extent};
 use crate::datatype;
@@ -96,6 +97,31 @@ impl<'a> ChunkedGeometry<'a> {
         dataspace: &'a Dataspace,
         layout: &'a DataLayout,
     ) -> Result<Self, FormatError> {
+        Self::parse(dataspace, layout, || {
+            datatype::stored_element_size_usize(datatype, offsets)
+        })
+    }
+
+    /// Checks the chunk dimensions against the stored size of one datatype element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if the dataspace or layout has invalid
+    /// chunk geometry, including a final chunk dimension that differs from `element_size`.
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the element size exceeds [`usize::MAX`].
+    pub fn with_element_size(
+        element_size: NonZeroU32,
+        dataspace: &'a Dataspace,
+        layout: &'a DataLayout,
+    ) -> Result<Self, FormatError> {
+        Self::parse(dataspace, layout, || element_size.narrow())
+    }
+
+    fn parse(
+        dataspace: &'a Dataspace,
+        layout: &'a DataLayout,
+        element_size: impl FnOnce() -> Result<NonZeroUsize, FormatError>,
+    ) -> Result<Self, FormatError> {
         let DataLayout::Chunked {
             chunk_dimensions, ..
         } = layout
@@ -126,7 +152,7 @@ impl<'a> ChunkedGeometry<'a> {
                 "chunk dimensions must be nonzero",
             ));
         }
-        let element_size = datatype::stored_element_size_usize(datatype, offsets)?;
+        let element_size = element_size()?;
         if *stored_element_size != element_size.get() as u64 {
             return Err(FormatError::InvalidChunkGeometry(
                 "chunk element size differs from the datatype size",

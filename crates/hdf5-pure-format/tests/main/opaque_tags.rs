@@ -6,6 +6,7 @@ use hdf5_pure_core::FormatError;
 use hdf5_pure_core::StringPadding;
 use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use rstest::rstest;
 use test_util::datatype;
 use test_util::datatype::Class;
@@ -37,8 +38,9 @@ fn opaque_tags_use_terminated_aligned_properties(#[case] length: usize, #[case] 
     expected.extend_from_slice(&tag);
     expected.extend_from_slice(&vec![0; usize::from(wire_length) - length]);
     assert_eq!(encoded, expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&expected).unwrap();
     assert_eq!(
-        format::parse_datatype(&expected).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, 8 + usize::from(wire_length)),
     );
 }
@@ -54,13 +56,15 @@ fn opaque_tags_preserve_native_logical_bytes(#[case] property: &[u8], #[case] lo
         size: 4,
         tag: logical.to_vec(),
     };
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype.clone(), 16)
     );
     let canonical = format::serialize_datatype(&datatype).unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&canonical).unwrap();
     assert_eq!(
-        format::parse_datatype(&canonical).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, canonical.len()),
     );
     if !logical.is_empty() {
@@ -75,7 +79,8 @@ fn opaque_tags_preserve_native_logical_bytes(#[case] property: &[u8], #[case] lo
 fn native_full_property_is_preserved_when_canonical_encoding_cannot_fit() {
     let mut bytes = datatype::header(Class::OPAQUE, 1, [248, 0, 0], 4);
     bytes.extend_from_slice(&[b'x'; 248]);
-    let (datatype, consumed) = format::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, 256);
     assert_eq!(
         datatype,
@@ -104,7 +109,7 @@ fn opaque_tags_reject_malformed_properties(
 ) {
     let mut bytes = datatype::header(Class::OPAQUE, 1, fields, 4);
     bytes.extend_from_slice(property);
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -127,7 +132,7 @@ fn datatype_parsers_report_opaque_tag_eof_from_the_message_start(#[case] availab
         expected,
         available: bytes.len(),
     };
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), error);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), error);
     assert_eq!(format::DatatypeMessage::parse(&bytes).unwrap_err(), error);
 }
 
@@ -159,7 +164,8 @@ fn opaque_members_leave_adjacent_compound_members_at_their_declared_offsets(
     #[case] size: u32,
 ) {
     let bytes = layout.build();
-    let (parsed, consumed) = format::parse_datatype(&bytes).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&bytes).unwrap();
+    let parsed = decoded.into_datatype();
     assert_eq!(consumed, bytes.len());
     let Datatype::Compound {
         size: actual_size,
@@ -196,8 +202,9 @@ fn opaque_members_leave_adjacent_compound_members_at_their_declared_offsets(
         }
     );
     let encoded = format::serialize_datatype(&parsed).unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&encoded).unwrap();
     assert_eq!(
-        format::parse_datatype(&encoded).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (parsed, encoded.len())
     );
 }
@@ -218,13 +225,15 @@ fn opaque_array_parsing_stops_before_the_next_field(#[case] version: ArrayVersio
         }),
         dimensions: vec![2],
     };
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected.clone(), expected_consumed)
     );
     let encoded = format::serialize_datatype(&expected).unwrap();
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&encoded).unwrap();
     assert_eq!(
-        format::parse_datatype(&encoded).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected, encoded.len())
     );
 }

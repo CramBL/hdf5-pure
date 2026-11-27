@@ -1,5 +1,6 @@
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private as dense_attribute_write;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{BTreeV2Header, MessageRecordLayout};
 use rstest::rstest;
 use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
@@ -1094,7 +1095,9 @@ fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
         .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
         .unwrap()
         .data;
-    let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
+    let dt = DecodedDatatype::from_record(dt_data)
+        .unwrap()
+        .into_datatype();
     let ds = Dataspace::parse_with_length_width(ds_data, sb.length_size).unwrap();
     let dl = crate::data_layout::DataLayout::parse_with_widths(
         dl_data,

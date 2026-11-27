@@ -1,6 +1,7 @@
 use hdf5_pure_core::DatatypeMemberName;
 use hdf5_pure_core::{CharacterSet, FormatError, StringPadding};
 use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use hdf5_pure_format::__private::{
     DatatypeMessage, DatatypeMessageMember, DatatypeProperties, DatatypeVersion, OffsetWidth,
 };
@@ -68,7 +69,7 @@ fn compound_layout_rejects_overlapping_members(
         ],
     );
     assert_eq!(DatatypeMessage::parse(&bytes).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&bytes).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), expected);
 }
 
 #[rstest]
@@ -117,8 +118,9 @@ fn compound_layout_preserves_disjoint_members_and_record_order(#[case] spans: &[
             .to_bytes(),
         bytes
     );
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (semantic, bytes.len())
     );
     assert_eq!(
@@ -206,12 +208,14 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
     );
     let (message, consumed) = DatatypeMessage::parse_prefix(&low).unwrap();
     assert_eq!(consumed, low.len());
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&low).unwrap();
     assert_eq!(
-        format::parse_datatype(&low).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), low.len())
     );
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&middle).unwrap();
     assert_eq!(
-        format::parse_datatype(&middle).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (message.to_datatype().unwrap(), middle.len())
     );
     assert_eq!(message.serialize(OffsetWidth::Two).unwrap(), low);
@@ -221,7 +225,7 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
         second: DatatypeMemberName::from(c"fixed"),
     };
     assert_eq!(DatatypeMessage::parse(&high).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&high).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&high).unwrap_err(), expected);
     assert_eq!(message.serialize(OffsetWidth::Eight).unwrap_err(), expected);
     let semantic = message.to_datatype().unwrap();
     for (width, bytes) in [(OffsetWidth::Two, &low), (OffsetWidth::Four, &middle)] {
@@ -271,7 +275,7 @@ fn compound_layout_rejects_width_dependent_and_nested_overlap(
         }],
     );
     assert_eq!(DatatypeMessage::parse(&outer).unwrap_err(), expected);
-    assert_eq!(format::parse_datatype(&outer).unwrap_err(), expected);
+    assert_eq!(DecodedDatatype::parse_prefix(&outer).unwrap_err(), expected);
 }
 
 fn string(size: u32) -> DatatypeMessage {

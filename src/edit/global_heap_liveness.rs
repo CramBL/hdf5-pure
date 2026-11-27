@@ -10,6 +10,8 @@ use core::num::NonZeroU64;
 use hdf5_pure_core::__private::ElementCount;
 use hdf5_pure_core::__private::FileRange;
 
+use hdf5_pure_format::__private::DecodedDatatype;
+
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
@@ -247,7 +249,7 @@ impl WriteEngine {
             return Ok(false);
         }
         let layout = DataLayout::parse_with_widths(&layout.data, self.widths())?;
-        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&datatype.data)?;
+        let datatype = DecodedDatatype::from_record(&datatype.data)?.into_datatype();
         if matches!(layout, DataLayout::Virtual) {
             return Ok(false);
         }

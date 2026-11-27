@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 
+use hdf5_pure_format::__private::DecodedDatatype;
+
 use crate::PhysicalAddress;
 use crate::access_mode::AccessMode;
 #[cfg(test)]
@@ -421,8 +423,9 @@ fn scan_parsed_header<S: OriginalSource + ?Sized>(
                         .first()
                         .is_some_and(|&b| crate::datatype::class_may_hold_object_address(b))
                 {
-                    match hdf5_pure_format::__private::parse_datatype(encoded) {
-                        Ok((dt, _)) => {
+                    match DecodedDatatype::from_record(encoded) {
+                        Ok(decoded) => {
+                            let dt = decoded.into_datatype();
                             file_writer::require_reference_width(widths, &dt)?;
                             element_dt = Some(dt);
                         }
@@ -622,8 +625,9 @@ fn scan_object<S: OriginalSource + ?Sized>(
                         p = body_end;
                         continue;
                     }
-                    match hdf5_pure_format::__private::parse_datatype(encoded) {
-                        Ok((dt, _)) => {
+                    match DecodedDatatype::from_record(encoded) {
+                        Ok(decoded) => {
+                            let dt = decoded.into_datatype();
                             file_writer::require_reference_width(widths, &dt)?;
                             out.holds_a_reference |= datatype::datatype_holds_object_address(&dt);
                             element_dt = Some(dt);

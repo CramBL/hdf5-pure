@@ -22,108 +22,9 @@ use crate::codec::{self, DecodeFrame, DecodePrefix, Parsed};
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
 
-/// Parses a datatype message body and returns the type and the number of bytes read.
-///
-/// Reads each complete eight-byte header before checking its version or class. Checks version
-/// before class, except in a complex datatype's parent, where it checks class first.
-/// Reads fixed-size atomic property blocks in full before checking class flags. Ignores
-/// reserved class bits in fixed-point, time, string, and bitfield descriptions.
-///
-/// Accepts legacy object and dataset-region reference kinds at every supported message
-/// version and preserves their declared element sizes.
-///
-/// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Preserves compound
-/// and enumeration member name bytes. Acquires the full array dimension list and any version 2
-/// permutation indices before reading the base datatype.
-/// Checks the enumeration size against its base size before reading the member names, then
-/// acquires the complete value list.
-///
-/// Checks compound member bounds and overlaps using the sizes stored in the member
-/// descriptions. For a version 1 implicit array member, multiplies the base size by its extents.
-/// Reserves member capacity after reading a member's nested datatype and checking its byte range.
-/// Checks each array message's declared size against the stored base size multiplied by
-/// the dimension extents.
-/// Variable-length descriptors occupy 10, 12, or 16 bytes for heap address widths of 2, 4, or
-/// 8 bytes, respectively.
-///
-/// The nesting limit is 64 descriptions along one path, including the outer description and
-/// any complex datatype's floating-point parent.
-///
-/// Reads an opaque tag's complete recorded property and copies its logical bytes into
-/// [`Datatype::Opaque`]. Reads a zero-length property as an absent tag and strips the first NUL
-/// and its zero padding from a tagged property. Also accepts aligned properties filled entirely
-/// by tag bytes. `H5O__dtype_encode_helper` writes that form for tags whose logical length is a
-/// multiple of eight (`H5Odtype.c`, HDF5 2.2.0).
-///
-/// Parses floating-point message versions and byte-order bits together through
-/// [`message::FloatingPointByteOrder::parse`], including nested descriptions in legacy containers.
-/// Accepts little- and big-endian order at versions 1 through 5 and VAX order at versions
-/// 3 through 5, subject to the numeric layout checks.
-///
-/// # Errors
-///
-/// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. EOF byte counts
-/// are relative to the start of `data`, including for nested descriptions. Returns
-/// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
-/// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
-/// Returns [`FormatError::NestingDepthExceeded`] if a nested description exceeds the limit.
-/// Returns [`FormatError::InvalidDatatypeVersion`] for a version unsupported by an array,
-/// complex datatype, or its parent. Returns
-/// [`FormatError::InvalidReferenceType`] for an unknown reference kind,
-/// [`FormatError::InvalidStringPadding`] for an unknown string padding code, or
-/// [`FormatError::InvalidCharacterSet`] for an unknown character set code. Returns
-/// [`FormatError::ZeroSizedDatatype`] if the parsed type has no element bytes.
-/// Returns [`FormatError::LengthTooLarge`] if the computed array size exceeds the size field, or
-/// [`FormatError::InvalidDatatypeSize`] if the declared array size differs from the computed size.
-/// Returns [`FormatError::InvalidFixedPointRange`], [`FormatError::InvalidFloatingPointRange`], or
-/// [`FormatError::InvalidNumericBitRange`] if a numeric bit range is empty or exceeds its element
-/// size. Returns [`FormatError::InvalidFloatingPointField`] if a floating-point field is empty or
-/// outside that range, [`FormatError::OverlappingFloatingPointFields`] if fields overlap, or
-/// [`FormatError::InvalidMantissaNormalization`] if the normalization code is reserved.
-///
-/// For a floating-point description outside a complex parent, returns
-/// [`FormatError::InvalidByteOrder`] for masked order bits `0x40`,
-/// [`FormatError::InvalidDatatypeVersion`] for VAX order in versions 1 or 2, or
-/// [`FormatError::InvalidDatatypeFlags`] for reserved class bits.
-///
-/// Returns [`FormatError::InvalidOpaqueReservedBits`] if an opaque datatype has nonzero reserved
-/// bits, [`FormatError::InvalidOpaqueTagLength`] if its property length is not a multiple of
-/// eight, or [`FormatError::InvalidOpaqueTagPadding`] if a byte after the first NUL is nonzero.
-///
-/// Returns [`FormatError::InvalidVariableLengthSubtype`] if a variable-length subtype is
-/// neither sequence nor string, [`FormatError::InvalidVariableLengthReservedBits`] if its
-/// class bit field has reserved bits set, or
-/// [`FormatError::InvalidVariableLengthSequenceMetadata`] if a sequence has nonzero string
-/// padding or character-set metadata. Returns [`FormatError::InvalidVariableLengthSize`] for an
-/// unsupported descriptor size.
-///
-/// Returns [`FormatError::InvalidCompoundV1Rank`] if a version 1 compound member declares more
-/// than four dimensions, [`FormatError::InvalidCompoundV1Extent`] if an active dimension is
-/// zero, or [`FormatError::UnsupportedCompoundV1Permutation`] if its permutation field is nonzero.
-/// Returns [`FormatError::CompoundArraySizeOverflow`] if a version 1 member's implicit array
-/// size exceeds [`u32::MAX`]. Returns [`FormatError::CompoundFieldOutOfBounds`] if a member
-/// extends past the compound's declared size or [`FormatError::CompoundFieldOverlap`] if member
-/// byte ranges overlap.
-///
-/// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration and its base datatype
-/// declare different sizes, or [`FormatError::AllocationFailed`] if a compound or enumeration
-/// member list reservation fails.
-///
-/// Returns [`FormatError::InvalidComplexFlags`] if a complex class bit field has reserved bits,
-/// [`FormatError::UnsupportedComplexForm`] if the complex form is not homogeneous rectangular,
-/// or [`FormatError::InvalidComplexParent`] if its parent is not floating point. Returns
-/// [`FormatError::InvalidComplexParentFlags`] if the parent has reserved bits, the reserved
-/// order pattern, or VAX order in versions 1 or 2. Returns
-/// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
-/// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
-pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
-    Ok(DecodedDatatype::decode_prefix(data, ())?
-        .map(DecodedDatatype::into_datatype)
-        .into_parts())
-}
-
 /// A semantic datatype with its stored element size and inferred descriptor widths.
-pub(crate) struct DecodedDatatype {
+#[derive(Debug)]
+pub struct DecodedDatatype {
     datatype: Datatype,
     /// The size in bytes of one stored element.
     stored_size: NonZeroU32,
@@ -132,8 +33,153 @@ pub(crate) struct DecodedDatatype {
 }
 
 impl DecodedDatatype {
+    /// Parses the first datatype description in `data` and returns it with the number of bytes read.
+    ///
+    /// Reads each complete eight-byte header before checking its version or class. Checks version
+    /// before class, except in a complex datatype's parent, where it checks class first.
+    /// Reads fixed-size atomic property blocks in full before checking class flags. Ignores
+    /// reserved class bits in fixed-point, time, string, and bitfield descriptions.
+    ///
+    /// Accepts legacy object and dataset-region reference kinds at every supported message
+    /// version and preserves their declared element sizes.
+    ///
+    /// Reads version 1 and 2 compounds and enumerations, and version 2 arrays. Preserves compound
+    /// and enumeration member name bytes. Acquires the full array dimension list and any version 2
+    /// permutation indices before reading the base datatype.
+    /// Checks the enumeration size against its base size before reading the member names, then
+    /// acquires the complete value list.
+    ///
+    /// Checks compound member bounds and overlaps using the sizes stored in the member
+    /// descriptions. For a version 1 implicit array member, multiplies the base size by its extents.
+    /// Reserves member capacity after reading a member's nested datatype and checking its byte range.
+    /// Checks each array message's declared size against the stored base size multiplied by
+    /// the dimension extents.
+    /// Variable-length descriptors occupy 10, 12, or 16 bytes for heap address widths of 2, 4, or
+    /// 8 bytes, respectively.
+    ///
+    /// The nesting limit is 64 descriptions along one path, including the outer description and
+    /// any complex datatype's floating-point parent.
+    ///
+    /// Reads an opaque tag's complete recorded property and copies its logical bytes into
+    /// [`Datatype::Opaque`]. Reads a zero-length property as an absent tag and strips the first NUL
+    /// and its zero padding from a tagged property. Also accepts aligned properties filled entirely
+    /// by tag bytes. `H5O__dtype_encode_helper` writes that form for tags whose logical length is a
+    /// multiple of eight (`H5Odtype.c`, HDF5 2.2.0).
+    ///
+    /// Parses floating-point message versions and byte-order bits together through
+    /// [`message::FloatingPointByteOrder::parse`], including nested descriptions in legacy containers.
+    /// Accepts little- and big-endian order at versions 1 through 5 and VAX order at versions
+    /// 3 through 5, subject to the numeric layout checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if a required field is incomplete. EOF byte counts
+    /// are relative to the start of `data`, including for nested descriptions. Returns
+    /// [`FormatError::InvalidDatatypeMessageVersion`] for a version outside `1..=5`, except in a
+    /// complex datatype's parent, or [`FormatError::InvalidDatatypeClass`] for an unsupported class.
+    /// Returns [`FormatError::NestingDepthExceeded`] if a nested description exceeds the limit.
+    /// Returns [`FormatError::InvalidDatatypeVersion`] for a version unsupported by an array,
+    /// complex datatype, or its parent. Returns
+    /// [`FormatError::InvalidReferenceType`] for an unknown reference kind,
+    /// [`FormatError::InvalidStringPadding`] for an unknown string padding code, or
+    /// [`FormatError::InvalidCharacterSet`] for an unknown character set code. Returns
+    /// [`FormatError::ZeroSizedDatatype`] if the parsed type has no element bytes.
+    /// Returns [`FormatError::LengthTooLarge`] if the computed array size exceeds the size field, or
+    /// [`FormatError::InvalidDatatypeSize`] if the declared array size differs from the computed size.
+    /// Returns [`FormatError::InvalidFixedPointRange`], [`FormatError::InvalidFloatingPointRange`], or
+    /// [`FormatError::InvalidNumericBitRange`] if a numeric bit range is empty or exceeds its element
+    /// size. Returns [`FormatError::InvalidFloatingPointField`] if a floating-point field is empty or
+    /// outside that range, [`FormatError::OverlappingFloatingPointFields`] if fields overlap, or
+    /// [`FormatError::InvalidMantissaNormalization`] if the normalization code is reserved.
+    ///
+    /// For a floating-point description outside a complex parent, returns
+    /// [`FormatError::InvalidByteOrder`] for masked order bits `0x40`,
+    /// [`FormatError::InvalidDatatypeVersion`] for VAX order in versions 1 or 2, or
+    /// [`FormatError::InvalidDatatypeFlags`] for reserved class bits.
+    ///
+    /// Returns [`FormatError::InvalidOpaqueReservedBits`] if an opaque datatype has nonzero reserved
+    /// bits, [`FormatError::InvalidOpaqueTagLength`] if its property length is not a multiple of
+    /// eight, or [`FormatError::InvalidOpaqueTagPadding`] if a byte after the first NUL is nonzero.
+    ///
+    /// Returns [`FormatError::InvalidVariableLengthSubtype`] if a variable-length subtype is
+    /// neither sequence nor string, [`FormatError::InvalidVariableLengthReservedBits`] if its
+    /// class bit field has reserved bits set, or
+    /// [`FormatError::InvalidVariableLengthSequenceMetadata`] if a sequence has nonzero string
+    /// padding or character-set metadata. Returns [`FormatError::InvalidVariableLengthSize`] for an
+    /// unsupported descriptor size.
+    ///
+    /// Returns [`FormatError::InvalidCompoundV1Rank`] if a version 1 compound member declares more
+    /// than four dimensions, [`FormatError::InvalidCompoundV1Extent`] if an active dimension is
+    /// zero, or [`FormatError::UnsupportedCompoundV1Permutation`] if its permutation field is nonzero.
+    /// Returns [`FormatError::CompoundArraySizeOverflow`] if a version 1 member's implicit array
+    /// size exceeds [`u32::MAX`]. Returns [`FormatError::CompoundFieldOutOfBounds`] if a member
+    /// extends past the compound's declared size or [`FormatError::CompoundFieldOverlap`] if member
+    /// byte ranges overlap.
+    ///
+    /// Returns [`FormatError::EnumBaseSizeMismatch`] if the enumeration and its base datatype
+    /// declare different sizes, or [`FormatError::AllocationFailed`] if a compound or enumeration
+    /// member list reservation fails.
+    ///
+    /// Returns [`FormatError::InvalidComplexFlags`] if a complex class bit field has reserved bits,
+    /// [`FormatError::UnsupportedComplexForm`] if the complex form is not homogeneous rectangular,
+    /// or [`FormatError::InvalidComplexParent`] if its parent is not floating point. Returns
+    /// [`FormatError::InvalidComplexParentFlags`] if the parent has reserved bits, the reserved
+    /// order pattern, or VAX order in versions 1 or 2. Returns
+    /// [`FormatError::ComplexSizeOverflow`] if twice its size exceeds [`u32::MAX`], or
+    /// [`FormatError::InvalidComplexSize`] if the declared complex size differs from that product.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_format::{__private::DecodedDatatype, FormatError, OffsetWidth};
+    ///
+    /// let record = [0x15, 0, 0, 0, 3, 0, 0, 0, 0xaa];
+    /// let (decoded, consumed) = DecodedDatatype::parse_prefix(&record)?;
+    /// assert_eq!(decoded.element_size_at(OffsetWidth::Four)?.get(), 3);
+    /// assert_eq!(&record[consumed..], &[0xaa]);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn parse_prefix(data: &[u8]) -> Result<(Self, usize), FormatError> {
+        Ok(Self::decode_prefix(data, ())?.into_parts())
+    }
+
+    /// Reads the datatype at the start of an object header record body.
+    ///
+    /// Leaves any bytes after the description uninterpreted. Use [`Self::parse_prefix`] to
+    /// locate those bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::parse_prefix`].
+    pub fn from_record(body: &[u8]) -> Result<Self, FormatError> {
+        Ok(Self::parse_prefix(body)?.0)
+    }
+
+    /// Borrows the semantic datatype for inspection.
+    pub fn datatype(&self) -> &Datatype {
+        &self.datatype
+    }
+
+    /// Returns the size of one stored element in bytes at `offset_width`.
+    ///
+    /// Uses the decoded element size unless a different address width changes the size of a
+    /// variable-length descriptor or an array of such descriptors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LengthTooLarge`] if the array size at `offset_width`
+    /// exceeds the four-byte datatype size field.
+    pub fn element_size_at(&self, offset_width: OffsetWidth) -> Result<NonZeroU32, FormatError> {
+        match self.offsets.element_width() {
+            Some(width) if width != offset_width => {
+                stored_size::stored_element_size(&self.datatype, offset_width)
+            }
+            _ => Ok(self.stored_size),
+        }
+    }
+
     /// Returns the semantic datatype, discarding the separate stored layout.
-    pub(crate) fn into_datatype(self) -> Datatype {
+    pub fn into_datatype(self) -> Datatype {
         self.datatype
     }
 }
@@ -162,7 +208,7 @@ impl DecodeFrame<'_> for DecodedDatatype {
 ///
 /// # Errors
 ///
-/// Returns the errors of [`parse_datatype`].
+/// Returns the errors of [`DecodedDatatype::parse_prefix`].
 fn parse_datatype_at(
     cursor: &mut ByteCursor<'_>,
     depth: MessageDepth,
@@ -278,7 +324,7 @@ fn parse_datatype_at(
 ///
 /// # Errors
 ///
-/// Returns the errors of [`parse_datatype`].
+/// Returns the errors of [`DecodedDatatype::parse_prefix`].
 fn parse_nested_datatype(
     cursor: &mut ByteCursor<'_>,
     parent_depth: MessageDepth,

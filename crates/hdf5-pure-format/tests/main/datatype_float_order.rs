@@ -11,7 +11,7 @@ use hdf5_pure_core::FloatingPointType;
 use hdf5_pure_core::FormatError;
 use hdf5_pure_core::MantissaNormalization;
 use hdf5_pure_core::VariableLengthType;
-use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::DecodedDatatype;
 use rstest::rstest;
 use test_util::datatype;
 use test_util::datatype::Class;
@@ -74,7 +74,7 @@ fn ordinary_float_parser_applies_order_rules_in_every_context(
             } else {
                 error
             };
-            assert_eq!(format::parse_datatype(&bytes).unwrap_err(), error);
+            assert_eq!(DecodedDatatype::parse_prefix(&bytes).unwrap_err(), error);
             return;
         }
     };
@@ -132,8 +132,9 @@ fn ordinary_float_parser_applies_order_rules_in_every_context(
         Context::Sequence => Datatype::VariableLength(VariableLengthType::sequence(datatype)),
         Context::Complex => Datatype::Complex(ComplexType::new(component).unwrap()),
     };
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&bytes).unwrap();
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (expected, bytes.len())
     );
 }
@@ -147,7 +148,7 @@ fn ordinary_float_parser_rejects_reserved_flags(#[case] extra: [u8; 3], #[case] 
     bytes[2] |= extra[1];
     bytes[3] |= extra[2];
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::InvalidDatatypeFlags {
             class: Class::FLOATING_POINT.0,
             version: Version::Five.get(),
@@ -164,7 +165,7 @@ fn ordinary_float_parser_rejects_unsupported_versions(#[case] version: u8) {
     let mut bytes = Leaf::Float(Order::Little).bytes(Version::One);
     bytes[0] = datatype::header(Class::FLOATING_POINT, version, [0; 3], 0)[0];
     assert_eq!(
-        format::parse_datatype(&bytes).unwrap_err(),
+        DecodedDatatype::parse_prefix(&bytes).unwrap_err(),
         FormatError::InvalidDatatypeMessageVersion(version)
     );
 }

@@ -18,6 +18,7 @@ use super::super::message::version::{DATATYPE_VERSION_FIVE, DATATYPE_VERSION_THR
 use super::super::message::{FLOAT_BYTE_ORDER_HIGH_BIT, FLOAT_BYTE_ORDER_LOW_BIT};
 use super::super::references;
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 use super::super::slots;
 use super::fixtures;
 
@@ -45,7 +46,8 @@ fn native_complex_preserves_component_layout_and_message_extent(
     let following = fixtures::build_fixed_point(1, false, false, 0, 8);
     encoded.extend_from_slice(&following);
 
-    let (datatype, actual_consumed) = semantic::parse_datatype(&encoded).unwrap();
+    let (decoded, actual_consumed) = DecodedDatatype::parse_prefix(&encoded).unwrap();
+    let datatype = decoded.into_datatype();
     let Datatype::Complex(complex) = &datatype else {
         panic!("expected native complex, got {datatype:?}");
     };
@@ -67,7 +69,7 @@ fn native_complex_preserves_component_layout_and_message_extent(
     assert_eq!(actual_consumed, consumed);
     assert_eq!(actual_consumed, 28);
     assert_eq!(
-        semantic::parse_datatype(&encoded[actual_consumed..])
+        DecodedDatatype::parse_prefix(&encoded[actual_consumed..])
             .unwrap()
             .1,
         following.len()
@@ -81,8 +83,9 @@ fn native_complex_preserves_component_layout_and_message_extent(
     );
     expected.extend_from_slice(&canonical_parent);
     assert_eq!(semantic::serialize_datatype(&datatype).unwrap(), expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&expected).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&expected).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, expected.len())
     );
 }
@@ -97,7 +100,7 @@ fn native_complex_preserves_component_layout_and_message_extent(
 #[case::reserved_high([1, 0, 1], FormatError::InvalidComplexFlags(0x01_0001))]
 fn native_complex_rejects_unsupported_flags(#[case] flags: [u8; 3], #[case] error: FormatError) {
     let encoded = header::build_datatype_header(COMPLEX_CLASS, DATATYPE_VERSION_FIVE, flags, 8);
-    assert_eq!(semantic::parse_datatype(&encoded).unwrap_err(), error);
+    assert_eq!(DecodedDatatype::parse_prefix(&encoded).unwrap_err(), error);
 }
 
 #[rstest]
@@ -108,7 +111,7 @@ fn native_complex_rejects_unsupported_flags(#[case] flags: [u8; 3], #[case] erro
 fn native_complex_rejects_other_message_versions(#[case] version: u8) {
     let encoded = header::build_datatype_header(COMPLEX_CLASS, version, [1, 0, 0], 8);
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::InvalidDatatypeVersion {
             class: COMPLEX_CLASS,
             version
@@ -130,7 +133,7 @@ fn native_complex_rejects_truncated_parent(
         header::build_datatype_header(COMPLEX_CLASS, DATATYPE_VERSION_FIVE, [1, 0, 0], 8);
     encoded.extend_from_slice(&ieee_parent(4, false)[..parent_len]);
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::UnexpectedEof {
             expected,
             available
@@ -152,7 +155,7 @@ fn native_complex_rejects_non_floating_parent(#[case] class: u8) {
         4,
     ));
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::InvalidComplexParent { class }
     );
 }
@@ -166,7 +169,7 @@ fn native_complex_rejects_inconsistent_element_size(#[case] size: u32) {
         header::build_datatype_header(COMPLEX_CLASS, DATATYPE_VERSION_FIVE, [1, 0, 0], size);
     encoded.extend_from_slice(&ieee_parent(4, false));
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::InvalidComplexSize {
             size,
             component_size: 4
@@ -185,7 +188,7 @@ fn native_complex_rejects_invalid_parent_version(#[case] version: u8) {
     parent[0] = (version << 4) | FLOATING_POINT_CLASS;
     encoded.extend_from_slice(&parent);
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::InvalidDatatypeVersion {
             class: FLOATING_POINT_CLASS,
             version
@@ -207,7 +210,7 @@ fn native_complex_rejects_reserved_parent_flags(#[case] version: u8, #[case] ext
     parent[1..4].copy_from_slice(&flags.to_le_bytes()[..3]);
     encoded.extend_from_slice(&parent);
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::InvalidComplexParentFlags { version, flags }
     );
 }
@@ -220,7 +223,7 @@ fn native_complex_reports_reserved_parent_normalization() {
     parent[1] |= FLOAT_NORMALIZATION_RESERVED << FLOAT_NORMALIZATION_SHIFT;
     encoded.extend_from_slice(&parent);
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::InvalidMantissaNormalization(FLOAT_NORMALIZATION_RESERVED)
     );
 }
@@ -233,7 +236,7 @@ fn native_complex_rejects_element_size_overflow() {
     parent[4..8].copy_from_slice(&0x8000_0000u32.to_le_bytes());
     encoded.extend_from_slice(&parent);
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap_err(),
+        DecodedDatatype::parse_prefix(&encoded).unwrap_err(),
         FormatError::ComplexSizeOverflow {
             component_size: 0x8000_0000
         }
@@ -280,7 +283,8 @@ fn native_complex_preserves_vax_component_metadata() {
     parent[0] = (DATATYPE_VERSION_THREE << 4) | FLOATING_POINT_CLASS;
     parent[1] |= FLOAT_BYTE_ORDER_LOW_BIT | FLOAT_BYTE_ORDER_HIGH_BIT;
     encoded.extend_from_slice(&parent);
-    let (datatype, consumed) = semantic::parse_datatype(&encoded).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&encoded).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(
         datatype,
         Datatype::Complex(
@@ -318,8 +322,9 @@ fn native_complex_propagates_versions_through_containers(
         });
     let encoded = semantic::serialize_datatype(&datatype).unwrap();
     assert_eq!(encoded, expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&encoded).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&encoded).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, encoded.len())
     );
 }

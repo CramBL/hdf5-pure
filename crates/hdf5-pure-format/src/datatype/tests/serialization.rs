@@ -22,6 +22,7 @@ use super::super::message::{
     FLOAT_BYTE_ORDER_HIGH_BIT, FLOAT_BYTE_ORDER_LOW_BIT, PreparedDatatype,
 };
 use super::super::semantic;
+use super::super::semantic::DecodedDatatype;
 use super::super::stored_size;
 use super::fixtures;
 use crate::width::OffsetWidth;
@@ -56,13 +57,15 @@ use crate::width::OffsetWidth;
 #[case::vax_sequence(sequence_bytes(vax_float(), DATATYPE_VERSION_THREE))]
 #[case::vax_array_sequence(sequence_bytes(array_bytes(vax_float(), &[3], 12, DATATYPE_VERSION_THREE), DATATYPE_VERSION_THREE))]
 fn canonical_messages_preserve_bytes_and_extent(#[case] expected: Vec<u8>) {
-    let (datatype, consumed) = semantic::parse_datatype(&expected).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&expected).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, expected.len());
     assert_eq!(semantic::serialize_datatype(&datatype).unwrap(), expected);
     let mut following = expected.clone();
     following.extend_from_slice(b"next message");
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&following).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&following).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, expected.len())
     );
 }
@@ -95,8 +98,9 @@ fn canonical_compound_array_offsets(#[case] size: u32, #[case] width: usize) {
         DATATYPE_VERSION_THREE,
     ));
     assert_eq!(semantic::serialize_datatype(&datatype).unwrap(), expected);
+    let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&expected).unwrap();
     assert_eq!(
-        semantic::parse_datatype(&expected).unwrap(),
+        (decoded.into_datatype(), bytes_read),
         (datatype, expected.len())
     );
 }
@@ -143,7 +147,8 @@ fn canonical_enumeration_version_supports_the_base_datatype(
 ) {
     let mut expected = header::build_datatype_header(ENUMERATION_CLASS, version, [0, 0, 0], size);
     expected.extend_from_slice(&base);
-    let (datatype, consumed) = semantic::parse_datatype(&expected).unwrap();
+    let (decoded, consumed) = DecodedDatatype::parse_prefix(&expected).unwrap();
+    let datatype = decoded.into_datatype();
     assert_eq!(consumed, expected.len());
     assert_eq!(semantic::serialize_datatype(&datatype).unwrap(), expected);
 }
@@ -163,7 +168,12 @@ fn bounded_datatype_writes_preserve_earlier_headers(#[case] nested: Vec<u8>) {
     first_bytes.extend_from_slice(b"first\0\0\0");
     let cases = [
         (first, first_bytes),
-        (semantic::parse_datatype(&nested).unwrap().0, nested),
+        (
+            DecodedDatatype::from_record(&nested)
+                .unwrap()
+                .into_datatype(),
+            nested,
+        ),
         (
             fixtures::byte_member_type(),
             fixtures::build_fixed_point(1, false, false, 0, 8),
@@ -261,8 +271,9 @@ fn nested_opaque_tags_keep_their_encoding_boundaries(
                 DATATYPE_VERSION_THREE,
             ));
             assert_eq!(encoded.unwrap(), expected);
+            let (decoded, bytes_read) = DecodedDatatype::parse_prefix(&expected).unwrap();
             assert_eq!(
-                semantic::parse_datatype(&expected).unwrap(),
+                (decoded.into_datatype(), bytes_read),
                 (datatype, expected.len())
             );
         }
