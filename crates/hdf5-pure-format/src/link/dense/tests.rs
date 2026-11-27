@@ -1,23 +1,41 @@
 use alloc::vec;
+use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
 
+use super::index::{HEAP_ID_LEN, NAME_RECORD_LEN, PlannedIndex};
+use super::{DenseLinkImage, DenseLinkPlan, DenseLinkPlanError};
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
+use crate::btree::v2::BTREE_V2_LINK_NAME;
 use crate::btree::v2::BTreeV2Header;
 use crate::btree::v2::BTreeV2Layout;
 use crate::btree::v2::BTreeV2Node;
+use crate::checksum;
 use crate::datatype::CharacterSet;
+use crate::error::FormatError;
+use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::FractalHeapIdKind;
 use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap::block::FractalHeapBlock;
 use crate::fractal_heap::block::FractalHeapBlockLayout;
-use crate::link_info::LinkCreationOrderIndex;
-use crate::link_storage::OwnedLink;
-use crate::link_storage::OwnedLinkTarget;
-
-use super::*;
+use crate::fractal_heap::write::GROUP_HEAP_MAX_DIRECT_BLOCK_SIZE;
+use crate::fractal_heap::write::GROUP_HEAP_MAX_HEAP_SIZE_BITS;
+use crate::fractal_heap::write::GROUP_HEAP_MAX_MANAGED_OBJECT;
+use crate::fractal_heap::write::GROUP_HEAP_STARTING_BLOCK_SIZE;
+use crate::fractal_heap::write::GROUP_HEAP_TABLE_WIDTH;
+use crate::fractal_heap::write::ManagedHeapPlanError;
+use crate::link::info::LinkCreationOrderIndex;
+use crate::link::info::LinkInfoMessage;
+use crate::link::storage::GroupLinkStorage;
+use crate::link::storage::OwnedLink;
+use crate::link::storage::OwnedLinkTarget;
+use crate::width::FormatWidths;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 #[rstest]
 #[case::untracked(0)]
@@ -107,18 +125,18 @@ fn heap_blocks_indexes_and_statistics_conform_to_the_parser(
     assert_eq!(heap_header.managed_objects_count, count as u64);
     assert_eq!(heap_header.huge_objects_count, 0);
     assert_eq!(heap_header.tiny_objects_count, 0);
-    assert_eq!(heap_header.managed_space, plan.heap.managed_space());
+    assert_eq!(heap_header.managed_space, plan.heap().managed_space());
     assert_eq!(
         heap_header.allocated_managed_space,
-        plan.heap.allocated_space()
+        plan.heap().allocated_space()
     );
     assert_eq!(
         heap_header.free_space_in_managed_blocks,
-        plan.heap.free_space()
+        plan.heap().free_space()
     );
     assert_eq!(
         heap_header.direct_block_allocation_iterator_offset,
-        plan.heap.allocation_iterator()
+        plan.heap().allocation_iterator()
     );
 }
 

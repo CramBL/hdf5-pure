@@ -1,10 +1,14 @@
-//! Version 1 Link messages, borrowed fields, and text projections.
+//! Version 1 Link messages, group link storage, and dense link indexes.
 
+pub(crate) mod creation_order;
+pub(crate) mod dense;
 pub(crate) mod encode;
 mod error;
+pub(crate) mod info;
 mod name;
 mod projection;
 mod source;
+pub(crate) mod storage;
 mod view;
 mod wire;
 

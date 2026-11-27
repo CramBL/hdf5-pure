@@ -123,10 +123,6 @@ pub use crate::dense_attribute_write::DenseAttrPlan;
 pub use crate::dense_attribute_write::PreparedDenseAttrs;
 pub use crate::dense_attribute_write::build_dense_attrs;
 pub use crate::dense_attribute_write::dense_attrs_plan;
-pub use crate::dense_link_write::DenseLinkImage;
-pub use crate::dense_link_write::DenseLinkPlacement;
-pub use crate::dense_link_write::DenseLinkPlan;
-pub use crate::dense_link_write::DenseLinkPlanError;
 pub use crate::extensible_array::BlockOffsetWidth;
 pub use crate::extensible_array::DataBlockGeometry;
 pub use crate::extensible_array::EA_CLIENT_ID_UNFILTERED;
@@ -309,18 +305,22 @@ pub use crate::group_info::GroupThresholds;
 pub use crate::link::LinkMessage;
 pub use crate::link::LinkTarget;
 pub use crate::link::SymbolicLinkTarget;
+pub use crate::link::creation_order::{LinkCreationCounter, LinkCreationPolicy};
+pub use crate::link::dense::DenseLinkImage;
+pub use crate::link::dense::DenseLinkPlacement;
+pub use crate::link::dense::DenseLinkPlan;
+pub use crate::link::dense::DenseLinkPlanError;
+pub use crate::link::info::{LinkCreationOrderIndex, LinkInfoMessage};
 pub use crate::link::link_is_named;
+pub use crate::link::storage::{
+    GroupLinkStorage, LinkStorageError, OwnedLink, OwnedLinkTarget, OwnedSymbolicLinkTarget,
+};
 pub use crate::link::{
     LinkMessageV1, LinkName, LinkProjectionError, LinkTargetV1, LinkWireError, UserLinkKind,
     UserLinkValue,
 };
 pub use crate::link::{LinkMessageView, LinkTargetView};
 pub use crate::link::{LinkOutputTooSmall, PreparedLink};
-pub use crate::link_info::{LinkCreationOrderIndex, LinkInfoMessage};
-pub use crate::link_storage::{
-    GroupLinkStorage, LinkCreationCounter, LinkCreationPolicy, LinkStorageError, OwnedLink,
-    OwnedLinkTarget, OwnedSymbolicLinkTarget,
-};
 pub use crate::local_heap::LocalHeap;
 pub use crate::local_heap::LocalHeapDataSegment;
 pub use crate::local_heap::LocalHeapLocator;
