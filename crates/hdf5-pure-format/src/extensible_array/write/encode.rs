@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use super::BlockLocation;
 use super::ExtensibleArrayBlock;
 use super::ExtensibleArrayPlacement;
-use super::ExtensibleArrayPlan;
+
 use super::HEADER_BLOCK;
 use super::block::{self, Addresses, Bitmap, ExtensibleArrayBlockWriter};
 use crate::address::StoredAddress;
@@ -89,15 +89,10 @@ impl<'a> ExtensibleArrayEncoding<'a> {
         placement: &'a ExtensibleArrayPlacement<'a>,
         slots: &'a IndexSlots<'a>,
     ) -> Result<Self, FormatError> {
-        let ExtensibleArrayPlan {
-            creation: _,
-            widths: _,
-            encoding: _,
-            layout,
-            blocks,
-            stats,
-            total_length: _,
-        } = placement.plan;
+        let plan = placement.plan();
+        let layout = plan.layout();
+        let blocks = plan.descriptors();
+        let stats = plan.statistics();
         if slots.len().to_u64() != stats.max_idx_set {
             return Err(FormatError::ExtensibleArraySlotCount {
                 expected: stats.max_idx_set,
@@ -106,10 +101,10 @@ impl<'a> ExtensibleArrayEncoding<'a> {
         }
         let mut next = slots.next_occupied(u64::from(layout.inline_elements()));
         for block in blocks {
-            let BlockLocation::Data(block) = &block.location else {
+            let BlockLocation::Data(block) = block.location() else {
                 continue;
             };
-            let range = &block.slots;
+            let range = block.slots();
             if let Some(slot) = next.filter(|&slot| slot < range.start) {
                 return Err(FormatError::ExtensibleArrayUnplannedSlot { slot });
             }
@@ -124,7 +119,7 @@ impl<'a> ExtensibleArrayEncoding<'a> {
             layout.encoding().require_record_fits(chunk)?;
         }
         for block in blocks {
-            block.length.to_usize()?;
+            block.length().to_usize()?;
         }
         let mut pointers = Vec::new();
         pointers
@@ -135,12 +130,12 @@ impl<'a> ExtensibleArrayEncoding<'a> {
             })?;
         let direct_blocks = layout.direct_data_blocks();
         for (descriptor, block) in blocks.iter().enumerate() {
-            let (parent, slot) = match &block.location {
+            let (parent, slot) = match block.location() {
                 BlockLocation::Header | BlockLocation::Index { .. } => continue,
                 BlockLocation::Secondary(block) => {
-                    (super::INDEX_BLOCK, direct_blocks + block.pointer)
+                    (super::INDEX_BLOCK, direct_blocks + block.pointer())
                 }
-                BlockLocation::Data(block) => block.parent,
+                BlockLocation::Data(block) => block.parent(),
             };
             pointers.push(Pointer {
                 parent,
@@ -160,7 +155,7 @@ impl<'a> ExtensibleArrayEncoding<'a> {
     ///
     /// Repeated calls borrow the same records and reference index.
     pub fn blocks(&self) -> impl ExactSizeIterator<Item = ExtensibleArrayEmission<'_>> {
-        (0..self.placement.ranges.len()).map(|index| ExtensibleArrayEmission {
+        (0..self.placement.ranges().len()).map(|index| ExtensibleArrayEmission {
             encoding: self,
             index,
         })
@@ -192,12 +187,12 @@ pub struct ExtensibleArrayEmission<'a> {
 impl ExtensibleArrayEmission<'_> {
     /// Returns the stored start address of the complete allocation.
     pub fn address(&self) -> StoredAddress {
-        self.encoding.placement.ranges[self.index].start()
+        self.encoding.placement.ranges()[self.index].start()
     }
 
     /// Returns the complete allocation descriptor from the borrowed plan.
     pub fn block(&self) -> &ExtensibleArrayBlock {
-        &self.encoding.placement.plan.blocks[self.index]
+        &self.encoding.placement.plan().descriptors()[self.index]
     }
 
     /// Returns the exact length in bytes of the complete allocation, including checksums.
@@ -228,16 +223,16 @@ impl ExtensibleArrayEmission<'_> {
             slots,
             pointers: _,
         } = self.encoding;
-        let layout = placement.plan.layout;
+        let layout = placement.plan().layout();
         let writer =
-            ExtensibleArrayBlockWriter::placed(layout, placement.ranges[HEADER_BLOCK].start());
+            ExtensibleArrayBlockWriter::placed(layout, placement.ranges()[HEADER_BLOCK].start());
         let children = self.encoding.children(self.index);
         let addresses = Addresses::Placed {
             children,
-            ranges: &placement.ranges,
+            ranges: placement.ranges(),
         };
         let length = output.len();
-        let block = match &self.block().location {
+        let block = match self.block().location() {
             BlockLocation::Header => {
                 placement.header_encoding().write_header(output);
                 return;
@@ -252,17 +247,17 @@ impl ExtensibleArrayEmission<'_> {
                         reason = "the checked block length fits usize and includes at least one byte per pointer"
                     )
                 )]
-                let pointer_count = block.geometry.blocks() as usize;
+                let pointer_count = block.geometry().blocks() as usize;
                 let bitmap_len = length - layout.pages_offset_usize() - pointer_count * offsets;
                 let bitmap = Bitmap::Occupied {
                     slots,
                     children,
-                    first_slot: block.first_slot,
+                    first_slot: block.first_slot(),
                 };
-                writer.secondary(length, block.geometry, bitmap_len, bitmap, addresses)
+                writer.secondary(length, block.geometry(), bitmap_len, bitmap, addresses)
             }
             BlockLocation::Data(block) => {
-                writer.data(slots, block.slots.clone(), block.offset, length)
+                writer.data(slots, block.slots().clone(), block.offset(), length)
             }
         };
         block.write_block(output);
@@ -280,7 +275,7 @@ impl Encode for ExtensibleArrayEmission<'_> {
         )
     )]
     fn encoded_len(&self) -> usize {
-        self.block().length as usize
+        self.block().length() as usize
     }
 
     fn encode_into(&self, output: &mut [u8]) -> Result<usize, Self::Error> {
@@ -430,10 +425,10 @@ mod tests {
                 assert_checksum(&output);
             } else {
                 let range = descriptor.slots().unwrap();
-                if let Some(pages) = plan.layout.pages(range.end - range.start) {
-                    let prefix = plan.layout.pages_offset().to_usize().unwrap();
+                if let Some(pages) = plan.layout().pages(range.end - range.start) {
+                    let prefix = plan.layout().pages_offset().to_usize().unwrap();
                     assert_checksum(&output[..prefix]);
-                    let page_len = plan.layout.page_len().unwrap().to_usize().unwrap();
+                    let page_len = plan.layout().page_len().unwrap().to_usize().unwrap();
                     assert_eq!(
                         output[prefix..].chunks_exact(page_len).len().to_u64(),
                         pages

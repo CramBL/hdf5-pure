@@ -210,6 +210,18 @@ impl ExtensibleArrayPlan {
         self.blocks.iter().map(ExtensibleArrayBlock::length)
     }
 
+    fn descriptors(&self) -> &[ExtensibleArrayBlock] {
+        &self.blocks
+    }
+
+    fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    fn statistics(&self) -> &ExtensibleArrayStats {
+        &self.stats
+    }
+
     /// Checks disjoint complete ranges at the supplied stored addresses.
     ///
     /// Addresses follow [`blocks`](Self::blocks) order and may be in any address order. Starts
@@ -227,15 +239,15 @@ impl ExtensibleArrayPlan {
         &self,
         addresses: &[StoredAddress],
     ) -> Result<ExtensibleArrayPlacement<'_>, FormatError> {
-        if addresses.len() != self.blocks.len() {
+        if addresses.len() != self.blocks().len() {
             return Err(FormatError::ExtensibleArrayBlockCount {
-                expected: self.blocks.len(),
+                expected: self.blocks().len(),
                 actual: addresses.len(),
             });
         }
         let mut ranges = Vec::with_capacity(addresses.len());
         for (&address, length) in addresses.iter().zip(self.block_lengths()) {
-            ranges.push(stored_block_range(self.widths.offsets, address, length)?);
+            ranges.push(stored_block_range(self.widths().offsets, address, length)?);
         }
         let mut ordered: Vec<_> = ranges
             .iter()
@@ -271,12 +283,12 @@ impl ExtensibleArrayPlan {
         slots: &IndexSlots<'_>,
         address: StoredAddress,
     ) -> Result<Vec<u8>, FormatError> {
-        let whole = stored_block_range(self.widths.offsets, address, self.total_length)?;
+        let whole = stored_block_range(self.widths().offsets, address, self.total_len())?;
         let mut ranges = Vec::new();
         ranges
-            .try_reserve_exact(self.blocks.len())
+            .try_reserve_exact(self.blocks().len())
             .map_err(|source| FormatError::AllocationFailed {
-                values: self.blocks.len(),
+                values: self.blocks().len(),
                 source,
             })?;
         let mut cursor = whole.start();
@@ -287,7 +299,7 @@ impl ExtensibleArrayPlan {
         }
         let placement = ExtensibleArrayPlacement { plan: self, ranges };
         let encoding = placement.encoding(slots)?;
-        let length = self.total_length.to_usize()?;
+        let length = self.total_len().to_usize()?;
         let mut output = Vec::new();
         output
             .try_reserve_exact(length)
@@ -341,6 +353,10 @@ impl ExtensibleArrayPlacement<'_> {
     pub fn plan(&self) -> &ExtensibleArrayPlan {
         self.plan
     }
+    fn ranges(&self) -> &[AddressRange<StoredAddress>] {
+        &self.ranges
+    }
+
     /// Returns stored starts and complete lengths in the plan's descriptor order.
     pub fn blocks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, u64)> + '_ {
         self.ranges
@@ -360,6 +376,10 @@ pub struct ExtensibleArrayBlock {
 }
 
 impl ExtensibleArrayBlock {
+    fn location(&self) -> &BlockLocation {
+        &self.location
+    }
+
     /// Returns the block's role in the index.
     pub fn kind(&self) -> ExtensibleArrayBlockKind {
         match self.location {
@@ -425,6 +445,18 @@ struct SecondaryBlock {
 }
 
 impl SecondaryBlock {
+    fn geometry(&self) -> SuperBlock {
+        self.geometry
+    }
+
+    fn first_slot(&self) -> u64 {
+        self.first_slot
+    }
+
+    fn pointer(&self) -> u64 {
+        self.pointer
+    }
+
     fn slots(&self) -> Range<u64> {
         // Planning checks the range of every secondary block before building the descriptor.
         self.first_slot..self.first_slot + self.geometry.blocks() * self.geometry.block_elements()
@@ -437,6 +469,20 @@ struct ChildBlock {
     slots: Range<u64>,
     offset: u64,
     parent: (usize, u64),
+}
+
+impl ChildBlock {
+    fn slots(&self) -> &Range<u64> {
+        &self.slots
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn parent(&self) -> (usize, u64) {
+        self.parent
+    }
 }
 
 /// The role of a complete Extensible Array allocation.
