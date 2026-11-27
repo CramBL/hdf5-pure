@@ -1,13 +1,15 @@
+use super::ExtensibleArrayPlacement;
 use super::block;
-use super::{ExtensibleArrayPlacement, INDEX_BLOCK};
+use super::plan::INDEX_BLOCK;
 use crate::address::StoredAddress;
 use crate::bytes::UnexpectedEof;
 use crate::chunk_record::{ArrayClient, ElementEncoding, InvalidElementEncoding};
 use crate::codec::Encode;
 use crate::error::FormatError;
+use crate::extensible_array::block::VERSION;
+use crate::extensible_array::header::{HEADER_BYTE_FIELDS, HEADER_PREFIX_LEN, HEADER_SIGNATURE};
 use crate::extensible_array::{
     ExtensibleArrayCreationParameters, ExtensibleArrayHeader, ExtensibleArrayStats,
-    HEADER_BYTE_FIELDS, HEADER_PREFIX_LEN, HEADER_SIGNATURE, VERSION,
 };
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 

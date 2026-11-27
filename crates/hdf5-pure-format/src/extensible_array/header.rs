@@ -1,12 +1,13 @@
 use hdf5_pure_core::__private::{FileRange, FileRegion};
 
+use super::ExtensibleArrayIndexBlockRef;
+use super::block::{CHECKSUM_LEN, Owner, VERSION};
 use super::creation::{
     BlockOffsetWidth, ExtensibleArrayBitGeometry, ExtensibleArrayCreationParameters, MaxIndexBits,
     PageElementCount,
 };
 use super::geometry::{ExtensibleArrayGeometry, Layout};
 use super::statistics::ExtensibleArrayStats;
-use super::{CHECKSUM_LEN, ExtensibleArrayIndexBlockRef, Owner, VERSION};
 use crate::address::{BaseAddress, BaseAddressExt, StoredAddress};
 use crate::bytes;
 use crate::checksum;

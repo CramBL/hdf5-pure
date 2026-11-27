@@ -3,7 +3,7 @@
 use hdf5_pure_core::AddressRange;
 
 use super::encode::Pointer;
-use super::stored_block_range;
+use super::placement;
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes::UnexpectedEof;
 use crate::checksum;
@@ -11,9 +11,8 @@ use crate::chunk_record::{self, ArrayClient, ElementEncoding, IndexSlots, Invali
 use crate::codec::Encode;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::extensible_array::{
-    self, DataBlock, ExtensibleArrayCreationParameters, Layout, SuperBlock,
-};
+use crate::extensible_array::geometry::{self, DataBlock, Layout, SuperBlock};
+use crate::extensible_array::{self, ExtensibleArrayCreationParameters};
 use crate::width::OffsetWidth;
 
 /// The creation geometry, element layout, and owning header address of an Extensible Array.
@@ -138,7 +137,7 @@ impl ExtensibleArrayBlockWriter {
                     let data = block.data_block(local.to_u64())?;
                     self.require_block_offset(data.offset())?;
                     let (length, _) = self.data_extent(data)?;
-                    stored_block_range(layout.encoding().offsets(), *address, length)?;
+                    placement::stored_block_range(layout.encoding().offsets(), *address, length)?;
                 }
             }
         }
@@ -355,9 +354,9 @@ impl ExtensibleArrayBlockWriter {
         let (prefix, body) = output.split_at_mut(self.layout.prefix_len_usize());
         let (signature_field, fields) = prefix.split_at_mut(signature.len());
         signature_field.copy_from_slice(&signature);
-        let (properties, address) = fields.split_at_mut(extensible_array::BLOCK_BYTE_FIELDS);
+        let (properties, address) = fields.split_at_mut(extensible_array::block::BLOCK_BYTE_FIELDS);
         properties.copy_from_slice(&[
-            extensible_array::VERSION,
+            extensible_array::block::VERSION,
             self.layout.encoding().client().id(),
         ]);
         write_address(address, self.owner);
@@ -427,8 +426,11 @@ impl<'a> ExtensibleArrayBlockEncoding<'a> {
                 addresses,
             } => {
                 write_checksummed(output, |body| {
-                    let body =
-                        writer.write_prefix(body, extensible_array::INDEX_BLOCK_SIGNATURE, None);
+                    let body = writer.write_prefix(
+                        body,
+                        extensible_array::index_block::INDEX_BLOCK_SIGNATURE,
+                        None,
+                    );
                     let (elements, pointers) = body.split_at_mut(*elements_len);
                     Elements {
                         slots,
@@ -448,7 +450,7 @@ impl<'a> ExtensibleArrayBlockEncoding<'a> {
                 write_checksummed(output, |body| {
                     let body = writer.write_prefix(
                         body,
-                        extensible_array::SUPER_BLOCK_SIGNATURE,
+                        extensible_array::secondary_block::SUPER_BLOCK_SIGNATURE,
                         Some(block.offset()),
                     );
                     let (bits, pointers) = body.split_at_mut(*bitmap_len);
@@ -460,7 +462,7 @@ impl<'a> ExtensibleArrayBlockEncoding<'a> {
                 write_checksummed(output, |body| {
                     let body = writer.write_prefix(
                         body,
-                        extensible_array::DATA_BLOCK_SIGNATURE,
+                        extensible_array::data_block::DATA_BLOCK_SIGNATURE,
                         Some(*offset),
                     );
                     elements.write(body);
@@ -475,7 +477,7 @@ impl<'a> ExtensibleArrayBlockEncoding<'a> {
                 write_checksummed(prefix, |body| {
                     writer.write_prefix(
                         body,
-                        extensible_array::DATA_BLOCK_SIGNATURE,
+                        extensible_array::data_block::DATA_BLOCK_SIGNATURE,
                         Some(*offset),
                     );
                 });
@@ -716,7 +718,7 @@ fn require_page_owners(
     child_count: u64,
     pages_per_child: u64,
 ) -> Result<(), FormatError> {
-    let page_count = extensible_array::product(child_count, pages_per_child)?;
+    let page_count = geometry::product(child_count, pages_per_child)?;
     let bits_per_byte = u64::from(u8::BITS);
     let page_bytes = page_count.div_ceil(bits_per_byte).to_usize()?;
     // Preparation acquires the bitmap length rounded up separately for each child.
@@ -757,7 +759,7 @@ pub(super) fn destination(output: &mut [u8], length: usize) -> Result<&mut [u8],
 ///
 /// Panics if `output` has fewer than four bytes.
 pub(super) fn write_checksummed(output: &mut [u8], write: impl FnOnce(&mut [u8])) {
-    let (body, stored) = output.split_at_mut(output.len() - extensible_array::CHECKSUM_LEN);
+    let (body, stored) = output.split_at_mut(output.len() - extensible_array::block::CHECKSUM_LEN);
     write(body);
     stored.copy_from_slice(&checksum::jenkins_lookup3(body).to_le_bytes());
 }

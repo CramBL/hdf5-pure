@@ -1,7 +1,6 @@
 use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_core::PhysicalAddress;
 
-use super::VERSION;
 use super::data_block::DATA_BLOCK_SIGNATURE;
 use super::geometry::{DataBlock, Layout};
 use super::header::ExtensibleArrayHeader;
@@ -229,5 +228,14 @@ pub(super) fn body(bytes: &[u8], pos: usize) -> Result<&[u8], FormatError> {
     bytes
         .split_last_chunk::<{ size_of::<u32>() }>()
         .and_then(|(body, _checksum)| body.get(pos..))
-        .ok_or_else(|| super::internal("block ends inside its prefix or its checksum"))
+        .ok_or_else(|| internal("block ends inside its prefix or its checksum"))
 }
+
+pub(super) fn internal(detail: &str) -> FormatError {
+    FormatError::Internal(alloc::format!("an Extensible Array {detail}"))
+}
+
+pub(super) const VERSION: u8 = 0;
+// The version and client ID of a block.
+pub(super) const BLOCK_BYTE_FIELDS: usize = 2;
+pub(super) const CHECKSUM_LEN: usize = 4;

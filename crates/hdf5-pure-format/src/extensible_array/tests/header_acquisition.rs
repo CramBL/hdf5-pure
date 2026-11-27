@@ -4,8 +4,9 @@ use super::support::{ARRAY_AT, FILTER_MASK_BYTES, Fixture, HEADER_MINIMUM_POINTE
 use crate::address::{StoredAddress, StoredAddressExt};
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::extensible_array::block::CHECKSUM_LEN;
+use crate::extensible_array::header::HEADER_PREFIX_LEN;
 use crate::extensible_array::statistics::STATISTICS;
-use crate::extensible_array::{CHECKSUM_LEN, HEADER_PREFIX_LEN};
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
 
 #[rstest]
