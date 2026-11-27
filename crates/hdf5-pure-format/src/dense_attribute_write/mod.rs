@@ -179,7 +179,7 @@ impl PreparedDenseAttrs {
     ) -> Result<Self, FormatError> {
         Self::with_plan(
             attrs,
-            EncodedDenseAttrs::new(widths, attrs, creation)?.into_plan()?,
+            DenseAttrPlan::new(EncodedDenseAttrs::new(widths, attrs, creation)?)?,
             fixups,
         )
     }
@@ -197,7 +197,7 @@ impl PreparedDenseAttrs {
         plan: DenseAttrPlan,
         fixups: impl IntoIterator<Item = DenseAttrFixup>,
     ) -> Result<Self, FormatError> {
-        let widths = plan.geometry.widths;
+        let widths = plan.geometry().widths();
         let reference_size = DENSE_ATTR_VL_ADDRESS_OFFSET
             + usize::from(widths.offsets.get())
             + core::mem::size_of::<u32>();
@@ -221,7 +221,7 @@ impl PreparedDenseAttrs {
                     "dense attribute fixups overlap".into(),
                 ));
             }
-            let bytes = &plan.attributes[attribute].bytes;
+            let bytes = plan.attributes()[attribute].bytes();
             let data_offset = bytes.len() - attr.raw_data.len();
             prepared.push(match fixup {
                 DenseAttrFixup::CommittedDatatype { .. } => {
@@ -331,7 +331,7 @@ impl PreparedDenseAttrs {
         mut payload: impl FnMut(usize) -> Result<&'a [u8], FormatError>,
     ) -> Result<DenseAttrPlan, FormatError> {
         let Self { mut plan, fixups } = self;
-        let widths = plan.geometry.widths;
+        let widths = plan.geometry().widths();
         let reference_size = DENSE_ATTR_VL_ADDRESS_OFFSET
             + usize::from(widths.offsets.get())
             + core::mem::size_of::<u32>();
@@ -340,7 +340,7 @@ impl PreparedDenseAttrs {
                 PreparedAttrFixup::CommittedDatatype { attribute, offset } => {
                     let resolved = address(attribute)?;
                     defined_dense_attr_reference(widths, resolved)?;
-                    plan.attributes[attribute].bytes
+                    plan.attribute_bytes_mut(attribute)
                         [offset..offset + usize::from(widths.offsets.get())]
                         .copy_from_slice(
                             &resolved.get().to_le_bytes()[..usize::from(widths.offsets.get())],
@@ -349,7 +349,7 @@ impl PreparedDenseAttrs {
                 PreparedAttrFixup::GlobalHeap { attribute, offset }
                 | PreparedAttrFixup::Payload { attribute, offset } => {
                     let resolved = payload(attribute)?;
-                    let target = &mut plan.attributes[attribute].bytes[offset..];
+                    let target = &mut plan.attribute_bytes_mut(attribute)[offset..];
                     if target.len() != resolved.len() {
                         return Err(FormatError::Internal(
                             "a dense attribute fixup changes its prepared length".into(),
@@ -408,7 +408,7 @@ impl PreparedDenseAttrs {
 
     /// Returns the widths retained for reference resolution, placement, and serialization.
     pub fn widths(&self) -> FormatWidths {
-        self.plan.geometry.widths
+        self.plan.geometry().widths()
     }
 
     /// Returns the reserved length, including heap blocks, indexes, and huge objects.
@@ -491,24 +491,43 @@ pub fn dense_attrs_plan(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
 ) -> Result<DenseAttrPlan, FormatError> {
-    EncodedDenseAttrs::new(
+    DenseAttrPlan::new(EncodedDenseAttrs::new(
         FormatWidths {
             offsets: DENSE_ATTR_OFFSET_WIDTH,
             lengths: DENSE_ATTR_LENGTH_WIDTH,
         },
         attrs,
         creation,
-    )?
-    .into_plan()
+    )?)
 }
 
 impl DenseAttrPlan {
+    fn new(encoded: EncodedDenseAttrs) -> Result<Self, FormatError> {
+        let (geometry, attributes) = DenseAttrGeometry::prepare(encoded)?;
+        Ok(Self {
+            attributes,
+            geometry: Arc::new(geometry),
+        })
+    }
+
+    fn geometry(&self) -> &DenseAttrGeometry {
+        &self.geometry
+    }
+
+    fn attributes(&self) -> &[EncodedDenseAttribute] {
+        &self.attributes
+    }
+
+    fn attribute_bytes_mut(&mut self, index: usize) -> &mut [u8] {
+        self.attributes[index].bytes_mut()
+    }
+
     /// Returns the allocation kind of each block in placement order.
     ///
     /// The order matches [`Self::block_lengths`]. Huge-object payloads follow the metadata.
     pub fn block_kinds(&self) -> impl ExactSizeIterator<Item = DenseAttrBlockKind> + '_ {
-        let metadata = self.geometry.block_lengths.len() - self.geometry.huge_count;
-        (0..self.geometry.block_lengths.len()).map(move |index| {
+        let metadata = self.geometry.block_lengths().len() - self.geometry.huge_count();
+        (0..self.geometry.block_lengths().len()).map(move |index| {
             if index < metadata {
                 DenseAttrBlockKind::Metadata
             } else {
@@ -524,7 +543,7 @@ impl DenseAttrPlan {
     /// header followed by its nodes. Huge objects retain the input attribute order.
     /// [`Self::place`] takes addresses in this order.
     pub fn block_lengths(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
-        self.geometry.block_lengths.iter().copied()
+        self.geometry.block_lengths().iter().copied()
     }
 
     /// Places each heap block, index block, and huge object at its supplied address.
@@ -578,7 +597,7 @@ impl DenseAttrPlan {
 
     /// Returns the reserved length, including heap blocks, indexes, and huge objects.
     pub fn blob_len(&self) -> u64 {
-        self.geometry.total_len
+        self.geometry.offsets().total_len
     }
 
     /// Returns the object-header metadata for a heap placed at `heap_address`.
@@ -597,13 +616,15 @@ impl DenseAttrPlan {
     ) -> Result<AttributeInfoMessage, FormatError> {
         self.extent(heap_address)?;
         AttributeInfoMessage::new(
-            self.geometry.widths.offsets,
-            self.geometry.next_index,
+            self.geometry.widths().offsets,
+            self.geometry.indexes().next_index(),
             DecodedStoredAddress::Defined(heap_address),
-            DecodedStoredAddress::Defined(heap_address.checked_add(self.geometry.btree_off)?),
-            if self.geometry.indexed {
+            DecodedStoredAddress::Defined(
+                heap_address.checked_add(self.geometry.offsets().btree_off)?,
+            ),
+            if self.geometry.indexes().indexed() {
                 AttributeCreationOrderIndex::Defined(
-                    heap_address.checked_add(self.geometry.corder_bthd_off)?,
+                    heap_address.checked_add(self.geometry.offsets().corder_bthd_off)?,
                 )
             } else {
                 AttributeCreationOrderIndex::Absent
@@ -623,7 +644,7 @@ impl DenseAttrPlan {
     /// the retained length width. Propagates heap-header, index-header, heap-ID, and huge-object
     /// record encoding and parsing errors.
     pub fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
-        let widths = self.geometry.widths;
+        let widths = self.geometry.widths();
         self.extent(heap_address)?;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
         let heap_id_length = DENSE_ATTR_HEAP_ID_LENGTH;
@@ -632,33 +653,28 @@ impl DenseAttrPlan {
             attributes,
             geometry,
         } = self;
-        let DenseAttrGeometry {
-            huge_id_of,
-            huge_count,
-            huge_total: _,
-            managed_plan,
-            name_plan,
-            corder_plan,
-            huge_plan,
-            order,
-            corder_order,
-            ..
-        } = geometry.as_ref();
-        let huge_count = *huge_count;
+        let huge_id_of = geometry.huge_id_of();
+        let huge_count = geometry.huge_count();
+        let managed_plan = geometry.managed_plan();
+        let name_plan = geometry.name_plan();
+        let corder_plan = geometry.corder_plan();
+        let huge_plan = geometry.huge_plan();
+        let order = geometry.indexes().order();
+        let corder_order = geometry.indexes().corder_order();
 
         // The writer adds the heap base to offsets for its blocks, indexes, and huge objects.
         // Attribute references in payload bytes are resolved independently of this base.
         // The serialized length is independent of the chosen heap address.
         let address_of = |offset: u64| heap_address.checked_add(offset);
         let frhp_addr = heap_address;
-        let managed_addr = address_of(geometry.managed_off)?;
-        let name_nodes_addr = address_of(geometry.name_nodes_off)?;
-        let corder_nodes_addr = address_of(geometry.corder_nodes_off)?;
+        let managed_addr = address_of(geometry.offsets().managed_off)?;
+        let name_nodes_addr = address_of(geometry.offsets().name_nodes_off)?;
+        let corder_nodes_addr = address_of(geometry.offsets().corder_nodes_off)?;
         let (huge_bthd_addr, huge_nodes_addr, huge_data_addr) = if huge_count > 0 {
             (
-                address_of(geometry.huge_bthd_off)?,
-                address_of(geometry.huge_nodes_off)?,
-                address_of(geometry.huge_data_off)?,
+                address_of(geometry.offsets().huge_bthd_off)?,
+                address_of(geometry.offsets().huge_nodes_off)?,
+                address_of(geometry.offsets().huge_data_off)?,
             )
         } else {
             (
@@ -673,7 +689,7 @@ impl DenseAttrPlan {
         // (`H5HF__hdr_finish_init_phase1`, `H5HFhdr.c`, HDF5 2.2.0). For this geometry, the flag
         // byte, offset, and length occupy the eight-byte heap ID.
         debug_assert_eq!(
-            1 + block_offset_bytes + encoded_size_width(u64::from(self.geometry.max_managed)),
+            1 + block_offset_bytes + encoded_size_width(u64::from(self.geometry.max_managed())),
             heap_id_length as usize,
             "managed heap ID width must match what the declared maximum managed object size implies"
         );
@@ -693,10 +709,10 @@ impl DenseAttrPlan {
             match huge_id {
                 Some(id) => {
                     let address = next_huge_addr;
-                    huge_records.push((*id, address, s.bytes.len() as u64));
-                    next_huge_addr = next_huge_addr.checked_add(s.bytes.len() as u64)?;
+                    huge_records.push((*id, address, s.bytes().len() as u64));
+                    next_huge_addr = next_huge_addr.checked_add(s.bytes().len() as u64)?;
                     heap_ids.push(if header.huge_ids_direct_with_widths(widths) {
-                        header.encode_huge_direct_id(address, s.bytes.len().to_u64(), widths)?
+                        header.encode_huge_direct_id(address, s.bytes().len().to_u64(), widths)?
                     } else {
                         header.encode_huge_id(*id, widths.offsets, widths.lengths)?
                     });
@@ -704,9 +720,9 @@ impl DenseAttrPlan {
                 None => {
                     heap_ids.push(header.encode_managed_id(
                         managed_plan.heap_offset(managed.len()),
-                        s.bytes.len() as u64,
+                        s.bytes().len() as u64,
                     )?);
-                    managed.push(s.bytes.as_slice());
+                    managed.push(s.bytes());
                 }
             }
         }
@@ -721,7 +737,7 @@ impl DenseAttrPlan {
             AttributeRecord {
                 heap_id: PreparedHeapId::new(&ids, &heap_ids[i as usize])?.bytes(),
                 flags: MessageFlags::NONE,
-                creation_order: attributes[i as usize].creation_index,
+                creation_order: attributes[i as usize].creation_index(),
             }
             .encode_name_record(&mut name_records, hash);
         }
@@ -733,10 +749,10 @@ impl DenseAttrPlan {
             widths.lengths,
         )?;
 
-        let mut blob = Vec::with_capacity(geometry.total_len.to_usize().unwrap_or(0));
+        let mut blob = Vec::with_capacity(geometry.offsets().total_len.to_usize().unwrap_or(0));
         blob.extend_from_slice(&frhp);
         blob.extend_from_slice(&managed_blocks);
-        debug_assert_eq!(blob.len() as u64, geometry.btree_off);
+        debug_assert_eq!(blob.len() as u64, geometry.offsets().btree_off);
         blob.extend_from_slice(&name_tree.header);
         blob.extend_from_slice(&name_tree.nodes);
 
@@ -748,7 +764,7 @@ impl DenseAttrPlan {
                 AttributeRecord {
                     heap_id: PreparedHeapId::new(&ids, &heap_ids[i as usize])?.bytes(),
                     flags: MessageFlags::NONE,
-                    creation_order: attributes[i as usize].creation_index,
+                    creation_order: attributes[i as usize].creation_index(),
                 }
                 .encode_creation_order_record(&mut corder_records);
             }
@@ -758,7 +774,7 @@ impl DenseAttrPlan {
                 widths.offsets,
                 widths.lengths,
             )?;
-            debug_assert_eq!(blob.len() as u64, geometry.corder_bthd_off);
+            debug_assert_eq!(blob.len() as u64, geometry.offsets().corder_bthd_off);
             blob.extend_from_slice(&corder_tree.header);
             blob.extend_from_slice(&corder_tree.nodes);
         }
@@ -793,19 +809,19 @@ impl DenseAttrPlan {
                 widths.lengths,
             )?;
 
-            debug_assert_eq!(blob.len() as u64, geometry.huge_bthd_off);
+            debug_assert_eq!(blob.len() as u64, geometry.offsets().huge_bthd_off);
             blob.extend_from_slice(&huge_tree.header);
             blob.extend_from_slice(&huge_tree.nodes);
-            debug_assert_eq!(blob.len() as u64, geometry.huge_data_off);
+            debug_assert_eq!(blob.len() as u64, geometry.offsets().huge_data_off);
             for (s, huge_id) in attributes.iter().zip(huge_id_of) {
                 if huge_id.is_some() {
-                    blob.extend_from_slice(&s.bytes);
+                    blob.extend_from_slice(s.bytes());
                 }
             }
         }
 
         // Compare the emitted length with the reserved length returned by `blob_len`.
-        if blob.len() as u64 != geometry.total_len {
+        if blob.len() as u64 != geometry.offsets().total_len {
             return Err(FormatError::Internal(
                 "a dense attribute heap does not fill its planned reservation".into(),
             ));
@@ -816,41 +832,42 @@ impl DenseAttrPlan {
             blob,
         })
     }
+
     fn heap_header(&self, root: StoredAddress, huge_index: StoredAddress) -> FractalHeapHeader {
-        let widths = self.geometry.widths;
-        let geometry = &self.geometry;
+        let widths = self.geometry.widths();
+        let geometry = self.geometry();
         FractalHeapHeader {
             heap_id_length: DENSE_ATTR_HEAP_ID_LENGTH,
             filtering: FractalHeapFiltering::Unfiltered,
             flags: FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
-            max_managed_object_size: self.geometry.max_managed,
-            next_huge_object_id: geometry.huge_count as u64,
-            btree_huge_objects_address: if geometry.huge_count == 0 {
+            max_managed_object_size: self.geometry.max_managed(),
+            next_huge_object_id: geometry.huge_count() as u64,
+            btree_huge_objects_address: if geometry.huge_count() == 0 {
                 StoredAddress::undefined(widths.offsets)
             } else {
                 huge_index
             },
-            free_space_in_managed_blocks: geometry.managed_plan.free_space(),
+            free_space_in_managed_blocks: geometry.managed_plan().free_space(),
             managed_block_free_space_manager_address: StoredAddress::undefined(widths.offsets),
-            managed_space: geometry.managed_plan.managed_space(),
-            allocated_managed_space: geometry.managed_plan.allocated_space(),
-            direct_block_allocation_iterator_offset: geometry.managed_plan.allocation_iterator(),
+            managed_space: geometry.managed_plan().managed_space(),
+            allocated_managed_space: geometry.managed_plan().allocated_space(),
+            direct_block_allocation_iterator_offset: geometry.managed_plan().allocation_iterator(),
             // Managed and huge objects are counted separately, and an attribute is
             // in exactly one of the two.
-            managed_objects_count: (self.attributes.len() - geometry.huge_count) as u64,
-            huge_objects_size: geometry.huge_total,
-            huge_objects_count: geometry.huge_count as u64,
+            managed_objects_count: (self.attributes.len() - geometry.huge_count()) as u64,
+            huge_objects_size: geometry.huge_total(),
+            huge_objects_count: geometry.huge_count() as u64,
             tiny_objects_size: 0,
             tiny_objects_count: 0,
             table_width: ATTRIBUTE_HEAP_TABLE_WIDTH,
             starting_block_size: ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE,
-            max_direct_block_size: self.geometry.max_direct,
+            max_direct_block_size: self.geometry.max_direct(),
             max_heap_size: DENSE_ATTR_MAX_HEAP_SIZE_BITS,
             start_root_rows: ATTRIBUTE_HEAP_START_ROOT_ROWS,
             root_block_address: root,
             // Zero when the root is a direct block, which is how a reader decides
             // which of the two the address above points at.
-            current_rows_in_root_indirect_block: geometry.managed_plan.root_rows(),
+            current_rows_in_root_indirect_block: geometry.managed_plan().root_rows(),
         }
     }
 
@@ -860,7 +877,8 @@ impl DenseAttrPlan {
     ///
     /// Returns the start and exclusive-end errors of [`Self::block_end`].
     fn extent(&self, base: StoredAddress) -> Result<(), FormatError> {
-        self.block_end(base, self.geometry.total_len).map(|_| ())
+        self.block_end(base, self.geometry.offsets().total_len)
+            .map(|_| ())
     }
 
     /// Checks a defined block start and returns its representable exclusive end.
@@ -873,7 +891,7 @@ impl DenseAttrPlan {
     /// [`FormatError::AddressTooLarge`] if the start or end exceeds the retained width, or
     /// [`FormatError::OffsetOverflow`] if the end exceeds [`u64::MAX`].
     fn block_end(&self, address: StoredAddress, length: u64) -> Result<u64, FormatError> {
-        let offsets = self.geometry.widths.offsets;
+        let offsets = self.geometry.widths().offsets;
         let maximum = StoredAddress::undefined(offsets).get();
         if address.get() == maximum {
             return Err(FormatError::DefinedAddressIsUndefined {
@@ -941,16 +959,12 @@ struct DenseAttrGeometry {
     name_plan: BTreeV2Plan,
     corder_plan: Option<BTreeV2Plan>,
     huge_plan: Option<BTreeV2Plan>,
-    /// `(name hash, attribute index)` in the order the name index is searched.
-    order: Vec<(u32, u32)>,
-    /// Attribute indices in the order the creation-order index is searched.
-    /// Empty unless that index is emitted.
-    corder_order: Vec<u32>,
-    /// The next creation index, or `None` when creation order is untracked.
-    next_index: Option<u16>,
-    /// Whether the creation-order B-tree is emitted.
-    indexed: bool,
+    indexes: AttributeIndexes,
     /// Where each part of the blob starts, relative to the heap's own address.
+    offsets: DenseAttrOffsets,
+}
+
+struct DenseAttrOffsets {
     managed_off: u64,
     btree_off: u64,
     name_nodes_off: u64,
@@ -970,12 +984,35 @@ struct DenseAttrGeometry {
 struct EncodedDenseAttrs {
     widths: FormatWidths,
     attributes: Vec<EncodedDenseAttribute>,
+    indexes: AttributeIndexes,
+}
+
+#[derive(Debug)]
+struct AttributeIndexes {
     /// `(name hash, attribute index)` pairs sorted by hash and then by name.
     order: Vec<(u32, u32)>,
     /// Attribute indexes sorted by creation index for the optional creation-order B-tree.
     corder_order: Vec<u32>,
     next_index: Option<u16>,
     indexed: bool,
+}
+
+impl AttributeIndexes {
+    fn order(&self) -> &[(u32, u32)] {
+        &self.order
+    }
+
+    fn corder_order(&self) -> &[u32] {
+        &self.corder_order
+    }
+
+    fn next_index(&self) -> Option<u16> {
+        self.next_index
+    }
+
+    fn indexed(&self) -> bool {
+        self.indexed
+    }
 }
 
 impl EncodedDenseAttrs {
@@ -1051,7 +1088,7 @@ impl EncodedDenseAttrs {
         } else {
             Vec::new()
         };
-        corder_order.sort_unstable_by_key(|&i| attributes[i as usize].creation_index);
+        corder_order.sort_unstable_by_key(|&i| attributes[i as usize].creation_index());
         for pair in corder_order.windows(2) {
             let left = attributes[pair[0] as usize].creation_index;
             let right = attributes[pair[1] as usize].creation_index;
@@ -1062,27 +1099,30 @@ impl EncodedDenseAttrs {
         Ok(Self {
             widths,
             attributes,
-            order,
-            corder_order: if indexed { corder_order } else { Vec::new() },
-            next_index,
-            indexed,
+            indexes: AttributeIndexes {
+                order,
+                corder_order: if indexed { corder_order } else { Vec::new() },
+                next_index,
+                indexed,
+            },
         })
     }
 
+    fn into_parts(self) -> (FormatWidths, Vec<EncodedDenseAttribute>, AttributeIndexes) {
+        (self.widths, self.attributes, self.indexes)
+    }
+}
+
+impl DenseAttrGeometry {
     /// Plans heap blocks and indexes for the encoded attributes.
     ///
     /// # Errors
     ///
     /// Returns the heap-space, platform-size, and length errors documented by [`dense_attrs_plan`].
-    fn into_plan(self) -> Result<DenseAttrPlan, FormatError> {
-        let EncodedDenseAttrs {
-            widths,
-            attributes,
-            order,
-            corder_order,
-            next_index,
-            indexed,
-        } = self;
+    fn prepare(
+        encoded: EncodedDenseAttrs,
+    ) -> Result<(Self, Vec<EncodedDenseAttribute>), FormatError> {
+        let (widths, attributes, indexes) = encoded.into_parts();
         let count = attributes.len();
         let max_direct = crate::fractal_heap::write::maximum_direct_block_size(
             ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
@@ -1098,7 +1138,7 @@ impl EncodedDenseAttrs {
         let mut huge_id_of: Vec<Option<u64>> = vec![None; count];
         let mut huge_count: usize = 0;
         for (slot, attribute) in huge_id_of.iter_mut().zip(&attributes) {
-            if attribute.bytes.len().to_u64() > u64::from(max_managed) {
+            if attribute.bytes().len().to_u64() > u64::from(max_managed) {
                 huge_count += 1;
                 *slot = Some(huge_count as u64);
             }
@@ -1107,7 +1147,7 @@ impl EncodedDenseAttrs {
             .iter()
             .zip(&huge_id_of)
             .filter(|(_, id)| id.is_some())
-            .map(|(s, _)| s.bytes.len() as u64)
+            .map(|(s, _)| s.bytes().len() as u64)
             .sum();
         bytes::require_length(huge_total, widths.lengths)?;
         bytes::require_length(huge_count.to_u64(), widths.lengths)?;
@@ -1119,7 +1159,7 @@ impl EncodedDenseAttrs {
             .iter()
             .zip(&huge_id_of)
             .filter(|(_, id)| id.is_none())
-            .map(|(s, _)| s.bytes.len() as u64)
+            .map(|(s, _)| s.bytes().len() as u64)
             .collect();
         let managed_plan = ManagedHeapPlan::attributes_with_widths(&managed_sizes, widths)
             .map_err(dense_attr_heap_error)?;
@@ -1150,7 +1190,8 @@ impl EncodedDenseAttrs {
                 })
         };
         let name_plan = plan_index(BTREE_V2_ATTRIBUTE_NAME, count, DENSE_ATTR_BTREE_RECORD)?;
-        let corder_plan = indexed
+        let corder_plan = indexes
+            .indexed()
             .then(|| {
                 plan_index(
                     BTREE_V2_ATTRIBUTE_CREATION_ORDER,
@@ -1225,13 +1266,12 @@ impl EncodedDenseAttrs {
                     .iter()
                     .zip(&huge_id_of)
                     .filter(|(_, id)| id.is_some())
-                    .map(|(attribute, _)| attribute.bytes.len().to_u64()),
+                    .map(|(attribute, _)| attribute.bytes().len().to_u64()),
             )
             .collect();
 
-        Ok(DenseAttrPlan {
-            attributes,
-            geometry: Arc::new(DenseAttrGeometry {
+        Ok((
+            Self {
                 widths,
                 max_managed,
                 max_direct,
@@ -1243,21 +1283,73 @@ impl EncodedDenseAttrs {
                 name_plan,
                 corder_plan,
                 huge_plan,
-                order,
-                corder_order,
-                next_index,
-                indexed,
-                managed_off,
-                btree_off,
-                name_nodes_off,
-                corder_bthd_off,
-                corder_nodes_off,
-                huge_bthd_off,
-                huge_nodes_off,
-                huge_data_off,
-                total_len,
-            }),
-        })
+                indexes,
+                offsets: DenseAttrOffsets {
+                    managed_off,
+                    btree_off,
+                    name_nodes_off,
+                    corder_bthd_off,
+                    corder_nodes_off,
+                    huge_bthd_off,
+                    huge_nodes_off,
+                    huge_data_off,
+                    total_len,
+                },
+            },
+            attributes,
+        ))
+    }
+
+    fn widths(&self) -> FormatWidths {
+        self.widths
+    }
+
+    fn max_managed(&self) -> u32 {
+        self.max_managed
+    }
+
+    fn max_direct(&self) -> u64 {
+        self.max_direct
+    }
+
+    fn block_lengths(&self) -> &[u64] {
+        &self.block_lengths
+    }
+
+    fn huge_id_of(&self) -> &[Option<u64>] {
+        &self.huge_id_of
+    }
+
+    fn huge_count(&self) -> usize {
+        self.huge_count
+    }
+
+    fn huge_total(&self) -> u64 {
+        self.huge_total
+    }
+
+    fn managed_plan(&self) -> &ManagedHeapPlan {
+        &self.managed_plan
+    }
+
+    fn name_plan(&self) -> &BTreeV2Plan {
+        &self.name_plan
+    }
+
+    fn corder_plan(&self) -> Option<&BTreeV2Plan> {
+        self.corder_plan.as_ref()
+    }
+
+    fn huge_plan(&self) -> Option<&BTreeV2Plan> {
+        self.huge_plan.as_ref()
+    }
+
+    fn offsets(&self) -> &DenseAttrOffsets {
+        &self.offsets
+    }
+
+    fn indexes(&self) -> &AttributeIndexes {
+        &self.indexes
     }
 }
 
@@ -1268,6 +1360,20 @@ impl EncodedDenseAttrs {
 struct EncodedDenseAttribute {
     bytes: Vec<u8>,
     creation_index: u32,
+}
+
+impl EncodedDenseAttribute {
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    fn creation_index(&self) -> u32 {
+        self.creation_index
+    }
 }
 
 /// Returns the minimum nonzero byte width needed to encode `value`.
