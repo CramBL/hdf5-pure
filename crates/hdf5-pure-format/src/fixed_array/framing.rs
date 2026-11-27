@@ -18,6 +18,8 @@ pub(super) fn checksum_ranges(range: FileRange) -> Result<(FileRange, FileRange)
     Ok((body, FileRange::new(body.end(), CHECKSUM_LEN)?))
 }
 
+// The signatures, the version, and the field widths are defined in "The Fixed Array Index" of the
+// format specification, version 4.0.
 pub(super) const VERSION: u8 = 0;
 pub(super) const SIGNATURE_LEN: u64 = 4;
 pub(super) const CHECKSUM_LEN: u64 = 4;

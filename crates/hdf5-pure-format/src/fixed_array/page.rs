@@ -9,11 +9,11 @@ use super::data_block;
 use super::data_block::FixedArrayDataBlockRef;
 use super::data_block::FixedArrayElements;
 use super::data_block::FixedArrayEntryWindow;
+use super::emit;
 use super::framing;
 use super::framing::CHECKSUM_LEN;
 use super::geometry;
 use super::geometry::Paging;
-use super::mutation;
 use crate::bytes;
 use crate::checksum;
 use crate::checksum::JenkinsLookup3;
@@ -221,14 +221,14 @@ impl FixedArrayPageRef {
         let stride = u64::from(self.encoding.stride().get());
         let empty = self.encoding.encode(None)?;
         let mut checksum = JenkinsLookup3::new(self.checksummed_range()?.length());
-        mutation::emit_repeated(
+        emit::emit_repeated(
             &mut write,
             Some(&mut checksum),
             empty.as_bytes(),
             geometry::product(window.first_slot() - slots.start, stride)?,
         )?;
-        mutation::emit_records(&mut write, &mut checksum, self.encoding, records)?;
-        mutation::emit_repeated(
+        emit::emit_records(&mut write, &mut checksum, self.encoding, records)?;
+        emit::emit_repeated(
             &mut write,
             Some(&mut checksum),
             empty.as_bytes(),
