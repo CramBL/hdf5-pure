@@ -91,6 +91,19 @@ fn supported_models_report_typed_user_kind_projection_errors(
 }
 
 #[test]
+fn exact_link_framing_precedes_storage_projection() {
+    let bytes = b"\x01\x08\x41\x01u\x01\x00x\xa5";
+    assert_eq!(
+        OwnedLink::parse(bytes, OffsetWidth::Two).unwrap_err(),
+        LinkStorageError::TrailingBytes
+    );
+    assert_eq!(
+        OwnedLink::parse_prefix(bytes, OffsetWidth::Two).unwrap_err(),
+        LinkStorageError::Format(FormatError::InvalidLinkType(65))
+    );
+}
+
+#[test]
 fn unsupported_kind_projection_error_displays_the_kind_without_a_source() {
     let error = LinkProjectionError::UnsupportedKind(UserLinkKind::new(u8::MAX).unwrap());
     assert_eq!(error.to_string(), "unsupported link kind: 255");
@@ -116,13 +129,13 @@ fn owned_compatibility_parsing_decodes_user_framing_before_rejecting_kind(
 }
 
 #[rstest]
-#[case::hard(b"\x01\x01\x01\x00x\x34\x12\x00\x00", 7)]
-#[case::soft(b"\x01\x09\x01\x01\x00x\x01\x00y\x00\x00", 9)]
+#[case::hard(b"\x01\x01\x01\x00x\x34\x12\xa5\xff", 7)]
+#[case::soft(b"\x01\x09\x01\x01\x00x\x01\x00y\xa5\xff", 9)]
 fn owned_prefix_parsing_preserves_original_consumed_extent(
     #[case] bytes: &[u8],
     #[case] len: usize,
 ) {
-    let (owned, consumed) = OwnedLink::parse_padded(bytes, OffsetWidth::Two).unwrap();
+    let (owned, consumed) = OwnedLink::parse_prefix(bytes, OffsetWidth::Two).unwrap();
     assert_eq!(consumed, len);
     assert_eq!(owned.encoded_len(OffsetWidth::Two).unwrap(), len);
     assert_eq!(owned.serialize(OffsetWidth::Two).unwrap(), bytes[..len]);

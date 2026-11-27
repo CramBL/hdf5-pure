@@ -2286,7 +2286,7 @@ impl FileInner {
                 MessageType::LINK => {
                     let bytes = self.message_body(message)?;
                     let link = if header.version == PADDED_HEADER_VERSION {
-                        OwnedLink::parse_padded(&bytes, widths.offsets).map(|(link, _)| link)
+                        OwnedLink::parse_prefix(&bytes, widths.offsets).map(|(link, _)| link)
                     } else {
                         OwnedLink::parse(&bytes, widths.offsets)
                     }

@@ -7,6 +7,7 @@ use super::error::LinkWireError;
 use super::name::{LinkName, LinkTargetV1};
 use super::source::StoredLink;
 use super::view::{LinkMessageView, LinkTargetView};
+use crate::codec::{DecodeFrame, DecodePrefix};
 use crate::datatype::CharacterSet;
 use crate::width::{OffsetWidth, UintWidth};
 
@@ -53,16 +54,16 @@ impl LinkMessageV1 {
     /// Returns the errors of [`Self::parse_prefix`], or [`LinkWireError::TrailingBytes`] if bytes
     /// follow the target.
     pub fn parse(data: &[u8], offset_width: OffsetWidth) -> Result<Self, LinkWireError> {
-        Ok(Self::from_view(&LinkMessageView::parse(
+        Ok(Self::from_view(&LinkMessageView::decode_frame(
             data,
             offset_width,
         )?))
     }
 
-    /// Parses the message at the start of `data` and returns its consumed length.
+    /// Parses the message at the start of `data` and returns it with the number of bytes read.
     ///
-    /// Uses [`LinkMessageView::parse_prefix`] to check the message before copying its name and
-    /// target. The returned length ends at the target, excluding object header padding.
+    /// Copies the name and target after checking the message. The count includes all fields
+    /// through the target and excludes any bytes that follow it.
     ///
     /// # Errors
     ///
@@ -72,8 +73,9 @@ impl LinkMessageV1 {
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<(Self, usize), LinkWireError> {
-        let link = LinkMessageView::parse_prefix(data, offset_width)?;
-        Ok((Self::from_view(&link), link.consumed()))
+        Ok(LinkMessageView::decode_prefix(data, offset_width)?
+            .map(|view| Self::from_view(&view))
+            .into_parts())
     }
 
     /// Creates a message from checked name bytes and a target.

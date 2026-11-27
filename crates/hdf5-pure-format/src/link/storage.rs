@@ -14,6 +14,7 @@ use core::fmt;
 
 use super::creation_order::LinkCreationPolicy;
 use crate::address::StoredAddress;
+use crate::codec::{DecodeFrame, DecodePrefix};
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
@@ -294,10 +295,11 @@ pub struct OwnedLink {
 }
 
 impl OwnedLink {
-    /// Parses a version 1 Link message while preserving name and symbolic-target bytes.
+    /// Parses one complete version 1 Link message and copies its name and symbolic-target bytes.
     ///
     /// Supports hard, soft, and version 0 external links with zero external flags.
-    /// User-defined values are decoded completely before the kind is rejected. Convert a parsed
+    /// Checks the complete body, including any user-defined value, before copying fields or
+    /// reporting an unsupported kind. Convert a parsed
     /// [`LinkMessageView`] or [`LinkMessageV1`] with [`Self::try_from`] to distinguish an
     /// unsupported kind from a decoding error.
     ///
@@ -313,29 +315,28 @@ impl OwnedLink {
     /// [`FormatError::InvalidLinkType`] wrapped in [`LinkStorageError::Format`] for reserved
     /// or user-defined kinds.
     pub fn parse(data: &[u8], offset_width: OffsetWidth) -> Result<Self, LinkStorageError> {
-        let link = LinkMessageView::parse(data, offset_width).map_err(LinkStorageError::from)?;
+        let link = LinkMessageView::decode_frame(data, offset_width)?;
         Self::try_from(&link).map_err(LinkStorageError::from)
     }
 
-    /// Parses the version 1 Link message at the start of `data` and returns it with its length.
+    /// Parses the version 1 Link message at the start of `data` and returns it with the number
+    /// of bytes read.
     ///
-    /// The bytes past the link are left unread, such as the padding after a message in a version 1
-    /// object header.
+    /// The count ends after the target. The caller can use it to locate any remaining bytes
+    /// in the enclosing record.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Self::parse`] other than [`LinkStorageError::TrailingBytes`] for
     /// bytes after the target.
-    pub fn parse_padded(
+    pub fn parse_prefix(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<(Self, usize), LinkStorageError> {
-        let link =
-            LinkMessageView::parse_prefix(data, offset_width).map_err(LinkWireError::from)?;
-        Ok((
-            Self::try_from(&link).map_err(LinkStorageError::from)?,
-            link.consumed(),
-        ))
+        Ok(LinkMessageView::decode_prefix(data, offset_width)
+            .map_err(LinkWireError::from)?
+            .try_map(|view| Self::try_from(&view))?
+            .into_parts())
     }
 
     /// Creates an owned link from encoded name and target bytes and an optional creation index.

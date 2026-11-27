@@ -22,14 +22,14 @@ use crate::width::OffsetWidth;
     OwnedLinkTarget::soft(b"../x".to_vec()),
     11,
 )]
-fn a_padded_parse_reads_the_link_before_the_padding(
+fn a_link_prefix_ends_before_the_object_header_padding(
     #[case] bytes: &[u8],
     #[case] target: OwnedLinkTarget,
     #[case] len: usize,
 ) {
     let expected = OwnedLink::new(b"l".to_vec(), CharacterSet::Ascii, target, None).unwrap();
     assert_eq!(
-        OwnedLink::parse_padded(bytes, OffsetWidth::Eight),
+        OwnedLink::parse_prefix(bytes, OffsetWidth::Eight),
         Ok((expected, len))
     );
     assert_eq!(
