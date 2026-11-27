@@ -11,6 +11,7 @@ pub(super) struct Geometry {
     encoding: ElementEncoding,
     /// The number of elements in the array, the maximum number of entries the header stores.
     entries: u64,
+    page_bits: u8,
     /// `None` if the data block holds the elements itself.
     paging: Option<Paging>,
 }
@@ -27,6 +28,7 @@ impl Geometry {
         Ok(Self {
             encoding,
             entries,
+            page_bits,
             paging: (entries > page_entries).then(|| Paging {
                 page_entries,
                 pages: entries.div_ceil(page_entries),
@@ -42,6 +44,10 @@ impl Geometry {
         self.entries
     }
 
+    pub(super) const fn page_bits(&self) -> u8 {
+        self.page_bits
+    }
+
     pub(super) const fn paging(&self) -> Option<Paging> {
         self.paging
     }
@@ -50,6 +56,7 @@ impl Geometry {
         let Self {
             encoding,
             entries,
+            page_bits: _,
             paging,
         } = *self;
         let elements = product(entries, u64::from(encoding.stride().get()))?;

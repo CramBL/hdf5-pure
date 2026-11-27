@@ -31,7 +31,6 @@ use crate::bytes;
 use crate::checksum;
 use crate::chunk_record;
 use crate::chunk_record::ArrayClient;
-use crate::chunk_record::ChunkElementEncoding;
 use crate::chunk_record::ChunkRecord;
 use crate::chunk_record::IndexSlots;
 use crate::convert::Narrow;
@@ -102,11 +101,8 @@ pub(crate) const FIXED_ARRAY_PAGE_BITS: u8 = 10;
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct FixedArrayPlan {
-    widths: FormatWidths,
+    lengths: LengthWidth,
     geometry: Geometry,
-    encoding: ChunkElementEncoding,
-    entry_size: u8,
-    page_bits: u8,
     data_block_length: u64,
     total_length: u64,
 }
@@ -128,12 +124,6 @@ impl FixedArrayPlan {
         widths: FormatWidths,
         has_filters: bool,
     ) -> Result<Self, FormatError> {
-        if !width::length_width_holds(widths.lengths, entries) {
-            return Err(FormatError::LengthTooLarge {
-                length: entries,
-                length_size: widths.lengths.get(),
-            });
-        }
         let encoding =
             chunk_record::chunk_element_encoding(chunk_bytes, widths.offsets, has_filters);
         let entry_size = encoding
@@ -141,22 +131,12 @@ impl FixedArrayPlan {
             .narrow_or_else(|| FormatError::InvalidFixedArrayGeometry)?;
         let elements = geometry::element_encoding(widths.offsets, encoding.client_id, entry_size)?;
         let geometry = Geometry::new(elements, entries, FIXED_ARRAY_PAGE_BITS)?;
-        let data_block_length = geometry.data_block_len()?;
-        let total_length = geometry::sum([header::header_len(widths), data_block_length])?;
-        Ok(Self {
-            widths,
-            geometry,
-            encoding,
-            entry_size,
-            page_bits: FIXED_ARRAY_PAGE_BITS,
-            data_block_length,
-            total_length,
-        })
+        Self::from_geometry(widths.lengths, geometry)
     }
 
     /// Returns complete allocation lengths in header, then data block order.
     pub fn block_lengths(&self) -> impl ExactSizeIterator<Item = u64> {
-        [header::header_len(self.widths), self.data_block_length].into_iter()
+        self.block_sizes().into_iter()
     }
 
     /// Returns the sum of the block lengths, excluding any gaps between their placements.
@@ -181,47 +161,44 @@ impl FixedArrayPlan {
         header: StoredAddress,
         data_block: StoredAddress,
     ) -> Result<FixedArrayPlacement, FormatError> {
-        let header = self.range(header, header::header_len(self.widths))?;
-        let data_block = self.range(data_block, self.data_block_length)?;
-        if header.overlaps(data_block) {
-            return Err(FormatError::FixedArrayBlockOverlap {
-                header: header.start().get(),
-                data_block: data_block.start().get(),
+        FixedArrayPlacement::new(self, header, data_block)
+    }
+
+    fn from_geometry(lengths: LengthWidth, geometry: Geometry) -> Result<Self, FormatError> {
+        let entries = geometry.entries();
+        if !width::length_width_holds(lengths, entries) {
+            return Err(FormatError::LengthTooLarge {
+                length: entries,
+                length_size: lengths.get(),
             });
         }
-        Ok(FixedArrayPlacement {
-            plan: self,
-            header,
-            data_block,
+        let data_block_length = geometry.data_block_len()?;
+        let widths = FormatWidths {
+            offsets: geometry.encoding().offsets(),
+            lengths,
+        };
+        let total_length = geometry::sum([header::header_len(widths), data_block_length])?;
+        Ok(Self {
+            lengths,
+            geometry,
+            data_block_length,
+            total_length,
         })
     }
 
-    fn range(
-        &self,
-        address: StoredAddress,
-        length: u64,
-    ) -> Result<AddressRange<StoredAddress>, FormatError> {
-        let maximum = StoredAddress::undefined(self.widths.offsets).get();
-        if address.get() == maximum {
-            return Err(FormatError::DefinedAddressIsUndefined {
-                address: address.get(),
-                offset_size: self.widths.offsets.get(),
-            });
+    fn block_sizes(&self) -> [u64; 2] {
+        [header::header_len(self.widths()), self.data_block_length]
+    }
+
+    fn widths(&self) -> FormatWidths {
+        FormatWidths {
+            offsets: self.geometry.encoding().offsets(),
+            lengths: self.lengths,
         }
-        if address.get() > maximum {
-            return Err(FormatError::AddressTooLarge {
-                address: address.get(),
-                offset_size: self.widths.offsets.get(),
-            });
-        }
-        let range = AddressRange::new(address, length)?;
-        if range.end().get() > maximum {
-            return Err(FormatError::AddressTooLarge {
-                address: range.end().get(),
-                offset_size: self.widths.offsets.get(),
-            });
-        }
-        Ok(range)
+    }
+
+    fn geometry(&self) -> Geometry {
+        self.geometry
     }
 }
 
@@ -237,18 +214,60 @@ pub struct FixedArrayPlacement {
 }
 
 impl FixedArrayPlacement {
+    fn new(
+        plan: FixedArrayPlan,
+        header: StoredAddress,
+        data_block: StoredAddress,
+    ) -> Result<Self, FormatError> {
+        let widths = plan.widths();
+        let [header_length, data_block_length] = plan.block_sizes();
+        let header = Self::range(widths.offsets, header, header_length)?;
+        let data_block = Self::range(widths.offsets, data_block, data_block_length)?;
+        if header.overlaps(data_block) {
+            return Err(FormatError::FixedArrayBlockOverlap {
+                header: header.start().get(),
+                data_block: data_block.start().get(),
+            });
+        }
+        Ok(Self {
+            plan,
+            header,
+            data_block,
+        })
+    }
+
     /// Returns each block's stored address and complete length, header first.
     ///
     /// The order is independent of the blocks' address order.
     pub fn blocks(&self) -> impl ExactSizeIterator<Item = (StoredAddress, u64)> {
-        let Self {
-            plan: _,
-            header,
-            data_block,
-        } = *self;
-        [header, data_block]
+        self.ranges()
             .into_iter()
             .map(|range| (range.start(), range.length()))
+    }
+
+    fn plan(&self) -> FixedArrayPlan {
+        self.plan
+    }
+
+    fn ranges(&self) -> [AddressRange<StoredAddress>; 2] {
+        [self.header, self.data_block]
+    }
+
+    fn range(
+        offsets: OffsetWidth,
+        address: StoredAddress,
+        length: u64,
+    ) -> Result<AddressRange<StoredAddress>, FormatError> {
+        let maximum = StoredAddress::undefined(offsets).get();
+        bytes::require_defined_offset(address.get(), offsets)?;
+        let range = AddressRange::new(address, length)?;
+        if range.end().get() > maximum {
+            return Err(FormatError::AddressTooLarge {
+                address: range.end().get(),
+                offset_size: offsets.get(),
+            });
+        }
+        Ok(range)
     }
 
     /// Serializes the header and data block separately, with their reciprocal stored references.
@@ -269,20 +288,8 @@ impl FixedArrayPlacement {
         &self,
         slots: &IndexSlots<'_>,
     ) -> Result<[(StoredAddress, Vec<u8>); 2], FormatError> {
-        let Self {
-            plan,
-            header,
-            data_block,
-        } = *self;
-        let FixedArrayPlan {
-            widths: _,
-            geometry,
-            encoding: _,
-            entry_size: _,
-            page_bits: _,
-            data_block_length: _,
-            total_length: _,
-        } = plan;
+        let [header, data_block] = self.ranges();
+        let geometry = self.plan().geometry();
         let actual = slots.len().to_u64();
         if actual != geometry.entries() {
             return Err(FormatError::FixedArrayEntryCount {
@@ -307,31 +314,20 @@ impl FixedArrayPlacement {
     /// [`usize::MAX`], or [`FormatError::AllocationFailed`] if its buffer reservation fails.
     /// Placement and planning check the encoded address and entry count.
     pub fn serialize_header(&self) -> Result<Vec<u8>, FormatError> {
-        let Self {
-            plan,
-            header,
-            data_block,
-        } = *self;
-        let FixedArrayPlan {
-            widths,
-            geometry,
-            encoding,
-            entry_size,
-            page_bits,
-            data_block_length: _,
-            total_length: _,
-        } = plan;
+        let [header, data_block] = self.ranges();
+        let geometry = self.plan().geometry();
+        let encoding = geometry.encoding();
         let mut bytes = output_buffer(header.length())?;
         bytes.extend_from_slice(&HEADER_SIGNATURE);
         bytes.push(VERSION);
-        bytes.push(encoding.client_id);
-        bytes.push(entry_size);
-        bytes.push(page_bits);
-        bytes::try_write_length(&mut bytes, geometry.entries(), widths.lengths)?;
+        bytes.push(encoding.client().id());
+        bytes.push(encoding.stride().get());
+        bytes.push(geometry.page_bits());
+        bytes::try_write_length(&mut bytes, geometry.entries(), self.plan().widths().lengths)?;
         bytes::try_write_decoded_address(
             &mut bytes,
             DecodedStoredAddress::Defined(data_block.start()),
-            widths.offsets,
+            encoding.offsets(),
         )?;
         let checksum = checksum::jenkins_lookup3(&bytes);
         bytes.extend_from_slice(&checksum.to_le_bytes());
@@ -340,28 +336,17 @@ impl FixedArrayPlacement {
     }
 
     fn serialize_data_block(&self, slots: &IndexSlots<'_>) -> Result<Vec<u8>, FormatError> {
-        let Self {
-            plan,
-            header,
-            data_block,
-        } = *self;
-        let FixedArrayPlan {
-            widths,
-            geometry,
-            encoding,
-            entry_size: _,
-            page_bits: _,
-            data_block_length: _,
-            total_length: _,
-        } = plan;
+        let [header, data_block] = self.ranges();
+        let geometry = self.plan().geometry();
+        let encoding = geometry.encoding();
         let mut bytes = output_buffer(data_block.length())?;
         bytes.extend_from_slice(&DATA_BLOCK_SIGNATURE);
         bytes.push(VERSION);
-        bytes.push(encoding.client_id);
+        bytes.push(encoding.client().id());
         bytes::try_write_decoded_address(
             &mut bytes,
             DecodedStoredAddress::Defined(header.start()),
-            widths.offsets,
+            encoding.offsets(),
         )?;
         match geometry.paging() {
             None => {
@@ -386,7 +371,8 @@ impl FixedArrayPlacement {
                 for page in 0..pages {
                     let start = page * page_size;
                     let end = start.saturating_add(page_size).min(slots.len());
-                    let mut page_bytes = Vec::with_capacity((end - start) * encoding.elem_size);
+                    let mut page_bytes =
+                        Vec::with_capacity((end - start) * usize::from(encoding.stride().get()));
                     for slot in start..end {
                         self.write_element(&mut page_bytes, slots.at(slot))?;
                     }
@@ -405,41 +391,25 @@ impl FixedArrayPlacement {
         bytes: &mut Vec<u8>,
         chunk: Option<&ChunkRecord>,
     ) -> Result<(), FormatError> {
-        let Self {
-            plan,
-            header: _,
-            data_block: _,
-        } = *self;
-        let FixedArrayPlan {
-            widths,
-            geometry,
-            encoding,
-            entry_size: _,
-            page_bits: _,
-            data_block_length: _,
-            total_length: _,
-        } = plan;
-        let filtered = matches!(
-            geometry.encoding().client(),
-            ArrayClient::FilteredChunks { .. }
-        );
+        let encoding = self.plan().geometry().encoding();
+        let (filtered, chunk_size_bytes) = match encoding.client() {
+            ArrayClient::Chunks => (false, 0),
+            ArrayClient::FilteredChunks { chunk_size_len } => (true, usize::from(chunk_size_len)),
+        };
         match chunk {
-            Some(chunk) => {
-                plan.range(chunk.address, 0)?;
-                chunk_record::write_chunk_element(
-                    bytes,
-                    chunk,
-                    widths.offsets,
-                    filtered,
-                    encoding.chunk_size_bytes,
-                )
-            }
+            Some(chunk) => chunk_record::write_chunk_element(
+                bytes,
+                chunk,
+                encoding.offsets(),
+                filtered,
+                chunk_size_bytes,
+            ),
             None => {
                 chunk_record::write_undefined_element(
                     bytes,
-                    widths.offsets,
+                    encoding.offsets(),
                     filtered,
-                    encoding.chunk_size_bytes,
+                    chunk_size_bytes,
                 );
                 Ok(())
             }
@@ -518,7 +488,7 @@ pub fn build_fixed_array_at(
         has_filters,
     )?;
     fa_address.checked_add(plan.total_len())?;
-    let data_block = fa_address.checked_add(header::header_len(plan.widths))?;
+    let data_block = fa_address.checked_add(header::header_len(plan.widths()))?;
     let [(header, mut bytes), (_, data)] = plan
         .place(fa_address, data_block)?
         .serialize_blocks(slots)?;

@@ -17,7 +17,6 @@ use crate::address::StoredAddress;
 use crate::bytes;
 use crate::checksum;
 use crate::chunk_record::ArrayClient;
-use crate::chunk_record::ChunkElementEncoding;
 use crate::error::FormatError;
 use crate::width::FormatWidths;
 
@@ -94,8 +93,6 @@ impl FixedArrayHeaderLocator {
             range,
             widths,
             base,
-            entry_size,
-            page_bits,
             storage: BlockStorage::new(geometry, address)?,
         })
     }
@@ -126,8 +123,6 @@ pub struct FixedArrayHeader {
     range: FileRange,
     widths: FormatWidths,
     base: BaseAddress,
-    entry_size: u8,
-    page_bits: u8,
     storage: BlockStorage,
 }
 
@@ -150,6 +145,7 @@ impl FixedArrayHeader {
     pub const fn data_block(&self) -> Option<FixedArrayDataBlockRef> {
         self.storage.at(self.base, self.range.start())
     }
+
     /// Plans an empty data block at `data_block` for this header's recorded geometry.
     ///
     /// Retains the header's stored address, widths, client, entry size, entry count, and page bits.
@@ -171,6 +167,7 @@ impl FixedArrayHeader {
     ///
     /// let widths = format::FormatWidths::from_sizes(2, 4)?;
     /// let placement = format::FixedArrayPlan::new(3, 16, widths, false)?
+    ///     .with_page_bits(1)?
     ///     .place(StoredAddress::new(64), StoredAddress::new(256))?;
     /// let bytes = placement.serialize_header()?;
     /// let range = FileRange::new(PhysicalAddress::new(64), bytes.len() as u64)?;
@@ -179,9 +176,9 @@ impl FixedArrayHeader {
     /// );
     /// let header = locator.parse(FileRegion::new(range, &bytes)?)?;
     /// assert_eq!(header.entries(), 3);
-    /// assert_eq!(header.page_bits(), 10);
+    /// assert_eq!(header.page_bits(), 1);
     /// let plan = header.initialization_plan()?;
-    /// assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [18, 18]);
+    /// assert_eq!(plan.block_lengths().collect::<Vec<_>>(), [18, 27]);
     /// let replacement = header.initialization_at(StoredAddress::new(512))?;
     /// let bytes = replacement.serialize_header()?;
     /// let updated = locator.parse(FileRegion::new(range, &bytes)?)?;
@@ -207,35 +204,7 @@ impl FixedArrayHeader {
     ///
     /// Returns [`FormatError::InvalidFixedArrayGeometry`] if a block length or their sum overflows.
     pub fn initialization_plan(&self) -> Result<FixedArrayPlan, FormatError> {
-        let Self {
-            range,
-            widths,
-            base: _,
-            entry_size,
-            page_bits,
-            storage,
-        } = *self;
-        let geometry = storage.geometry();
-        let elements = geometry.encoding();
-        let encoding = ChunkElementEncoding {
-            chunk_size_bytes: match elements.client() {
-                ArrayClient::Chunks => 0,
-                ArrayClient::FilteredChunks { chunk_size_len } => usize::from(chunk_size_len),
-            },
-            elem_size: usize::from(elements.stride().get()),
-            client_id: elements.client().id(),
-        };
-        let data_block_length = geometry.data_block_len()?;
-        let plan = FixedArrayPlan {
-            widths,
-            geometry,
-            encoding,
-            entry_size,
-            page_bits,
-            data_block_length,
-            total_length: geometry::sum([range.length(), data_block_length])?,
-        };
-        Ok(plan)
+        FixedArrayPlan::from_geometry(self.widths.lengths, self.storage.geometry())
     }
 
     /// Returns the array's maximum entry count, including unallocated slots.
@@ -245,7 +214,7 @@ impl FixedArrayHeader {
 
     /// Returns the base 2 logarithm of the maximum entries per page.
     pub const fn page_bits(&self) -> u8 {
-        self.page_bits
+        self.storage.geometry().page_bits()
     }
 }
 
