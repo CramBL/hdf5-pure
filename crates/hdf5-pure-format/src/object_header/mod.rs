@@ -28,6 +28,7 @@ pub use v2::ObjectHeaderAllocation;
 pub use v2::ObjectHeaderAllocationGeometry;
 pub use v2::ObjectHeaderContinuation;
 pub use v2::ObjectHeaderPrefix;
+pub use v2::ObjectHeaderWriter;
 pub use v2::ObjectTimes;
 pub use v2::ParsedObjectHeaderPrefix;
 pub use v2::PreparedMessageRecord;

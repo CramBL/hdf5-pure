@@ -13,11 +13,13 @@ use crate::convert::Narrow;
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_header::header::OHDR_SIGNATURE;
 use crate::width::{self, FormatWidths, UintWidth};
 
-use super::record::RecordPrefix;
+use super::continuation::OCHK_SIGNATURE;
+use super::prepared_record::RecordPrefix;
 use super::worklist;
-use super::{CHECKSUM_LEN, MessageRecordLayout, OCHK_SIGNATURE, ObjectHeaderPrefix};
+use super::{CHECKSUM_LEN, MessageRecordLayout, ObjectHeaderPrefix};
 
 /// Holds checked chunk geometry and stored addresses for a version 2 object header.
 ///
@@ -140,7 +142,7 @@ impl<'a> ObjectHeaderAllocation<'a> {
     fn encode_chunk(&self, index: usize, chunk: &Chunk, out: &mut Vec<u8>) {
         let start = out.len();
         if index == 0 {
-            let fixed = super::OHDR_SIGNATURE.len()
+            let fixed = OHDR_SIGNATURE.len()
                 + 2
                 + self.geometry.prefix.optional_len()
                 + usize::from(self.root_width.get())
@@ -593,7 +595,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
             UintWidth::Four,
             UintWidth::Eight,
         ] {
-            let fixed = super::OHDR_SIGNATURE.len()
+            let fixed = OHDR_SIGNATURE.len()
                 + 2
                 + prefix.optional_len()
                 + usize::from(root_width.get())
@@ -712,7 +714,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
     }
 
     fn root_fixed(&self, width: UintWidth) -> usize {
-        super::OHDR_SIGNATURE.len()
+        OHDR_SIGNATURE.len()
             + 2
             + self.prefix.optional_len()
             + usize::from(width.get())
