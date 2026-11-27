@@ -579,7 +579,7 @@ fn visit_regions(
     mut visit: impl FnMut(Region<'_>) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     let occupancy = Occupancy::new(occupancy, num_slots)?;
-    let mut covered = num_slots <= u64::from(layout.inline_elements);
+    let mut covered = num_slots <= u64::from(layout.inline_elements());
     for (pointer, block) in layout.direct_blocks().enumerate() {
         let block = block?;
         let DataBlock {
@@ -599,7 +599,7 @@ fn visit_regions(
             })?;
         }
     }
-    for index in layout.first_super_block..layout.super_blocks {
+    for index in layout.first_super_block()..layout.super_blocks() {
         if covered {
             break;
         }
@@ -613,7 +613,7 @@ fn visit_regions(
         covered = num_slots > first && (num_slots - 1 - first) / block_elements < blocks;
         visit(Region::Secondary {
             block,
-            pointer: u64::from(index - layout.first_super_block),
+            pointer: u64::from(index - layout.first_super_block()),
             data: SelectedData::new(occupancy, layout, block)?,
         })?;
     }
@@ -644,7 +644,7 @@ impl ExtensibleArrayStats {
             ndata_blks: 0,
             data_blk_size: 0,
             max_idx_set: num_slots,
-            nelmts: u64::from(layout.inline_elements),
+            nelmts: u64::from(layout.inline_elements()),
         }
     }
 
@@ -660,7 +660,7 @@ impl ExtensibleArrayStats {
             elements,
             libhdf5_offset: _,
         } = block;
-        let offset_len = usize::from(layout.block_offset_len);
+        let offset_len = usize::from(layout.block_offset_len());
         if offset.to_le_bytes()[offset_len..]
             .iter()
             .any(|&byte| byte != 0)
@@ -730,7 +730,7 @@ fn vec_blocks(
         ExtensibleArrayBlock {
             length: layout.index_block_len()?,
             location: BlockLocation::Index {
-                inline_elements: layout.inline_elements
+                inline_elements: layout.inline_elements()
             },
         },
     ])

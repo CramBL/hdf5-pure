@@ -104,7 +104,7 @@ impl<'a> ExtensibleArrayEncoding<'a> {
                 actual: slots.len().to_u64(),
             });
         }
-        let mut next = slots.next_occupied(u64::from(layout.inline_elements));
+        let mut next = slots.next_occupied(u64::from(layout.inline_elements()));
         for block in blocks {
             let BlockLocation::Data(block) = &block.location else {
                 continue;
@@ -121,7 +121,7 @@ impl<'a> ExtensibleArrayEncoding<'a> {
             return Err(FormatError::ExtensibleArrayUnplannedSlot { slot });
         }
         for chunk in slots.records() {
-            layout.encoding.require_record_fits(chunk)?;
+            layout.encoding().require_record_fits(chunk)?;
         }
         for block in blocks {
             block.length.to_usize()?;
@@ -244,7 +244,7 @@ impl ExtensibleArrayEmission<'_> {
             }
             BlockLocation::Index { .. } => writer.index(length, slots, addresses),
             BlockLocation::Secondary(block) => {
-                let offsets = usize::from(layout.encoding.offsets().get());
+                let offsets = usize::from(layout.encoding().offsets().get());
                 #[cfg_attr(
                     target_pointer_width = "32",
                     expect(

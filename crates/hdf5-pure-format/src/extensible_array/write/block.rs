@@ -120,9 +120,9 @@ impl ExtensibleArrayBlockWriter {
     ) -> Result<ExtensibleArrayBlockEncoding<'a>, FormatError> {
         let layout = self.layout;
         let index = layout
-            .first_super_block
+            .first_super_block()
             .checked_add(index)
-            .filter(|&index| index < layout.super_blocks)
+            .filter(|&index| index < layout.super_blocks())
             .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
         let block = layout.super_block(index)?;
         let length = layout.super_block_len(block)?.to_usize()?;
@@ -138,7 +138,7 @@ impl ExtensibleArrayBlockWriter {
                     let data = block.data_block(local.to_u64())?;
                     self.require_block_offset(data.offset)?;
                     let (length, _) = self.data_extent(data)?;
-                    stored_block_range(layout.encoding.offsets(), *address, length)?;
+                    stored_block_range(layout.encoding().offsets(), *address, length)?;
                 }
             }
         }
@@ -206,7 +206,7 @@ impl ExtensibleArrayBlockWriter {
         let mut next = slots.next_occupied(range.start);
         while let Some(slot) = next.filter(|&slot| slot < range.end) {
             if let Some(record) = slots.at(slot.to_usize()?) {
-                layout.encoding.require_record_fits(record)?;
+                layout.encoding().require_record_fits(record)?;
             }
             next = slots.next_occupied(slot + 1);
         }
@@ -216,7 +216,7 @@ impl ExtensibleArrayBlockWriter {
     fn data_geometry(self, offset: u64) -> Result<DataBlock, FormatError> {
         self.require_block_offset(offset)?;
         let layout = self.layout;
-        for index in 0..layout.super_blocks {
+        for index in 0..layout.super_blocks() {
             let block = layout.super_block(index)?;
             let Some(relative) = offset.checked_sub(block.offset) else {
                 break;
@@ -230,7 +230,7 @@ impl ExtensibleArrayBlockWriter {
     }
 
     fn require_block_offset(self, offset: u64) -> Result<(), FormatError> {
-        if offset.to_le_bytes()[usize::from(self.layout.block_offset_len)..]
+        if offset.to_le_bytes()[usize::from(self.layout.block_offset_len())..]
             .iter()
             .any(|&byte| byte != 0)
         {
@@ -268,8 +268,8 @@ impl ExtensibleArrayBlockWriter {
             writer: self,
             length,
             body: Body::Index {
-                elements_len: usize::from(layout.inline_elements)
-                    * usize::from(layout.encoding.stride().get()),
+                elements_len: usize::from(layout.inline_elements())
+                    * usize::from(layout.encoding().stride().get()),
                 slots,
                 addresses,
             },
@@ -312,11 +312,11 @@ impl ExtensibleArrayBlockWriter {
         offset: u64,
         length: usize,
     ) -> ExtensibleArrayBlockEncoding<'a> {
-        let page_elements = self.layout.page_nelmts.get();
+        let page_elements = self.layout.page_nelmts().get();
         let count = range.end - range.start;
         let elements = Elements {
             slots,
-            encoding: self.layout.encoding,
+            encoding: self.layout.encoding(),
             first: range.start,
         };
         ExtensibleArrayBlockEncoding {
@@ -358,11 +358,11 @@ impl ExtensibleArrayBlockWriter {
         let (properties, address) = fields.split_at_mut(extensible_array::BLOCK_BYTE_FIELDS);
         properties.copy_from_slice(&[
             extensible_array::VERSION,
-            self.layout.encoding.client().id(),
+            self.layout.encoding().client().id(),
         ]);
         write_address(address, self.owner);
         if let Some(offset) = offset {
-            let (field, body) = body.split_at_mut(usize::from(self.layout.block_offset_len));
+            let (field, body) = body.split_at_mut(usize::from(self.layout.block_offset_len()));
             field.copy_from_slice(&offset.to_le_bytes()[..field.len()]);
             body
         } else {
@@ -432,11 +432,11 @@ impl<'a> ExtensibleArrayBlockEncoding<'a> {
                     let (elements, pointers) = body.split_at_mut(*elements_len);
                     Elements {
                         slots,
-                        encoding: writer.layout.encoding,
+                        encoding: writer.layout.encoding(),
                         first: 0,
                     }
                     .write(elements);
-                    addresses.write(pointers, writer.layout.encoding.offsets());
+                    addresses.write(pointers, writer.layout.encoding().offsets());
                 });
             }
             Body::Secondary {
@@ -453,7 +453,7 @@ impl<'a> ExtensibleArrayBlockEncoding<'a> {
                     );
                     let (bits, pointers) = body.split_at_mut(*bitmap_len);
                     bitmap.write(bits, writer.layout, *block);
-                    addresses.write(pointers, writer.layout.encoding.offsets());
+                    addresses.write(pointers, writer.layout.encoding().offsets());
                 });
             }
             Body::Data { offset, elements } => {
@@ -665,7 +665,7 @@ impl Bitmap<'_> {
                         children,
                         *first_slot,
                         block.block_elements,
-                        layout.page_nelmts.get(),
+                        layout.page_nelmts().get(),
                         pages,
                     );
                 }
