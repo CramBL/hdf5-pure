@@ -1,13 +1,15 @@
 use alloc::vec;
 use core::ops::Range;
 
+use hdf5_pure_core::__private::{FileRange, FileRegion};
 use hdf5_pure_core::PhysicalAddress;
 use rstest::rstest;
 use test_util::bytes;
 use test_util::global_heap;
 use test_util::widths::Widths;
 
-use super::*;
+use super::GlobalHeapMembers;
+use crate::error::FormatError;
 use crate::global_heap::GlobalHeapCollectionLocator;
 use crate::width::LengthWidth;
 
