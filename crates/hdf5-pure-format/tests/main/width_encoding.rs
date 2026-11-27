@@ -197,7 +197,7 @@ fn dataspace_dimensions_preserve_the_selected_length_width(
     )
     .build();
     assert_eq!(dataspace.prepare(width).unwrap().to_bytes(), expected);
-    assert_eq!(Dataspace::parse(&expected, width.get()).unwrap(), dataspace);
+    assert_eq!(Dataspace::parse(&expected, width).unwrap(), dataspace);
 }
 
 #[rstest]
@@ -311,7 +311,7 @@ fn unlimited_encodes_an_eight_byte_all_ones_maximum() {
         expected
     );
     assert_eq!(
-        Dataspace::parse_with_length_width(&expected, LengthWidth::Eight)
+        Dataspace::parse(&expected, LengthWidth::Eight)
             .unwrap()
             .max_dimensions(),
         Some([MaxExtent::Unlimited].as_slice()),
@@ -369,7 +369,7 @@ fn unlimited_maxima_are_stored_as_the_value_an_all_ones_field_reads(
     all_ones.extend_from_slice(&vec![0; usize::from(width.get())]);
     all_ones.extend_from_slice(&vec![0xff; usize::from(width.get())]);
     assert_eq!(
-        Dataspace::parse(&all_ones, width.get()).unwrap(),
+        Dataspace::parse(&all_ones, width).unwrap(),
         Dataspace::simple(vec![0], Some(vec![stored])).unwrap()
     );
 }

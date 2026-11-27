@@ -7,6 +7,7 @@ use hdf5_pure_core::MessageType;
 use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::Dataspace;
+use hdf5_pure_format::__private::DataspaceRecord;
 use hdf5_pure_format::__private::DataspaceType;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
@@ -100,20 +101,19 @@ fn dataspace_dimension_arrays_preserve_native_values_and_ranges(
         dataspace::V1_HEADER_LEN
     };
     let expected_range = header_size..header_size + dimensions.len() * usize::from(width.get());
+    let record = DataspaceRecord::parse(body, width).unwrap();
+    assert_eq!(record.dimension_fields(), expected_range);
     assert_eq!(
-        Dataspace::parse_with_dimension_fields(body, width).unwrap(),
-        (
-            Dataspace::new(
-                match shape {
-                    Shape::Scalar => DataspaceType::Scalar,
-                    Shape::Fixed | Shape::Bounded => DataspaceType::Simple,
-                },
-                dimensions,
-                (body[2] & dataspace::Flags::MAX_DIMS.0 != 0).then_some(maxima)
-            )
-            .unwrap(),
-            expected_range,
+        record.into_shape(),
+        Dataspace::new(
+            match shape {
+                Shape::Scalar => DataspaceType::Scalar,
+                Shape::Fixed | Shape::Bounded => DataspaceType::Simple,
+            },
+            dimensions,
+            (body[2] & dataspace::Flags::MAX_DIMS.0 != 0).then_some(maxima)
         )
+        .unwrap()
     );
     drop(pure);
     directory.close().unwrap();

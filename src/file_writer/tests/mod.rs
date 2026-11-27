@@ -1092,7 +1092,7 @@ fn read_dataset_f64(bytes: &[u8], path: &str) -> Vec<f64> {
     let dt = DecodedDatatype::from_record(dt_data)
         .unwrap()
         .into_datatype();
-    let ds = Dataspace::parse_with_length_width(ds_data, sb.length_size).unwrap();
+    let ds = Dataspace::from_record(ds_data, sb.length_size).unwrap();
     let dl = crate::data_layout::DataLayout::parse_with_widths(
         dl_data,
         FormatWidths {

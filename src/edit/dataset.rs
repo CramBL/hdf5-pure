@@ -318,7 +318,7 @@ impl WriteEngine {
                 "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
             ));
         }
-        let disk_ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
+        let disk_ds = Dataspace::from_record(&region[ds_b..ds_e], widths.lengths)?;
         if disk_ds.space_type() != fd.ds.space_type() || disk_ds.dimensions() != fd.ds.dimensions()
         {
             return Err(Error::EditUnsupported(
@@ -555,7 +555,7 @@ impl WriteEngine {
         ))?;
 
         let decoded = DecodedDatatype::from_record(&region[dt_b..dt_e])?;
-        let disk_ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
+        let disk_ds = Dataspace::from_record(&region[ds_b..ds_e], widths.lengths)?;
         let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
 
         let DataLayout::Chunked { index, flags, .. } = &dl else {

@@ -7921,7 +7921,7 @@ the same commit to replace it",
     pub(crate) fn dataspace(&self) -> Result<Dataspace, Error> {
         let state = self.resolved()?;
         let msg = find_message(&state.header, MessageType::DATASPACE)?;
-        Ok(Dataspace::parse_with_length_width(
+        Ok(Dataspace::from_record(
             &self.file.message_body(msg)?,
             self.file.widths.lengths,
         )?)
