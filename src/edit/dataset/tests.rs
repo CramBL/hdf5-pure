@@ -10,10 +10,12 @@ use hdf5_pure_space::__private::PageType;
 use rstest::rstest;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use test_util::allocation;
+use test_util::dataspace;
 use test_util::disk_log;
 use test_util::disk_log::IoEvent;
 use test_util::disk_log::IoOutcome;
 
+use super::MovingWrite;
 use super::test_util::{Creation, CreationAccess};
 use crate::AttrValue;
 use crate::File;
@@ -32,6 +34,7 @@ use crate::PersistedFreeSpacePolicy;
 use crate::PhysicalAddress;
 use crate::SyncPolicy;
 use crate::UserblockSize;
+use crate::address::AddressContext;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::address::StoredAddress;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -44,9 +47,9 @@ use crate::chunked_write::ChunkOptions;
 use crate::chunked_write::StorageAllocation;
 use crate::dataset_request::{PreparedDataset, StagedFill};
 use crate::dataspace::MaxExtent;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use crate::edit::WriteEngine;
+use crate::edit::object_header;
 use crate::edit::test_util as edit_test_util;
+use crate::edit::{AppendBuilder, WriteEngine};
 use crate::error::{Error, FormatError};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::fill_value::FillPattern;
@@ -57,6 +60,8 @@ use crate::message_type::MessageType;
 use crate::object_graph::ObjectId;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
+use crate::reader::OpenedSource;
+use crate::source::BytesSource;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::source::MetadataCacheConfig;
 use crate::type_builders;
@@ -71,6 +76,53 @@ mod lifecycle;
 mod providers;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod resources;
+
+#[test]
+fn relocating_append_updates_only_the_first_dataspace_dimension() {
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("d")
+        .with_i32_data(&[1, 2, 3])
+        .with_chunks(&[4])
+        .with_maxshape(&[MaxExtent::Fixed(8)]);
+    let mut image = builder.finish().unwrap();
+    let file = File::from_bytes(image.clone()).unwrap();
+    let address = file.dataset("d").unwrap().header_address().unwrap();
+    let addresses = AddressContext::from_effective_base(file.superblock().base_address);
+    let widths = file.widths();
+    let region = WriteEngine::gather_oh_messages(
+        &BytesSource::new(image.as_slice()),
+        PhysicalAddress::new(address),
+        addresses,
+        widths,
+    )
+    .unwrap();
+    let mut body = dataspace::v1(1, dataspace::Flags::MAX_DIMS, &[3], Some(&[8]));
+    body.extend_from_slice(&[0xbc, 0, 0xda]);
+    let region = super::replace_dataspace_message(&region, &body).unwrap();
+    let header = object_header::build_v2_object_header(&region).unwrap();
+    let replacement = ObjectId::new(PhysicalAddress::new(u64::try_from(image.len()).unwrap()));
+    image.extend_from_slice(&header);
+    let source = BytesSource::new(image.as_slice());
+    let mut append = AppendBuilder::new();
+    append.append_i32(&[4, 5]);
+    let planned = WriteEngine::prepare_append(
+        &OpenedSource::for_test(&source, addresses),
+        replacement,
+        &append,
+        widths,
+    )
+    .unwrap();
+    let MovingWrite::AppendedChunks {
+        new_dataspace_body, ..
+    } = planned
+    else {
+        panic!("expected an append to chunked storage");
+    };
+    let start = dataspace::V1_HEADER_LEN;
+    body[start..start + 8].copy_from_slice(&5_u64.to_le_bytes());
+    assert_eq!(new_dataspace_body, body);
+}
 
 #[rstest]
 #[case::deferred_fixed(false, false)]
