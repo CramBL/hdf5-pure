@@ -5,6 +5,7 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::PhysicalAddress;
 use test_util::checksum;
+use test_util::widths::Widths;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -158,3 +159,30 @@ impl Fixture {
         }
     }
 }
+
+pub(super) fn region(start: PhysicalAddress, bytes: &[u8]) -> Result<FileRegion<'_>, FormatError> {
+    FileRegion::new(
+        FileRange::new(start, u64::try_from(bytes.len()).unwrap())?,
+        bytes,
+    )
+}
+
+pub(super) fn parse_header(widths: FormatWidths, base: u64, bytes: &[u8]) -> FixedArrayHeader {
+    let base = BaseAddress::new(base);
+    let locator = FixedArrayHeaderLocator::new(widths, base, StoredAddress::new(HEADER_AT));
+    locator
+        .parse(region(base.resolve(StoredAddress::new(HEADER_AT)).unwrap(), bytes).unwrap())
+        .unwrap()
+}
+
+pub(super) fn fixture_widths(widths: FormatWidths) -> Widths {
+    Widths::new(
+        usize::from(widths.offsets.get()),
+        usize::from(widths.lengths.get()),
+    )
+}
+
+pub(super) const HEADER_AT: u64 = 0x40;
+pub(super) const DATA_AT: u64 = 0x100;
+pub(super) const PAGE_BITS: u8 = 4;
+pub(super) const CHUNK_BYTES: u64 = 16;
