@@ -1,7 +1,7 @@
-use hdf5_pure_core::{
-    CharacterSet, DatatypeByteOrder, FixedPointType, ReferenceType, StringPadding,
-    VariableLengthType,
-};
+use alloc::format;
+use alloc::vec;
+
+use hdf5_pure_core::{CharacterSet, ReferenceType, StringPadding, VariableLengthType};
 use rstest::rstest;
 use test_util::attribute::{UnpaddedAttribute, UnpaddedVersion};
 use test_util::{dataspace, datatype};
@@ -11,7 +11,10 @@ use crate::dataspace::DataspaceType;
 use crate::datatype::Datatype;
 use crate::shared_message::DatatypeLocation;
 
+use crate::width::{LengthWidth, OffsetWidth};
+
 use super::*;
+use crate::dense_attribute_write::{dense_attrs_plan, test_support};
 
 #[rstest]
 #[case::two_two(OffsetWidth::Two, LengthWidth::Two)]
@@ -28,7 +31,7 @@ fn dense_preparation_retains_both_file_widths(
     #[case] lengths: LengthWidth,
 ) {
     let widths = FormatWidths { offsets, lengths };
-    let attribute = canonical_attribute("label", 3);
+    let attribute = test_support::canonical_attribute("label", 3);
     let attrs = [attribute];
     let dense =
         PreparedDenseAttrs::with_widths(widths, &attrs, DenseAttrCreationOrder::Untracked, [])
@@ -44,7 +47,7 @@ fn dense_preparation_retains_both_file_widths(
 #[case::ascii_huge("label", 70_000)]
 #[case::unicode_huge("étiquette", 70_000)]
 fn dense_storage_emits_the_version_three_attribute_body_once(#[case] name: &str, #[case] len: u32) {
-    let attribute = canonical_attribute(name, len);
+    let attribute = test_support::canonical_attribute(name, len);
     let expected = UnpaddedAttribute::inline(
         UnpaddedVersion::Three,
         name,
@@ -79,7 +82,7 @@ fn dense_storage_emits_the_version_three_attribute_body_once(#[case] name: &str,
 #[case::managed(8)]
 #[case::huge(70_000)]
 fn prepared_clones_retain_shared_geometry_through_finalization(#[case] len: u32) {
-    let attr = canonical_attribute("label", len);
+    let attr = test_support::canonical_attribute("label", len);
     let replacement = vec![b'b'; usize::try_from(len).unwrap()];
     let prepared = PreparedDenseAttrs::new(
         &[attr],
@@ -104,187 +107,6 @@ fn prepared_clones_retain_shared_geometry_through_finalization(#[case] len: u32)
 }
 
 #[rstest]
-#[case::missing_index(vec![1], 9, false,
-    FormatError::Internal("a tracked attribute set needs one creation index per attribute".into()))]
-#[case::extra_index(vec![1, 2, 3], 9, true,
-    FormatError::Internal("a tracked attribute set needs one creation index per attribute".into()))]
-#[case::duplicate_index(vec![3, 3], 9, true,
-    FormatError::DuplicateAttributeCreationIndex(3))]
-#[case::duplicate_unindexed(vec![3, 3], 9, false,
-    FormatError::DuplicateAttributeCreationIndex(3))]
-#[case::counter_equals_index(vec![1, 3], 3, true,
-    FormatError::InvalidAttributeCreationCounter { index: 3, next: 3 })]
-#[case::counter_below_index(vec![1, 3], 2, false,
-    FormatError::InvalidAttributeCreationCounter { index: 3, next: 2 })]
-fn dense_attribute_preparation_rejects_incoherent_creation_metadata(
-    #[case] indices: Vec<u16>,
-    #[case] max: u16,
-    #[case] indexed: bool,
-    #[case] expected: FormatError,
-) {
-    let attrs = [metadata_attribute("a", 1), metadata_attribute("b", 2)];
-    assert_eq!(
-        EncodedDenseAttrs::new(
-            FormatWidths {
-                offsets: DENSE_ATTR_OFFSET_WIDTH,
-                lengths: DENSE_ATTR_LENGTH_WIDTH
-            },
-            &attrs,
-            DenseAttrCreationOrder::Tracked {
-                indices,
-                max,
-                indexed
-            }
-        )
-        .unwrap_err(),
-        expected,
-    );
-}
-
-#[rstest]
-#[case::tracked_and_indexed(true)]
-#[case::tracked_without_index(false)]
-fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed: bool) {
-    let attrs = [metadata_attribute("a", 1), metadata_attribute("b", 2)];
-    let prepared = EncodedDenseAttrs::new(
-        FormatWidths {
-            offsets: DENSE_ATTR_OFFSET_WIDTH,
-            lengths: DENSE_ATTR_LENGTH_WIDTH,
-        },
-        &attrs,
-        DenseAttrCreationOrder::Tracked {
-            indices: vec![7, 2],
-            max: u16::MAX,
-            indexed,
-        },
-    )
-    .unwrap();
-    assert_eq!(prepared.indexes.next_index, Some(u16::MAX));
-    assert_eq!(prepared.indexes.indexed, indexed);
-    assert_eq!(
-        prepared
-            .attributes
-            .iter()
-            .map(|a| a.creation_index())
-            .collect::<Vec<_>>(),
-        vec![7, 2]
-    );
-    assert_eq!(
-        prepared
-            .attributes
-            .iter()
-            .map(|a| a.bytes().to_vec())
-            .collect::<Vec<_>>(),
-        attrs
-            .iter()
-            .map(|a| a
-                .serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH.get())
-                .unwrap())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        prepared.indexes.corder_order,
-        if indexed { vec![1, 0] } else { vec![] }
-    );
-}
-
-#[test]
-fn dense_attribute_preparation_preserves_untracked_positions() {
-    let attrs = [metadata_attribute("b", 1), metadata_attribute("a", 2)];
-    let prepared = EncodedDenseAttrs::new(
-        FormatWidths {
-            offsets: DENSE_ATTR_OFFSET_WIDTH,
-            lengths: DENSE_ATTR_LENGTH_WIDTH,
-        },
-        &attrs,
-        DenseAttrCreationOrder::Untracked,
-    )
-    .unwrap();
-    assert_eq!(prepared.indexes.next_index, None);
-    assert!(!prepared.indexes.indexed);
-    assert!(prepared.indexes.corder_order.is_empty());
-    assert_eq!(
-        prepared
-            .attributes
-            .iter()
-            .map(|a| a.creation_index())
-            .collect::<Vec<_>>(),
-        vec![0, 1]
-    );
-}
-
-#[test]
-fn dense_attribute_preparation_rejects_duplicate_names() {
-    let attrs = [
-        metadata_attribute("duplicate", 1),
-        metadata_attribute("duplicate", 2),
-    ];
-    assert_eq!(
-        EncodedDenseAttrs::new(
-            FormatWidths {
-                offsets: DENSE_ATTR_OFFSET_WIDTH,
-                lengths: DENSE_ATTR_LENGTH_WIDTH
-            },
-            &attrs,
-            DenseAttrCreationOrder::Untracked
-        )
-        .unwrap_err(),
-        FormatError::DuplicateAttributeName("duplicate".into())
-    );
-}
-
-#[rstest]
-#[case::untracked(DenseAttrCreationOrder::Untracked, None, false)]
-#[case::tracked(DenseAttrCreationOrder::Tracked { indices: vec![], max: 17, indexed: true }, Some(17), true)]
-fn dense_attribute_preparation_preserves_empty_set_metadata(
-    #[case] creation: DenseAttrCreationOrder,
-    #[case] next: Option<u16>,
-    #[case] indexed: bool,
-) {
-    let prepared = EncodedDenseAttrs::new(
-        FormatWidths {
-            offsets: DENSE_ATTR_OFFSET_WIDTH,
-            lengths: DENSE_ATTR_LENGTH_WIDTH,
-        },
-        &[],
-        creation,
-    )
-    .unwrap();
-    assert!(prepared.attributes.is_empty());
-    assert!(prepared.indexes.order.is_empty());
-    assert!(prepared.indexes.corder_order.is_empty());
-    assert_eq!(prepared.indexes.next_index, next);
-    assert_eq!(prepared.indexes.indexed, indexed);
-}
-
-#[test]
-fn a_fixed_node_size_keeps_the_derived_count_width_at_one_byte() {
-    for record_size in [
-        DENSE_ATTR_BTREE_RECORD,
-        HugeObjectRecord::size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH),
-    ] {
-        let (info, depth) = format_boundary::BTreeV2NodeInfo::for_record_count(
-            BTREE_V2_NODE_SIZE,
-            record_size,
-            format_boundary::OffsetWidth::Eight,
-            0,
-        )
-        .expect("the emitted geometry is plannable");
-        assert_eq!(depth, 0);
-        let capacity = info.max_nrec(0);
-        assert!(
-            capacity >= 20,
-            "a {record_size}-byte record should leave room for 20 per node, got {capacity}"
-        );
-        assert_eq!(
-            encoded_size_width(capacity),
-            1,
-            "a {record_size}-byte record's leaf capacity must stay inside one byte"
-        );
-    }
-}
-
-#[rstest]
 #[case::undefined(true)]
 #[case::end(false)]
 fn dense_attribute_plan_rejects_invalid_extent(
@@ -297,9 +119,9 @@ fn dense_attribute_plan_rejects_invalid_extent(
         lengths: LengthWidth::Two,
     };
     let attrs = [if huge {
-        canonical_attribute("huge", 33_000)
+        test_support::canonical_attribute("huge", 33_000)
     } else {
-        metadata_attribute("a", 1)
+        test_support::metadata_attribute("a", 1)
     }];
     let plan =
         PreparedDenseAttrs::with_widths(widths, &attrs, DenseAttrCreationOrder::Untracked, [])
@@ -344,8 +166,8 @@ fn dense_attribute_plan_rejects_invalid_extent(
 
 #[rstest]
 #[case::empty(vec![])]
-#[case::managed(vec![metadata_attribute("a", 1)])]
-#[case::huge(vec![canonical_attribute("huge", 70_000)])]
+#[case::managed(vec![test_support::metadata_attribute("a", 1)])]
+#[case::huge(vec![test_support::canonical_attribute("huge", 70_000)])]
 fn dense_attribute_plan_fills_a_valid_extent_at_the_address_limit(
     #[case] attrs: Vec<AttributeMessage>,
     #[values(OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
@@ -361,8 +183,8 @@ fn dense_attribute_plan_fills_a_valid_extent_at_the_address_limit(
 
 #[rstest]
 #[case::empty(vec![])]
-#[case::managed(vec![metadata_attribute("a", 1)])]
-#[case::huge(vec![canonical_attribute("huge", 33_000)])]
+#[case::managed(vec![test_support::metadata_attribute("a", 1)])]
+#[case::huge(vec![test_support::canonical_attribute("huge", 33_000)])]
 fn dense_attribute_plan_fills_a_two_byte_extent_at_the_address_limit(
     #[case] attrs: Vec<AttributeMessage>,
 ) {
@@ -402,39 +224,6 @@ fn assert_valid_extent(widths: FormatWidths, attrs: &[AttributeMessage]) {
 }
 
 #[rstest]
-fn dense_attribute_huge_totals_fit_the_selected_length_width(
-    #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
-) {
-    let attrs = [
-        canonical_attribute("a", 33_000),
-        canonical_attribute("b", 33_000),
-    ];
-    let total = attrs
-        .iter()
-        .map(|attribute| attribute.serialize_v3(offsets, 2).unwrap().len() as u64)
-        .sum::<u64>();
-    assert!(total > u64::from(u16::MAX));
-    let error = PreparedDenseAttrs::with_widths(
-        FormatWidths {
-            offsets,
-            lengths: LengthWidth::Two,
-        },
-        &attrs,
-        DenseAttrCreationOrder::Untracked,
-        [],
-    )
-    .err()
-    .unwrap();
-    assert_eq!(
-        error,
-        FormatError::LengthTooLarge {
-            length: total,
-            length_size: 2
-        }
-    );
-}
-
-#[rstest]
 #[case::empty_variable_value(0)]
 #[case::managed(2)]
 #[case::huge(5_000)]
@@ -442,7 +231,7 @@ fn dense_attribute_huge_totals_fit_the_selected_length_width(
 fn finalization_retains_geometry_and_encodes_resolved_references(#[case] references: usize) {
     let mut attrs = vec![
         variable_attribute("vl", references),
-        metadata_attribute("digest", 0),
+        test_support::metadata_attribute("digest", 0),
     ];
     attrs[0].datatype_location = DatatypeLocation::Committed(StoredAddress::ZERO);
     let payload = 123i64.to_le_bytes();
@@ -530,7 +319,7 @@ fn finalization_retains_geometry_and_encodes_resolved_references(#[case] referen
         direct.build(StoredAddress::new(0x8000)).unwrap().blob
     );
     assert_eq!(
-        ready.geometry.huge_count(),
+        ready.geometry().huge_count(),
         usize::from(references >= 5_000)
     );
 }
@@ -546,7 +335,7 @@ fn preparation_rejects_fixups_for_other_attribute_shapes(
     #[case] fixup: DenseAttrFixup,
     #[case] expected: &str,
 ) {
-    let attrs = [metadata_attribute("a", 0)];
+    let attrs = [test_support::metadata_attribute("a", 0)];
     assert_eq!(
         PreparedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked, [fixup])
             .err()
@@ -579,7 +368,7 @@ fn preparation_rejects_payload_fixups_with_file_addresses(#[case] attr: Attribut
 fn preparation_rejects_overlapping_fixups(#[case] fixups: [DenseAttrFixup; 2]) {
     assert_eq!(
         PreparedDenseAttrs::new(
-            &[metadata_attribute("a", 0)],
+            &[test_support::metadata_attribute("a", 0)],
             DenseAttrCreationOrder::Untracked,
             fixups
         )
@@ -635,7 +424,7 @@ fn finalization_rejects_global_heap_length_changes() {
 #[case::long(9)]
 fn finalization_rejects_payload_length_changes(#[case] len: usize) {
     let prepared = PreparedDenseAttrs::new(
-        &[metadata_attribute("a", 0)],
+        &[test_support::metadata_attribute("a", 0)],
         DenseAttrCreationOrder::Untracked,
         [DenseAttrFixup::Payload { attribute: 0 }],
     )
@@ -685,7 +474,7 @@ fn finalization_propagates_resolution_errors(
     #[case] fixup: DenseAttrFixup,
     #[case] expected: FormatError,
 ) {
-    let mut attr = metadata_attribute("a", 0);
+    let mut attr = test_support::metadata_attribute("a", 0);
     attr.datatype_location = DatatypeLocation::Committed(StoredAddress::ZERO);
     let prepared =
         PreparedDenseAttrs::new(&[attr], DenseAttrCreationOrder::Untracked, [fixup]).unwrap();
@@ -726,12 +515,12 @@ fn prepared_dense_output_matches_baseline_bytes(
 ) {
     let attrs = match shape {
         CanonicalShape::Managed | CanonicalShape::Tracked => (0..10)
-            .map(|i| canonical_attribute(&format!("a{i}"), 512))
+            .map(|i| test_support::canonical_attribute(&format!("a{i}"), 512))
             .collect::<Vec<_>>(),
         CanonicalShape::Mixed => vec![
-            canonical_attribute("small", 512),
-            canonical_attribute("huge", 70_000),
-            canonical_attribute("after", 512),
+            test_support::canonical_attribute("small", 512),
+            test_support::canonical_attribute("huge", 70_000),
+            test_support::canonical_attribute("after", 512),
         ],
     };
     let creation = match shape {
@@ -751,7 +540,7 @@ fn prepared_dense_output_matches_baseline_bytes(
         .unwrap();
     let built = ready.build(StoredAddress::new(0x8000)).unwrap();
     assert_eq!(
-        ready.geometry.huge_count(),
+        ready.geometry().huge_count(),
         usize::from(matches!(shape, CanonicalShape::Mixed))
     );
     assert_eq!(built.blob.len(), len);
@@ -764,25 +553,6 @@ enum CanonicalShape {
     Managed,
     Mixed,
     Tracked,
-}
-
-fn canonical_attribute(name: &str, len: u32) -> AttributeMessage {
-    AttributeMessage {
-        name: name.into(),
-        datatype: Datatype::String {
-            size: len,
-            padding: StringPadding::NullPad,
-            charset: CharacterSet::Ascii,
-        },
-        dataspace: Dataspace {
-            space_type: DataspaceType::Scalar,
-            rank: 0,
-            dimensions: vec![],
-            max_dimensions: None,
-        },
-        raw_data: vec![b'y'; len as usize],
-        datatype_location: DatatypeLocation::Inline,
-    }
 }
 
 fn canonical_hash(bytes: &[u8]) -> u64 {
@@ -823,7 +593,7 @@ fn geometry(plan: &DenseAttrPlan) -> RetainedGeometry {
 }
 
 fn variable_attribute(name: &str, count: usize) -> AttributeMessage {
-    let mut attr = metadata_attribute(name, 0);
+    let mut attr = test_support::metadata_attribute(name, 0);
     attr.datatype = Datatype::VariableLength(VariableLengthType::string(
         StringPadding::NullTerminate,
         CharacterSet::Utf8,
@@ -849,27 +619,10 @@ fn variable_attribute(name: &str, count: usize) -> AttributeMessage {
 }
 
 fn reference_attribute() -> AttributeMessage {
-    let mut attr = metadata_attribute("a", 0);
+    let mut attr = test_support::metadata_attribute("a", 0);
     attr.datatype = Datatype::Reference {
         size: 8,
         ref_type: ReferenceType::Object,
     };
     attr
-}
-
-fn metadata_attribute(name: &str, value: i64) -> AttributeMessage {
-    AttributeMessage {
-        name: name.into(),
-        datatype: Datatype::FixedPoint(
-            FixedPointType::new(8, DatatypeByteOrder::LittleEndian, true, 0, 64).unwrap(),
-        ),
-        dataspace: Dataspace {
-            space_type: DataspaceType::Scalar,
-            rank: 0,
-            dimensions: Vec::new(),
-            max_dimensions: None,
-        },
-        raw_data: value.to_le_bytes().to_vec(),
-        datatype_location: DatatypeLocation::Inline,
-    }
 }
