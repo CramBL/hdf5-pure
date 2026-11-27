@@ -3,6 +3,7 @@ mod build;
 mod data_block;
 mod geometry;
 mod header;
+mod initialization;
 mod mutation;
 mod page;
 mod placement;
