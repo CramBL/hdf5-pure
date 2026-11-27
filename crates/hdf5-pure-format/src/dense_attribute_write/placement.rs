@@ -11,7 +11,7 @@ use crate::fractal_heap::FractalHeapIdLayout;
 use crate::fractal_heap::write::ManagedHeapPlacement;
 
 use super::DenseAttrPlan;
-use super::plan::AttributeIndexRecords;
+use super::encode::AttributeIndexRecords;
 
 /// Dense attribute storage with checked, independent block addresses.
 ///
@@ -272,3 +272,7 @@ struct PlacedIndex<'a> {
     placement: BTreeV2Placement<'a>,
     records: Vec<u8>,
 }
+
+#[cfg(test)]
+#[path = "tests/placement.rs"]
+mod tests;

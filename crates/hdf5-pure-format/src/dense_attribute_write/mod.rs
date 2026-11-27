@@ -4,6 +4,7 @@
 //! with creation indexes before heap and index planning.
 
 mod attributes;
+mod encode;
 mod fixup;
 mod geometry;
 mod placement;
@@ -13,9 +14,9 @@ mod plan;
 mod test_support;
 
 pub use attributes::DenseAttrCreationOrder;
+pub use encode::{DenseAttrBlob, build_dense_attrs};
 pub use fixup::{DenseAttrFixup, PreparedDenseAttrs};
 pub use placement::{DenseAttrBlock, DenseAttrPlacement};
 pub use plan::{
-    DENSE_ATTR_MAX_MANAGED_OBJECT, DenseAttrBlob, DenseAttrBlockKind, DenseAttrPlan,
-    build_dense_attrs, dense_attrs_plan,
+    DENSE_ATTR_MAX_MANAGED_OBJECT, DenseAttrBlockKind, DenseAttrPlan, dense_attrs_plan,
 };

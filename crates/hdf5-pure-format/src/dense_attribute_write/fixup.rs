@@ -415,5 +415,5 @@ const DENSE_ATTR_VL_ADDRESS_OFFSET: usize = 4;
 const DENSE_ATTR_DATASPACE_SIZE_OFFSET: usize = 6;
 
 #[cfg(test)]
-#[path = "tests/operations.rs"]
+#[path = "tests/fixup.rs"]
 mod tests;
