@@ -25,10 +25,9 @@ use crate::message_type::MessageType;
 use crate::metadata_source;
 use crate::metadata_source::MetadataSource;
 use crate::object_header::MessageFilter;
+use crate::object_header::MessageRecordLayout;
 use crate::object_header::ObjectHeader;
 use crate::width::FormatWidths;
-
-use super::*;
 
 #[rstest]
 #[case::version_1(Version::One)]

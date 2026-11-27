@@ -1,17 +1,16 @@
 use alloc::vec::Vec;
 
+use byteorder::{ByteOrder, LittleEndian};
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::PhysicalAddress;
-
-use byteorder::{ByteOrder, LittleEndian};
 
 use super::HeaderMessage;
 use super::MessageFilter;
 use super::ObjectHeader;
 use super::ObjectHeaderChunk;
 use super::ObjectHeaderContinuation;
-use super::ParseContext;
+use super::context::ParseContext;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;

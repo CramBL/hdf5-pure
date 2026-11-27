@@ -2,14 +2,13 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::PhysicalAddress;
 
+use super::super::v2::CHECKSUM_LEN;
+use super::ObjectReferenceCountField;
+use super::count::COUNT_LENGTH;
 use crate::checksum;
 use crate::checksum::JenkinsLookup3;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-
-use super::super::v2::CHECKSUM_LEN;
-use super::COUNT_LENGTH;
-use super::ObjectReferenceCountField;
 
 impl ObjectReferenceCountField {
     /// Prepares count and checksum writes for the complete associated chunk in `current`.
@@ -40,12 +39,10 @@ impl ObjectReferenceCountField {
         current: FileRegion<'_>,
         count: u32,
     ) -> Result<ObjectReferenceCountUpdate, ObjectReferenceCountUpdateError> {
-        let Self {
-            value,
-            range,
-            chunk,
-            flags,
-        } = self;
+        let value = self.value();
+        let range = self.range();
+        let chunk = self.chunk();
+        let flags = self.flags();
         if current.range() != chunk {
             return Err(ObjectReferenceCountUpdateError::Chunk {
                 expected: chunk,

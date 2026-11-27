@@ -8,7 +8,7 @@ use test_util::object_header::v1;
 use test_util::object_header::{Message, MessageFlags, MessageType as WireType};
 use test_util::widths::Widths;
 
-use super::Driver;
+use super::support::Driver;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;

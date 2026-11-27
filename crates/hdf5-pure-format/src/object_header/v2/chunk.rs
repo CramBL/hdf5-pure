@@ -16,7 +16,7 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeaderChunk;
-use crate::object_header::ParseContext;
+use crate::object_header::context::ParseContext;
 use crate::object_header::v2;
 use crate::object_header::v2::CHECKSUM_LEN;
 use crate::object_header::v2::MessageRecord;

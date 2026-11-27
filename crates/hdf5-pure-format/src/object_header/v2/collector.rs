@@ -7,7 +7,7 @@ use crate::error::FormatError;
 use crate::object_header::HeaderMessage;
 use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
-use crate::object_header::ParseContext;
+use crate::object_header::context::ParseContext;
 use crate::object_header::v2::MessageRecord;
 use crate::object_header::v2::MessageRecordLayout;
 use crate::object_header::v2::ParsedObjectHeaderPrefix;
