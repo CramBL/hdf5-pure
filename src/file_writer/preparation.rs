@@ -2,7 +2,7 @@
 
 use alloc::format;
 use alloc::vec::Vec;
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU32, NonZeroUsize};
 
 use hdf5_pure_core::__private::ByteLength;
 use hdf5_pure_format::__private::IndexSlots;
@@ -61,7 +61,9 @@ pub(super) struct PreparedDataset {
     widths: FormatWidths,
     /// Link name in the owning group.
     pub(super) name: LinkNameBuf,
-    pub(super) dt: Datatype,
+    dt: Datatype,
+    /// The size of one stored element at the destination file's address width.
+    element_size: NonZeroU32,
     /// Where `dt` is written: in this dataset's header, or in a committed
     /// datatype object it refers to.
     pub(super) dt_location: DatatypeLocation,
@@ -168,16 +170,15 @@ impl PreparedDataset {
         if let Some(fill) = &mut fill {
             fill.narrow_variable_length(&dt, widths.offsets)?;
         }
+        let element_size = hdf5_pure_format::__private::stored_element_size(&dt, widths.offsets)?;
         let declared_contiguous_len = if widths.offsets == OffsetWidth::Eight {
             canonical_extent
         } else {
-            let target_size =
-                hdf5_pure_format::__private::stored_element_size(&dt, widths.offsets)?;
             (canonical_extent / canonical_element_size.get() as u64)
-                .checked_mul(u64::from(target_size.get()))
+                .checked_mul(u64::from(element_size.get()))
                 .ok_or(FormatError::DatasetSizeOverflow {
                     size: canonical_extent,
-                    dimension: u64::from(target_size.get()),
+                    dimension: u64::from(element_size.get()),
                 })?
         };
         if let Some(mut staging) = storage.take_vl_string_staging() {
@@ -211,6 +212,7 @@ impl PreparedDataset {
                 widths,
                 name,
                 dt,
+                element_size,
                 dt_location: match committed_datatype_target {
                     Some(_) => DatatypeLocation::Committed(StoredAddress::ZERO),
                     None => DatatypeLocation::Inline,
@@ -230,6 +232,10 @@ impl PreparedDataset {
             },
             patches,
         ))
+    }
+
+    pub(super) fn datatype(&self) -> &Datatype {
+        &self.dt
     }
 
     /// Describes this dataset's contiguous region for placement and emission.
@@ -275,14 +281,8 @@ impl PreparedDataset {
         let (data, messages) = if self.is_chunked() {
             if self.storage.reference_targets().is_some() {
                 let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
-                let ctx = ChunkContext::from_stored_datatype(
-                    &chunk_dims,
-                    &self.dt,
-                    hdf5_pure_format::__private::stored_element_size(
-                        &self.dt,
-                        self.widths.offsets,
-                    )?,
-                );
+                let ctx =
+                    ChunkContext::from_stored_datatype(&chunk_dims, &self.dt, self.element_size);
                 let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
                 let header = self.chunk_options.measure_header(
                     self.widths,
@@ -457,11 +457,7 @@ impl PreparedDataset {
     /// [`crate::filters::compress_chunk_with`] are propagated.
     pub(super) fn compress_chunks(&self) -> Result<CompressedChunkSet, FormatError> {
         let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
-        let ctx = ChunkContext::from_stored_datatype(
-            &chunk_dims,
-            &self.dt,
-            hdf5_pure_format::__private::stored_element_size(&self.dt, self.widths.offsets)?,
-        );
+        let ctx = ChunkContext::from_stored_datatype(&chunk_dims, &self.dt, self.element_size);
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         chunked_write::compress_chunks(
             self.widths,
