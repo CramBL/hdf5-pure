@@ -1,5 +1,6 @@
 use alloc::format;
 use alloc::vec::Vec;
+use core::iter;
 
 use hdf5_pure_core::AddressRange;
 
@@ -10,10 +11,10 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_header::v2::ObjectHeaderPrefix;
 use crate::object_header::v2::continuation::OCHK_SIGNATURE;
 use crate::object_header::v2::prepared_record::RecordPrefix;
 use crate::object_header::v2::worklist;
-use crate::object_header::v2::{CHECKSUM_LEN, ObjectHeaderPrefix};
 use crate::width::{self, FormatWidths, UintWidth};
 
 use super::chunk::{ChunkPadding, ChunkSpace};
@@ -302,15 +303,29 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
                 length: 0,
             });
         };
-        let root_width = self.root_width(root_len, !children.is_empty())?;
+        let (root_width, root) = ChunkSpace::placed_root(&self, root_len, !children.is_empty())?;
         let mut chunks = Vec::with_capacity(lengths.len());
-        for (index, &length) in lengths.iter().enumerate() {
-            let next_len = lengths.get(index + 1).copied();
-            let next_address = address.checked_add(length)?;
-            let next = next_len
+        let spaces =
+            iter::once(Ok(root)).chain(children.iter().enumerate().map(|(index, &length)| {
+                ChunkSpace::placed_continuation(
+                    &self,
+                    index + 1,
+                    length,
+                    index + 1 < children.len(),
+                )
+            }));
+        for (index, space) in spaces.enumerate() {
+            let space = space?;
+            let next_address = address.checked_add(space.len().to_u64())?;
+            let next = lengths
+                .get(index + 1)
                 .map(|length| length.to_usize().map(|len| (next_address, len)))
                 .transpose()?;
-            chunks.push(self.chunk(index, root_width, address, length, next)?);
+            chunks.push(Chunk {
+                address,
+                space,
+                next,
+            });
             address = next_address;
         }
         Ok(ObjectHeaderAllocation {
@@ -372,17 +387,25 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
     /// ```
     pub fn into_placed_allocation(
         self,
-        allocations: impl ExactSizeIterator<Item = AddressRange<StoredAddress>>,
+        mut allocations: impl ExactSizeIterator<Item = AddressRange<StoredAddress>>,
     ) -> Result<ObjectHeaderAllocation<'a>, FormatError> {
-        if allocations.len() > worklist::MAX_CONTINUATIONS {
+        let count = allocations.len();
+        if count > worklist::MAX_CONTINUATIONS {
             return Err(FormatError::NestingDepthExceeded);
         }
-        let mut allocations = allocations.peekable();
-        let root_len = allocations.peek().map_or(0, |range| range.length());
-        let root_width = self.root_width(root_len, allocations.len() > 1)?;
-        let mut chunks = Vec::with_capacity(allocations.len());
+        let first = allocations
+            .next()
+            .ok_or(FormatError::InvalidObjectHeaderChunkLength {
+                index: 0,
+                length: 0,
+            })?;
+        let (root_width, root) = ChunkSpace::placed_root(&self, first.length(), count > 1)?;
+        let mut ranges = iter::once((first, Some(root)))
+            .chain(allocations.map(|range| (range, None)))
+            .peekable();
+        let mut chunks = Vec::with_capacity(count);
         let mut allocation_len = 0_usize;
-        while let Some(range) = allocations.next() {
+        while let Some((range, root)) = ranges.next() {
             let len = Self::allocation_len(self.widths(), range.start(), range.length())?;
             allocation_len = allocation_len
                 .checked_add(len)
@@ -391,17 +414,24 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
                     value: allocation_len.to_u64().saturating_add(range.length()),
                     target: "object header allocation",
                 })?;
-            let next = allocations
+            let next = ranges
                 .peek()
-                .map(|range| range.length().to_usize().map(|len| (range.start(), len)))
+                .map(|(range, _)| range.length().to_usize().map(|len| (range.start(), len)))
                 .transpose()?;
-            chunks.push(self.chunk(
-                chunks.len(),
-                root_width,
-                range.start(),
-                range.length(),
+            let space = match root {
+                Some(space) => space,
+                None => ChunkSpace::placed_continuation(
+                    &self,
+                    chunks.len(),
+                    range.length(),
+                    next.is_some(),
+                )?,
+            };
+            chunks.push(Chunk {
+                address: range.start(),
+                space,
                 next,
-            )?);
+            });
         }
         let mut order = (0..chunks.len()).collect::<Vec<_>>();
         order.sort_unstable_by_key(|&index| (chunks[index].address, index));
@@ -489,32 +519,21 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
         address: StoredAddress,
         allocation_len: usize,
     ) -> Result<(UintWidth, Vec<Chunk>), FormatError> {
-        let prefix = self.prefix();
-        let widths = self.widths();
-        let records_len = self.records_len();
         for root_width in [
             UintWidth::One,
             UintWidth::Two,
             UintWidth::Four,
             UintWidth::Eight,
         ] {
-            let fixed = self.root_fixed(root_width);
-            let Some(padding) = allocation_len.checked_sub(fixed + records_len) else {
+            let Some(space) = ChunkSpace::root(self, root_width, allocation_len)? else {
                 continue;
             };
-            let first = Chunk {
+            let mut chunks = Vec::new();
+            let mut chunk = Chunk {
                 address,
-                space: ChunkSpace::new(prefix, widths, fixed + records_len, padding, true)?,
+                space,
                 next: None,
             };
-            let root_body = first.len() - fixed;
-            if (root_body > 0 && root_body < prefix.layout.prefix_len())
-                || UintWidth::smallest_for_len(root_body).get() > root_width.get()
-            {
-                continue;
-            }
-            let mut chunks = Vec::new();
-            let mut chunk = first;
             while let Some(remaining) = chunk.space.remaining() {
                 if chunks.len() + 1 >= worklist::MAX_CONTINUATIONS {
                     return Err(FormatError::NestingDepthExceeded);
@@ -523,13 +542,7 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
                 let next = Chunk {
                     address: next_address,
                     next: None,
-                    space: ChunkSpace::new(
-                        prefix,
-                        widths,
-                        OCHK_SIGNATURE.len() + CHECKSUM_LEN,
-                        remaining - OCHK_SIGNATURE.len() - CHECKSUM_LEN,
-                        false,
-                    )?,
+                    space: remaining.continuation(self)?,
                 };
                 chunk.next = Some((next.address, next.len()));
                 chunks.push(chunk);
@@ -539,43 +552,9 @@ impl<'a> ObjectHeaderAllocationGeometry<'a> {
             return Ok((root_width, chunks));
         }
         Err(FormatError::Internal(format!(
-            "a {allocation_len}-byte allocation cannot represent an object header with {records_len} message bytes"
+            "a {allocation_len}-byte allocation cannot represent an object header with {} message bytes",
+            self.records_len()
         )))
-    }
-
-    fn chunk(
-        &self,
-        index: usize,
-        root_width: UintWidth,
-        address: StoredAddress,
-        length: u64,
-        next: Option<(StoredAddress, usize)>,
-    ) -> Result<Chunk, FormatError> {
-        if index != 0
-            && !self
-                .continuation_chunk_lengths(next.is_some())
-                .contains(&length)
-        {
-            return Err(FormatError::InvalidObjectHeaderChunkLength { index, length });
-        }
-        let fixed = if index == 0 {
-            self.root_fixed(root_width) + self.records_len()
-        } else {
-            OCHK_SIGNATURE.len() + CHECKSUM_LEN
-        };
-        let len = length.to_usize()?;
-        let padding = len
-            - fixed
-            - if next.is_some() {
-                self.continuation_len()
-            } else {
-                0
-            };
-        Ok(Chunk {
-            address,
-            space: ChunkSpace::with_padding(self.prefix().layout, len, padding)?,
-            next,
-        })
     }
 
     fn allocation_len(

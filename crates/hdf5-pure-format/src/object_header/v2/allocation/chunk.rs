@@ -3,39 +3,120 @@ use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::message_type::MessageType;
 use crate::object_header::v2::continuation::OCHK_SIGNATURE;
 use crate::object_header::v2::{CHECKSUM_LEN, MessageRecordLayout, ObjectHeaderPrefix};
-use crate::width::{self, FormatWidths};
+use crate::width::{self, FormatWidths, UintWidth};
 
+use super::geometry::ObjectHeaderAllocationGeometry;
+
+/// The complete encoded length and padding of one chunk, with any space reserved for later chunks.
 #[derive(Debug)]
 pub(super) struct ChunkSpace {
     len: usize,
     padding: ChunkPadding,
-    remaining: Option<usize>,
+    remaining: Option<RemainingSpace>,
 }
 
 impl ChunkSpace {
-    pub(super) fn len(&self) -> usize {
-        self.len
-    }
-    pub(super) fn padding(&self) -> ChunkPadding {
-        self.padding
-    }
-    pub(super) fn remaining(&self) -> Option<usize> {
-        self.remaining
+    /// Plans chunk 0 at the proposed size-field width within a contiguous allocation.
+    ///
+    /// Returns `Ok(None)` if the records do not fit or the proposed width cannot represent a
+    /// valid chunk body for this allocation.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from planning the padding and continuation space.
+    pub(super) fn root(
+        geometry: &ObjectHeaderAllocationGeometry<'_>,
+        width: UintWidth,
+        allocation_len: usize,
+    ) -> Result<Option<Self>, FormatError> {
+        let fixed = geometry.root_fixed(width);
+        let occupied = fixed + geometry.records_len();
+        let Some(available) = allocation_len.checked_sub(occupied) else {
+            return Ok(None);
+        };
+        let prefix = geometry.prefix();
+        let space = Self::new(prefix, geometry.widths(), occupied, available, true)?;
+        let body = space.len - fixed;
+        Ok(((body == 0 || body >= prefix.layout.prefix_len())
+            && UintWidth::smallest_for_len(body).get() <= width.get())
+        .then_some(space))
     }
 
-    pub(super) fn with_padding(
-        layout: MessageRecordLayout,
-        len: usize,
-        padding: usize,
+    /// Selects the smallest size-field width that permits a root chunk of exactly `length` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidObjectHeaderChunkLength`] if the root cannot occupy the
+    /// supplied length, or [`FormatError::ValueTooLargeForPlatform`] if it exceeds [`usize::MAX`].
+    pub(super) fn placed_root(
+        geometry: &ObjectHeaderAllocationGeometry<'_>,
+        length: u64,
+        continued: bool,
+    ) -> Result<(UintWidth, Self), FormatError> {
+        let width = geometry.root_width(length, continued)?;
+        let fixed = geometry.root_fixed(width) + geometry.records_len();
+        let space = Self::with_length(geometry, 0, fixed, length, continued)?;
+        Ok((width, space))
+    }
+
+    pub(super) fn placed_continuation(
+        geometry: &ObjectHeaderAllocationGeometry<'_>,
+        index: usize,
+        length: u64,
+        continued: bool,
     ) -> Result<Self, FormatError> {
+        if !geometry
+            .continuation_chunk_lengths(continued)
+            .contains(&length)
+        {
+            return Err(FormatError::InvalidObjectHeaderChunkLength { index, length });
+        }
+        Self::with_length(
+            geometry,
+            index,
+            OCHK_SIGNATURE.len() + CHECKSUM_LEN,
+            length,
+            continued,
+        )
+    }
+
+    fn with_length(
+        geometry: &ObjectHeaderAllocationGeometry<'_>,
+        index: usize,
+        fixed: usize,
+        length: u64,
+        continued: bool,
+    ) -> Result<Self, FormatError> {
+        let occupied = fixed
+            + if continued {
+                geometry.continuation_len()
+            } else {
+                0
+            };
+        let len = length.to_usize()?;
+        let padding = len
+            .checked_sub(occupied)
+            .ok_or(FormatError::InvalidObjectHeaderChunkLength { index, length })?;
         Ok(Self {
             len,
-            padding: ChunkPadding::new(layout, padding)?,
+            padding: ChunkPadding::new(geometry.prefix().layout, padding)?,
             remaining: None,
         })
     }
 
-    pub(super) fn new(
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(super) fn padding(&self) -> ChunkPadding {
+        self.padding
+    }
+
+    pub(super) fn remaining(&self) -> Option<RemainingSpace> {
+        self.remaining
+    }
+
+    fn new(
         prefix: ObjectHeaderPrefix,
         widths: FormatWidths,
         fixed: usize,
@@ -69,8 +150,28 @@ impl ChunkSpace {
         Ok(Self {
             len,
             padding: ChunkPadding::new(prefix.layout, padding)?,
-            remaining: Some(remaining),
+            remaining: Some(RemainingSpace(remaining)),
         })
+    }
+}
+
+/// The unused suffix of a contiguous allocation, large enough for a continuation chunk.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RemainingSpace(usize);
+
+impl RemainingSpace {
+    pub(super) fn continuation(
+        self,
+        geometry: &ObjectHeaderAllocationGeometry<'_>,
+    ) -> Result<ChunkSpace, FormatError> {
+        let fixed = OCHK_SIGNATURE.len() + CHECKSUM_LEN;
+        ChunkSpace::new(
+            geometry.prefix(),
+            geometry.widths(),
+            fixed,
+            self.0 - fixed,
+            false,
+        )
     }
 }
 

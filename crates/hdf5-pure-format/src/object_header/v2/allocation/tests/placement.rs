@@ -151,6 +151,35 @@ fn placed_chunks_reject_unrepresentable_records(
 }
 
 #[rstest]
+#[case::short_root(128, 30, FormatError::InvalidObjectHeaderChunkLength { index: 0, length: 30 })]
+#[case::undefined_end(u64::MAX - 31, 31, FormatError::DefinedAddressIsUndefined {
+    address: u64::MAX,
+    offset_size: 8,
+})]
+fn invalid_root_leaves_the_first_continuation_in_the_iterator(
+    #[case] address: u64,
+    #[case] length: u64,
+    #[case] expected: FormatError,
+) {
+    let geometry = ObjectHeaderAllocationGeometry::new(
+        ObjectHeaderPrefix::PLAIN,
+        FormatWidths::from_sizes(8, 8).unwrap(),
+        &[],
+    )
+    .unwrap();
+    let root = AddressRange::new(StoredAddress::new(address), length).unwrap();
+    let child = AddressRange::new(StoredAddress::new(512), 12).unwrap();
+    let mut ranges = [root, child].into_iter();
+    assert_eq!(
+        geometry
+            .into_placed_allocation(ranges.by_ref())
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(ranges.next(), Some(child));
+}
+
+#[rstest]
 #[case::undefined_start(65_535, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
 #[case::undefined_end(65_523, FormatError::DefinedAddressIsUndefined { address: 65_535, offset_size: 2 })]
 #[case::oversized_end(65_524, FormatError::AddressTooLarge { address: 65_536, offset_size: 2 })]
