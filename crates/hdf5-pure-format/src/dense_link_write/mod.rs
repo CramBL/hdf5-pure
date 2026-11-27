@@ -153,24 +153,7 @@ impl DenseLinkPlan {
             .enumerate()
             .map(|(index, &size)| header.encode_managed_id(heap.heap_offset(index), size))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut order = storage
-            .links()
-            .iter()
-            .enumerate()
-            .map(|(index, link)| (checksum::jenkins_lookup3(link.name()), index))
-            .collect::<Vec<_>>();
-        order.sort_unstable_by(|&(hash_a, index_a), &(hash_b, index_b)| {
-            hash_a.cmp(&hash_b).then_with(|| {
-                storage.links()[index_a]
-                    .name()
-                    .cmp(storage.links()[index_b].name())
-            })
-        });
-        let mut name_records = Vec::new();
-        for (hash, index) in order {
-            let id = PreparedHeapId::new(&id_layout, &ids[index])?;
-            btree_v2::LinkIndexKey::NameHash(hash).append_record(&mut name_records, id);
-        }
+        let name_records = PlannedIndex::name_records(&storage, &id_layout, &ids)?;
         let heap_offset = FractalHeapHeader::serialized_size(offset_width, length_width).to_u64();
         let mut cursor = heap_offset
             .checked_add(heap.region_size())
@@ -188,22 +171,7 @@ impl DenseLinkPlan {
             &mut cursor,
         )?;
         let creation_index = if creation.is_indexed() {
-            let mut order = storage
-                .links()
-                .iter()
-                .enumerate()
-                .map(|(index, link)| {
-                    link.creation_order()
-                        .map(|creation| (creation, index))
-                        .ok_or(LinkStorageError::CreationOrderPresence)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            order.sort_unstable_by_key(|&(creation, _)| creation);
-            let mut records = Vec::new();
-            for (creation, index) in order {
-                let id = PreparedHeapId::new(&id_layout, &ids[index])?;
-                btree_v2::LinkIndexKey::CreationOrder(creation).append_record(&mut records, id);
-            }
+            let records = PlannedIndex::creation_records(&storage, &id_layout, &ids)?;
             Some(PlannedIndex::new(
                 widths,
                 BTREE_V2_LINK_CREATION_ORDER,
@@ -259,82 +227,7 @@ impl DenseLinkPlan {
         &self,
         addresses: &[StoredAddress],
     ) -> Result<DenseLinkPlacement<'_>, FormatError> {
-        let Self {
-            offset_width,
-            length_width: _,
-            creation,
-            serialized,
-            header: _,
-            heap,
-            name,
-            creation_index,
-            heap_offset: _,
-            total_len: _,
-        } = self;
-        let expected = self.block_count();
-        if addresses.len() != expected {
-            return Err(FormatError::DenseLinkBlockCount {
-                expected,
-                actual: addresses.len(),
-            });
-        }
-        let heap_end = 1 + heap.block_lengths().len();
-        let name_end = heap_end + 1 + name.plan.block_lengths().len();
-        let mut header_fields = [
-            (0, LinkInfoAddressField::Heap),
-            (heap_end, LinkInfoAddressField::NameIndex),
-            (name_end, LinkInfoAddressField::CreationIndex),
-        ]
-        .into_iter()
-        .take(2 + usize::from(creation_index.is_some()))
-        .peekable();
-        let mut info = LinkInfoMessage::compact(*offset_width, creation.next_index(), false);
-        let mut ranges = Vec::with_capacity(expected);
-        for (index, (&address, length)) in addresses.iter().zip(self.block_lengths()).enumerate() {
-            if let Some((_, field)) = header_fields.next_if(|(position, _)| *position == index) {
-                info.set_defined_address(field, address)?;
-            } else {
-                self.address(address, 0)?;
-            }
-            let end = address
-                .get()
-                .checked_add(length)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: address.get(),
-                    length,
-                })?;
-            if end > StoredAddress::undefined(*offset_width).get() {
-                return Err(FormatError::AddressTooLarge {
-                    address: end,
-                    offset_size: offset_width.get(),
-                });
-            }
-            ranges.push((address.get(), end, index));
-        }
-        ranges.sort_unstable();
-        for pair in ranges.windows(2) {
-            if pair[0].1 > pair[1].0 {
-                return Err(FormatError::DenseLinkBlockOverlap {
-                    first: pair[0].2,
-                    second: pair[1].2,
-                });
-            }
-        }
-        let heap = heap.place(&addresses[1..heap_end])?;
-        let name = name.plan.place(&addresses[heap_end + 1..name_end])?;
-        let creation_placement = creation_index
-            .as_ref()
-            .map(|index| index.plan.place(&addresses[name_end + 1..]))
-            .transpose()?;
-        Ok(DenseLinkPlacement {
-            plan: self,
-            addresses: addresses.to_vec(),
-            objects: serialized.iter().map(Vec::as_slice).collect(),
-            heap,
-            name,
-            creation_index: creation_placement,
-            info,
-        })
+        DenseLinkPlacement::new(self, addresses)
     }
 
     /// Returns the bytes required for the heap header, heap blocks, and index headers and nodes.
@@ -352,8 +245,7 @@ impl DenseLinkPlan {
     /// Returns [`DenseLinkPlanError::Format`] if `base` is undefined, an address exceeds the
     /// stored address width, or address arithmetic overflows.
     pub fn link_info(&self, base: StoredAddress) -> Result<LinkInfoMessage, DenseLinkPlanError> {
-        let mut info =
-            LinkInfoMessage::compact(self.offset_width, self.creation.next_index(), false);
+        let mut info = self.compact_info();
         info.set_defined_address(LinkInfoAddressField::Heap, base)?;
         let end = base
             .get()
@@ -371,12 +263,12 @@ impl DenseLinkPlan {
         }
         info.set_defined_address(
             LinkInfoAddressField::NameIndex,
-            base.checked_add(self.name.offset)?,
+            base.checked_add(self.name.offset())?,
         )?;
         if let Some(index) = &self.creation_index {
             info.set_defined_address(
                 LinkInfoAddressField::CreationIndex,
-                base.checked_add(index.offset)?,
+                base.checked_add(index.offset())?,
             )?;
         }
         Ok(info)
@@ -399,7 +291,7 @@ impl DenseLinkPlan {
             offset_width,
             length_width,
             creation: _,
-            serialized,
+            serialized: _,
             header,
             heap,
             name,
@@ -412,26 +304,26 @@ impl DenseLinkPlan {
         header.root_block_address = heap.root_address(heap_address)?;
         let mut bytes = Vec::with_capacity(total_len.to_usize()?);
         bytes.extend(header.serialize(*offset_width, *length_width)?);
-        let objects = serialized.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let objects = self.objects();
         Self::append(
             &mut bytes,
             *heap_offset,
             &heap.serialize(&objects, heap_address, base)?,
         )?;
         for index in core::iter::once(name).chain(creation_index.iter()) {
-            let nodes_address = if index.records.is_empty() {
+            let nodes_address = if index.records().is_empty() {
                 StoredAddress::undefined(*offset_width)
             } else {
-                self.address(base, index.nodes_offset)?
+                self.address(base, index.nodes_offset())?
             };
-            let image = index.plan.serialize(
-                &index.records,
+            let image = index.tree().serialize(
+                index.records(),
                 nodes_address,
                 *offset_width,
                 *length_width,
             )?;
-            Self::append(&mut bytes, index.offset, &image.header)?;
-            Self::append(&mut bytes, index.nodes_offset, &image.nodes)?;
+            Self::append(&mut bytes, index.offset(), &image.header)?;
+            Self::append(&mut bytes, index.nodes_offset(), &image.nodes)?;
         }
         if bytes.len().to_u64() != *total_len {
             return Err(FormatError::Internal(
@@ -442,13 +334,44 @@ impl DenseLinkPlan {
         Ok(DenseLinkImage { bytes, info })
     }
 
+    fn heap(&self) -> &ManagedHeapPlan {
+        &self.heap
+    }
+
+    fn header(&self) -> &FractalHeapHeader {
+        &self.header
+    }
+
+    fn widths(&self) -> FormatWidths {
+        FormatWidths {
+            offsets: self.offset_width,
+            lengths: self.length_width,
+        }
+    }
+
+    fn name_index(&self) -> &PlannedIndex {
+        &self.name
+    }
+
+    fn creation_index(&self) -> Option<&PlannedIndex> {
+        self.creation_index.as_ref()
+    }
+
+    fn objects(&self) -> Vec<&[u8]> {
+        self.serialized.iter().map(Vec::as_slice).collect()
+    }
+
+    fn compact_info(&self) -> LinkInfoMessage {
+        LinkInfoMessage::compact(self.offset_width, self.creation.next_index(), false)
+    }
+
     fn block_count(&self) -> usize {
         2 + self.heap.block_lengths().len()
-            + self.name.plan.block_lengths().len()
+            + self.name.tree().block_lengths().len()
             + self
                 .creation_index
                 .as_ref()
-                .map_or(0, |index| 1 + index.plan.block_lengths().len())
+                .map_or(0, |index| 1 + index.tree().block_lengths().len())
     }
 
     #[expect(
@@ -481,10 +404,10 @@ impl DenseLinkPlan {
                 return btree_v2::btree_v2_header_size(*offset_width, *length_width).to_u64();
             }
             index -= 1;
-            if let Some(length) = tree.plan.block_lengths().nth(index) {
+            if let Some(length) = tree.tree().block_lengths().nth(index) {
                 return length;
             }
-            index -= tree.plan.block_lengths().len();
+            index -= tree.tree().block_lengths().len();
         }
         // The iterator supplies indexes below `block_count`, which counts these same components.
         unreachable!("block index is bounded by the complete block count")
@@ -593,7 +516,77 @@ pub struct DenseLinkPlacement<'a> {
     info: LinkInfoMessage,
 }
 
-impl DenseLinkPlacement<'_> {
+impl<'a> DenseLinkPlacement<'a> {
+    fn new(plan: &'a DenseLinkPlan, addresses: &[StoredAddress]) -> Result<Self, FormatError> {
+        let expected = plan.block_count();
+        if addresses.len() != expected {
+            return Err(FormatError::DenseLinkBlockCount {
+                expected,
+                actual: addresses.len(),
+            });
+        }
+        let heap_end = 1 + plan.heap().block_lengths().len();
+        let name_end = heap_end + 1 + plan.name_index().tree().block_lengths().len();
+        let mut header_fields = [
+            (0, LinkInfoAddressField::Heap),
+            (heap_end, LinkInfoAddressField::NameIndex),
+            (name_end, LinkInfoAddressField::CreationIndex),
+        ]
+        .into_iter()
+        .take(2 + usize::from(plan.creation_index().is_some()))
+        .peekable();
+        let mut info = plan.compact_info();
+        let mut ranges = Vec::with_capacity(expected);
+        for (index, (&address, length)) in addresses.iter().zip(plan.block_lengths()).enumerate() {
+            if let Some((_, field)) = header_fields.next_if(|(position, _)| *position == index) {
+                info.set_defined_address(field, address)?;
+            } else {
+                plan.address(address, 0)?;
+            }
+            let end = address
+                .get()
+                .checked_add(length)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: address.get(),
+                    length,
+                })?;
+            if end > StoredAddress::undefined(plan.widths().offsets).get() {
+                return Err(FormatError::AddressTooLarge {
+                    address: end,
+                    offset_size: plan.widths().offsets.get(),
+                });
+            }
+            ranges.push((address.get(), end, index));
+        }
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            if pair[0].1 > pair[1].0 {
+                return Err(FormatError::DenseLinkBlockOverlap {
+                    first: pair[0].2,
+                    second: pair[1].2,
+                });
+            }
+        }
+        let heap = plan.heap().place(&addresses[1..heap_end])?;
+        let name = plan
+            .name_index()
+            .tree()
+            .place(&addresses[heap_end + 1..name_end])?;
+        let creation_placement = plan
+            .creation_index()
+            .map(|index| index.tree().place(&addresses[name_end + 1..]))
+            .transpose()?;
+        Ok(DenseLinkPlacement {
+            plan,
+            addresses: addresses.to_vec(),
+            objects: plan.objects(),
+            heap,
+            name,
+            creation_index: creation_placement,
+            info,
+        })
+    }
+
     /// Returns each block's stored address and complete serialized length in placement order.
     ///
     /// The order is the same as [`DenseLinkPlan::block_lengths`].
@@ -638,34 +631,24 @@ impl DenseLinkPlacement<'_> {
             creation_index,
             info: _,
         } = self;
-        let DenseLinkPlan {
-            offset_width,
-            length_width,
-            creation: _,
-            serialized: _,
-            header,
-            heap: heap_plan,
-            name: name_plan,
-            creation_index: creation_plan,
-            heap_offset: _,
-            total_len: _,
-        } = plan;
-        let mut header = header.clone();
+        let widths = plan.widths();
+        let mut header = plan.header().clone();
         header.root_block_address = heap.root_address();
         let heap_address = addresses[0];
-        let heap_header = header.serialize(*offset_width, *length_width)?;
+        let heap_header = header.serialize(widths.offsets, widths.lengths)?;
         let heap = heap.serialize_blocks(objects, heap_address)?;
-        let name_header = name.serialize_header(*length_width)?;
-        let name_address = addresses[1 + heap_plan.block_lengths().len()];
-        let name = name.serialize_nodes(&name_plan.records)?;
+        let name_header = name.serialize_header(widths.lengths)?;
+        let name_address = addresses[1 + plan.heap().block_lengths().len()];
+        let name = name.serialize_nodes(plan.name_index().records())?;
         let creation = creation_index
             .as_ref()
-            .zip(creation_plan.as_ref())
+            .zip(plan.creation_index())
             .map(|(placement, index)| {
-                let header = placement.serialize_header(*length_width)?;
-                let address = addresses
-                    [2 + heap_plan.block_lengths().len() + name_plan.plan.block_lengths().len()];
-                let nodes = placement.serialize_nodes(&index.records)?;
+                let header = placement.serialize_header(widths.lengths)?;
+                let address = addresses[2
+                    + plan.heap().block_lengths().len()
+                    + plan.name_index().tree().block_lengths().len()];
+                let nodes = placement.serialize_nodes(index.records())?;
                 Ok::<_, FormatError>(core::iter::once(Ok((address, header))).chain(nodes))
             })
             .transpose()?;
@@ -726,6 +709,72 @@ struct PlannedIndex {
 }
 
 impl PlannedIndex {
+    fn tree(&self) -> &BTreeV2Plan {
+        &self.plan
+    }
+
+    fn records(&self) -> &[u8] {
+        &self.records
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn nodes_offset(&self) -> u64 {
+        self.nodes_offset
+    }
+
+    fn creation_records(
+        storage: &GroupLinkStorage,
+        id_layout: &FractalHeapIdLayout,
+        ids: &[Vec<u8>],
+    ) -> Result<Vec<u8>, DenseLinkPlanError> {
+        let mut order = storage
+            .links()
+            .iter()
+            .enumerate()
+            .map(|(index, link)| {
+                link.creation_order()
+                    .map(|creation| (creation, index))
+                    .ok_or(LinkStorageError::CreationOrderPresence)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        order.sort_unstable_by_key(|&(creation, _)| creation);
+        let mut records = Vec::new();
+        for (creation, index) in order {
+            let id = PreparedHeapId::new(id_layout, &ids[index])?;
+            btree_v2::LinkIndexKey::CreationOrder(creation).append_record(&mut records, id);
+        }
+        Ok(records)
+    }
+
+    fn name_records(
+        storage: &GroupLinkStorage,
+        id_layout: &FractalHeapIdLayout,
+        ids: &[Vec<u8>],
+    ) -> Result<Vec<u8>, DenseLinkPlanError> {
+        let mut order = storage
+            .links()
+            .iter()
+            .enumerate()
+            .map(|(index, link)| (checksum::jenkins_lookup3(link.name()), index))
+            .collect::<Vec<_>>();
+        order.sort_unstable_by(|&(hash_a, index_a), &(hash_b, index_b)| {
+            hash_a.cmp(&hash_b).then_with(|| {
+                storage.links()[index_a]
+                    .name()
+                    .cmp(storage.links()[index_b].name())
+            })
+        });
+        let mut name_records = Vec::new();
+        for (hash, index) in order {
+            let id = PreparedHeapId::new(id_layout, &ids[index])?;
+            btree_v2::LinkIndexKey::NameHash(hash).append_record(&mut name_records, id);
+        }
+        Ok(name_records)
+    }
+
     fn new(
         widths: FormatWidths,
         tree_type: u8,
