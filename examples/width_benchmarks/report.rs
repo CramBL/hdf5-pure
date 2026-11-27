@@ -424,7 +424,7 @@ impl Wire {
                 let dataset = group.dataset(&link_name)?;
                 let dimensions = dataset.shape()?;
                 let dataspace = Dataspace::simple(dimensions, dataset.maxshape()?)?;
-                let length = u64::try_from(dataspace.serialize(case.lengths().get())?.len())
+                let length = u64::try_from(dataspace.prepare(case.lengths())?.encoded_size())
                     .map_err(|_error| Error::EditUnsupported("dataspace length exceeds u64"))?;
                 dataset_dataspace_bytes = dataset_dataspace_bytes
                     .checked_add(length)

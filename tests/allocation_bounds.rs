@@ -2937,7 +2937,7 @@ fn prepared_dataspace_uses_only_the_destination_allocation() {
             .build();
 
     let (owned, measured) = allocation::measure("dataspace_owned", || {
-        dataspace.serialize(LengthWidth::Eight.get()).unwrap()
+        dataspace.prepare(LengthWidth::Eight).unwrap().to_bytes()
     });
     assert_eq!(measured.blocks, 1, "{measured}");
     assert_eq!(

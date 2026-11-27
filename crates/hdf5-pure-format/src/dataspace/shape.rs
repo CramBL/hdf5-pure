@@ -249,7 +249,7 @@ impl Dataspace {
     /// use hdf5_pure_format::{__private as format, FormatError, LengthWidth, MaxExtent};
     ///
     /// let dataspace = format::Dataspace::simple(vec![3], Some(vec![MaxExtent::Fixed(7)]))?;
-    /// let mut body = dataspace.serialize(2)?;
+    /// let mut body = dataspace.prepare(LengthWidth::Two)?.to_bytes();
     /// let (parsed, dimensions) = format::Dataspace::parse_with_dimension_fields(
     ///     &body, LengthWidth::Two,
     /// )?;
@@ -270,18 +270,6 @@ impl Dataspace {
         let stored = StoredDataspace::decode_prefix(data, length_width)?.into_value();
         let range = stored.dimension_range();
         Ok((stored.into_dataspace()?, range))
-    }
-
-    /// Serializes a version 2 dataspace message with `length_size`-byte dimensions.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidLengthSize`] if `length_size` is not 2, 4, or 8, and otherwise
-    /// returns the errors of [`Self::prepare`].
-    pub fn serialize(&self, length_size: u8) -> Result<Vec<u8>, FormatError> {
-        Ok(self
-            .prepare(LengthWidth::try_from(length_size)?)?
-            .to_bytes())
     }
 
     /// Borrows the dataspace for version 2 encoding at the file's length width.
@@ -457,29 +445,16 @@ impl PreparedDataspace<'_> {
         output
     }
 
-    /// Writes the checked dataspace into a body of exactly [`Self::encoded_size`] bytes.
+    /// Writes the dataspace into the first [`Self::encoded_size`] bytes of `body`.
     ///
     /// # Panics
     ///
-    /// Panics if `body` is too short to hold the four-byte prefix.
+    /// Panics if `body` is shorter than [`Self::encoded_size`].
     pub(crate) fn write_body(&self, body: &mut [u8]) {
-        let (header, fields) = body.split_at_mut(V2_HEADER_SIZE);
-        let flags = if self.dataspace.max_dimensions.is_some() {
-            MAX_DIMENSIONS_FLAG
-        } else {
-            0
-        };
-        header.copy_from_slice(&[
-            VERSION_TWO,
-            self.dataspace.rank(),
-            flags,
-            self.dataspace.space_type.type_byte(),
-        ]);
-        match self.length_width {
-            LengthWidth::Two => self.write_lengths::<2>(fields),
-            LengthWidth::Four => self.write_lengths::<4>(fields),
-            LengthWidth::Eight => self.write_lengths::<8>(fields),
-        }
+        assert!(
+            self.encode_into(body).is_ok(),
+            "caller reserves the prepared dataspace size"
+        );
     }
 
     fn write_lengths<const N: usize>(&self, fields: &mut [u8]) {
@@ -507,7 +482,23 @@ impl Encode for PreparedDataspace<'_> {
         let body = output
             .get_mut(..expected)
             .ok_or_else(|| bytes::UnexpectedEof::new(expected, available))?;
-        self.write_body(body);
+        let (header, fields) = body.split_at_mut(V2_HEADER_SIZE);
+        let flags = if self.dataspace.max_dimensions.is_some() {
+            MAX_DIMENSIONS_FLAG
+        } else {
+            0
+        };
+        header.copy_from_slice(&[
+            VERSION_TWO,
+            self.dataspace.rank(),
+            flags,
+            self.dataspace.space_type.type_byte(),
+        ]);
+        match self.length_width {
+            LengthWidth::Two => self.write_lengths::<2>(fields),
+            LengthWidth::Four => self.write_lengths::<4>(fields),
+            LengthWidth::Eight => self.write_lengths::<8>(fields),
+        }
         Ok(expected)
     }
 }
@@ -1029,7 +1020,7 @@ mod tests {
             Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(6)]),
         )
         .unwrap();
-        let bytes = ds.serialize(8).unwrap();
+        let bytes = ds.prepare(LengthWidth::Eight).unwrap().to_bytes();
         assert_eq!(bytes[..4], [2, 2, 0x01, 1]);
         assert_eq!(bytes[20..28], u64::MAX.to_le_bytes());
         assert_eq!(bytes[28..36], 6u64.to_le_bytes());

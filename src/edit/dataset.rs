@@ -749,7 +749,7 @@ impl WriteEngine {
 
         let mut grown = disk_ds.clone();
         grown.set_first_dimension(new_dim0)?;
-        let new_dataspace_body = grown.serialize(widths.lengths.get())?;
+        let new_dataspace_body = grown.prepare(widths.lengths)?.to_bytes();
 
         let (kind, slot_of_chunk, index_slots) = chunked_write::plan_index_slots(
             widths,
