@@ -4,15 +4,14 @@ use alloc::vec::Vec;
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::attribute_info::{AttributeCreationOrderIndex, AttributeInfoMessage};
 use crate::btree::v2::write::BTreeV2Placement;
-use crate::btree::v2::{AttributeRecord, HugeObjectDirectRecord, HugeObjectRecord};
+use crate::btree::v2::{HugeObjectDirectRecord, HugeObjectRecord};
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::fractal_heap::FractalHeapIdLayout;
-use crate::fractal_heap::PreparedHeapId;
 use crate::fractal_heap::write::ManagedHeapPlacement;
-use crate::message_flags::MessageFlags;
 
 use super::DenseAttrPlan;
+use super::plan::AttributeIndexRecords;
 
 /// Dense attribute storage with checked, independent block addresses.
 ///
@@ -111,25 +110,10 @@ impl<'a> DenseAttrPlacement<'a> {
                 record.encode(&mut huge_records, widths.offsets, widths.lengths)?;
             }
         }
-        for &(hash, position) in geometry.indexes().order() {
-            let position = position.to_usize()?;
-            AttributeRecord {
-                heap_id: PreparedHeapId::new(&ids, &heap_ids[position])?.bytes(),
-                flags: MessageFlags::NONE,
-                creation_order: attributes[position].creation_index(),
-            }
-            .encode_name_record(&mut indexes[0].records, hash);
-        }
+        let records = AttributeIndexRecords::new(plan, &ids, &heap_ids)?;
+        indexes[0].records = records.name_records()?;
         if geometry.indexes().indexed() {
-            for &position in geometry.indexes().corder_order() {
-                let position = position.to_usize()?;
-                AttributeRecord {
-                    heap_id: PreparedHeapId::new(&ids, &heap_ids[position])?.bytes(),
-                    flags: MessageFlags::NONE,
-                    creation_order: attributes[position].creation_index(),
-                }
-                .encode_creation_order_record(&mut indexes[1].records);
-            }
+            indexes[1].records = records.creation_records()?;
         }
         if geometry.huge_plan().is_some() {
             indexes[1 + usize::from(geometry.indexes().indexed())].records = huge_records;
