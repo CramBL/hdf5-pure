@@ -6,8 +6,14 @@ use crate::bytes::ByteCursor;
 
 /// Decodes one value at the start of a byte slice.
 ///
-/// The value may borrow from the input. The byte count includes every field of the prefix,
-/// even when the decoder omits a field from the returned value.
+/// Reads only the bytes needed to decode the value and returns their count. The value may
+/// borrow from the input. Count all fields, internal alignment, and trailers of the selected
+/// unit, including fields omitted from the result. Measure the count and retained ranges from
+/// the start of the supplied unit.
+///
+/// A consuming caller checks the count and advances its cursor after decoding and any fallible
+/// projection succeed. A caller reading a declared field with a known end can use
+/// [`DecodeFrame`] to check the whole field.
 pub(crate) trait DecodePrefix<'input>: Sized {
     /// The field widths or other information required to interpret the input.
     type Context;
@@ -29,7 +35,10 @@ pub(crate) trait DecodePrefix<'input>: Sized {
 /// Decodes a value from a slice whose boundaries are known to the caller.
 ///
 /// The decoder accounts for every byte in the frame, including any payload, checksum, or
-/// padding defined by the format. The value may borrow from the frame.
+/// padding defined by the format. A structural decoder can retain a delimited payload for
+/// later interpretation. Document which fields are checked during decoding and which checks
+/// require a subsequent operation. The value may borrow from the frame or a layout supplied
+/// through [`Self::Context`].
 ///
 /// Implement this trait independently of [`DecodePrefix`]. Use [`decode_exact`] when the
 /// frame consists of one prefix and trailing bytes are checked after prefix decoding.
@@ -96,7 +105,10 @@ pub(crate) struct InvalidConsumption {
 /// A value and the number of bytes consumed from the original input.
 ///
 /// Construct this from the value and the slice consumed by its decoder, or use
-/// [`Self::from_cursor`] for a cursor positioned at the end of the value.
+/// [`Self::from_cursor`] for a cursor positioned at the end of the value. The decoder constructs
+/// it after reading the whole value, from a cursor or slice over its own input. [`Self::map`]
+/// and [`Self::try_map`] preserve the input count through conversion, even if the new value has
+/// a different encoded length.
 #[must_use]
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Parsed<T> {
@@ -197,7 +209,9 @@ pub(crate) trait Decode<'input>: Sized {
 /// Writes complete encodings into bounded byte slices.
 ///
 /// Construction or fallible preparation establishes that numeric fields fit their retained widths.
-/// Each implementation defines byte order and wire layout.
+/// Preparation also establishes counts, geometry, and placement when the layout requires them.
+/// Each implementation defines byte order and wire layout. An aggregate encoder must leave
+/// the complete output unchanged on error, including bytes reserved for earlier children.
 ///
 /// See [`VariableLengthDescriptor`] and [`SymbolTableMessage::write_into`] for encoding at checked
 /// field widths.
