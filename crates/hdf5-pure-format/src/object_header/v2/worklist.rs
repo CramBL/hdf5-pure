@@ -67,8 +67,6 @@ pub(super) const MAX_CONTINUATIONS: usize = 256;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::address::StoredAddress;
-    use crate::address::StoredAddressExt;
     use crate::convert::Narrow;
 
     #[test]
@@ -100,9 +98,9 @@ mod tests {
     }
 
     fn continuation(address: u64) -> ObjectHeaderContinuation {
-        ObjectHeaderContinuation {
-            address: StoredAddress::new(address),
-            length: 16,
-        }
+        let mut body = [0; 16];
+        body[..8].copy_from_slice(&address.to_le_bytes());
+        body[8..].copy_from_slice(&16_u64.to_le_bytes());
+        ObjectHeaderContinuation::parse(&body, 8, 8).unwrap()
     }
 }
