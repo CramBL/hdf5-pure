@@ -3,20 +3,47 @@
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
 
-use super::ALIGNMENT;
-use super::GCOL_RESERVED_LEN;
-use super::GCOL_SIGNATURE;
-use super::GCOL_VERSION;
-use super::GLOBAL_HEAP_MAX_OBJECTS;
-use super::GLOBAL_HEAP_MIN_COLLECTION_SIZE;
-use super::GlobalHeapCollectionError;
-use super::IndexSet;
-use super::OBJECT_RESERVED_LEN;
+use super::collection::{
+    self, ALIGNMENT, GCOL_RESERVED_LEN, GCOL_SIGNATURE, GCOL_VERSION,
+    GLOBAL_HEAP_MIN_COLLECTION_SIZE,
+};
+use super::error::GlobalHeapCollectionError;
+use super::index::{GLOBAL_HEAP_MAX_OBJECTS, IndexSet};
+use super::object::OBJECT_RESERVED_LEN;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::width;
 use crate::width::LengthWidth;
+
+/// Encodes a global heap collection that holds `objects` at the indices 1, 2, and so on, in order.
+///
+/// Every length field is `length_width` bytes wide. The collection header, each object header and
+/// each object's data are padded to a multiple of 8 bytes, and a free space object at index 0
+/// spans the rest of the collection. A collection smaller than 4096 bytes, the minimum collection
+/// size the specification defines, is padded to 4096. Each object stores a reference count of 1.
+/// The collection is defined in "Global Heap" of the [format specification, version 4.0][spec].
+///
+/// libhdf5 pads a header to a multiple of 8 bytes at every length width (`H5HG_SIZEOF_HDR`
+/// and `H5HG_SIZEOF_OBJHDR` in `H5HGpkg.h`, HDF5 2.2.0).
+///
+/// # Errors
+///
+/// Returns [`GlobalHeapCollectionError::TooManyObjects`] if `objects` has more than
+/// [`GLOBAL_HEAP_MAX_OBJECTS`] objects, and [`GlobalHeapCollectionError::TooLarge`] if the size of
+/// the collection does not fit a length field of `length_width` bytes. Returns
+/// [`GlobalHeapCollectionError::Format`] for arithmetic overflow, a collection larger than the
+/// target's [`usize`] range, or failure to reserve the collection buffer.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+pub fn encode_global_heap_collection(
+    length_width: LengthWidth,
+    objects: &[&[u8]],
+) -> Result<Vec<u8>, GlobalHeapCollectionError> {
+    PreparedGlobalHeapCollection::from_objects(length_width, objects)?
+        .serialize()
+        .map_err(GlobalHeapCollectionError::from)
+}
 
 /// A nonzero member index, reference count, and borrowed payload for a version 1 collection.
 ///
@@ -297,16 +324,16 @@ impl<'a> PreparedGlobalHeapCollection<'a> {
         members: Members<'a>,
         capacity: Capacity,
     ) -> Result<Self, FormatError> {
-        let header = super::header_len(lengths);
+        let header = collection::header_len(lengths);
         let used = members.iter().try_fold(header, |used, member| {
-            super::add_collection_size(
-                super::add_collection_size(used, header)?,
-                super::aligned_collection_size(member.payload.len().to_u64())?,
+            collection::add_collection_size(
+                collection::add_collection_size(used, header)?,
+                collection::aligned_collection_size(member.payload.len().to_u64())?,
             )
         })?;
         let capacity = match capacity {
-            Capacity::Derived => super::aligned_collection_size(
-                super::add_collection_size(used, header)?
+            Capacity::Derived => collection::aligned_collection_size(
+                collection::add_collection_size(used, header)?
                     .max(GLOBAL_HEAP_MIN_COLLECTION_SIZE.to_u64()),
             )?,
             Capacity::Exact(capacity) => capacity,

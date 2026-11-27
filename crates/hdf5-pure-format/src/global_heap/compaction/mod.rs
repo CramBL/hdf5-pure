@@ -8,6 +8,7 @@ use hdf5_pure_core::__private::FileRegion;
 use super::GlobalHeapCollection;
 use super::GlobalHeapObject;
 use super::GlobalHeapWalk;
+use super::collection::FIXED_HEADER_LEN;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -163,7 +164,7 @@ impl GlobalHeapMembers {
             let mut bytes = [0; FREE_HEADER_LEN];
             bytes::write_length_at(
                 &mut bytes,
-                super::FIXED_HEADER_LEN.to_usize()?,
+                FIXED_HEADER_LEN.to_usize()?,
                 length,
                 collection.lengths(),
             )?;
