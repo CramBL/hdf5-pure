@@ -8,7 +8,7 @@ use super::name::{self, LinkName, USER_LINK_MIN, UserLinkKind};
 use super::wire::{EXTERNAL_LINK, HARD_LINK, SOFT_LINK};
 use crate::address::{DecodedStoredAddress, StoredAddress};
 use crate::bytes::{ByteCursor, UnexpectedEof};
-use crate::codec::Decode;
+use crate::codec::{self, DecodeFrame, DecodePrefix, Parsed};
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
@@ -41,11 +41,7 @@ impl<'a> LinkMessageView<'a> {
     /// Returns the errors of [`Self::parse_prefix`] wrapped in [`LinkWireError::Format`], or
     /// [`LinkWireError::TrailingBytes`] if bytes follow the target.
     pub fn parse(data: &'a [u8], offset_width: OffsetWidth) -> Result<Self, LinkWireError> {
-        let link = Self::decode(data, offset_width)?;
-        if link.consumed() != data.len() {
-            return Err(LinkWireError::TrailingBytes);
-        }
-        Ok(link)
+        Self::decode_frame(data, offset_width)
     }
 
     /// Reads the complete Link message at the start of `data`.
@@ -90,7 +86,7 @@ impl<'a> LinkMessageView<'a> {
     /// # Ok::<(), hdf5_pure_format::FormatError>(())
     /// ```
     pub fn parse_prefix(data: &'a [u8], offset_width: OffsetWidth) -> Result<Self, FormatError> {
-        Self::decode(data, offset_width)
+        Ok(Self::decode_prefix(data, offset_width)?.into_value())
     }
 
     /// Prepares a body at `offset_width` using the borrowed fields and retained encoding choices.
@@ -147,13 +143,14 @@ impl<'a> LinkMessageView<'a> {
     }
 }
 
-impl<'a> Decode<'a> for LinkMessageView<'a> {
+impl<'a> DecodePrefix<'a> for LinkMessageView<'a> {
     type Context = OffsetWidth;
     type Error = FormatError;
 
-    fn decode(input: &'a [u8], width: OffsetWidth) -> Result<Self, Self::Error> {
+    fn decode_prefix(input: &'a [u8], width: OffsetWidth) -> Result<Parsed<Self>, Self::Error> {
         let prefix = LinkPrefix::parse(input)?;
-        let (target, consumed, target_value_len) = prefix.read_target(width)?;
+        let parsed = prefix.read_target(width)?;
+        let consumed = parsed.consumed();
         let target_start = prefix.target_start();
         let LinkPrefix {
             name,
@@ -163,7 +160,7 @@ impl<'a> Decode<'a> for LinkMessageView<'a> {
             charset,
             target: _,
         } = prefix;
-        Ok(Self {
+        Ok(parsed.map(|(target, target_value_len)| Self {
             target,
             target_value_len,
             creation_order,
@@ -172,7 +169,16 @@ impl<'a> Decode<'a> for LinkMessageView<'a> {
             name_width,
             target_start,
             consumed,
-        })
+        }))
+    }
+}
+
+impl<'a> DecodeFrame<'a> for LinkMessageView<'a> {
+    type Context = OffsetWidth;
+    type Error = LinkWireError;
+
+    fn decode_frame(frame: &'a [u8], width: OffsetWidth) -> Result<Self, Self::Error> {
+        codec::decode_exact(frame, width).map_err(LinkWireError::from)
     }
 }
 
@@ -329,7 +335,7 @@ impl<'a> LinkPrefix<'a> {
         &self,
         width: OffsetWidth,
     ) -> Result<LinkTargetView<'a>, FormatError> {
-        Ok(self.read_target(width)?.0)
+        Ok(self.read_target(width)?.value().0)
     }
 
     pub(super) fn discover_hard_link(
@@ -341,9 +347,9 @@ impl<'a> LinkPrefix<'a> {
             .map(|(address, _)| (self.name, address)))
     }
 
-    /// Checks the name component and reads the target, end position, and stored value length.
+    /// Reads the target and its stored value length, checking the name component.
     ///
-    /// The end position is relative to the start of the entire Link message. Returns a value
+    /// The byte count includes the entire Link message through the target. Returns a value
     /// length of zero for a hard address.
     ///
     /// # Errors
@@ -353,7 +359,7 @@ impl<'a> LinkPrefix<'a> {
     fn read_target(
         &self,
         width: OffsetWidth,
-    ) -> Result<(LinkTargetView<'a>, usize, u16), FormatError> {
+    ) -> Result<Parsed<(LinkTargetView<'a>, u16)>, FormatError> {
         let mut cursor = self.target;
         let (target, value_len) = match self.link_type.unwrap_or(HARD_LINK) {
             HARD_LINK => (
@@ -386,7 +392,7 @@ impl<'a> LinkPrefix<'a> {
             }
             kind => return Err(FormatError::InvalidLinkType(kind)),
         };
-        Ok((target, cursor.position(), value_len))
+        Ok(Parsed::from_cursor((target, value_len), &cursor))
     }
 
     pub(super) fn read_hard_target(

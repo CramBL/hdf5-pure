@@ -12,6 +12,7 @@ use super::name::{LinkTargetV1, UserLinkKind};
 use super::view::{LinkMessageView, LinkPrefix, LinkTargetView};
 use super::wire::LinkMessageV1;
 use crate::address::StoredAddress;
+use crate::codec::DecodePrefix;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
 use crate::width::OffsetWidth;
@@ -305,9 +306,10 @@ impl LinkMessage {
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<LinkMessage, FormatError> {
-        LinkMessageView::parse_prefix(data, offset_width)?
-            .to_text()
-            .map_err(LinkProjectionError::into_format)
+        Ok(LinkMessageView::decode_prefix(data, offset_width)?
+            .try_map(|view| view.to_text())
+            .map_err(LinkProjectionError::into_format)?
+            .into_value())
     }
 }
 
