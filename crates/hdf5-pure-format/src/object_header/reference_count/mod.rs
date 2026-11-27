@@ -181,28 +181,7 @@ impl ObjectReferenceCountObserver {
         };
         Ok(match header.version {
             V1_HEADER_VERSION if count_message.get() => ObjectReferenceCount::Ambiguous,
-            V1_HEADER_VERSION => match header.reference_count {
-                Some(value) => {
-                    let range = FileRange::new(
-                        address.checked_add(V1_COUNT_OFFSET)?,
-                        COUNT_LENGTH.to_u64(),
-                    )?;
-                    if !chunk.contains(range) {
-                        return Ok(ObjectReferenceCount::Unsupported(
-                            ObjectReferenceCountIssue::InitialChunk,
-                        ));
-                    }
-                    ObjectReferenceCount::Version1(ObjectReferenceCountField {
-                        value,
-                        range,
-                        chunk,
-                        flags: None,
-                    })
-                }
-                None => {
-                    ObjectReferenceCount::Unsupported(ObjectReferenceCountIssue::MissingPrefixCount)
-                }
-            },
+            V1_HEADER_VERSION => ObjectReferenceCount::from_prefix(chunk, header.reference_count)?,
             V2_HEADER_VERSION => explicit.get().unwrap_or(ObjectReferenceCount::ImplicitOne),
             version => {
                 ObjectReferenceCount::Unsupported(ObjectReferenceCountIssue::HeaderVersion(version))
@@ -230,6 +209,27 @@ pub enum ObjectReferenceCount {
 }
 
 impl ObjectReferenceCount {
+    fn from_prefix(chunk: FileRange, count: Option<u32>) -> Result<Self, FormatError> {
+        let Some(value) = count else {
+            return Ok(Self::Unsupported(
+                ObjectReferenceCountIssue::MissingPrefixCount,
+            ));
+        };
+        let range = FileRange::new(
+            chunk.start().checked_add(V1_COUNT_OFFSET)?,
+            COUNT_LENGTH.to_u64(),
+        )?;
+        if !chunk.contains(range) {
+            return Ok(Self::Unsupported(ObjectReferenceCountIssue::InitialChunk));
+        }
+        Ok(Self::Version1(ObjectReferenceCountField {
+            value,
+            range,
+            chunk,
+            flags: None,
+        }))
+    }
+
     fn from_record(
         chunk: ObjectHeaderChunk<'_>,
         record: MessageRecord<'_>,
